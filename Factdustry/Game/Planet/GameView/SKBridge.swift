@@ -431,7 +431,7 @@ final class SKUnitsScene: SKScene {
                              y: CGFloat(core.y) + h/2.0)
         
         if !hasSpawnedShardling {
-            spawnShardling(at: center)
+            spawnShardling(at: center, faction: .lumina)
             hasSpawnedShardling = true
             print("📍 Shardling spawned at core position: \(center)")
             
@@ -473,8 +473,8 @@ final class SKUnitsScene: SKScene {
         }
     }
 
-    private func spawnShardling(at tilePos: CGPoint) {
-        var u = Unit(kind: .shardling, faction: .lumina, position: tilePos, speed: 2.0, sprite: nil)
+    private func spawnShardling(at tilePos: CGPoint, faction: Faction) {
+        var u = Unit(kind: .shardling, faction: faction, position: tilePos, speed: 2.0, sprite: nil)
         
         let spriteNameCandidates = ["Shardling", "shardling", "shardling-0"]
         var tex: SKTexture? = nil
@@ -541,6 +541,7 @@ final class SKUnitsScene: SKScene {
         
         // NEW: Set camera to follow this shardling
         startFollowing(node: node)
+        FactionManager.shared.incrementUnitsOwned(for: faction)
         
         print("Shardling spawned successfully at tile position: \(tilePos)")
     }
@@ -724,74 +725,6 @@ final class SKUnitsScene: SKScene {
         syncBlocks(blockManager.placedBlocks)
         
         print("🔄 Shardling respawned!")
-    }
-}
-
-extension SKUnitsScene {
-    // Update spawnShardling to include faction
-    private func spawnShardling(at tilePos: CGPoint, faction: Faction = .lumina) {
-        var u = Unit(kind: .shardling, faction: faction, position: tilePos, speed: 2.0, sprite: nil)
-        
-        let spriteNameCandidates = ["Shardling", "shardling", "shardling-0"]
-        var tex: SKTexture? = nil
-        
-        // Try to find texture
-        for candidate in spriteNameCandidates {
-            if let foundTex = SKArt.tex(candidate) {
-                tex = foundTex
-                break
-            }
-        }
-        
-        // Create sprite with faction colors
-        let node: SKSpriteNode
-        if let tex = tex, tex.size().width > 0 {
-            node = SKSpriteNode(texture: tex)
-            node.size = CGSize(width: tileSize * 2.5, height: tileSize * 2.5)
-        } else {
-            // Fallback with faction color
-            node = SKSpriteNode(color: faction.primaryColor.uiColor, size: CGSize(width: tileSize * 2.5, height: tileSize * 2.5))
-            
-            // Add faction indicator
-            let border = SKShapeNode(rect: CGRect(x: -tileSize * 1.25, y: -tileSize * 1.25, width: tileSize * 2.5, height: tileSize * 2.5))
-            border.strokeColor = faction.secondaryColor.uiColor
-            border.fillColor = .clear
-            border.lineWidth = 2.0
-            node.addChild(border)
-        }
-        
-        node.anchorPoint = CGPoint(x: 1, y: 1)
-        
-        // Convert tile position to world position
-        let worldPos = CGPoint(x: tilePos.x * tileSize, y: tilePos.y * tileSize)
-        node.position = worldPos
-        node.zPosition = 100
-        
-        // Apply faction color tint if not already colored
-        if tex != nil {
-            node.colorBlendFactor = 0.3
-            node.color = faction.primaryColor.uiColor
-        }
-        
-        node.alpha = 1.0
-        node.isHidden = false
-        
-        unitLayer.addChild(node)
-        u.sprite = node
-        units[u.id] = u
-        
-        // Update faction stats
-        FactionManager.shared.incrementUnitsOwned(for: faction)
-        
-        // Only follow player faction units
-        if faction == FactionManager.shared.playerFaction {
-            if let camera = cameraController {
-                camera.setFollowTarget(worldPos, viewSize: CGSize(width: 800, height: 600))
-                print("📷 Camera now following \(faction.displayName) shardling at: \(worldPos)")
-            }
-        }
-        
-        print("\(faction.displayName) shardling spawned successfully at tile position: \(tilePos)")
     }
 }
 

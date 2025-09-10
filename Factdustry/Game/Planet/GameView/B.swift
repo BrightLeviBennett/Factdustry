@@ -978,31 +978,59 @@ class FactionManager: ObservableObject {
     // MARK: - Statistics
     
     func incrementBlocksOwned(for faction: Faction) {
-        factionStats[faction]?.blocksOwned += 1
+        var s = factionStats[faction] ?? FactionStats()
+        s.blocksOwned += 1
+        factionStats[faction] = s
+        // Trigger @Published update
+        self.factionStats = self.factionStats
     }
     
     func decrementBlocksOwned(for faction: Faction) {
-        factionStats[faction]?.blocksOwned = max(0, (factionStats[faction]?.blocksOwned ?? 0) - 1)
+        var s = factionStats[faction] ?? FactionStats()
+        s.blocksOwned = max(0, s.blocksOwned - 1)
+        factionStats[faction] = s
+        // Trigger @Published update
+        self.factionStats = self.factionStats
     }
     
     func incrementUnitsOwned(for faction: Faction) {
-        factionStats[faction]?.unitsOwned += 1
+        var s = factionStats[faction] ?? FactionStats()
+        s.unitsOwned += 1
+        factionStats[faction] = s
+        // Trigger @Published update
+        self.factionStats = self.factionStats
     }
     
     func decrementUnitsOwned(for faction: Faction) {
-        factionStats[faction]?.unitsOwned = max(0, (factionStats[faction]?.unitsOwned ?? 0) - 1)
+        var s = factionStats[faction] ?? FactionStats()
+        s.unitsOwned = max(0, s.unitsOwned - 1)
+        factionStats[faction] = s
+        // Trigger @Published update
+        self.factionStats = self.factionStats
     }
     
     func addResourcesCollected(for faction: Faction, amount: Int) {
-        factionStats[faction]?.resourcesCollected += amount
+        var s = factionStats[faction] ?? FactionStats()
+        s.resourcesCollected += amount
+        factionStats[faction] = s
+        // Trigger @Published update
+        self.factionStats = self.factionStats
     }
     
     func incrementBlocksDestroyed(for faction: Faction) {
-        factionStats[faction]?.blocksDestroyed += 1
+        var s = factionStats[faction] ?? FactionStats()
+        s.blocksDestroyed += 1
+        factionStats[faction] = s
+        // Trigger @Published update
+        self.factionStats = self.factionStats
     }
     
     func incrementUnitsDestroyed(for faction: Faction) {
-        factionStats[faction]?.unitsDestroyed += 1
+        var s = factionStats[faction] ?? FactionStats()
+        s.unitsDestroyed += 1
+        factionStats[faction] = s
+        // Trigger @Published update
+        self.factionStats = self.factionStats
     }
     
     func getStats(for faction: Faction) -> FactionStats {
