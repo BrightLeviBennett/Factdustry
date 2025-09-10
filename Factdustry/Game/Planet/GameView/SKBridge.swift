@@ -101,7 +101,7 @@ final class SKUnitsScene: SKScene {
         self.transmissionManager = transmissionManager
         self.blockManager = blockManager
 
-        hookCamera(cameraController)
+        // hookCamera(cameraController) // Disabled: camera now directly follows shardling
         hookProjectiles(transmissionManager)
         hookBlocks(blockManager)
         hookUnitProduction(transmissionManager) // NEW: Hook unit production
@@ -134,6 +134,16 @@ final class SKUnitsScene: SKScene {
         cameraNode.xScale = inv
         cameraNode.yScale = inv
     }
+
+    // Simple camera follow: lock camera to the given node's position.
+    private func startFollowing(node: SKNode) {
+        let zero = SKRange(constantValue: 0)
+        let follow = SKConstraint.distance(zero, to: node)
+        cameraNode.constraints = [follow]
+        cameraNode.setScale(1.0)
+    }
+
+
     
     private func hookCamera(_ cc: CameraController) {
         self.cameraController = cc
@@ -505,10 +515,7 @@ final class SKUnitsScene: SKScene {
                 units[u.id] = u
                 
                 // NEW: Set camera to follow this shardling
-                if let camera = cameraController {
-                    camera.setFollowTarget(worldPos, viewSize: CGSize(width: 800, height: 600))
-                    print("📷 Camera now following shardling at: \(worldPos)")
-                }
+                startFollowing(node: fallbackNode)
                 
                 print("Fallback shardling created at tile position: \(tilePos)")
                 return
@@ -533,10 +540,7 @@ final class SKUnitsScene: SKScene {
         units[u.id] = u
         
         // NEW: Set camera to follow this shardling
-        if let camera = cameraController {
-            camera.setFollowTarget(worldPos, viewSize: CGSize(width: 800, height: 600))
-            print("📷 Camera now following shardling at: \(worldPos)")
-        }
+        startFollowing(node: node)
         
         print("Shardling spawned successfully at tile position: \(tilePos)")
     }
