@@ -15,7 +15,7 @@ build/
 # Keep Package.resolved committed for reproducible builds
 
 # CocoaPods (pick one approach; see note)
-# Pods/
+Pods/
 
 # Carthage
 Carthage/Build/
