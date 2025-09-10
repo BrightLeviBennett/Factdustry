@@ -523,7 +523,7 @@ final class SKUnitsScene: SKScene {
         }
         
         let node = SKSpriteNode(texture: tex)
-        node.size = CGSize(width: tileSize * 2.5, height: tileSize * 2.5)
+        node.size = CGSize(width: tileSize * 5.0, height: tileSize * 5.0)
         node.anchorPoint = CGPoint(x: 1, y: 1)
         
         // Convert tile position to world position
