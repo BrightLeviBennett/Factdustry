@@ -514,10 +514,28 @@ struct CoreSchemaMetadata: Codable {
     let name: String
 }
 
-struct CoreSchemaData: Codable {
-    let metadata: CoreSchemaMetadata
+struct FactionData: Codable {
     let tileTranslations: [String: String]
     let tiles: [String]
+}
+
+struct CoreSchemaData: Codable {
+    let metadata: CoreSchemaMetadata
+    let factions: [String: FactionData]
+    
+    // Legacy support for old format
+    let tileTranslations: [String: String]?
+    let tiles: [String]?
+    
+    // Helper to check if this is the new faction format
+    var isNewFormat: Bool {
+        return !factions.isEmpty
+    }
+    
+    // Helper to get all factions
+    var availableFactions: [String] {
+        return Array(factions.keys)
+    }
 }
 
 // MARK: - Enhanced PlacedBlock with New Rotation System
@@ -549,6 +567,246 @@ struct PlacedBlock: Identifiable, Equatable {
     // MARK: - Equatable Implementation
     static func == (lhs: PlacedBlock, rhs: PlacedBlock) -> Bool {
         return lhs.id == rhs.id
+    }
+}
+
+extension BlockLoadingManager {
+    func loadBlocksFromCoreSchema(fileIdentifier: String, mapData: MapData? = nil) {
+        isLoading = true
+        loadingError = nil
+        placedBlocks.removeAll()
+        
+        guard !fileIdentifier.isEmpty else {
+            isLoading = false
+            return
+        }
+        
+        let fileName = "CoreScem_\(fileIdentifier)"
+        
+        guard let fileURL = Bundle.main.url(forResource: fileName, withExtension: "json") else {
+            print("❌ Could not find file: \(fileName).json")
+            isLoading = false
+            return
+        }
+        
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let coreSchema = try JSONDecoder().decode(CoreSchemaData.self, from: data)
+            
+            print("📄 Loaded schema with \(coreSchema.factions.count) factions")
+            
+            if coreSchema.isNewFormat {
+                print("🆕 Using new faction-based format")
+                // New faction-based format
+                parseAndPlaceBlocksFromFactions(from: coreSchema, mapData: mapData)
+            } else {
+                print("🔄 Using legacy format")
+                // Legacy format compatibility
+                parseAndPlaceBlocksLegacy(from: coreSchema, mapData: mapData)
+            }
+            
+        } catch {
+            let errorMessage = "Failed to load CoreScem file: \(error.localizedDescription)"
+            print("❌ \(errorMessage)")
+            loadingError = errorMessage
+        }
+        
+        isLoading = false
+    }
+    
+    // New method to handle faction-based format (Add this method)
+    private func parseAndPlaceBlocksFromFactions(from schema: CoreSchemaData, mapData: MapData? = nil) {
+        var newBlocks: [PlacedBlock] = []
+        var processedPositions: Set<String> = []
+        
+        print("🏭 Processing \(schema.factions.count) factions...")
+        
+        // Process each faction
+        for (factionName, factionData) in schema.factions {
+            print("🔍 Processing faction: \(factionName)")
+            print("  - Tile translations: \(factionData.tileTranslations)")
+            print("  - Tiles count: \(factionData.tiles.count)")
+            
+            // Process tiles for this faction
+            for (y, row) in factionData.tiles.enumerated() {
+                for (x, char) in row.enumerated() {
+                    let charString = String(char)
+                    let positionKey = "\(x),\(y)"
+                    
+                    // Skip if already processed or blank
+                    if processedPositions.contains(positionKey) {
+                        continue
+                    }
+                    
+                    if charString == " " || factionData.tileTranslations[charString] == "blank" {
+                        continue
+                    }
+                    
+                    // Look up block type from faction's tile translations
+                    if let schemaBlockType = factionData.tileTranslations[charString] {
+                        print("  - Found tile '\(charString)' at (\(x),\(y)) -> \(schemaBlockType)")
+                        
+                        if let blockType = findBlockTypeFromSchema(schemaBlockType: schemaBlockType) {
+                            print("    ✅ Mapped to block type: \(blockType.iconName)")
+                            
+                            let gridX = x
+                            let gridY = y
+                            
+                            // Mark occupied positions
+                            for blockX in gridX..<(gridX + blockType.sizeX) {
+                                for blockY in gridY..<(gridY + blockType.sizeY) {
+                                    processedPositions.insert("\(blockX),\(blockY)")
+                                }
+                            }
+                            
+                            // Check if PlacedBlock supports faction parameter
+                            let block: PlacedBlock
+                            if factionName.lowercased() == "lumina" {
+                                // Player faction blocks - no special faction parameter needed
+                                block = PlacedBlock(
+                                    blockType: blockType.iconName,
+                                    x: gridX,
+                                    y: gridY,
+                                    iconName: blockType.iconName,
+                                    size: blockType.size,
+                                    rotation: BlockRotation()
+                                )
+                            } else {
+                                // Try to create with faction if supported, otherwise use default
+                                block = PlacedBlock(
+                                    blockType: blockType.iconName,
+                                    x: gridX,
+                                    y: gridY,
+                                    iconName: blockType.iconName,
+                                    size: blockType.size,
+                                    rotation: BlockRotation()
+                                    // Note: faction parameter may not exist in original PlacedBlock
+                                )
+                            }
+                            
+                            newBlocks.append(block)
+                            print("    📦 Created block at (\(gridX), \(gridY))")
+                            
+                            // Create network node
+                            let networkNode = NetworkNode(
+                                id: block.id,
+                                position: SIMD2<Int>(gridX, gridY),
+                                blockType: blockType.iconName,
+                                connections: blockType.connections,
+                                rotation: BlockRotation(),
+                                blockSize: (width: blockType.sizeX, height: blockType.sizeY),
+                                capacity: blockType.capacity
+                            )
+                            
+                            // Set faction if supported
+                            // networkNode.faction = faction  // Uncomment if NetworkNode supports faction
+                            
+                            // Update ore types for drills
+                            if let mapData = mapData, (blockType.iconName.contains("drill") || blockType.iconName.contains("bore")) {
+                                networkNode.updateOreTypesFacing(mapData: mapData)
+                            }
+                            
+                            transmissionManager.addNode(networkNode)
+                            print("    🔗 Added network node")
+                            
+                        } else {
+                            print("    ❌ Could not find block type for: \(schemaBlockType)")
+                        }
+                    }
+                }
+            }
+        }
+        
+        print("📦 Created \(newBlocks.count) total blocks")
+        
+        DispatchQueue.main.async {
+            self.placedBlocks = newBlocks
+            print("✅ Updated placedBlocks with \(newBlocks.count) blocks")
+        }
+    }
+    
+    // Legacy method for old format (Add this method)
+    private func parseAndPlaceBlocksLegacy(from schema: CoreSchemaData, mapData: MapData? = nil) {
+        guard let tiles = schema.tiles, let tileTranslations = schema.tileTranslations else {
+            print("❌ Legacy format missing tiles or tileTranslations")
+            return
+        }
+        
+        print("🔄 Processing legacy format with \(tiles.count) tile rows")
+        
+        var newBlocks: [PlacedBlock] = []
+        var processedPositions: Set<String> = []
+        
+        for (y, row) in tiles.enumerated() {
+            for (x, char) in row.enumerated() {
+                let charString = String(char)
+                let positionKey = "\(x),\(y)"
+                
+                if processedPositions.contains(positionKey) {
+                    continue
+                }
+                
+                if charString == " " || tileTranslations[charString] == "blank" {
+                    continue
+                }
+                
+                if let schemaBlockType = tileTranslations[charString] {
+                    print("  - Found tile '\(charString)' at (\(x),\(y)) -> \(schemaBlockType)")
+                    
+                    if let blockType = findBlockTypeFromSchema(schemaBlockType: schemaBlockType) {
+                        print("    ✅ Mapped to block type: \(blockType.iconName)")
+                        
+                        let gridX = x
+                        let gridY = y
+                        
+                        for blockX in gridX..<(gridX + blockType.sizeX) {
+                            for blockY in gridY..<(gridY + blockType.sizeY) {
+                                processedPositions.insert("\(blockX),\(blockY)")
+                            }
+                        }
+                        
+                        let block = PlacedBlock(
+                            blockType: blockType.iconName,
+                            x: gridX,
+                            y: gridY,
+                            iconName: blockType.iconName,
+                            size: blockType.size,
+                            rotation: BlockRotation()
+                        )
+                        
+                        newBlocks.append(block)
+                        print("    📦 Created block at (\(gridX), \(gridY))")
+                        
+                        let networkNode = NetworkNode(
+                            id: block.id,
+                            position: SIMD2<Int>(gridX, gridY),
+                            blockType: blockType.iconName,
+                            connections: blockType.connections,
+                            rotation: BlockRotation(),
+                            blockSize: (width: blockType.sizeX, height: blockType.sizeY),
+                            capacity: blockType.capacity
+                        )
+                        
+                        if let mapData = mapData, (blockType.iconName.contains("drill") || blockType.iconName.contains("bore")) {
+                            networkNode.updateOreTypesFacing(mapData: mapData)
+                        }
+                        
+                        transmissionManager.addNode(networkNode)
+                        print("    🔗 Added network node")
+                        
+                    } else {
+                        print("    ❌ Could not find block type for: \(schemaBlockType)")
+                    }
+                }
+            }
+        }
+        
+        print("📦 Created \(newBlocks.count) total blocks")
+        
+        DispatchQueue.main.async {
+            self.placedBlocks = newBlocks
+            print("✅ Updated placedBlocks with \(newBlocks.count) blocks")
+        }
     }
 }
 
@@ -1042,37 +1300,6 @@ class BlockLoadingManager: ObservableObject {
         constructionProgress.removeValue(forKey: id)
     }
     
-    func loadBlocksFromCoreSchema(fileIdentifier: String, mapData: MapData? = nil) {
-        isLoading = true
-        loadingError = nil
-        placedBlocks.removeAll()
-        
-        guard !fileIdentifier.isEmpty else {
-            isLoading = false
-            return
-        }
-        
-        let fileName = "CoreScem_\(fileIdentifier)"
-        
-        guard let fileURL = Bundle.main.url(forResource: fileName, withExtension: "json") else {
-            isLoading = false
-            return
-        }
-        
-        do {
-            let data = try Data(contentsOf: fileURL)
-            let coreSchema = try JSONDecoder().decode(CoreSchemaData.self, from: data)
-            
-            parseAndPlaceBlocks(from: coreSchema, mapData: mapData)
-            
-        } catch {
-            let errorMessage = "Failed to load CoreScem file: \(error.localizedDescription)"
-            loadingError = errorMessage
-        }
-        
-        isLoading = false
-    }
-    
     // MARK: - Enhanced Collision Detection with New Tile Requirement System
     func wouldCollide(blockType: BlockType, at position: (x: Int, y: Int), rotation: BlockRotation, mapData: MapData? = nil) -> (hasCollision: Bool, reason: String?) {
         let rotatedSize = blockType.getRotatedSize(rotation: rotation)
@@ -1299,7 +1526,7 @@ class BlockLoadingManager: ObservableObject {
         var processedPositions: Set<String> = [] // Track positions to avoid duplicates for multi-tile blocks
         
         // Iterate through each row of tiles
-        for (y, row) in schema.tiles.enumerated() {
+        for (y, row) in schema.tiles!.enumerated() {
             // Iterate through each character in the row
             for (x, char) in row.enumerated() {
                 let charString = String(char)
@@ -1311,12 +1538,12 @@ class BlockLoadingManager: ObservableObject {
                 }
                 
                 // Skip blank tiles
-                if charString == " " || schema.tileTranslations[charString] == "blank" {
+                if charString == " " || schema.tileTranslations![charString] == "blank" {
                     continue
                 }
                 
                 // Look up the block type from tile translations
-                if let schemaBlockType = schema.tileTranslations[charString] {
+                if let schemaBlockType = schema.tileTranslations![charString] {
                     
                     // Map schema block types to our block library
                     if let blockType = findBlockTypeFromSchema(schemaBlockType: schemaBlockType) {
