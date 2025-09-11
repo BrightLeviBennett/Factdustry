@@ -1006,11 +1006,31 @@ class CameraController: ObservableObject {
         
         DispatchQueue.main.async {
             switch direction {
-            case .up:    self.offset.y += moveDistance
-            case .down:  self.offset.y -= moveDistance
-            case .left:  self.offset.x += moveDistance
-            case .right: self.offset.x -= moveDistance
-            }
+case .up:
+    self.offset.y += moveDistance
+case .down:
+    self.offset.y -= moveDistance
+case .left:
+    self.offset.x += moveDistance
+case .right:
+    self.offset.x -= moveDistance
+case .upLeft:
+    let d = moveDistance / CGFloat(2).squareRoot()
+    self.offset.y += d
+    self.offset.x += d
+case .upRight:
+    let d = moveDistance / CGFloat(2).squareRoot()
+    self.offset.y += d
+    self.offset.x -= d
+case .downLeft:
+    let d = moveDistance / CGFloat(2).squareRoot()
+    self.offset.y -= d
+    self.offset.x += d
+case .downRight:
+    let d = moveDistance / CGFloat(2).squareRoot()
+    self.offset.y -= d
+    self.offset.x -= d
+}
             
             // Calculate velocity for shardling drift effect
             let deltaOffset = CGPoint(x: self.offset.x - previousOffset.x, y: self.offset.y - previousOffset.y)
@@ -1074,6 +1094,7 @@ class CameraController: ObservableObject {
 
 enum MoveDirection {
     case up, down, left, right
+    case upLeft, upRight, downLeft, downRight
 }
 
 // MARK: - Keyboard Handler

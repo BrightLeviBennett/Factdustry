@@ -1648,73 +1648,83 @@ struct GameView: View {
     }
     
     func handleKeyDown(_ key: String) {
-        switch key.lowercased() {
-        case "w":
-            if !pressedKeys.contains(key) {
-                pressedKeys.insert(key)
-                cameraController.startMoving(direction: .up)
-            }
-        case "s":
-            if !pressedKeys.contains(key) {
-                pressedKeys.insert(key)
-                cameraController.startMoving(direction: .down)
-            }
-        case "a":
-            if !pressedKeys.contains(key) {
-                pressedKeys.insert(key)
-                cameraController.startMoving(direction: .left)
-            }
-        case "d":
-            if !pressedKeys.contains(key) {
-                pressedKeys.insert(key)
-                cameraController.startMoving(direction: .right)
-            }
-        case "r":
-            // Respawn shardling
-            respawnShardling = true
-            print("🔄 Respawning shardling...")
-        case "x":
-            selectedBlock = nil
-            rotationController.resetRotation()
-        case " ": // Space bar
-            break
-        case "q", "e": // Rotation keys
-            if let selectedBlock = selectedBlock, selectedBlock.canRotate {
-                rotationController.handleKeyboard(key: key)
-            }
-        case "shift":
-            isShiftPressed = true
-        default:
-            break
+    switch key.lowercased() {
+    case "w", "a", "s", "d":
+        if !pressedKeys.contains(key.lowercased()) {
+            pressedKeys.insert(key.lowercased())
         }
+        updateMovementFromPressedKeys()
+    case "r":
+        // Respawn shardling
+        respawnShardling = true
+        print("🔄 Respawning shardling...")
+    case "x":
+        selectedBlock = nil
+        rotationController.resetRotation()
+    case " ": // Space bar
+        break
+    case "q", "e": // Rotation keys
+        if let selectedBlock = selectedBlock, selectedBlock.canRotate {
+            rotationController.handleKeyboard(key: key)
+        }
+    case "shift":
+        isShiftPressed = true
+    default:
+        break
     }
+}
+
     
     func handleKeyUp(_ key: String) {
-        pressedKeys.remove(key)
-        
-        switch key.lowercased() {
-        case "w", "s", "a", "d":
-            cameraController.stopMoving()
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-                if self.pressedKeys.contains("w") {
-                    self.cameraController.startMoving(direction: .up)
-                } else if self.pressedKeys.contains("s") {
-                    self.cameraController.startMoving(direction: .down)
-                } else if self.pressedKeys.contains("a") {
-                    self.cameraController.startMoving(direction: .left)
-                } else if self.pressedKeys.contains("d") {
-                    self.cameraController.startMoving(direction: .right)
-                }
-            }
-        case " ": // Space bar
-            break
-        case "shift":
-            isShiftPressed = false
-        default:
-            break
-        }
+    pressedKeys.remove(key.lowercased())
+
+    switch key.lowercased() {
+    case "w", "a", "s", "d":
+        updateMovementFromPressedKeys()
+    case " ": // Space bar
+        break
+    case "shift":
+        isShiftPressed = false
+    default:
+        break
     }
+}
+
+/// Recomputes camera movement from currently pressed WASD keys.
+private func updateMovementFromPressedKeys() {
+    let up = pressedKeys.contains("w")
+    let down = pressedKeys.contains("s")
+    let left = pressedKeys.contains("a")
+    let right = pressedKeys.contains("d")
+
+    // Resolve vertical and horizontal intents (opposites cancel out)
+    let v = (up ? 1 : 0) - (down ? 1 : 0)
+    let h = (left ? 1 : 0) - (right ? 1 : 0)
+
+    if v == 0 && h == 0 {
+        cameraController.stopMoving()
+        return
+    }
+
+    if v > 0 && h > 0 {
+        cameraController.startMoving(direction: .upLeft)
+    } else if v > 0 && h < 0 {
+        cameraController.startMoving(direction: .upRight)
+    } else if v < 0 && h > 0 {
+        cameraController.startMoving(direction: .downLeft)
+    } else if v < 0 && h < 0 {
+        cameraController.startMoving(direction: .downRight)
+    } else if v > 0 {
+        cameraController.startMoving(direction: .up)
+    } else if v < 0 {
+        cameraController.startMoving(direction: .down)
+    } else if h > 0 {
+        cameraController.startMoving(direction: .left)
+    } else if h < 0 {
+        cameraController.startMoving(direction: .right)
+    }
+}
+
 }
 
 #Preview {
