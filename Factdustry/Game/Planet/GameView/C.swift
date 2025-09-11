@@ -335,9 +335,9 @@ struct SingleBlockViewWithConstruction: View {
         
         // Image with faction-aware tinting for non-player blocks
         
-        // World rendering view for this block: for core-shard, layer base + faction overlay; otherwise default standardized image
+        // World rendering view for this block: for coreShardComplete, layer base + faction overlay; otherwise default standardized image
         let blockImage: AnyView = {
-            let isCoreShard = (block.blockType == "core-shard" || block.iconName == "core-shard")
+            let isCoreShard = (block.blockType == "coreShardComplete" || block.iconName == "coreShardComplete")
             if isCoreShard {
                 let overlayName = (block.faction == .ferox) ? "coreShardOverlay-ferox" : "coreShardOverlay-lumina"
                 let layered = ZStack {
@@ -1644,8 +1644,8 @@ class BlockLoadingManager: ObservableObject {
         // Enhanced mapping from schema block names to block library icon names
         let blockTypeMapping: [String: String] = [
             // Core blocks
-            "Core_Shard": "core-shard",
-            "core_shard": "core-shard",
+            "Core_Shard": "coreShardComplete",
+            "core_shard": "coreShardComplete",
             "Core_Fragment": "core-fragment",
             "core_fragment": "core-fragment",
             "Core_Remnant": "core-remnant",
@@ -1794,23 +1794,12 @@ struct EnhancedBlockButton: View {
         
         Button(action: onTap) {
             ZStack {
-                // UPDATED: Use coreShardComplete for UI, regular multi-layer for world
-                if block.iconName == "core-shard" {
-                    // Use complete texture in UI (like Mindustry)
-                    Image("coreShardComplete")
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 40, height: 40)
-                        .clipped()
-                } else {
-                    // Standardized block image for other blocks
-                    StandardizedBlockImageView(
-                        iconName: block.iconName,
-                        targetSize: 40,
-                        color: .white,
-                        opacity: 1.0
-                    )
-                }
+                StandardizedBlockImageView(
+                    iconName: block.iconName,
+                    targetSize: 40,
+                    color: .white,
+                    opacity: 1.0
+                )
             }
             .frame(width: 40, height: 40)
             .background(
