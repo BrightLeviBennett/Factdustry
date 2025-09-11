@@ -242,7 +242,7 @@ struct GameView: View {
     static let enhancedBlockLibrary: [BlockCategory: [BlockType]] = [
         .core: [
             BlockType(
-                iconName: "core:-shard",
+                iconName: "core-shard",
                 size: 100,
                 sizeX: 2,
                 sizeY: 2,

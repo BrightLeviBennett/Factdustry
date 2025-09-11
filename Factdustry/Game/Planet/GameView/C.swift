@@ -93,7 +93,8 @@ extension BlockLoadingManager {
                 y: construction.position.y,
                 iconName: construction.blockType.iconName,
                 size: construction.blockType.size,
-                rotation: construction.rotation
+                rotation: construction.rotation,
+                faction: existingBlock.faction // preserve whoever placed it
             )
             
             placedBlocks[existingIndex] = completedBlock
@@ -333,15 +334,37 @@ struct SingleBlockViewWithConstruction: View {
         let textureOffset = blockType?.getRotatedTextureOffset(rotation: block.rotation) ?? .zero
         
         // Image with faction-aware tinting for non-player blocks
-        let blockImage = StandardizedBlockImageView(
-            iconName: displayIconName,
-            targetSize: scaledSize,
-            rotation: effectiveRotation
-        )
-        .compositingGroup()
-        // Apply faction tint for enemy/other faction blocks
-        .colorMultiply(block.faction == FactionManager.shared.playerFaction ? .white : block.faction.primaryColor.opacity(0.7))
-        .offset(x: textureOffset.x, y: textureOffset.y)
+        
+        // World rendering view for this block: for core-shard, layer base + faction overlay; otherwise default standardized image
+        let blockImage: AnyView = {
+            let isCoreShard = (block.blockType == "core-shard" || block.iconName == "core-shard")
+            if isCoreShard {
+                let overlayName = (block.faction == .ferox) ? "coreShardOverlay-ferox" : "coreShardOverlay-lumina"
+                let layered = ZStack {
+                    Image("coreShardBase")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: scaledSize, height: scaledSize)
+                    Image(overlayName)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: scaledSize, height: scaledSize)
+                }
+                .offset(x: textureOffset.x, y: textureOffset.y)
+                return AnyView(layered)
+            } else {
+                let v = StandardizedBlockImageView(
+                    iconName: displayIconName,
+                    targetSize: scaledSize,
+                    rotation: effectiveRotation
+                )
+                .compositingGroup()
+                // Apply faction tint for enemy/other faction blocks
+                .colorMultiply(block.faction == FactionManager.shared.playerFaction ? .white : block.faction.primaryColor.opacity(0.7))
+                .offset(x: textureOffset.x, y: textureOffset.y)
+                return AnyView(v)
+            }
+        }()
         
         ZStack {
             Group {
@@ -377,11 +400,6 @@ struct SingleBlockViewWithConstruction: View {
             HStack {
                 Spacer()
                 VStack(spacing: 2) {
-                    // Faction indicator (always show for non-player factions)
-                    if block.faction != FactionManager.shared.playerFaction {
-                        FactionIndicatorView(faction: block.faction, size: 10)
-                    }
-                    
                     // Power/active indicator
                     if transmissionManager.getNodePowerLevel(id: block.id) > 0 {
                         Image(systemName: "bolt.fill")
@@ -673,14 +691,16 @@ extension BlockLoadingManager {
                                 )
                             } else {
                                 // Try to create with faction if supported, otherwise use default
+                                let factionEnum = Faction(rawValue: factionName.lowercased()) ?? .neutral
+
                                 block = PlacedBlock(
                                     blockType: blockType.iconName,
                                     x: gridX,
                                     y: gridY,
                                     iconName: blockType.iconName,
                                     size: blockType.size,
-                                    rotation: BlockRotation()
-                                    // Note: faction parameter may not exist in original PlacedBlock
+                                    rotation: BlockRotation(),
+                                    faction: factionEnum
                                 )
                             }
                             
@@ -1624,8 +1644,8 @@ class BlockLoadingManager: ObservableObject {
         // Enhanced mapping from schema block names to block library icon names
         let blockTypeMapping: [String: String] = [
             // Core blocks
-            "Core_Shard": "core:-shard",
-            "core_shard": "core:-shard",
+            "Core_Shard": "core-shard",
+            "core_shard": "core-shard",
             "Core_Fragment": "core-fragment",
             "core_fragment": "core-fragment",
             "Core_Remnant": "core-remnant",
@@ -1774,13 +1794,23 @@ struct EnhancedBlockButton: View {
         
         Button(action: onTap) {
             ZStack {
-                // Standardized block image
-                StandardizedBlockImageView(
-                    iconName: block.iconName,
-                    targetSize: 40,
-                    color: .white,
-                    opacity: 1.0
-                )
+                // UPDATED: Use coreShardComplete for UI, regular multi-layer for world
+                if block.iconName == "core-shard" {
+                    // Use complete texture in UI (like Mindustry)
+                    Image("coreShardComplete")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 40, height: 40)
+                        .clipped()
+                } else {
+                    // Standardized block image for other blocks
+                    StandardizedBlockImageView(
+                        iconName: block.iconName,
+                        targetSize: 40,
+                        color: .white,
+                        opacity: 1.0
+                    )
+                }
             }
             .frame(width: 40, height: 40)
             .background(
