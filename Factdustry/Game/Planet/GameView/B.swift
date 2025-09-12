@@ -182,76 +182,13 @@ extension TileRequirement {
         )
     }
     
-    /// Factory method for buildings that need mixed terrain (some ore, some floor)
-    static func requiresMixedTerrain(minOrePercentage: Double = 0.5) -> TileRequirement {
-        let floorTypes: [TileType] = [.darkSand, .terrain0, .terrain1, .terrain2]
-        return TileRequirement(
-            globalRules: [
-                TileRequirementRule(
-                    type: .percentage(minOrePercentage),
-                    conditions: [.anyOre],
-                    customErrorMessage: "Requires at least \(Int(minOrePercentage * 100))% ore coverage",
-                    priority: 100
-                ),
-                TileRequirementRule(
-                    type: .atLeast(1),
-                    conditions: [.anyTileType(floorTypes), .noOre],
-                    logicalOperator: .and,
-                    customErrorMessage: "Requires at least one solid ground tile without ore",
-                    priority: 90
-                )
-            ],
-            name: "Mixed Terrain",
-            description: "Requires both ore deposits and solid ground"
-        )
-    }
-    
-    /// Factory method for advanced buildings with complex positional requirements
-    static func advancedFactoryRequirement() -> TileRequirement {
-        let floorTypes: [TileType] = [.darkSand, .terrain0, .terrain1, .terrain2]
-        
-        return TileRequirement(
-            globalRules: [
-                TileRequirementRule(
-                    type: .atLeast(4),
-                    conditions: [.anyTileType(floorTypes)],
-                    customErrorMessage: "Requires at least 4 solid ground tiles",
-                    priority: 100
-                )
-            ],
-            positionalRequirements: [
-                // Center tile must be solid ground with no ore (for foundation)
-                PositionalRequirement(x: 1, y: 1, rules: [
-                    TileRequirementRule(
-                        type: .all,
-                        conditions: [.anyTileType(floorTypes), .noOre],
-                        logicalOperator: .and,
-                        customErrorMessage: "Center must be solid ground without ore (foundation)",
-                        priority: 100
-                    )
-                ]),
-                // At least one corner must have access to power (no specific requirement for now)
-                PositionalRequirement(x: 0, y: 0, rules: [
-                    TileRequirementRule(
-                        type: .all,
-                        conditions: [.anyTileType(floorTypes)],
-                        customErrorMessage: "Corner must be solid ground (power access)",
-                        priority: 90
-                    )
-                ])
-            ],
-            name: "Advanced Factory",
-            description: "Complex factory requiring specific foundation and access requirements"
-        )
-    }
-    
     /// Factory method for water-based buildings
     static func requiresWaterAccess() -> TileRequirement {
         return TileRequirement(
             globalRules: [
                 TileRequirementRule(
                     type: .any,
-                    conditions: [.tileType(.geyser)], // Assuming geysers provide water access
+                    conditions: [.tileType(.saltWater), .tileType(.water)],
                     customErrorMessage: "Must have access to water source",
                     priority: 100
                 )
@@ -780,18 +717,20 @@ enum FluidType: Codable, Hashable {
     case methane
     case butane
     case propane
+    case saltwater
     
     var displayName: String {
         switch self {
         case .water: return "Water"
         case .hydrogen: return "Hydrogen"
         case .oxygen: return "Oxygen"
-        case .petroleum: return "petroleum"
-        case .carbonDioxide: return "carbonDioxide"
-        case .ethane: return "ethane"
-        case .methane: return "methane"
-        case .butane: return "butane"
-        case .propane: return "propane"
+        case .petroleum: return "Petroleum"
+        case .carbonDioxide: return "Carbon Dioxide"
+        case .ethane: return "Ethane"
+        case .methane: return "Methane"
+        case .butane: return "Butane"
+        case .propane: return "Propane"
+        case .saltwater: return "Saltwater"
         }
     }
 }

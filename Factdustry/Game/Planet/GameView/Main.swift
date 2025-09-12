@@ -645,6 +645,26 @@ struct GameView: View {
                         UniversalConnection(direction: .east, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20)),
                         UniversalConnection(direction: .west, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20))
                     ]
+                ),
+                
+                BlockType(
+                    iconName: "fluid-pump",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 40), (.graphite, 30)],
+                    buildTime: 8.0,
+                    processes: [
+                        Process(time: 2.0, outputFluids: [.water: 1])
+                    ],
+                    tileRequirement: .requiresWaterAccess(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20)),
+                        UniversalConnection(direction: .south, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20)),
+                        UniversalConnection(direction: .east, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20)),
+                        UniversalConnection(direction: .west, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20))
+                    ]
                 )
             ],
         
@@ -1125,7 +1145,7 @@ struct GameView: View {
                     processes: [
                         Process(time: 2.0, inputItems: [.copper: 2, .graphite: 1], inputPower: 25, outputItems: [.silicon: 1])
                     ],
-                    tileRequirement: .advancedFactoryRequirement(),
+                    tileRequirement: .requiresFloor(),
                     canRotate: true,
                     connections: [
                         UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 5, bufferSize: 0)),
@@ -1139,14 +1159,14 @@ struct GameView: View {
                 BlockType(
                     iconName: "steel-furnace",
                     size: 160,
-                    sizeX: 3,
-                    sizeY: 3,
+                    sizeX: 4,
+                    sizeY: 4,
                     buildCost: [(.copper, 80), (.graphite, 60), (.silicon, 40)],
                     buildTime: 15.0,
                     processes: [
                         Process(time: 3.0, inputItems: [.iron: 2, .coal: 1], inputPower: 40, outputItems: [.steel: 1])
                     ],
-                    tileRequirement: .advancedFactoryRequirement(),
+                    tileRequirement: .requiresFloor(),
                     canRotate: true,
                     connections: [
                         UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 50, priority: 5, bufferSize: 0)),
@@ -1160,8 +1180,8 @@ struct GameView: View {
                 BlockType(
                     iconName: "graphite-electrolyzer",
                     size: 120,
-                    sizeX: 2,
-                    sizeY: 2,
+                    sizeX: 3,
+                    sizeY: 3,
                     buildCost: [(.copper, 60), (.graphite, 40), (.silicon, 30)],
                     buildTime: 12.0,
                     processes: [
@@ -1187,7 +1207,7 @@ struct GameView: View {
                     processes: [
                         Process(time: 4.0, inputItems: [.silicon: 3, .steel: 2], inputPower: 60, outputItems: [.circuit: 1])
                     ],
-                    tileRequirement: .advancedFactoryRequirement(),
+                    tileRequirement: .requiresFloor(),
                     canRotate: true,
                     connections: [
                         UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 80, priority: 5, bufferSize: 0)),
@@ -1201,8 +1221,8 @@ struct GameView: View {
                 BlockType(
                     iconName: "carbon-dioxide-concentrator",
                     size: 120,
-                    sizeX: 2,
-                    sizeY: 2,
+                    sizeX: 3,
+                    sizeY: 3,
                     buildCost: [(.steel, 60), (.silicon, 50), (.circuit, 30)],
                     buildTime: 18.0,
                     processes: [
@@ -1227,12 +1247,32 @@ struct GameView: View {
                     processes: [
                         Process(time: 5.0, inputFluids: [.carbonDioxide: 2], inputPower: 80, outputFluids: [.petroleum: 1])
                     ],
-                    tileRequirement: .advancedFactoryRequirement(),
+                    tileRequirement: .requiresFloor(),
                     canRotate: true,
                     connections: [
                         UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 5, bufferSize: 0)),
                         UniversalConnection(direction: .south, connectionTypes: [.fluidInput([.carbonDioxide])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 50)),
                         UniversalConnection(direction: .north, connectionTypes: [.fluidOutput([.petroleum])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 12, priority: 8, bufferSize: 25))
+                    ]
+                ),
+                
+                BlockType(
+                    iconName: "water-filter",
+                    size: 12,
+                    sizeX: 1,
+                    sizeY: 1,
+                    buildCost: [(.steel, 150), (.silicon, 120), (.circuit, 100)],
+                    buildTime: 30.0,
+                    processes: [
+                        Process(time: 5.0, inputFluids: [.carbonDioxide: 2], inputPower: 80, outputFluids: [.petroleum: 1])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .west, connectionTypes: [.fluidInput([.saltwater])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.fluidInput([.saltwater])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.fluidInput([.saltwater])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.fluidInput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 5, bufferSize: 0)),
                     ]
                 )
             ],
