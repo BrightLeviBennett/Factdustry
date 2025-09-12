@@ -316,6 +316,8 @@ struct UniversalConnection: Hashable {
         case itemOutput([ItemType]?) // nil = outputs all items
         case fluidInput([FluidType]?)
         case fluidOutput([FluidType]?)
+        case payloadInput  // NEW: For payload transportation
+        case payloadOutput // NEW: For payload transportation
         
         // MARK: - Hashable Conformance
         func hash(into hasher: inout Hasher) {
@@ -338,6 +340,10 @@ struct UniversalConnection: Hashable {
             case .fluidOutput(let fluidTypes):
                 hasher.combine("fluidOutput")
                 hasher.combine(fluidTypes)
+            case .payloadInput:
+                hasher.combine("payloadInput")
+            case .payloadOutput:
+                hasher.combine("payloadOutput")
             }
         }
         
@@ -355,6 +361,10 @@ struct UniversalConnection: Hashable {
                 return lhsTypes == rhsTypes
             case (.fluidOutput(let lhsTypes), .fluidOutput(let rhsTypes)):
                 return lhsTypes == rhsTypes
+            case (.payloadInput, .payloadInput):
+                return true
+            case (.payloadOutput, .payloadOutput):
+                return true
             default:
                 return false
             }

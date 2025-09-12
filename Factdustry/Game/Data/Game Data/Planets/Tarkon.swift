@@ -179,7 +179,71 @@ let Tarkon = Planet(name: "Tarkon",
         CDBlock(name: "Unit Assembler", description: "Assembles complex units from components.", icon: "unit-assembler", size: 5, buidTime: 480, SPs: CDBSP(targetsGround: false, targetsAir: false, TATs: [], range: 0, proceses: [])),
         CDBlock(name: "Unit Reassembler", description: "Reassembles and upgrades existing units.", icon: "unit-reassembler", size: 5, buidTime: 540, SPs: CDBSP(targetsGround: false, targetsAir: false, TATs: [], range: 0, proceses: [])),
         CDBlock(name: "Unit Upgrader", description: "Upgrades units with enhanced capabilities.", icon: "unit-upgrader", size: 4, buidTime: 420, SPs: CDBSP(targetsGround: false, targetsAir: false, TATs: [], range: 0, proceses: [])),
-        CDBlock(name: "Unit Refabricator", description: "Refabricates units with new specifications.", icon: "unit-refabricator", size: 6, buidTime: 720, SPs: CDBSP(targetsGround: false, targetsAir: false, TATs: [], range: 0, proceses: []))
+        CDBlock(name: "Unit Refabricator", description: "Refabricates units with new specifications.", icon: "unit-refabricator", size: 6, buidTime: 720, SPs: CDBSP(targetsGround: false, targetsAir: false, TATs: [], range: 0, proceses: [])),
+        
+        // === PLATFORMS ===
+        CDBlock(name: "Copper Platform", description: "A basic platform made of copper. Provides a solid foundation for building.", icon: "copper-platform", size: 1, buidTime: 15),
+        CDBlock(name: "Giant Copper Platform", description: "A large copper platform for expansive construction projects.", icon: "giant-copper-platform", size: 2, buidTime: 30),
+        CDBlock(name: "Huge Copper Platform", description: "An even larger copper platform suitable for major installations.", icon: "huge-copper-platform", size: 3, buidTime: 45),
+        CDBlock(name: "Large Copper Platform", description: "The largest copper platform available for massive construction.", icon: "large-copper-platform", size: 4, buidTime: 60),
+
+        CDBlock(name: "Steel Platform", description: "A reinforced steel platform with superior durability.", icon: "steel-platform", size: 1, buidTime: 25),
+        CDBlock(name: "Giant Steel Platform", description: "A large steel platform with enhanced structural integrity.", icon: "giant-steel-platform", size: 2, buidTime: 50),
+        CDBlock(name: "Huge Steel Platform", description: "A massive steel platform for heavy-duty construction.", icon: "huge-steel-platform", size: 3, buidTime: 75),
+        CDBlock(name: "Large Steel Platform", description: "The ultimate steel platform for the most demanding projects.", icon: "large-steel-platform", size: 4, buidTime: 100),
+
+        CDBlock(name: "Brass Platform", description: "An advanced platform made from brass alloy.", icon: "brass-platform", size: 1, buidTime: 35),
+        CDBlock(name: "Giant Brass Platform", description: "A large brass platform with excellent corrosion resistance.", icon: "giant-brass-platform", size: 2, buidTime: 70),
+        CDBlock(name: "Huge Brass Platform", description: "A massive brass platform for specialized applications.", icon: "huge-brass-platform", size: 3, buidTime: 105),
+        CDBlock(name: "Large Brass Platform", description: "The largest brass platform for premium construction.", icon: "large-brass-platform", size: 4, buidTime: 140),
+
+        CDBlock(name: "Bronze Platform", description: "A high-quality bronze platform with superior properties.", icon: "bronze-platform", size: 1, buidTime: 45),
+        CDBlock(name: "Giant Bronze Platform", description: "A large bronze platform for advanced construction needs.", icon: "giant-bronze-platform", size: 2, buidTime: 90),
+        CDBlock(name: "Huge Bronze Platform", description: "A massive bronze platform with exceptional durability.", icon: "huge-bronze-platform", size: 3, buidTime: 135),
+        CDBlock(name: "Large Bronze Platform", description: "The ultimate bronze platform for elite construction projects.", icon: "large-bronze-platform", size: 4, buidTime: 180),
+
+        CDBlock(name: "Silver Platform", description: "A premium silver platform with advanced conductive properties.", icon: "silver-platform", size: 1, buidTime: 55),
+        CDBlock(name: "Giant Silver Platform", description: "A large silver platform for high-tech installations.", icon: "giant-silver-platform", size: 2, buidTime: 110),
+        CDBlock(name: "Huge Silver Platform", description: "A massive silver platform for cutting-edge technology.", icon: "huge-silver-platform", size: 3, buidTime: 165),
+        CDBlock(name: "Large Silver Platform", description: "The most advanced silver platform available.", icon: "large-silver-platform", size: 4, buidTime: 220),
+
+        // === WALLS ===
+        CDBlock(name: "Copper Wall", description: "A basic defensive wall made of copper.", icon: "copper-wall", size: 1, buidTime: 10),
+        CDBlock(name: "Giant Copper Wall", description: "A reinforced copper wall providing better protection.", icon: "giant-copper-wall", size: 1, buidTime: 15),
+        CDBlock(name: "Huge Copper Wall", description: "A heavily reinforced copper wall with enhanced durability.", icon: "huge-copper-wall", size: 1, buidTime: 20),
+        CDBlock(name: "Large Copper Wall", description: "The strongest copper wall configuration available.", icon: "large-copper-wall", size: 1, buidTime: 25),
+
+        CDBlock(name: "Iron Wall", description: "A sturdy iron wall offering solid defense.", icon: "iron-wall", size: 1, buidTime: 15),
+        CDBlock(name: "Giant Iron Wall", description: "A reinforced iron wall with improved defensive capabilities.", icon: "giant-iron-wall", size: 1, buidTime: 22),
+        CDBlock(name: "Huge Iron Wall", description: "A heavily fortified iron wall providing excellent protection.", icon: "huge-iron-wall", size: 1, buidTime: 30),
+        CDBlock(name: "Large Iron Wall", description: "The ultimate iron wall for maximum defensive strength.", icon: "large-iron-wall", size: 1, buidTime: 37),
+
+        CDBlock(name: "Steel Wall", description: "A high-strength steel wall with superior defensive properties.", icon: "steel-wall", size: 1, buidTime: 20),
+        CDBlock(name: "Giant Steel Wall", description: "A reinforced steel wall capable of withstanding heavy attacks.", icon: "giant-steel-wall", size: 1, buidTime: 30),
+        CDBlock(name: "Huge Steel Wall", description: "A massive steel wall providing exceptional defensive coverage.", icon: "huge-steel-wall", size: 1, buidTime: 40),
+        CDBlock(name: "Large Steel Wall", description: "The strongest steel wall configuration for ultimate protection.", icon: "large-steel-wall", size: 1, buidTime: 50),
+
+        CDBlock(name: "Brass Wall", description: "An advanced brass wall with enhanced durability and corrosion resistance.", icon: "brass-wall", size: 1, buidTime: 25),
+        CDBlock(name: "Giant Brass Wall", description: "A reinforced brass wall offering superior defensive capabilities.", icon: "giant-brass-wall", size: 1, buidTime: 37),
+        CDBlock(name: "Huge Brass Wall", description: "A massive brass wall providing excellent protection against all threats.", icon: "huge-brass-wall", size: 1, buidTime: 50),
+        CDBlock(name: "Large Brass Wall", description: "The ultimate brass wall for premium defensive installations.", icon: "large-brass-wall", size: 1, buidTime: 62),
+
+        CDBlock(name: "Aluminum Wall", description: "A lightweight yet strong aluminum wall with excellent properties.", icon: "aluminum-wall", size: 1, buidTime: 30),
+        CDBlock(name: "Giant Aluminum Wall", description: "A reinforced aluminum wall combining strength with efficiency.", icon: "giant-aluminum-wall", size: 1, buidTime: 45),
+        CDBlock(name: "Huge Aluminum Wall", description: "A massive aluminum wall providing superior defensive coverage.", icon: "huge-aluminum-wall", size: 1, buidTime: 60),
+        CDBlock(name: "Large Aluminum Wall", description: "The strongest aluminum wall for advanced defensive systems.", icon: "large-aluminum-wall", size: 1, buidTime: 75),
+
+        CDBlock(name: "Bronze Wall", description: "A premium bronze wall with exceptional defensive properties.", icon: "bronze-wall", size: 1, buidTime: 35),
+        CDBlock(name: "Giant Bronze Wall", description: "A reinforced bronze wall offering elite-level protection.", icon: "giant-bronze-wall", size: 1, buidTime: 52),
+        CDBlock(name: "Huge Bronze Wall", description: "A massive bronze wall providing unparalleled defensive strength.", icon: "huge-bronze-wall", size: 1, buidTime: 70),
+        CDBlock(name: "Large Bronze Wall", description: "The ultimate bronze wall for the most demanding defensive applications.", icon: "large-bronze-wall", size: 1, buidTime: 87),
+
+        CDBlock(name: "Silver Wall", description: "An advanced silver wall with cutting-edge defensive technology.", icon: "silver-wall", size: 1, buidTime: 40),
+        CDBlock(name: "Giant Silver Wall", description: "A reinforced silver wall offering state-of-the-art protection.", icon: "giant-silver-wall", size: 1, buidTime: 60),
+        CDBlock(name: "Huge Silver Wall", description: "A massive silver wall providing the highest level of defensive capability.", icon: "huge-silver-wall", size: 1, buidTime: 80),
+        CDBlock(name: "Large Silver Wall", description: "The most advanced silver wall available for ultimate defensive superiority.", icon: "large-silver-wall", size: 1, buidTime: 100),
+
+        CDBlock(name: "Compound Wall", description: "The ultimate defensive wall made from advanced compound materials.", icon: "compound-wall", size: 1, buidTime: 120)
     ],
     
     units: [

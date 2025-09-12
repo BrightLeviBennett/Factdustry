@@ -737,6 +737,7 @@ enum ItemType: Codable, CaseIterable, Hashable {
     case aliuminum
     case coal
     case sulfur
+    case circuit
     
     var displayName: String {
         switch self {
@@ -749,6 +750,7 @@ enum ItemType: Codable, CaseIterable, Hashable {
         case .aliuminum: return "Aluminum"
         case .coal: return "Coal"
         case .sulfur: return "Sulfur"
+        case .circuit: return "Circuit"
         }
     }
     
@@ -762,7 +764,8 @@ enum ItemType: Codable, CaseIterable, Hashable {
         case .rawAliuminum: return "rawAluminum"
         case .aliuminum: return "aluminum"
         case .coal: return "coal"
-        case .sulfur: return"sulfur"
+        case .sulfur: return "sulfur"
+        case .circuit: return "circuit"
         }
     }
 }
@@ -771,12 +774,24 @@ enum FluidType: Codable, Hashable {
     case water
     case hydrogen
     case oxygen
+    case petroleum
+    case carbonDioxide
+    case ethane
+    case methane
+    case butane
+    case propane
     
     var displayName: String {
         switch self {
         case .water: return "Water"
         case .hydrogen: return "Hydrogen"
         case .oxygen: return "Oxygen"
+        case .petroleum: return "petroleum"
+        case .carbonDioxide: return "carbonDioxide"
+        case .ethane: return "ethane"
+        case .methane: return "methane"
+        case .butane: return "butane"
+        case .propane: return "propane"
         }
     }
 }

@@ -53,7 +53,7 @@ class RightClickGestureView: UIView {
         guard let touch = touches.first else { return }
         let location = touch.location(in: self)
         
-        #if targetEnvironment(macCatalyst)
+#if targetEnvironment(macCatalyst)
         // On Mac, check for right mouse button
         if touch.type == .indirectPointer {
             // Check if it's a secondary click (right-click)
@@ -68,10 +68,10 @@ class RightClickGestureView: UIView {
             // Direct touch on Mac with touchscreen
             handleTouchDevice(touches: touches, location: location, isStart: true)
         }
-        #else
+#else
         // iOS/iPadOS
         handleTouchDevice(touches: touches, location: location, isStart: true)
-        #endif
+#endif
     }
     
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -95,18 +95,18 @@ class RightClickGestureView: UIView {
         
         // Check if it was a tap (not a drag)
         if !isLeftDragging && !isRightDragging {
-            #if targetEnvironment(macCatalyst)
+#if targetEnvironment(macCatalyst)
             if touch.type == .indirectPointer && event?.buttonMask.contains(.secondary) == true {
                 onRightTap?(location)
             } else {
                 onLeftTap?(location)
             }
-            #else
+#else
             // On iOS, single tap is left click
             if touches.count == 1 {
                 onLeftTap?(location)
             }
-            #endif
+#endif
         }
         
         // End any active drags
@@ -230,7 +230,7 @@ struct GameView: View {
         }
         return ""
     }
-        
+    
     var normalizedSelectionRect: CGRect {
         let minX = min(selectionStartPoint.x, selectionEndPoint.x)
         let minY = min(selectionStartPoint.y, selectionEndPoint.y)
@@ -241,636 +241,1227 @@ struct GameView: View {
     
     static let enhancedBlockLibrary: [BlockCategory: [BlockType]] = [
         .core: [
+            // Core Shard (starting core)
             BlockType(
                 iconName: "coreShardComplete",
                 size: 100,
                 sizeX: 2,
                 sizeY: 2,
-                buildCost: [(.copper, 500), (.graphite, 500), (.silicon, 300)],
-                buildTime: 10.0,
+                buildCost: [(.copper, 500), (.graphite, 500), (.copper, 500)],
+                buildTime: 0.0,
                 tileRequirement: .requiresFloor(),
                 canRotate: false,
                 connections: [
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemInput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 200,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.itemInput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 200,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.itemInput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 200,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 200,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    ),
-                ]
-            )
-        ],
-        .production: [
-            BlockType(
-                iconName: "mechanical-drill",
-                size: 135,
-                sizeX: 2,
-                sizeY: 2,
-                buildCost: [(.copper, 10)],
-                buildTime: 10.0,
-                processes: [
-                    Process(time: 2.0, inputPower: 20, outputItems: [.copper: 1])
+                    UniversalConnection(direction: .north, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 10, bufferSize: 1000)),
+                    UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 10, bufferSize: 1000)),
+                    UniversalConnection(direction: .east, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 10, bufferSize: 1000)),
+                    UniversalConnection(direction: .west, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 10, bufferSize: 1000))
                 ],
-                tileRequirement: .requiresOreInFront(),
-                canRotate: true,
-                textureOffset: CGPoint(x: -2, y: -8),
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 10,
-                            priority: 8,
-                            bufferSize: 5
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "plasma-bore",
-                size: 80,
-                sizeX: 2,
-                sizeY: 2,
-                buildCost: [(.silicon, 50), (.graphite, 40)],
-                buildTime: 8.0,
-                processes: [
-                    Process(time: 1.5, inputPower: 35, outputItems: [.copper: 1, .graphite: 1])
-                ],
-                tileRequirement: .requiresOreInFront(oreTypes: [.copper, .graphite]),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 50,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemOutput([.copper, .graphite])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 15,
-                            priority: 8,
-                            bufferSize: 10
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "advanced-plasma-bore",
-                size: 120,
-                sizeX: 3,
-                sizeY: 3,
-                buildCost: [(.silicon, 100), (.steel, 80), (.graphite, 60)],
-                buildTime: 15.0,
-                processes: [
-                    Process(time: 1.0, inputPower: 50, outputItems: [.copper: 2, .graphite: 2])
-                ],
-                tileRequirement: .requiresOreInFront(oreTypes: [.copper, .graphite]),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 75,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemOutput([.copper, .graphite])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 20,
-                            priority: 8,
-                            bufferSize: 15
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "mineral-extractor",
-                size: 120,
-                sizeX: 3,
-                sizeY: 3,
-                buildCost: [(.copper, 120), (.silicon, 80), (.graphite, 100)],
-                buildTime: 20.0,
-                tileRequirement: .requiresCenterOnVentOrGeyser(),
-                canRotate: false
-            )
-        ],
-        .distribution: [
-            BlockType(
-                iconName: "conveyor-belt",
-                size: 40,
-                buildCost: [(.copper, 1)],
-                buildTime: 0.5,
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 20,
-                            priority: 5,
-                            bufferSize: 1
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 20,
-                            priority: 5,
-                            bufferSize: 1
-                        )
-                    ),
-                ],
-                capacity: 1
+                capacity: 10000
             ),
             
+            // Core Fragment
             BlockType(
-                iconName: "belt-bridge",
-                size: 80,
-                buildCost: [(.copper, 10)],
-                buildTime: 1.0,
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                textureOffset: CGPoint(x: 0, y: -12),
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 25,
-                            priority: 5,
-                            bufferSize: 5
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 25,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "belt-router",
-                size: 40,
-                buildCost: [(.copper, 5)],
-                buildTime: 0.8,
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 5,
-                            bufferSize: 5
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 8,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 6,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 6,
-                            bufferSize: 0
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "belt-junction",
-                size: 40,
-                buildCost: [(.copper, 5)],
-                buildTime: 0.6,
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemInput(nil), .itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 40,
-                            priority: 5,
-                            bufferSize: 3
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput(nil), .itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 40,
-                            priority: 5,
-                            bufferSize: 3
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.itemInput(nil), .itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 40,
-                            priority: 5,
-                            bufferSize: 3
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.itemInput(nil), .itemOutput(nil)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 40,
-                            priority: 5,
-                            bufferSize: 3
-                        )
-                    )
-                ]
-            )
-        ],
-        .defense: [
-            BlockType(
-                iconName: "shield.fill",
-                size: 26,
-                buildCost: [(.copper, 5)],
-                buildTime: 2.0,
-                tileRequirement: .requiresFloor(),
-                canRotate: false
-            ),
-            BlockType(
-                iconName: "lock.shield.fill",
-                size: 24,
-                buildCost: [(.steel, 15), (.silicon, 8)],
-                buildTime: 4.0,
-                tileRequirement: .requiresFloor(),
-                canRotate: false
-            )
-        ],
-        .turets: [
-            BlockType(
-                iconName: "single-barrel",
-                size: 80,
-                sizeX: 2,
-                sizeY: 2,
-                buildCost: [(.copper, 30), (.graphite, 30), (.silicon, 15)],
-                buildTime: 5.0,
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput([.copper, .graphite])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 5,
-                            priority: 7,
-                            bufferSize: 10
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "double-barrel",
-                size: 80,
-                sizeX: 2,
-                sizeY: 2,
-                buildCost: [(.copper, 40), (.graphite, 45), (.silicon, 25), (.iron, 10)],
-                buildTime: 8.0,
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput([.copper, .graphite, .iron])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 8,
-                            priority: 7,
-                            bufferSize: 15
-                        )
-                    )
-                ]
-            )
-        ],
-        .power: [
-            BlockType(
-                iconName: "steam-engine",
-                size: 170,
+                iconName: "core-fragment",
+                size: 120,
                 sizeX: 3,
                 sizeY: 3,
-                buildCost: [(.copper, 50)],
-                buildTime: 12.0,
-                processes: [
-                    Process(time: 1.0, outputPower: 100)
-                ],
-                tileRequirement: .requiresCenterOnVent(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 100,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 100,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 100,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 100,
-                            priority: 10,
-                            bufferSize: 0
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "shaft",
-                size: 55,
-                buildCost: [(.copper, 5)],
-                buildTime: 1.0,
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.powerOutput(.rotational), .powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 200,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.powerOutput(.rotational), .powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 200,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    )
-                ]
-            ),
-            BlockType(
-                iconName: "gearbox",
-                size: 40,
-                buildCost: [(.copper, 14)],
-                buildTime: 2.0,
+                buildCost: [(.copper, 100), (.graphite, 100)],
+                buildTime: 15.0,
                 tileRequirement: .requiresFloor(),
                 canRotate: false,
                 connections: [
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 150,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 150,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 150,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 150,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    )
-                ]
-            )
-        ],
-        .factory: [
-            BlockType(
-                iconName: "silicon-mixer",
-                size: 120,
-                sizeX: 3,
-                sizeY: 3,
-                buildCost: [(.copper, 40), (.graphite, 30)],
-                buildTime: 10.0,
-                processes: [
-                    Process(time: 2.0, inputItems: [.copper: 2, .graphite: 1], inputPower: 25, outputItems: [.silicon: 1])
+                    UniversalConnection(direction: .north, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 80, priority: 10, bufferSize: 500)),
+                    UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 80, priority: 10, bufferSize: 500)),
+                    UniversalConnection(direction: .east, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 80, priority: 10, bufferSize: 500)),
+                    UniversalConnection(direction: .west, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 80, priority: 10, bufferSize: 500))
                 ],
-                tileRequirement: .advancedFactoryRequirement(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 30,
-                            priority: 5,
-                            bufferSize: 0
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput([.copper])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 10,
-                            priority: 7,
-                            bufferSize: 20
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.itemInput([.graphite])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 10,
-                            priority: 7,
-                            bufferSize: 20
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemOutput([.silicon])],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 5,
-                            priority: 8,
-                            bufferSize: 10
-                        )
-                    )
-                ]
-            )
-        ],
-        .fluids: [],
-        .units: [
-            BlockType(
-                iconName: "tank-fabricator",
-                size: 120,
-                sizeX: 3,
-                sizeY: 3,
-                buildCost: [(.copper, 50), (.graphite, 40), (.silicon, 25)],
-                buildTime: 8.0,
-                processes: [
-                    Process(time: 3.0, inputItems: [.copper: 10], outputItems: [:]) // Custom unit production
-                ],
-                tileRequirement: .requiresFloor(),
-                canRotate: true,
-                connections: [
-                    UniversalConnection(
-                        direction: .south,
-                        connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 10,
-                            priority: 7,
-                            bufferSize: 50
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .east,
-                        connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 10,
-                            priority: 7,
-                            bufferSize: 50
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .west,
-                        connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 10,
-                            priority: 7,
-                            bufferSize: 50
-                        )
-                    ),
-                    UniversalConnection(
-                        direction: .north,
-                        connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)],
-                        constraints: UniversalConnection.ConnectionConstraints(
-                            maxThroughput: 10,
-                            priority: 7,
-                            bufferSize: 50
-                        )
-                    )
-                ],
-                capacity: 100
+                capacity: 5000
             ),
+            
+            // Core Remnant
+            BlockType(
+                iconName: "core-remnant",
+                size: 160,
+                sizeX: 4,
+                sizeY: 4,
+                buildCost: [(.graphite, 200), (.silicon, 150)],
+                buildTime: 25.0,
+                tileRequirement: .requiresFloor(),
+                canRotate: false,
+                capacity: 8000
+            ),
+            
+            // Core Bastion
+            BlockType(
+                iconName: "core-bastion",
+                size: 200,
+                sizeX: 5,
+                sizeY: 5,
+                buildCost: [(.silicon, 400), (.steel, 300)],
+                buildTime: 40.0,
+                tileRequirement: .requiresFloor(),
+                canRotate: false,
+                capacity: 15000
+            ),
+            
+            // Core Crucible
+            BlockType(
+                iconName: "core-crucible",
+                size: 240,
+                sizeX: 6,
+                sizeY: 6,
+                buildCost: [(.silicon, 600), (.steel, 500), (.circuit, 200)],
+                buildTime: 60.0,
+                tileRequirement: .requiresFloor(),
+                canRotate: false,
+                capacity: 25000
+            ),
+            
+            // Core Interplanetary
+            BlockType(
+                iconName: "core-interplanetary",
+                size: 280,
+                sizeX: 7,
+                sizeY: 7,
+                buildCost: [(.circuit, 400)],
+                buildTime: 80.0,
+                tileRequirement: .requiresFloor(),
+                canRotate: false,
+                capacity: 40000
+            ),
+            
+            // Core Aegis
+            BlockType(
+                iconName: "core-aegis",
+                size: 320,
+                sizeX: 8,
+                sizeY: 8,
+                buildCost: [(.circuit, 600)],
+                buildTime: 120.0,
+                tileRequirement: .requiresFloor(),
+                canRotate: false,
+                capacity: 60000
+            ),
+            
+            // Core Singularity
+            BlockType(
+                iconName: "core-singularity",
+                size: 360,
+                sizeX: 9,
+                sizeY: 9,
+                buildCost: [(.circuit, 1000)],
+                buildTime: 180.0,
+                tileRequirement: .requiresFloor(),
+                canRotate: false,
+                capacity: 100000
+            )
         ],
-        .payloads: []
+        
+            .production: [
+                // Mechanical Drill
+                BlockType(
+                    iconName: "mechanical-drill",
+                    size: 135,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 10)],
+                    buildTime: 10.0,
+                    processes: [
+                        Process(time: 2.0, inputPower: 20, outputItems: [.copper: 1])
+                    ],
+                    tileRequirement: .requiresOreInFront(),
+                    canRotate: true,
+                    textureOffset: CGPoint(x: -2, y: -8),
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Plasma Bore
+                BlockType(
+                    iconName: "plasma-bore",
+                    size: 135,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 30), (.graphite, 25), (.silicon, 15)],
+                    buildTime: 15.0,
+                    processes: [
+                        Process(time: 1.5, inputPower: 35, outputItems: [.copper: 1, .graphite: 1])
+                    ],
+                    tileRequirement: .requiresOreInFront(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 40, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 40, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 40, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 40, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Advanced Plasma Bore
+                BlockType(
+                    iconName: "advanced-plasma-bore",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.copper, 60), (.graphite, 50), (.silicon, 40), (.steel, 25)],
+                    buildTime: 25.0,
+                    processes: [
+                        Process(time: 1.0, inputPower: 50, outputItems: [.copper: 2, .graphite: 2])
+                    ],
+                    tileRequirement: .requiresOreInFront(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 60, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 60, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 60, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.powerInput(.rotational), .itemOutput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 60, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Mineral Extractor
+                BlockType(
+                    iconName: "mineral-extractor",
+                    size: 120,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.copper, 120), (.silicon, 80), (.graphite, 100)],
+                    buildTime: 20.0,
+                    tileRequirement: .requiresCenterOnVentOrGeyser(),
+                    canRotate: false
+                ),
+                
+                // Petroleum Drill
+                BlockType(
+                    iconName: "petroleum-drill",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 100), (.silicon, 80), (.circuit, 50)],
+                    buildTime: 30.0,
+                    processes: [
+                        Process(time: 3.0, inputPower: 80, outputFluids: [.petroleum: 1])
+                    ],
+                    tileRequirement: .requiresOreInFront(),
+                    canRotate: true
+                )
+            ],
+        
+            .distribution: [
+                // Conveyor Belt
+                BlockType(
+                    iconName: "conveyor-belt",
+                    size: 40,
+                    buildCost: [(.copper, 1)],
+                    buildTime: 0.5,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 1))
+                    ],
+                    capacity: 1
+                ),
+                
+                // Belt Junction
+                BlockType(
+                    iconName: "belt-junction",
+                    size: 40,
+                    buildCost: [(.copper, 8)],
+                    buildTime: 1.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.itemInput(nil), .itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil), .itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemInput(nil), .itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .west, connectionTypes: [.itemInput(nil), .itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 1))
+                    ],
+                    capacity: 4
+                ),
+                
+                // Belt Router
+                BlockType(
+                    iconName: "belt-router",
+                    size: 80,
+                    buildCost: [(.copper, 15), (.graphite, 10)],
+                    buildTime: 2.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 5)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 6, bufferSize: 0))
+                    ]
+                ),
+                
+                // Belt Bridge
+                BlockType(
+                    iconName: "belt-bridge",
+                    size: 80,
+                    buildCost: [(.copper, 10)],
+                    buildTime: 1.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    textureOffset: CGPoint(x: 0, y: -12),
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 200, priority: 10, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 200, priority: 10, bufferSize: 0))
+                    ]
+                ),
+                
+                // Belt Sorter
+                BlockType(
+                    iconName: "belt-sorter",
+                    size: 80,
+                    buildCost: [(.copper, 12), (.graphite, 8)],
+                    buildTime: 1.5,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 3)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 6, bufferSize: 0))
+                    ]
+                ),
+                
+                // Inverted Belt Sorter
+                BlockType(
+                    iconName: "inverted-belt-sorter",
+                    size: 80,
+                    buildCost: [(.copper, 12), (.graphite, 8)],
+                    buildTime: 1.5,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 3)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 6, bufferSize: 0))
+                    ]
+                ),
+                
+                // Overflow Belt
+                BlockType(
+                    iconName: "overflow-belt",
+                    size: 80,
+                    buildCost: [(.copper, 18), (.graphite, 12)],
+                    buildTime: 2.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 3)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 6, bufferSize: 0))
+                    ]
+                ),
+                
+                // Underflow Belt
+                BlockType(
+                    iconName: "underflow-belt",
+                    size: 80,
+                    buildCost: [(.copper, 18), (.graphite, 12)],
+                    buildTime: 2.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 5, bufferSize: 3)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 0))
+                    ]
+                ),
+                
+                // Cargo Mass Driver
+                BlockType(
+                    iconName: "cargo-mass-driver",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 200), (.silicon, 150), (.circuit, 100)],
+                    buildTime: 20.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput(nil), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 50, priority: 8, bufferSize: 20))
+                    ]
+                )
+            ],
+        
+            .fluids: [
+                // Fluid Conduit
+                BlockType(
+                    iconName: "fluid-conduit",
+                    size: 40,
+                    buildCost: [(.copper, 2)],
+                    buildTime: 0.5,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .south, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .east, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .west, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 5, bufferSize: 1))
+                    ],
+                    capacity: 10
+                ),
+                
+                // Conduit Junction
+                BlockType(
+                    iconName: "conduit-junction",
+                    size: 80,
+                    buildCost: [(.copper, 8), (.graphite, 5)],
+                    buildTime: 1.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 5, bufferSize: 5)),
+                        UniversalConnection(direction: .south, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 5, bufferSize: 5)),
+                        UniversalConnection(direction: .east, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 5, bufferSize: 5)),
+                        UniversalConnection(direction: .west, connectionTypes: [.fluidInput(nil), .fluidOutput(nil)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 5, bufferSize: 5))
+                    ],
+                    capacity: 50
+                ),
+                
+                // Vent Condenser
+                BlockType(
+                    iconName: "vent-condenser",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 40), (.graphite, 30)],
+                    buildTime: 8.0,
+                    processes: [
+                        Process(time: 2.0, outputFluids: [.water: 1])
+                    ],
+                    tileRequirement: .requiresCenterOnVent(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20)),
+                        UniversalConnection(direction: .south, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20)),
+                        UniversalConnection(direction: .east, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20)),
+                        UniversalConnection(direction: .west, connectionTypes: [.fluidOutput([.water])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 6, bufferSize: 20))
+                    ]
+                )
+            ],
+        
+            .defense: [
+                // Wall
+                BlockType(
+                    iconName: "wall",
+                    size: 40,
+                    buildCost: [(.copper, 5)],
+                    buildTime: 2.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false
+                ),
+                
+                // Large Wall
+                BlockType(
+                    iconName: "large-wall",
+                    size: 80,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 20)],
+                    buildTime: 6.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false
+                ),
+                
+                // Shielded Wall
+                BlockType(
+                    iconName: "shielded-wall",
+                    size: 40,
+                    buildCost: [(.steel, 15), (.silicon, 8)],
+                    buildTime: 4.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false
+                )
+            ],
+        
+            .turets: [
+                // Single Barrel
+                BlockType(
+                    iconName: "single-barrel",
+                    size: 80,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 30), (.graphite, 30), (.silicon, 15)],
+                    buildTime: 5.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper, .graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 7, bufferSize: 10))
+                    ]
+                ),
+                
+                // Double Barrel
+                BlockType(
+                    iconName: "double-barrel",
+                    size: 80,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 40), (.graphite, 45), (.silicon, 25), (.iron, 10)],
+                    buildTime: 8.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper, .graphite, .iron])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 8, priority: 7, bufferSize: 15))
+                    ]
+                ),
+                
+                // Quad Barrel
+                BlockType(
+                    iconName: "quad-barrel",
+                    size: 120,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.copper, 80), (.graphite, 90), (.silicon, 50), (.iron, 30)],
+                    buildTime: 15.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper, .graphite, .iron])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 7, bufferSize: 30))
+                    ]
+                ),
+                
+                // Octo Barrel
+                BlockType(
+                    iconName: "octo-barrel",
+                    size: 160,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.copper, 150), (.graphite, 180), (.silicon, 100), (.iron, 60), (.steel, 40)],
+                    buildTime: 25.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper, .graphite, .iron, .steel])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 25, priority: 7, bufferSize: 50))
+                    ]
+                ),
+                
+                // Duodec
+                BlockType(
+                    iconName: "duodec",
+                    size: 200,
+                    sizeX: 5,
+                    sizeY: 5,
+                    buildCost: [(.steel, 200), (.silicon, 150), (.circuit, 100)],
+                    buildTime: 40.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 40, priority: 7, bufferSize: 80))
+                    ]
+                ),
+                
+                // Quaddec
+                BlockType(
+                    iconName: "quaddec",
+                    size: 240,
+                    sizeX: 6,
+                    sizeY: 6,
+                    buildCost: [(.steel, 400), (.silicon, 300), (.circuit, 200)],
+                    buildTime: 60.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 60, priority: 7, bufferSize: 120))
+                    ]
+                ),
+                
+                // Shardstorm
+                BlockType(
+                    iconName: "shardstorm",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 120), (.silicon, 100), (.circuit, 80)],
+                    buildTime: 30.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 40))
+                    ]
+                ),
+                
+                // Thunderburst
+                BlockType(
+                    iconName: "thunderburst",
+                    size: 200,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.steel, 180), (.silicon, 150), (.circuit, 120)],
+                    buildTime: 45.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 7, bufferSize: 60))
+                    ]
+                ),
+                
+                // Diffuse
+                BlockType(
+                    iconName: "diffuse",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 60), (.graphite, 50), (.silicon, 40)],
+                    buildTime: 12.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper, .graphite, .silicon])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 7, bufferSize: 20))
+                    ]
+                ),
+                
+                // Disarm
+                BlockType(
+                    iconName: "disarm",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 100), (.silicon, 80), (.circuit, 60)],
+                    buildTime: 20.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 7, bufferSize: 30))
+                    ]
+                ),
+                
+                // Destroy
+                BlockType(
+                    iconName: "destroy",
+                    size: 200,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.steel, 150), (.silicon, 120), (.circuit, 100)],
+                    buildTime: 35.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 25, priority: 7, bufferSize: 50))
+                    ]
+                ),
+                
+                // Annihilate
+                BlockType(
+                    iconName: "annihilate",
+                    size: 240,
+                    sizeX: 5,
+                    sizeY: 5,
+                    buildCost: [(.steel, 250), (.silicon, 200), (.circuit, 150)],
+                    buildTime: 50.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 35, priority: 7, bufferSize: 70))
+                    ]
+                ),
+                
+                // EMP Diffuse
+                BlockType(
+                    iconName: "emp-diffuse",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.steel, 80), (.silicon, 60), (.circuit, 40)],
+                    buildTime: 15.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 12, priority: 7, bufferSize: 25))
+                    ]
+                ),
+                
+                // Homing Diffuse
+                BlockType(
+                    iconName: "homing-diffuse",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.steel, 100), (.silicon, 80), (.circuit, 60)],
+                    buildTime: 18.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 7, bufferSize: 30))
+                    ]
+                ),
+                
+                // Aegis Arc
+                BlockType(
+                    iconName: "aegis-arc",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 150), (.silicon, 120), (.circuit, 100)],
+                    buildTime: 30.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 40))
+                    ]
+                ),
+                
+                // Gauss Launcher
+                BlockType(
+                    iconName: "gauss-launcher",
+                    size: 200,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.steel, 200), (.silicon, 160), (.circuit, 120)],
+                    buildTime: 40.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 7, bufferSize: 60))
+                    ]
+                ),
+                
+                // Eclipse
+                BlockType(
+                    iconName: "eclipse",
+                    size: 280,
+                    sizeX: 6,
+                    sizeY: 6,
+                    buildCost: [(.steel, 400), (.silicon, 300), (.circuit, 250)],
+                    buildTime: 80.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 50, priority: 7, bufferSize: 100))
+                    ]
+                ),
+                
+                // Missile Launcher
+                BlockType(
+                    iconName: "missile-launcher",
+                    size: 240,
+                    sizeX: 5,
+                    sizeY: 5,
+                    buildCost: [(.steel, 300), (.silicon, 250), (.circuit, 200)],
+                    buildTime: 60.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon, .circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 40, priority: 7, bufferSize: 80))
+                    ]
+                )
+            ],
+        
+            .power: [
+                // Steam Engine
+                BlockType(
+                    iconName: "steam-engine",
+                    size: 170,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.copper, 50)],
+                    buildTime: 12.0,
+                    processes: [
+                        Process(time: 1.0, outputPower: 100)
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 150, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 150, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 150, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 150, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Combustion Engine
+                BlockType(
+                    iconName: "combustion-engine",
+                    size: 200,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.copper, 80), (.graphite, 60), (.silicon, 40)],
+                    buildTime: 18.0,
+                    processes: [
+                        Process(time: 0.8, outputPower: 200)
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 250, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 250, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 250, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 250, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Vent Turbine
+                BlockType(
+                    iconName: "vent-turbine",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 100), (.silicon, 80)],
+                    buildTime: 20.0,
+                    processes: [
+                        Process(time: 1.2, outputPower: 180)
+                    ],
+                    tileRequirement: .requiresCenterOnVent(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 220, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 220, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 220, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 220, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Combustion Generator
+                BlockType(
+                    iconName: "combustion-generator",
+                    size: 240,
+                    sizeX: 5,
+                    sizeY: 5,
+                    buildCost: [(.steel, 150), (.silicon, 120), (.circuit, 80)],
+                    buildTime: 30.0,
+                    processes: [
+                        Process(time: 0.6, inputFluids: [.petroleum: 1], outputPower: 400)
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.fluidInput([.petroleum])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 8, bufferSize: 50)),
+                        UniversalConnection(direction: .north, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 500, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 500, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 500, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Shaft
+                BlockType(
+                    iconName: "shaft",
+                    size: 40,
+                    buildCost: [(.copper, 3)],
+                    buildTime: 1.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 200, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 200, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 200, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational), .powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 200, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Gearbox
+                BlockType(
+                    iconName: "gearbox",
+                    size: 80,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 15), (.graphite, 10)],
+                    buildTime: 3.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 150, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 150, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerOutput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 150, priority: 6, bufferSize: 0))
+                    ]
+                ),
+                
+                // Beam Node
+                BlockType(
+                    iconName: "beam-node",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.steel, 80), (.silicon, 60), (.circuit, 40)],
+                    buildTime: 15.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.powerInput(.electrical), .powerOutput(.electrical)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 300, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.powerInput(.electrical), .powerOutput(.electrical)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 300, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerInput(.electrical), .powerOutput(.electrical)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 300, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.electrical), .powerOutput(.electrical)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 300, priority: 5, bufferSize: 0))
+                    ]
+                ),
+                
+                // Beam Tower
+                BlockType(
+                    iconName: "beam-tower",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 120), (.silicon, 100), (.circuit, 80)],
+                    buildTime: 25.0,
+                    processes: [
+                        Process(time: 0.5, inputPower: 50, outputPower: 500)
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: false,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 8, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.powerOutput(.electrical)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 600, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.powerOutput(.electrical)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 600, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.powerOutput(.electrical)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 600, priority: 5, bufferSize: 0))
+                    ]
+                )
+            ],
+        
+            .factory: [
+                // Silicon Mixer
+                BlockType(
+                    iconName: "silicon-mixer",
+                    size: 120,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.copper, 40), (.graphite, 30)],
+                    buildTime: 10.0,
+                    processes: [
+                        Process(time: 2.0, inputItems: [.copper: 2, .graphite: 1], inputPower: 25, outputItems: [.silicon: 1])
+                    ],
+                    tileRequirement: .advancedFactoryRequirement(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 30, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 7, bufferSize: 20)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemInput([.graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 7, bufferSize: 20)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput([.silicon])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 8, bufferSize: 10))
+                    ]
+                ),
+                
+                // Steel Furnace
+                BlockType(
+                    iconName: "steel-furnace",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.copper, 80), (.graphite, 60), (.silicon, 40)],
+                    buildTime: 15.0,
+                    processes: [
+                        Process(time: 3.0, inputItems: [.iron: 2, .coal: 1], inputPower: 40, outputItems: [.steel: 1])
+                    ],
+                    tileRequirement: .advancedFactoryRequirement(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 50, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.iron])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 7, bufferSize: 30)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemInput([.coal])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 8, priority: 7, bufferSize: 15)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput([.steel])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 8, priority: 8, bufferSize: 15))
+                    ]
+                ),
+                
+                // Graphite Electrolyzer
+                BlockType(
+                    iconName: "graphite-electrolyzer",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 60), (.graphite, 40), (.silicon, 30)],
+                    buildTime: 12.0,
+                    processes: [
+                        Process(time: 2.5, inputItems: [.coal: 2], inputPower: 30, outputItems: [.graphite: 3])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 40, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.coal])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 12, priority: 7, bufferSize: 25)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput([.graphite])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 18, priority: 8, bufferSize: 35))
+                    ]
+                ),
+                
+                // Circuit Printer
+                BlockType(
+                    iconName: "circuit-printer",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.silicon, 100), (.steel, 80), (.graphite, 60)],
+                    buildTime: 20.0,
+                    processes: [
+                        Process(time: 4.0, inputItems: [.silicon: 3, .steel: 2], inputPower: 60, outputItems: [.circuit: 1])
+                    ],
+                    tileRequirement: .advancedFactoryRequirement(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 80, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.silicon])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 40)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemInput([.steel])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 7, bufferSize: 30)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemOutput([.circuit])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 8, priority: 8, bufferSize: 15))
+                    ]
+                ),
+                
+                // Carbon-Dioxide Concentrator
+                BlockType(
+                    iconName: "carbon-dioxide-concentrator",
+                    size: 120,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.steel, 60), (.silicon, 50), (.circuit, 30)],
+                    buildTime: 18.0,
+                    processes: [
+                        Process(time: 3.0, inputPower: 50, outputFluids: [.carbonDioxide: 2])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 60, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.fluidOutput([.carbonDioxide])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 8, bufferSize: 30))
+                    ]
+                ),
+                
+                // Petroleum Refinery
+                BlockType(
+                    iconName: "petroleum-refinery",
+                    size: 200,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.steel, 150), (.silicon, 120), (.circuit, 100)],
+                    buildTime: 30.0,
+                    processes: [
+                        Process(time: 5.0, inputFluids: [.carbonDioxide: 2], inputPower: 80, outputFluids: [.petroleum: 1])
+                    ],
+                    tileRequirement: .advancedFactoryRequirement(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .west, connectionTypes: [.powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 100, priority: 5, bufferSize: 0)),
+                        UniversalConnection(direction: .south, connectionTypes: [.fluidInput([.carbonDioxide])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 50)),
+                        UniversalConnection(direction: .north, connectionTypes: [.fluidOutput([.petroleum])], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 12, priority: 8, bufferSize: 25))
+                    ]
+                )
+            ],
+        
+            .units: [
+                // Tank Fabricator
+                BlockType(
+                    iconName: "tank-fabricator",
+                    size: 120,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.copper, 50), (.graphite, 40), (.silicon, 25)],
+                    buildTime: 8.0,
+                    processes: [
+                        Process(time: 3.0, inputItems: [.copper: 10], outputItems: [:]) // Custom unit production
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 7, bufferSize: 50)),
+                        UniversalConnection(direction: .east, connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 7, bufferSize: 50)),
+                        UniversalConnection(direction: .west, connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 7, bufferSize: 50)),
+                        UniversalConnection(direction: .north, connectionTypes: [.itemInput([.copper]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 10, priority: 7, bufferSize: 50))
+                    ],
+                    capacity: 100
+                ),
+                
+                // Picker
+                BlockType(
+                    iconName: "picker",
+                    size: 80,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.copper, 100), (.graphite, 50), (.silicon, 30)],
+                    buildTime: 10.0,
+                    processes: [
+                        Process(time: 2.0, inputItems: [.copper: 5, .graphite: 3], outputItems: [:])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.copper, .graphite]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 8, priority: 7, bufferSize: 30))
+                    ],
+                    capacity: 60
+                ),
+                
+                // Placer
+                BlockType(
+                    iconName: "placer",
+                    size: 120,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.graphite, 100), (.iron, 75), (.silicon, 50)],
+                    buildTime: 15.0,
+                    processes: [
+                        Process(time: 2.5, inputItems: [.graphite: 8, .iron: 5], outputItems: [:])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.graphite, .iron]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 12, priority: 7, bufferSize: 40))
+                    ],
+                    capacity: 80
+                ),
+                
+                // Constructor
+                BlockType(
+                    iconName: "constructor",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.iron, 150), (.steel, 100), (.silicon, 80)],
+                    buildTime: 20.0,
+                    processes: [
+                        Process(time: 3.0, inputItems: [.iron: 10, .steel: 8], outputItems: [:])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.iron, .steel]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 7, bufferSize: 50))
+                    ],
+                    capacity: 100
+                ),
+                
+                // Deconstructor
+                BlockType(
+                    iconName: "deconstructor",
+                    size: 160,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 150), (.silicon, 100), (.circuit, 60)],
+                    buildTime: 25.0,
+                    processes: [
+                        Process(time: 3.5, inputItems: [.steel: 12, .silicon: 8], outputItems: [:])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 18, priority: 7, bufferSize: 60))
+                    ],
+                    capacity: 120
+                ),
+                
+                // Large Constructor
+                BlockType(
+                    iconName: "large-constructor",
+                    size: 200,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.steel, 200), (.silicon, 150), (.circuit, 100)],
+                    buildTime: 35.0,
+                    processes: [
+                        Process(time: 4.0, inputItems: [.steel: 15, .silicon: 12], outputItems: [:])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.steel, .silicon]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 20, priority: 7, bufferSize: 80))
+                    ],
+                    capacity: 150
+                ),
+                
+                // Large Deconstructor
+                BlockType(
+                    iconName: "large-deconstructor",
+                    size: 200,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.silicon, 200), (.circuit, 100)],
+                    buildTime: 40.0,
+                    processes: [
+                        Process(time: 4.5, inputItems: [.silicon: 18, .circuit: 10], outputItems: [:])
+                    ],
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.itemInput([.silicon, .circuit]), .powerInput(.rotational)], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 25, priority: 7, bufferSize: 100))
+                    ],
+                    capacity: 200
+                )
+            ],
+        
+            .payloads: [
+                // Payload Conveyor
+                BlockType(
+                    iconName: "payload-conveyor",
+                    size: 80,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.iron, 200), (.steel, 100)],
+                    buildTime: 8.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 5, bufferSize: 1)),
+                        UniversalConnection(direction: .south, connectionTypes: [.payloadInput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 5, bufferSize: 1))
+                    ],
+                    capacity: 2
+                ),
+                
+                // Payload Router
+                BlockType(
+                    iconName: "payload-router",
+                    size: 120,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 150), (.silicon, 100)],
+                    buildTime: 12.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.payloadInput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 5, bufferSize: 3)),
+                        UniversalConnection(direction: .north, connectionTypes: [.payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 3, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .east, connectionTypes: [.payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 3, priority: 6, bufferSize: 0)),
+                        UniversalConnection(direction: .west, connectionTypes: [.payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 3, priority: 6, bufferSize: 0))
+                    ]
+                ),
+                
+                // Payload Junction
+                BlockType(
+                    iconName: "payload-junction",
+                    size: 80,
+                    sizeX: 2,
+                    sizeY: 2,
+                    buildCost: [(.steel, 100), (.silicon, 60)],
+                    buildTime: 6.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .north, connectionTypes: [.payloadInput, .payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 5, bufferSize: 2)),
+                        UniversalConnection(direction: .south, connectionTypes: [.payloadInput, .payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 5, bufferSize: 2)),
+                        UniversalConnection(direction: .east, connectionTypes: [.payloadInput, .payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 5, bufferSize: 2)),
+                        UniversalConnection(direction: .west, connectionTypes: [.payloadInput, .payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 5, priority: 5, bufferSize: 2))
+                    ],
+                    capacity: 8
+                ),
+                
+                // Payload Bridge
+                BlockType(
+                    iconName: "payload-bridge",
+                    size: 120,
+                    sizeX: 3,
+                    sizeY: 3,
+                    buildCost: [(.steel, 125), (.silicon, 80)],
+                    buildTime: 10.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.payloadInput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 8, priority: 10, bufferSize: 0)),
+                        UniversalConnection(direction: .north, connectionTypes: [.payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 8, priority: 10, bufferSize: 0))
+                    ]
+                ),
+                
+                // Payload Rail
+                BlockType(
+                    iconName: "payload-rail",
+                    size: 160,
+                    sizeX: 4,
+                    sizeY: 4,
+                    buildCost: [(.steel, 200), (.silicon, 150), (.circuit, 100)],
+                    buildTime: 20.0,
+                    tileRequirement: .requiresFloor(),
+                    canRotate: true,
+                    connections: [
+                        UniversalConnection(direction: .south, connectionTypes: [.payloadInput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 8, bufferSize: 5)),
+                        UniversalConnection(direction: .north, connectionTypes: [.payloadOutput], constraints: UniversalConnection.ConnectionConstraints(maxThroughput: 15, priority: 8, bufferSize: 0))
+                    ]
+                )
+            ]
     ]
     
     init(fileURL: URL, onReturnToSectorMap: (() -> Void)? = nil) {
@@ -928,17 +1519,17 @@ struct GameView: View {
                         }
                     },
                     linePlacementPoints: linePlacementPoints,
-                        linePlacementCollisions: linePlacementCollisions,
-                        selectedBlock: selectedBlock,
-                        selectedBlockRotation: rotationController.selectedBlockRotation,
-                        hoverTileCoordinates: hoverTileCoordinates,
-                        isHoverColliding: isHoverColliding,
-                        blockLibrary: GameView.enhancedBlockLibrary,
-                        transmissionManager: blockManager.networkManager,
-                        blockManager: blockManager,
-                        mapViewFrame: $mapViewFrame,
-                        respawnTrigger: $respawnShardling
-                    )
+                    linePlacementCollisions: linePlacementCollisions,
+                    selectedBlock: selectedBlock,
+                    selectedBlockRotation: rotationController.selectedBlockRotation,
+                    hoverTileCoordinates: hoverTileCoordinates,
+                    isHoverColliding: isHoverColliding,
+                    blockLibrary: GameView.enhancedBlockLibrary,
+                    transmissionManager: blockManager.networkManager,
+                    blockManager: blockManager,
+                    mapViewFrame: $mapViewFrame,
+                    respawnTrigger: $respawnShardling
+                )
                 .onChange(of: respawnShardling) {
                     if respawnShardling {
                         // Reset the trigger after a short delay
@@ -1161,7 +1752,7 @@ struct GameView: View {
             // The shardling will automatically spawn on top of the core via the SpriteKit overlay
         }
     }
-
+    
     
     func loadSector() {
         blockManager.loadBlocksFromCoreSchema(fileIdentifier: fileIdentifier)
@@ -1199,14 +1790,14 @@ struct GameView: View {
         selectionEndPoint = location
         selectedBlocksForDeletion.removeAll()
     }
-
+    
     func handleSelectionDragChanged(at location: CGPoint, mapData: MapData) {
         guard isSelectionDragging else { return }
         
         selectionEndPoint = location
         updateSelectedBlocks(mapData: mapData)
     }
-
+    
     func handleSelectionDragEnd(mapData: MapData) {
         guard isSelectionDragging else { return }
         
@@ -1223,7 +1814,7 @@ struct GameView: View {
         selectionEndPoint = .zero
         selectedBlocksForDeletion.removeAll()
     }
-
+    
     func updateSelectedBlocks(mapData: MapData) {
         selectedBlocksForDeletion.removeAll()
         
@@ -1255,13 +1846,13 @@ struct GameView: View {
                 
                 // Check for overlap
                 if blockMaxX >= topLeft.x && blockMinX <= bottomRight.x &&
-                   blockMaxY >= topLeft.y && blockMinY <= bottomRight.y {
+                    blockMaxY >= topLeft.y && blockMinY <= bottomRight.y {
                     selectedBlocksForDeletion.insert(block.id)
                 }
             }
         }
     }
-
+    
     func getBlockType(for iconName: String) -> BlockType? {
         for (_, blocks) in GameView.enhancedBlockLibrary {
             if let block = blocks.first(where: { $0.iconName == iconName }) {
@@ -1287,7 +1878,7 @@ struct GameView: View {
         )
         
         guard tileCoordinates.x >= 0 && tileCoordinates.x < mapData.width &&
-              tileCoordinates.y >= 0 && tileCoordinates.y < mapData.height else {
+                tileCoordinates.y >= 0 && tileCoordinates.y < mapData.height else {
             return
         }
         
@@ -1300,7 +1891,7 @@ struct GameView: View {
             y: screenPoint.y + mapViewFrame.origin.y
         ))
     }
-
+    
     func handleDragEnd(_ mapData: MapData) {
         // Handle selection drag end if in selection mode
         if isSelectionDragging {
@@ -1335,7 +1926,7 @@ struct GameView: View {
             )
         }
     }
-
+    
     
     func generateLine(from start: (x: Int, y: Int), to end: (x: Int, y: Int)) -> (points: [(x: Int, y: Int)], direction: Direction?) {
         // Determine if we should make a horizontal or vertical line
@@ -1389,7 +1980,7 @@ struct GameView: View {
         let dy = Double(pos2.y - pos1.y)
         return sqrt(dx * dx + dy * dy)
     }
-
+    
     /// Get the center of the screen in tile coordinates
     func getScreenCenterInTileCoordinates() -> (x: Int, y: Int) {
         guard let mapData = cachedMapData else { return (0, 0) }
@@ -1406,7 +1997,7 @@ struct GameView: View {
         
         return tileCoords
     }
-        
+    
     private func handleMapTap(at screenPoint: CGPoint, _ mapData: MapData) {
         // Convert screen point to tile coordinates
         let tileCoordinates = cameraController.screenToTileCoordinates(
@@ -1419,7 +2010,7 @@ struct GameView: View {
         print("🖱️ Clicked at screen: (\(Int(screenPoint.x)), \(Int(screenPoint.y))) -> tile: (\(tileCoordinates.x), \(tileCoordinates.y))")
         
         guard tileCoordinates.x >= 0 && tileCoordinates.x < mapData.width &&
-              tileCoordinates.y >= 0 && tileCoordinates.y < mapData.height else {
+                tileCoordinates.y >= 0 && tileCoordinates.y < mapData.height else {
             print("❌ Click outside map bounds")
             return
         }
@@ -1532,7 +2123,7 @@ struct GameView: View {
         )
         
         guard tileCoordinates.x >= 0 && tileCoordinates.x < mapData.width &&
-              tileCoordinates.y >= 0 && tileCoordinates.y < mapData.height else {
+                tileCoordinates.y >= 0 && tileCoordinates.y < mapData.height else {
             if !isDragging {
                 hoverTileCoordinates = nil
                 isHoverColliding = false
@@ -1648,83 +2239,83 @@ struct GameView: View {
     }
     
     func handleKeyDown(_ key: String) {
-    switch key.lowercased() {
-    case "w", "a", "s", "d":
-        if !pressedKeys.contains(key.lowercased()) {
-            pressedKeys.insert(key.lowercased())
+        switch key.lowercased() {
+        case "w", "a", "s", "d":
+            if !pressedKeys.contains(key.lowercased()) {
+                pressedKeys.insert(key.lowercased())
+            }
+            updateMovementFromPressedKeys()
+        case "r":
+            // Respawn shardling
+            respawnShardling = true
+            print("🔄 Respawning shardling...")
+        case "x":
+            selectedBlock = nil
+            rotationController.resetRotation()
+        case " ": // Space bar
+            break
+        case "q", "e": // Rotation keys
+            if let selectedBlock = selectedBlock, selectedBlock.canRotate {
+                rotationController.handleKeyboard(key: key)
+            }
+        case "shift":
+            isShiftPressed = true
+        default:
+            break
         }
-        updateMovementFromPressedKeys()
-    case "r":
-        // Respawn shardling
-        respawnShardling = true
-        print("🔄 Respawning shardling...")
-    case "x":
-        selectedBlock = nil
-        rotationController.resetRotation()
-    case " ": // Space bar
-        break
-    case "q", "e": // Rotation keys
-        if let selectedBlock = selectedBlock, selectedBlock.canRotate {
-            rotationController.handleKeyboard(key: key)
-        }
-    case "shift":
-        isShiftPressed = true
-    default:
-        break
     }
-}
-
+    
     
     func handleKeyUp(_ key: String) {
-    pressedKeys.remove(key.lowercased())
-
-    switch key.lowercased() {
-    case "w", "a", "s", "d":
-        updateMovementFromPressedKeys()
-    case " ": // Space bar
-        break
-    case "shift":
-        isShiftPressed = false
-    default:
-        break
+        pressedKeys.remove(key.lowercased())
+        
+        switch key.lowercased() {
+        case "w", "a", "s", "d":
+            updateMovementFromPressedKeys()
+        case " ": // Space bar
+            break
+        case "shift":
+            isShiftPressed = false
+        default:
+            break
+        }
     }
-}
-
-/// Recomputes camera movement from currently pressed WASD keys.
-private func updateMovementFromPressedKeys() {
-    let up = pressedKeys.contains("w")
-    let down = pressedKeys.contains("s")
-    let left = pressedKeys.contains("a")
-    let right = pressedKeys.contains("d")
-
-    // Resolve vertical and horizontal intents (opposites cancel out)
-    let v = (up ? 1 : 0) - (down ? 1 : 0)
-    let h = (left ? 1 : 0) - (right ? 1 : 0)
-
-    if v == 0 && h == 0 {
-        cameraController.stopMoving()
-        return
+    
+    /// Recomputes camera movement from currently pressed WASD keys.
+    private func updateMovementFromPressedKeys() {
+        let up = pressedKeys.contains("w")
+        let down = pressedKeys.contains("s")
+        let left = pressedKeys.contains("a")
+        let right = pressedKeys.contains("d")
+        
+        // Resolve vertical and horizontal intents (opposites cancel out)
+        let v = (up ? 1 : 0) - (down ? 1 : 0)
+        let h = (left ? 1 : 0) - (right ? 1 : 0)
+        
+        if v == 0 && h == 0 {
+            cameraController.stopMoving()
+            return
+        }
+        
+        if v > 0 && h > 0 {
+            cameraController.startMoving(direction: .upLeft)
+        } else if v > 0 && h < 0 {
+            cameraController.startMoving(direction: .upRight)
+        } else if v < 0 && h > 0 {
+            cameraController.startMoving(direction: .downLeft)
+        } else if v < 0 && h < 0 {
+            cameraController.startMoving(direction: .downRight)
+        } else if v > 0 {
+            cameraController.startMoving(direction: .up)
+        } else if v < 0 {
+            cameraController.startMoving(direction: .down)
+        } else if h > 0 {
+            cameraController.startMoving(direction: .left)
+        } else if h < 0 {
+            cameraController.startMoving(direction: .right)
+        }
     }
-
-    if v > 0 && h > 0 {
-        cameraController.startMoving(direction: .upLeft)
-    } else if v > 0 && h < 0 {
-        cameraController.startMoving(direction: .upRight)
-    } else if v < 0 && h > 0 {
-        cameraController.startMoving(direction: .downLeft)
-    } else if v < 0 && h < 0 {
-        cameraController.startMoving(direction: .downRight)
-    } else if v > 0 {
-        cameraController.startMoving(direction: .up)
-    } else if v < 0 {
-        cameraController.startMoving(direction: .down)
-    } else if h > 0 {
-        cameraController.startMoving(direction: .left)
-    } else if h < 0 {
-        cameraController.startMoving(direction: .right)
-    }
-}
-
+    
 }
 
 #Preview {

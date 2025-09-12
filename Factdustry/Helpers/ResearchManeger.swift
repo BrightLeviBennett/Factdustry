@@ -130,7 +130,71 @@ class ResearchManager: ObservableObject {
         "duodec": "Duodec",
         "quaddec": "Quaddec",
         "shardstorm": "Shardstorm",
-        "thunderburst": "Thunderburst"
+        "thunderburst": "Thunderburst",
+        
+        // === PLATFORMS ===
+        "copper-platform": "Copper Platform",
+        "giant-copper-platform": "Giant Copper Platform",
+        "huge-copper-platform": "Huge Copper Platform",
+        "large-copper-platform": "Large Copper Platform",
+
+        "steel-platform": "Steel Platform",
+        "giant-steel-platform": "Giant Steel Platform",
+        "huge-steel-platform": "Huge Steel Platform",
+        "large-steel-platform": "Large Steel Platform",
+
+        "brass-platform": "Brass Platform",
+        "giant-brass-platform": "Giant Brass Platform",
+        "huge-brass-platform": "Huge Brass Platform",
+        "large-brass-platform": "Large Brass Platform",
+
+        "bronze-platform": "Bronze Platform",
+        "giant-bronze-platform": "Giant Bronze Platform",
+        "huge-bronze-platform": "Huge Bronze Platform",
+        "large-bronze-platform": "Large Bronze Platform",
+
+        "silver-platform": "Silver Platform",
+        "giant-silver-platform": "Giant Silver Platform",
+        "huge-silver-platform": "Huge Silver Platform",
+        "large-silver-platform": "Large Silver Platform",
+
+        // === WALLS ===
+        "copper-wall": "Copper Wall",
+        "giant-copper-wall": "Giant Copper Wall",
+        "huge-copper-wall": "Huge Copper Wall",
+        "large-copper-wall": "Large Copper Wall",
+
+        "iron-wall": "Iron Wall",
+        "giant-iron-wall": "Giant Iron Wall",
+        "huge-iron-wall": "Huge Iron Wall",
+        "large-iron-wall": "Large Iron Wall",
+
+        "steel-wall": "Steel Wall",
+        "giant-steel-wall": "Giant Steel Wall",
+        "huge-steel-wall": "Huge Steel Wall",
+        "large-steel-wall": "Large Steel Wall",
+
+        "brass-wall": "Brass Wall",
+        "giant-brass-wall": "Giant Brass Wall",
+        "huge-brass-wall": "Huge Brass Wall",
+        "large-brass-wall": "Large Brass Wall",
+
+        "aluminum-wall": "Aluminum Wall",
+        "giant-aluminum-wall": "Giant Aluminum Wall",
+        "huge-aluminum-wall": "Huge Aluminum Wall",
+        "large-aluminum-wall": "Large Aluminum Wall",
+
+        "bronze-wall": "Bronze Wall",
+        "giant-bronze-wall": "Giant Bronze Wall",
+        "huge-bronze-wall": "Huge Bronze Wall",
+        "large-bronze-wall": "Large Bronze Wall",
+
+        "silver-wall": "Silver Wall",
+        "giant-silver-wall": "Giant Silver Wall",
+        "huge-silver-wall": "Huge Silver Wall",
+        "large-silver-wall": "Large Silver Wall",
+
+        "compound-wall": "Compound Wall"
     ]
     
     

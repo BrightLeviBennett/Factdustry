@@ -178,6 +178,70 @@ class TechTreeViewModel: ObservableObject {
     private func setupTechTreeFromDatabase() {
         // Define only research-specific data, all display info comes from database
         let researchData: [TechResearchData] = [
+            // === PLATFORMS ===
+            TechResearchData(databaseItemName: "Copper Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 50)]),
+            TechResearchData(databaseItemName: "Giant Copper Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Platform"], visualConnections: ["Copper Platform"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 75)]),
+            TechResearchData(databaseItemName: "Huge Copper Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Platform"], visualConnections: ["Copper Platform"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 100)]),
+            TechResearchData(databaseItemName: "Large Copper Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Platform"], visualConnections: ["Copper Platform"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 125)]),
+            
+            TechResearchData(databaseItemName: "Steel Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Platform"], visualConnections: ["Copper Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 75)]),
+            TechResearchData(databaseItemName: "Giant Steel Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Platform"], visualConnections: ["Steel Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 100)]),
+            TechResearchData(databaseItemName: "Huge Steel Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Platform"], visualConnections: ["Steel Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 125)]),
+            TechResearchData(databaseItemName: "Large Steel Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Platform"], visualConnections: ["Steel Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 150)]),
+            
+            TechResearchData(databaseItemName: "Brass Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Platform"], visualConnections: ["Steel Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 100), ResourceCost(resourceName: "Graphite", amount: 50)]),
+            TechResearchData(databaseItemName: "Giant Brass Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Platform"], visualConnections: ["Brass Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 125), ResourceCost(resourceName: "Graphite", amount: 75)]),
+            TechResearchData(databaseItemName: "Huge Brass Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Platform"], visualConnections: ["Brass Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 150), ResourceCost(resourceName: "Graphite", amount: 100)]),
+            TechResearchData(databaseItemName: "Large Brass Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Platform"], visualConnections: ["Brass Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 175), ResourceCost(resourceName: "Graphite", amount: 125)]),
+            
+            TechResearchData(databaseItemName: "Bronze Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Platform"], visualConnections: ["Brass Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 150), ResourceCost(resourceName: "Silicon", amount: 75)]),
+            TechResearchData(databaseItemName: "Giant Bronze Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Platform"], visualConnections: ["Bronze Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 175), ResourceCost(resourceName: "Silicon", amount: 100)]),
+            TechResearchData(databaseItemName: "Huge Bronze Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Platform"], visualConnections: ["Bronze Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 200), ResourceCost(resourceName: "Silicon", amount: 125)]),
+            TechResearchData(databaseItemName: "Large Bronze Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Platform"], visualConnections: ["Bronze Platform"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 225), ResourceCost(resourceName: "Silicon", amount: 150)]),
+            
+            TechResearchData(databaseItemName: "Silver Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Platform"], visualConnections: ["Bronze Platform"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 200), ResourceCost(resourceName: "Circuit", amount: 75)]),
+            TechResearchData(databaseItemName: "Giant Silver Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Silver Platform"], visualConnections: ["Silver Platform"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 225), ResourceCost(resourceName: "Circuit", amount: 100)]),
+            TechResearchData(databaseItemName: "Huge Silver Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Silver Platform"], visualConnections: ["Silver Platform"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 250), ResourceCost(resourceName: "Circuit", amount: 125)]),
+            TechResearchData(databaseItemName: "Large Silver Platform", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Silver Platform"], visualConnections: ["Silver Platform"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 275), ResourceCost(resourceName: "Circuit", amount: 150)]),
+            
+            // === WALLS ===
+            TechResearchData(databaseItemName: "Copper Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 25)]),
+            TechResearchData(databaseItemName: "Giant Copper Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Wall"], visualConnections: ["Copper Wall"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 50)]),
+            TechResearchData(databaseItemName: "Huge Copper Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Wall"], visualConnections: ["Copper Wall"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 75)]),
+            TechResearchData(databaseItemName: "Large Copper Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Wall"], visualConnections: ["Copper Wall"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 100)]),
+            
+            TechResearchData(databaseItemName: "Iron Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Copper Wall"], visualConnections: ["Copper Wall"], researchCosts: [ResourceCost(resourceName: "Iron", amount: 50)]),
+            TechResearchData(databaseItemName: "Giant Iron Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Iron Wall"], visualConnections: ["Iron Wall"], researchCosts: [ResourceCost(resourceName: "Iron", amount: 75)]),
+            TechResearchData(databaseItemName: "Huge Iron Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Iron Wall"], visualConnections: ["Iron Wall"], researchCosts: [ResourceCost(resourceName: "Iron", amount: 100)]),
+            TechResearchData(databaseItemName: "Large Iron Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Iron Wall"], visualConnections: ["Iron Wall"], researchCosts: [ResourceCost(resourceName: "Iron", amount: 125)]),
+            
+            TechResearchData(databaseItemName: "Steel Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Iron Wall"], visualConnections: ["Iron Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 75)]),
+            TechResearchData(databaseItemName: "Giant Steel Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Wall"], visualConnections: ["Steel Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 100)]),
+            TechResearchData(databaseItemName: "Huge Steel Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Wall"], visualConnections: ["Steel Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 125)]),
+            TechResearchData(databaseItemName: "Large Steel Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Wall"], visualConnections: ["Steel Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 150)]),
+            
+            TechResearchData(databaseItemName: "Brass Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Steel Wall"], visualConnections: ["Steel Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 100), ResourceCost(resourceName: "Graphite", amount: 50)]),
+            TechResearchData(databaseItemName: "Giant Brass Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Wall"], visualConnections: ["Brass Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 125), ResourceCost(resourceName: "Graphite", amount: 75)]),
+            TechResearchData(databaseItemName: "Huge Brass Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Wall"], visualConnections: ["Brass Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 150), ResourceCost(resourceName: "Graphite", amount: 100)]),
+            TechResearchData(databaseItemName: "Large Brass Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Wall"], visualConnections: ["Brass Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 175), ResourceCost(resourceName: "Graphite", amount: 125)]),
+            
+            TechResearchData(databaseItemName: "Aluminum Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Brass Wall"], visualConnections: ["Brass Wall"], researchCosts: [ResourceCost(resourceName: "Aluminum", amount: 100)]),
+            TechResearchData(databaseItemName: "Giant Aluminum Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Aluminum Wall"], visualConnections: ["Aluminum Wall"], researchCosts: [ResourceCost(resourceName: "Aluminum", amount: 125)]),
+            TechResearchData(databaseItemName: "Huge Aluminum Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Aluminum Wall"], visualConnections: ["Aluminum Wall"], researchCosts: [ResourceCost(resourceName: "Aluminum", amount: 150)]),
+            TechResearchData(databaseItemName: "Large Aluminum Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Aluminum Wall"], visualConnections: ["Aluminum Wall"], researchCosts: [ResourceCost(resourceName: "Aluminum", amount: 175)]),
+            
+            TechResearchData(databaseItemName: "Bronze Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Aluminum Wall"], visualConnections: ["Aluminum Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 150), ResourceCost(resourceName: "Silicon", amount: 75)]),
+            TechResearchData(databaseItemName: "Giant Bronze Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Wall"], visualConnections: ["Bronze Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 175), ResourceCost(resourceName: "Silicon", amount: 100)]),
+            TechResearchData(databaseItemName: "Huge Bronze Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Wall"], visualConnections: ["Bronze Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 200), ResourceCost(resourceName: "Silicon", amount: 125)]),
+            TechResearchData(databaseItemName: "Large Bronze Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Wall"], visualConnections: ["Bronze Wall"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 225), ResourceCost(resourceName: "Silicon", amount: 150)]),
+            
+            TechResearchData(databaseItemName: "Silver Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Bronze Wall"], visualConnections: ["Bronze Wall"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 200), ResourceCost(resourceName: "Circuit", amount: 75)]),
+            TechResearchData(databaseItemName: "Giant Silver Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Silver Wall"], visualConnections: ["Silver Wall"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 225), ResourceCost(resourceName: "Circuit", amount: 100)]),
+            TechResearchData(databaseItemName: "Huge Silver Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Silver Wall"], visualConnections: ["Silver Wall"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 250), ResourceCost(resourceName: "Circuit", amount: 125)]),
+            TechResearchData(databaseItemName: "Large Silver Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Silver Wall"], visualConnections: ["Silver Wall"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 275), ResourceCost(resourceName: "Circuit", amount: 150)]),
+            
+            TechResearchData(databaseItemName: "Compound Wall", gridPosition: GridPosition(x: 0, y: 0), dependencies: ["Silver Wall"], visualConnections: ["Silver Wall"], researchCosts: [ResourceCost(resourceName: "Circuit", amount: 300), ResourceCost(resourceName: "Hydrogen", amount: 200)]),
+            
             // === UNITS: creatures ===
             TechResearchData(databaseItemName: "Ant", gridPosition: GridPosition(x:0,y:0), dependencies: ["Tank Fabricator"], visualConnections: ["Tank Fabricator"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 50)]),
             TechResearchData(databaseItemName: "Crawler Fabricator", gridPosition: GridPosition(x:0,y:0), dependencies: ["Ant"], visualConnections: ["Ant"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 100), ResourceCost(resourceName: "Graphite", amount: 75)]),
@@ -406,10 +470,74 @@ class TechTreeViewModel: ObservableObject {
     }
     
     private func layoutUnifiedTechTree() {
-        // Layout following the exact column order: Units | Turrets | Factories | Cores | Conveyers & Ducts | Fluids | Resource Extractors | Resources
+        // Layout following the exact column order: Platforms | Walls | Units | Turrets | Factories | Cores | Conveyers & Ducts | Fluids | Resource Extractors | Resources
         var positionMap: [String: GridPosition] = [:]
         
-        // === COLUMN 1: UNITS (0-4) ===
+        // === COLUMN 0: PLATFORMS (-35 to -31) ===
+        positionMap["Copper Platform"        ] = GridPosition(x: -35, y: -1)
+        positionMap["Giant Copper Platform"  ] = GridPosition(x: -35, y: -2)
+        positionMap["Huge Copper Platform"   ] = GridPosition(x: -34, y: -2)
+        positionMap["Large Copper Platform"  ] = GridPosition(x: -33, y: -2)
+        
+        positionMap["Steel Platform"         ] = GridPosition(x: -35, y: -3)
+        positionMap["Giant Steel Platform"   ] = GridPosition(x: -35, y: -4)
+        positionMap["Huge Steel Platform"    ] = GridPosition(x: -34, y: -4)
+        positionMap["Large Steel Platform"   ] = GridPosition(x: -33, y: -4)
+        
+        positionMap["Brass Platform"         ] = GridPosition(x: -35, y: -5)
+        positionMap["Giant Brass Platform"   ] = GridPosition(x: -35, y: -6)
+        positionMap["Huge Brass Platform"    ] = GridPosition(x: -34, y: -6)
+        positionMap["Large Brass Platform"   ] = GridPosition(x: -33, y: -6)
+        
+        positionMap["Bronze Platform"        ] = GridPosition(x: -35, y: -7)
+        positionMap["Giant Bronze Platform"  ] = GridPosition(x: -35, y: -8)
+        positionMap["Huge Bronze Platform"   ] = GridPosition(x: -34, y: -8)
+        positionMap["Large Bronze Platform"  ] = GridPosition(x: -33, y: -8)
+        
+        positionMap["Silver Platform"        ] = GridPosition(x: -35, y: -9)
+        positionMap["Giant Silver Platform"  ] = GridPosition(x: -35, y: -10)
+        positionMap["Huge Silver Platform"   ] = GridPosition(x: -34, y: -10)
+        positionMap["Large Silver Platform"  ] = GridPosition(x: -33, y: -10)
+        
+        // === COLUMN 1: WALLS (-32 to -29) ===
+        positionMap["Copper Wall"            ] = GridPosition(x: -32, y: -1)
+        positionMap["Giant Copper Wall"      ] = GridPosition(x: -32, y: -2)
+        positionMap["Huge Copper Wall"       ] = GridPosition(x: -31, y: -2)
+        positionMap["Large Copper Wall"      ] = GridPosition(x: -30, y: -2)
+        
+        positionMap["Iron Wall"              ] = GridPosition(x: -32, y: -3)
+        positionMap["Giant Iron Wall"        ] = GridPosition(x: -32, y: -4)
+        positionMap["Huge Iron Wall"         ] = GridPosition(x: -31, y: -4)
+        positionMap["Large Iron Wall"        ] = GridPosition(x: -30, y: -4)
+        
+        positionMap["Steel Wall"             ] = GridPosition(x: -32, y: -5)
+        positionMap["Giant Steel Wall"       ] = GridPosition(x: -32, y: -6)
+        positionMap["Huge Steel Wall"        ] = GridPosition(x: -31, y: -6)
+        positionMap["Large Steel Wall"       ] = GridPosition(x: -30, y: -6)
+        
+        positionMap["Brass Wall"             ] = GridPosition(x: -32, y: -7)
+        positionMap["Giant Brass Wall"       ] = GridPosition(x: -32, y: -8)
+        positionMap["Huge Brass Wall"        ] = GridPosition(x: -31, y: -8)
+        positionMap["Large Brass Wall"       ] = GridPosition(x: -30, y: -8)
+        
+        positionMap["Aluminum Wall"          ] = GridPosition(x: -32, y: -9)
+        positionMap["Giant Aluminum Wall"    ] = GridPosition(x: -32, y: -10)
+        positionMap["Huge Aluminum Wall"     ] = GridPosition(x: -31, y: -10)
+        positionMap["Large Aluminum Wall"    ] = GridPosition(x: -30, y: -10)
+        
+        positionMap["Bronze Wall"            ] = GridPosition(x: -32, y: -11)
+        positionMap["Giant Bronze Wall"      ] = GridPosition(x: -32, y: -12)
+        positionMap["Huge Bronze Wall"       ] = GridPosition(x: -31, y: -12)
+        positionMap["Large Bronze Wall"      ] = GridPosition(x: -30, y: -12)
+        
+        positionMap["Silver Wall"            ] = GridPosition(x: -32, y: -13)
+        positionMap["Giant Silver Wall"      ] = GridPosition(x: -32, y: -14)
+        positionMap["Huge Silver Wall"       ] = GridPosition(x: -31, y: -14)
+        positionMap["Large Silver Wall"      ] = GridPosition(x: -30, y: -14)
+        
+        positionMap["Compound Wall"          ] = GridPosition(x: -29, y: -13)
+        
+        // === COLUMN 2: UNITS (0-4) ===
         // Tank Fabricator as root at bottom
         positionMap["Tank Fabricator"   ] = GridPosition(x: -24, y: -1)
         
@@ -466,7 +594,7 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Large Constructor"  ] = GridPosition(x: -21, y: -4)
         positionMap["Large Deconstructor"] = GridPosition(x: -21, y: -5)
         
-        // === COLUMN 2: TURRETS/WEAPONS (Updated to match diagram) ===
+        // === COLUMN 3: TURRETS/WEAPONS (Updated to match diagram) ===
         positionMap["Single Barrel"   ] = GridPosition(x: -9, y: -1)
         positionMap["Diffuse"         ] = GridPosition(x: -9, y: -2)
         positionMap["Double Barrel"   ] = GridPosition(x: -8, y: -2)
@@ -486,7 +614,7 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Shardstorm"      ] = GridPosition(x: -8, y: -3)
         positionMap["Thunderburst"    ] = GridPosition(x: -8, y: -4)
         
-        // === COLUMN 3: FACTORIES/PRODUCTION (10-12) ===
+        // === COLUMN 4: FACTORIES/PRODUCTION (10-12) ===
         positionMap["Silicon Mixer"              ] = GridPosition(x: -4, y: -1)
         positionMap["Graphite Electrolyzer"      ] = GridPosition(x: -4, y: -2)
         positionMap["Circuit Printer"            ] = GridPosition(x: -3, y: -2)
@@ -494,7 +622,7 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Carbon-Dioxide Concentrator"] = GridPosition(x: -5, y: -3)
         positionMap["Petroleum Refinery"         ] = GridPosition(x: -5, y: -4)
         
-        // === COLUMN 4: CORES (14) ===
+        // === COLUMN 5: CORES (14) ===
         positionMap["Core: Shard"         ] = GridPosition(x: 0,  y: 0)
         positionMap["Core: Fragment"      ] = GridPosition(x: -2, y: -1)
         positionMap["Core: Remnant"       ] = GridPosition(x: -2, y: -2)
@@ -504,7 +632,7 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Core: Aegis"         ] = GridPosition(x: -2, y: -5)
         positionMap["Core: Singularity"   ] = GridPosition(x: -2, y: -6)
         
-        // === COLUMN 5: CONVEYERS & DUCTS (16-18) ===
+        // === COLUMN 6: CONVEYERS & DUCTS (16-18) ===
         // Belt system
         positionMap["Conveyor Belt"       ] = GridPosition(x: 5, y: -1)
         positionMap["Belt Junction"       ] = GridPosition(x: 3, y: -2)
@@ -554,7 +682,7 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Freight Rail Junction"] = GridPosition(x: 19, y: -6)
         positionMap["Freight Rail Bridge"  ] = GridPosition(x: 20, y: -6)
         
-        // === COLUMN 6: FLUIDS (20-22) ===
+        // === COLUMN 7: FLUIDS (20-22) ===
         positionMap["Fluid Conduit"           ] = GridPosition(x: 22, y: -1)
         positionMap["Conduit Router"          ] = GridPosition(x: 21, y: -2)
         positionMap["Conduit Bridge"          ] = GridPosition(x: 22, y: -2)
@@ -577,14 +705,14 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Butane"                  ] = GridPosition(x: 26, y: -7)
         positionMap["Propane"                 ] = GridPosition(x: 27, y: -7)
         
-        // === COLUMN 7: RESOURCE EXTRACTORS (27) ===
+        // === COLUMN 8: RESOURCE EXTRACTORS (27) ===
         positionMap["Mechanical Drill"    ] = GridPosition(x: 27, y: -1)
         positionMap["Plasma Bore"         ] = GridPosition(x: 27, y: -2)
         positionMap["Advanced Plasma Bore"] = GridPosition(x: 27, y: -3)
         positionMap["Mineral Extractor"   ] = GridPosition(x: 26, y: -4)
         positionMap["Petroleum Drill"     ] = GridPosition(x: 28, y: -4)
         
-        // === COLUMN 8: RESOURCES (29-35) ===
+        // === COLUMN 9: RESOURCES (29-35) ===
         // Basic resources (following the diagram layout)
         positionMap["Copper"        ] = GridPosition(x: 31, y: -1)  // Bottom
         positionMap["Graphite"      ] = GridPosition(x: 31, y: -2)  // Above copper
