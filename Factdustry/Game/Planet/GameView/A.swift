@@ -1278,6 +1278,7 @@ class TransmissionNetworkManager: ObservableObject {
     // MARK: - Control helpers
 
     func beginControllingTurret(_ id: UUID) {
+        print("🎯 beginControllingTurret:", id)
         controlledTurretID = id
         if let node = nodes[id] {
             nodes[id]?.targetHeadAngleDegrees = node.headAngleDegrees
@@ -1285,6 +1286,7 @@ class TransmissionNetworkManager: ObservableObject {
     }
 
     func releaseControl() {
+        print("🎯 releaseControl (was:", String(describing: controlledTurretID), ")")
         if let id = controlledTurretID { triggerHeld.remove(id) }
         controlledTurretID = nil
     }
@@ -1301,7 +1303,7 @@ class TransmissionNetworkManager: ObservableObject {
             let sz = node.getRotatedSize()
             let rect = CGRect(x: CGFloat(node.position.x), y: CGFloat(node.position.y),
                               width: CGFloat(sz.width), height: CGFloat(sz.height))
-            if rect.contains(p) { return node.id }
+            if rect.contains(p) { print("🔎 turret hit at", p, "->", node.id); return node.id }
         }
         return nil
     }

@@ -338,6 +338,8 @@ struct SingleBlockViewWithConstruction: View {
         // World rendering view for this block: for coreShardComplete, layer base + faction overlay; otherwise default standardized image
         let blockImage: AnyView = {
             let isCoreShard = (block.blockType == "coreShardComplete" || block.iconName == "coreShardComplete")
+            let isSingleBarrel = (block.blockType == "single-barrel" || block.iconName == "single-barrel")
+            
             if isCoreShard {
                 let overlayName = (block.faction == .ferox) ? "coreShardOverlay-ferox" : "coreShardOverlay-lumina"
                 let layered = ZStack {
@@ -350,6 +352,36 @@ struct SingleBlockViewWithConstruction: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: scaledSize, height: scaledSize)
                 }
+                .offset(x: textureOffset.x, y: textureOffset.y)
+                return AnyView(layered)
+            } else if isSingleBarrel {
+                // Get the head angle from the transmission manager
+                let headAngle = transmissionManager.nodes[block.id]?.headAngleDegrees ?? 0
+                
+                // Base rotation (follows building's rotation)
+                let baseRotationAngle = Angle.degrees(Double(effectiveRotation.rawValue * 90))
+                
+                // Head rotation (independent rotation for turret head)
+                let headRotationAngle = Angle.degrees(Double(headAngle))
+                
+                let layered = ZStack {
+                    // Turret base (rotates with building)
+                    Image("single-barrel-base")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: scaledSize, height: scaledSize)
+                        .rotationEffect(baseRotationAngle)
+                    
+                    // Turret head (rotates independently)
+                    Image("single-barrel-head")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: scaledSize, height: scaledSize)
+                        .rotationEffect(headRotationAngle)
+                }
+                .compositingGroup()
+                // Apply faction tint for enemy/other faction blocks
+                .colorMultiply(block.faction == FactionManager.shared.playerFaction ? .white : block.faction.primaryColor.opacity(0.7))
                 .offset(x: textureOffset.x, y: textureOffset.y)
                 return AnyView(layered)
             } else {
@@ -1156,6 +1188,7 @@ class KeyboardCapturingView: UIView {
                 handled = true
             }
             if key.keyCode == .keyboardLeftControl || key.keyCode == .keyboardRightControl {
+                print("⌨️ CTRL DOWN")
                 onKeyDown?("ctrl")
                 handled = true
             }
@@ -1183,6 +1216,7 @@ class KeyboardCapturingView: UIView {
                 handled = true
             }
             if key.keyCode == .keyboardLeftControl || key.keyCode == .keyboardRightControl {
+                print("⌨️ CTRL UP")
                 onKeyUp?("ctrl")
                 handled = true
             }

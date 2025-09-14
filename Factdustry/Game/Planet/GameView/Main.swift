@@ -218,6 +218,7 @@ struct GameView: View {
     @State var selectionRectangle: CGRect = .zero
     @State var selectedBlocksForDeletion: Set<UUID> = []
     @State var isShiftPressed = false  // Track shift key state
+    @State var isCtrlPressed = false  // Track ctrl key state
     @State var respawnShardling = false
     
     var fileURL: URL
@@ -2280,6 +2281,13 @@ struct GameView: View {
     
     func handleKeyDown(_ key: String) {
         switch key.lowercased() {
+        case "ctrl":
+    isCtrlPressed = true
+    break
+case "escape":
+    blockManager.networkManager.releaseControl()
+    break
+
         case "w", "a", "s", "d":
             if !pressedKeys.contains(key.lowercased()) {
                 pressedKeys.insert(key.lowercased())
@@ -2310,6 +2318,10 @@ struct GameView: View {
         pressedKeys.remove(key.lowercased())
         
         switch key.lowercased() {
+        case "ctrl":
+    isCtrlPressed = false
+    break
+
         case "w", "a", "s", "d":
             updateMovementFromPressedKeys()
         case " ": // Space bar
