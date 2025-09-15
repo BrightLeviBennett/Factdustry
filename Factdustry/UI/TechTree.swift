@@ -305,27 +305,28 @@ class TechTreeViewModel: ObservableObject {
             
             // === PRODUCTION ===
             TechResearchData(databaseItemName: "Copper", gridPosition: GridPosition(x:0,y:0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: []),
-            TechResearchData(databaseItemName: "Graphite", gridPosition: GridPosition(x:0,y:0), dependencies: ["Copper"], visualConnections: ["Copper"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 100)]),
-            TechResearchData(databaseItemName: "Water", gridPosition: GridPosition(x:0,y:0), dependencies: ["Copper"], visualConnections: ["Copper"], researchCosts: [ResourceCost(resourceName: "Copper", amount: 150)]),
-            TechResearchData(databaseItemName: "Silicon", gridPosition: GridPosition(x:0,y:0), dependencies: ["Graphite"], visualConnections: ["Graphite"], researchCosts: [ResourceCost(resourceName: "Graphite", amount: 150)]),
-            TechResearchData(databaseItemName: "Iron", gridPosition: GridPosition(x:0,y:0), dependencies: ["Water", "Graphite"], visualConnections: [], researchCosts: [ResourceCost(resourceName: "Water", amount: 200), ResourceCost(resourceName: "Graphite", amount: 200)]),
-            TechResearchData(databaseItemName: "Steel", gridPosition: GridPosition(x:0,y:0), dependencies: ["Iron"], visualConnections: ["Iron"], researchCosts: [ResourceCost(resourceName: "Iron", amount: 300)]),
-            TechResearchData(databaseItemName: "Hydrogen", gridPosition: GridPosition(x:0,y:0), dependencies: ["Water"], visualConnections: ["Water"], researchCosts: [ResourceCost(resourceName: "Water", amount: 500)]),
-            TechResearchData(databaseItemName: "Oxygen", gridPosition: GridPosition(x:0,y:0), dependencies: ["Water"], visualConnections: ["Water"], researchCosts: [ResourceCost(resourceName: "Water", amount: 400)]),
+            TechResearchData(databaseItemName: "Graphite", gridPosition: GridPosition(x:0,y:0), dependencies: ["Copper"], visualConnections: ["Copper"], researchCosts: []),
+            TechResearchData(databaseItemName: "Silicon", gridPosition: GridPosition(x:0,y:0), dependencies: ["Graphite"], visualConnections: ["Graphite"], researchCosts: []),
+            TechResearchData(databaseItemName: "Iron", gridPosition: GridPosition(x:0,y:0), dependencies: ["Water", "Graphite"], visualConnections: [], researchCosts: []),
+            TechResearchData(databaseItemName: "Steel", gridPosition: GridPosition(x:0,y:0), dependencies: ["Iron"], visualConnections: ["Iron"], researchCosts: []),
+            TechResearchData(databaseItemName: "Hydrogen", gridPosition: GridPosition(x:0,y:0), dependencies: ["Water"], visualConnections: ["Water"], researchCosts: []),
+            TechResearchData(databaseItemName: "Oxygen", gridPosition: GridPosition(x:0,y:0), dependencies: ["Water"], visualConnections: ["Water"], researchCosts: []),
             TechResearchData(databaseItemName: "Coal", gridPosition: GridPosition(x:0,y:0), dependencies: [], visualConnections: [], researchCosts: []),
             
             // === FLUIDS ===
-            TechResearchData(databaseItemName: "Petroleum", gridPosition: GridPosition(x:0,y:0), dependencies: ["Petroleum Drill"], visualConnections: ["Petroleum Drill"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 300), ResourceCost(resourceName: "Silicon", amount: 200)]),
+            TechResearchData(databaseItemName: "Petroleum", gridPosition: GridPosition(x:0,y:0), dependencies: ["Petroleum Drill"], visualConnections: ["Petroleum Drill"], researchCosts: []),
+            TechResearchData(databaseItemName: "Water", gridPosition: GridPosition(x:0,y:0), dependencies: ["Copper"], visualConnections: ["Copper"], researchCosts: []),
             
             // === GASES ===
-            TechResearchData(databaseItemName: "Ethane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Petroleum"], visualConnections: ["Petroleum"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 200), ResourceCost(resourceName: "Circuit", amount: 100)]),
-            TechResearchData(databaseItemName: "Methane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Ethane"], visualConnections: ["Ethane"], researchCosts: [ResourceCost(resourceName: "Circuit", amount: 150), ResourceCost(resourceName: "Hydrogen", amount: 100)]),
-            TechResearchData(databaseItemName: "Butane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Methane"], visualConnections: ["Methane"], researchCosts: [ResourceCost(resourceName: "Circuit", amount: 200), ResourceCost(resourceName: "Hydrogen", amount: 150)]),
-            TechResearchData(databaseItemName: "Propane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Butane"], visualConnections: ["Butane"], researchCosts: [ResourceCost(resourceName: "Circuit", amount: 250), ResourceCost(resourceName: "Hydrogen", amount: 200)]),
+            TechResearchData(databaseItemName: "Ethane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Petroleum"], visualConnections: ["Petroleum"], researchCosts: []),
+            TechResearchData(databaseItemName: "Methane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Ethane"], visualConnections: ["Ethane"], researchCosts: []),
+            TechResearchData(databaseItemName: "Butane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Methane"], visualConnections: ["Methane"], researchCosts: []),
+            TechResearchData(databaseItemName: "Propane", gridPosition: GridPosition(x:0,y:0), dependencies: ["Butane"], visualConnections: ["Butane"], researchCosts: []),
             
             // === ADVANCED RESOURCES ===
-            TechResearchData(databaseItemName: "Raw Aluminum", gridPosition: GridPosition(x:0,y:0), dependencies: ["Mineral Extractor"], visualConnections: ["Mineral Extractor"], researchCosts: [ResourceCost(resourceName: "Silicon", amount: 400), ResourceCost(resourceName: "Circuit", amount: 200)]),
-            TechResearchData(databaseItemName: "Aluminum", gridPosition: GridPosition(x:0,y:0), dependencies: ["Raw Aluminum"], visualConnections: ["Raw Aluminum"], researchCosts: [ResourceCost(resourceName: "Circuit", amount: 300), ResourceCost(resourceName: "Hydrogen", amount: 250)]),
+            TechResearchData(databaseItemName: "Bauxite", gridPosition: GridPosition(x:0,y:0), dependencies: ["Steel"], visualConnections: ["Steel"], researchCosts: []),
+            TechResearchData(databaseItemName: "Raw Aluminum", gridPosition: GridPosition(x:0,y:0), dependencies: ["Bauxite"], visualConnections: ["Bauxite"], researchCosts: []),
+            TechResearchData(databaseItemName: "Aluminum", gridPosition: GridPosition(x:0,y:0), dependencies: ["Raw Aluminum"], visualConnections: ["Raw Aluminum"], researchCosts: []),
             
             // Production buildings
             TechResearchData(databaseItemName: "Steel Furnace", gridPosition: GridPosition(x:0,y:0), dependencies: ["Iron"], visualConnections: ["Silicon Mixer"], researchCosts: [ResourceCost(resourceName: "Steel", amount: 500)]),
@@ -339,18 +340,29 @@ class TechTreeViewModel: ObservableObject {
             TechResearchData(databaseItemName: "Mechanical Drill", gridPosition: GridPosition(x:0,y:0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: []),
             TechResearchData(databaseItemName: "Plasma Bore", gridPosition: GridPosition(x:0,y:0), dependencies: ["Mechanical Drill"], visualConnections: ["Mechanical Drill"], researchCosts: []),
             TechResearchData(databaseItemName: "Advanced Plasma Bore", gridPosition: GridPosition(x:0,y:0), dependencies: ["Plasma Bore"], visualConnections: ["Plasma Bore"], researchCosts: []),
-            TechResearchData(databaseItemName: "Mineral Extractor", gridPosition: GridPosition(x:0,y:0), dependencies: ["Advanced Plasma Bore"], visualConnections: ["Advanced Plasma Bore"], researchCosts: []),
-            TechResearchData(databaseItemName: "Petroleum Drill", gridPosition: GridPosition(x:0,y:0), dependencies: ["Advanced Plasma Bore"], visualConnections: ["Advanced Plasma Bore"], researchCosts: []),
+            TechResearchData(databaseItemName: "Mineral Extractor", gridPosition: GridPosition(x:0,y:0), dependencies: ["Mechanical Drill"], visualConnections: ["Mechanical Drill"], researchCosts: []),
+            TechResearchData(databaseItemName: "Petroleum Drill", gridPosition: GridPosition(x:0,y:0), dependencies: ["Mechanical Drill"], visualConnections: ["Mechanical Drill"], researchCosts: []),
+            TechResearchData(databaseItemName: "Wall Crusher", gridPosition: GridPosition(x:0,y:0), dependencies: ["Mechanical Drill"], visualConnections: ["Mechanical Drill"], researchCosts: []),
+            TechResearchData(databaseItemName: "Wall Grinder", gridPosition: GridPosition(x:0,y:0), dependencies: ["Wall Crusher"], visualConnections: ["Wall Crusher"], researchCosts: []),
+            TechResearchData(databaseItemName: "Bauxite Crusher", gridPosition: GridPosition(x:0,y:0), dependencies: ["Mechanical Drill"], visualConnections: ["Mechanical Drill"], researchCosts: []),
+            TechResearchData(databaseItemName: "Bauxite Grinder", gridPosition: GridPosition(x:0,y:0), dependencies: ["Bauxite Crusher"], visualConnections: ["Bauxite Crusher"], researchCosts: []),
+            TechResearchData(databaseItemName: "Impact Driller", gridPosition: GridPosition(x:0,y:0), dependencies: ["Mechanical Drill"], visualConnections: ["Mechanical Drill"], researchCosts: []),
+            TechResearchData(databaseItemName: "Earthquake Harvester", gridPosition: GridPosition(x:0,y:0), dependencies: ["Impact Driller"], visualConnections: ["Impact Driller"], researchCosts: []),
+            TechResearchData(databaseItemName: "Eruption Harvester", gridPosition: GridPosition(x:0,y:0), dependencies: ["Earthquake Harvester"], visualConnections: ["Earthquake Harvester"], researchCosts: []),
+            TechResearchData(databaseItemName: "Ground Scraper", gridPosition: GridPosition(x:0,y:0), dependencies: ["Impact Driller"], visualConnections: ["Impact Driller"], researchCosts: []),
+            TechResearchData(databaseItemName: "Ground Harvester", gridPosition: GridPosition(x:0,y:0), dependencies: ["Ground Scraper"], visualConnections: ["Ground Scraper"], researchCosts: []),
             
             // === POWER ===
-            TechResearchData(databaseItemName: "Steam Engine", gridPosition: GridPosition(x:0,y:0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: []),
-            TechResearchData(databaseItemName: "Combustion Engine", gridPosition: GridPosition(x:0,y:0), dependencies: ["Steam Engine"], visualConnections: ["Steam Engine"], researchCosts: []),
-            TechResearchData(databaseItemName: "Combustion Generator", gridPosition: GridPosition(x:0,y:0), dependencies: ["Vent Turbine"], visualConnections: ["Vent Turbine"], researchCosts: []),
-            TechResearchData(databaseItemName: "Vent Turbine", gridPosition: GridPosition(x:0,y:0), dependencies: ["Steam Engine"], visualConnections: ["Steam Engine"], researchCosts: []),
-            TechResearchData(databaseItemName: "Beam Node", gridPosition: GridPosition(x:0,y:0), dependencies: ["Vent Turbine"], visualConnections: ["Vent Turbine"], researchCosts: []),
+            TechResearchData(databaseItemName: "Vent Turbine", gridPosition: GridPosition(x:0,y:0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: []),
+            TechResearchData(databaseItemName: "Combustion Engine", gridPosition: GridPosition(x:0,y:0), dependencies: ["Vent Turbine"], visualConnections: ["Vent Turbine"], researchCosts: []),
+            TechResearchData(databaseItemName: "Combustion Generator", gridPosition: GridPosition(x:0,y:0), dependencies: ["Rotational Generator"], visualConnections: ["Rotational Generator"], researchCosts: []),
+            TechResearchData(databaseItemName: "Rotational Generator", gridPosition: GridPosition(x:0,y:0), dependencies: ["Vent Turbine"], visualConnections: ["Vent Turbine"], researchCosts: []),
+            TechResearchData(databaseItemName: "Beam Node", gridPosition: GridPosition(x:0,y:0), dependencies: ["Rotational Generator"], visualConnections: ["Rotational Generator"], researchCosts: []),
             TechResearchData(databaseItemName: "Beam Tower", gridPosition: GridPosition(x:0,y:0), dependencies: ["Beam Node"], visualConnections: ["Beam Node"], researchCosts: []),
-            TechResearchData(databaseItemName: "Shaft", gridPosition: GridPosition(x:0,y:0), dependencies: ["Steam Engine"], visualConnections: ["Steam Engine"], researchCosts: []),
+            TechResearchData(databaseItemName: "Power Distributor", gridPosition: GridPosition(x:0,y:0), dependencies: ["Beam Tower"], visualConnections: ["Beam Tower"], researchCosts: []),
+            TechResearchData(databaseItemName: "Shaft", gridPosition: GridPosition(x:0,y:0), dependencies: ["Vent Turbine"], visualConnections: ["Vent Turbine"], researchCosts: []),
             TechResearchData(databaseItemName: "Gearbox", gridPosition: GridPosition(x:0,y:0), dependencies: ["Shaft"], visualConnections: ["Shaft"], researchCosts: []),
+            TechResearchData(databaseItemName: "Overhead Belt", gridPosition: GridPosition(x:0,y:0), dependencies: ["Gearbox"], visualConnections: ["Gearbox"], researchCosts: []),
             
             // === SECTORS ===
             TechResearchData(databaseItemName: "Starting Grounds", gridPosition: GridPosition(x:0,y:0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: []),
@@ -360,6 +372,7 @@ class TechTreeViewModel: ObservableObject {
             TechResearchData(databaseItemName: "Aluminum Mountains", gridPosition: GridPosition(x:0,y:0), dependencies: ["Nightfall Depths"], visualConnections: ["Nightfall Depths"], researchCosts: []),
             TechResearchData(databaseItemName: "Dark Valley", gridPosition: GridPosition(x:0,y:0), dependencies: ["Aluminum Mountains"], visualConnections: ["Aluminum Mountains"], researchCosts: []),
             TechResearchData(databaseItemName: "Ruins", gridPosition: GridPosition(x:0,y:0), dependencies: ["Dark Valley"], visualConnections: ["Dark Valley"], researchCosts: []),
+            TechResearchData(databaseItemName: "The Nexus", gridPosition: GridPosition(x:0,y:0), dependencies: ["Ruins"], visualConnections: ["Ruins"], researchCosts: []),
             
             // === WEAPONS ===
             TechResearchData(databaseItemName: "Single Barrel", gridPosition: GridPosition(x:0,y:0), dependencies: ["Core: Shard"], visualConnections: ["Core: Shard"], researchCosts: []),
@@ -706,11 +719,20 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Propane"                 ] = GridPosition(x: 27, y: -7)
         
         // === COLUMN 8: RESOURCE EXTRACTORS (27) ===
-        positionMap["Mechanical Drill"    ] = GridPosition(x: 27, y: -1)
-        positionMap["Plasma Bore"         ] = GridPosition(x: 27, y: -2)
-        positionMap["Advanced Plasma Bore"] = GridPosition(x: 27, y: -3)
-        positionMap["Mineral Extractor"   ] = GridPosition(x: 26, y: -4)
-        positionMap["Petroleum Drill"     ] = GridPosition(x: 28, y: -4)
+        positionMap["Mechanical Drill"    ] = GridPosition(x: 27, y: 1)
+        positionMap["Plasma Bore"         ] = GridPosition(x: 27, y: 2)
+        positionMap["Advanced Plasma Bore"] = GridPosition(x: 27, y: 3)
+        positionMap["Mineral Extractor"   ] = GridPosition(x: 29, y: 2)
+        positionMap["Petroleum Drill"     ] = GridPosition(x: 28, y: 3)
+        positionMap["Wall Crusher"        ] = GridPosition(x: 26, y: 2)
+        positionMap["Wall Grinder"        ] = GridPosition(x: 26, y: 3)
+        positionMap["Bauxite Crusher"     ] = GridPosition(x: 25, y: 2)
+        positionMap["Bauxite Grinder"     ] = GridPosition(x: 25, y: 3)
+        positionMap["Impact Driller"      ] = GridPosition(x: 24, y: 2)
+        positionMap["Earthquake Harvester"] = GridPosition(x: 24, y: 3)
+        positionMap["Eruption Harvester"  ] = GridPosition(x: 24, y: 4)
+        positionMap["Ground Scraper"      ] = GridPosition(x: 23, y: 3)
+        positionMap["Ground Harvester"    ] = GridPosition(x: 23, y: 4)
         
         // === COLUMN 9: RESOURCES (29-35) ===
         // Basic resources (following the diagram layout)
@@ -729,14 +751,16 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Aluminum"      ] = GridPosition(x: 33, y: -5)  // Above raw aluminum
         
         // Power (fits in between cores and conveyers)
-        positionMap["Steam Engine"        ] = GridPosition(x: 0,  y: -1)
+        positionMap["Vent Turbine"        ] = GridPosition(x: 0,  y: -1)
         positionMap["Combustion Engine"   ] = GridPosition(x: 1,  y: -1)
         positionMap["Combustion Generator"] = GridPosition(x: 1,  y: -2)
-        positionMap["Vent Turbine"        ] = GridPosition(x: 0,  y: -2)
+        positionMap["Rotational Generator"] = GridPosition(x: 0,  y: -2)
         positionMap["Beam Node"           ] = GridPosition(x: 0,  y: -3)
         positionMap["Beam Tower"          ] = GridPosition(x: 0,  y: -4)
+        positionMap["Power Distributor"   ] = GridPosition(x: 0,  y: -5)
         positionMap["Shaft"               ] = GridPosition(x: -1, y: -1)
         positionMap["Gearbox"             ] = GridPosition(x: -1, y: -2)
+        positionMap["Overhead Belt"       ] = GridPosition(x: -1, y: -3)
         
         // Sectors
         positionMap["Starting Grounds"  ] = GridPosition(x: 2, y: -1)
@@ -746,6 +770,7 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Aluminum Mountains"] = GridPosition(x: 2, y: -5)
         positionMap["Dark Valley"       ] = GridPosition(x: 2, y: -6)
         positionMap["Ruins"             ] = GridPosition(x: 2, y: -7)
+        positionMap["The Nexus"         ] = GridPosition(x: 2, y: -7)
         
         // Apply positions to nodes
         for index in nodes.indices {
@@ -1391,7 +1416,7 @@ struct ResourceSidebar: View {
                                         .frame(width: 20, height: 20)
                                         .foregroundColor(.gray)
                                 } else {
-                                    Image(resource.icon)
+                                    Image(safe: resource.icon)
                                         .resizable()
                                         .frame(width: 20, height: 20)
                                 }
@@ -1534,7 +1559,7 @@ struct MindustryTechNode: View {
                 
                 // Your icon
                 if state != .locked {
-                    Image(node.iconName)
+                    Image(safe: node.iconName)
                         .resizable()
                         .scaledToFit()
                         .frame(width: 24, height: 24)
@@ -1584,7 +1609,7 @@ struct NodeDetailOverlay: View {
                 // Header with icon, name, and close button
                 HStack {
                     // Node icon
-                    Image(node.iconName)
+                    Image(safe: node.iconName)
                         .resizable()
                         .scaledToFit()
                         .frame(width: 32, height: 32)
@@ -1641,7 +1666,7 @@ struct NodeDetailOverlay: View {
                                             .frame(width: 16, height: 16)
                                             .foregroundColor(.gray)
                                     } else {
-                                        Image(resource.icon)
+                                        Image(safe: resource.icon)
                                             .resizable()
                                             .frame(width: 16, height: 16)
                                     }

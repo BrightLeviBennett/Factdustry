@@ -343,11 +343,11 @@ struct SingleBlockViewWithConstruction: View {
             if isCoreShard {
                 let overlayName = (block.faction == .ferox) ? "coreShardOverlay-ferox" : "coreShardOverlay-lumina"
                 let layered = ZStack {
-                    Image("coreShardBase")
+                    Image(safe: "coreShardBase")
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: scaledSize, height: scaledSize)
-                    Image(overlayName)
+                    Image(safe: overlayName)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: scaledSize, height: scaledSize)
@@ -366,14 +366,14 @@ struct SingleBlockViewWithConstruction: View {
                 
                 let layered = ZStack {
                     // Turret base (rotates with building)
-                    Image("single-barrel-base")
+                    Image(safe: "single-barrel-base")
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: scaledSize, height: scaledSize)
                         .rotationEffect(baseRotationAngle)
                     
                     // Turret head (rotates independently)
-                    Image("single-barrel-head")
+                    Image(safe: "single-barrel-head")
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: scaledSize, height: scaledSize)
@@ -465,6 +465,7 @@ struct SingleBlockViewWithConstruction: View {
 struct BlockType: Identifiable, Equatable {
     let id = UUID()
     let iconName: String
+    let name: String
     let size: CGFloat  // Display size for UI
     
     // Enhanced block properties
@@ -479,7 +480,7 @@ struct BlockType: Identifiable, Equatable {
     var connections: [UniversalConnection] // NEW: Unified connection system
     var capacity: Int
     
-    init(iconName: String,
+    init(iconName: String, name: String? = nil,
          size: CGFloat = 20,
          sizeX: Int = 1,
          sizeY: Int = 1,
@@ -492,6 +493,7 @@ struct BlockType: Identifiable, Equatable {
          connections: [UniversalConnection] = [],
          capacity: Int = 100) {  // Default capacity of 100 for most blocks
         self.iconName = iconName
+        self.name = name ?? BlockType.defaultName(from: iconName)
         self.size = size
         self.sizeX = sizeX
         self.sizeY = sizeY
@@ -505,6 +507,12 @@ struct BlockType: Identifiable, Equatable {
         self.capacity = capacity
     }
     
+    /// Derive a human-readable default name from the icon name
+    static func defaultName(from iconName: String) -> String {
+        let spaced = iconName.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+        return spaced.capitalized
+    }
+
     /// Convert to BlockRotation-compatible dimensions
     var dimensions: CGSize {
         return CGSize(width: sizeX, height: sizeY)
@@ -595,6 +603,13 @@ struct PlacedBlock: Identifiable, Equatable {
     let x: Int
     let y: Int
     let iconName: String
+    var customName: String? = nil
+    var name: String {
+        (customName ?? iconName)
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalized
+    }
     let size: CGFloat
     let rotation: BlockRotation
     let faction: Faction // NEW: Add faction to PlacedBlock
@@ -1801,7 +1816,7 @@ struct StandardizedBlockImageView: View {
                     )
             } else {
                 // Custom asset from catalog - standardized sizing
-                Image(iconName)
+                Image(safe: iconName)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: targetSize, height: targetSize)
@@ -1876,8 +1891,6 @@ struct UpdatedEnhancedBlockSelectionPanel: View {
         (categories.count + 1) / 2
     }
     
-    @State private var name = ""
-    
     var body: some View {
         ZStack {
             ZStack {
@@ -1889,7 +1902,7 @@ struct UpdatedEnhancedBlockSelectionPanel: View {
                         .cornerRadius(15)
                     
                     let columns = [
-                        GridItem(.adaptive(minimum: 40), spacing: 8)
+                        GridItem(.adaptive(minimum: 60), spacing: 8)
                     ]
                     
                     ScrollView {
@@ -1944,12 +1957,12 @@ struct UpdatedEnhancedBlockSelectionPanel: View {
                     if let selectedBlock = selectedBlock {
                         VStack {
                             HStack {
-                                Image(selectedBlock.iconName)
+                                Image(safe: selectedBlock.iconName)
                                     .resizable()
                                     .frame(width: 40, height: 40)
                                 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(name)
+                                    Text(selectedBlock.name)
                                         .font(.headline)
                                         .fontWeight(.bold)
                                         .foregroundColor(.white)
@@ -1969,7 +1982,7 @@ struct UpdatedEnhancedBlockSelectionPanel: View {
                                     let hasEnough = availableAmount >= requiredAmount
                                     
                                     HStack(spacing: 0) {
-                                        Image(itemType.iconName)
+                                        Image(safe: itemType.iconName)
                                             .resizable()
                                             .frame(width: 20, height: 20)
                                         
@@ -2043,11 +2056,6 @@ struct UpdatedEnhancedBlockSelectionPanel: View {
             }
             .offset(y: 165)
         }
-        .onChange(of: selectedBlock) {
-            if selectedBlock != nil {
-                updateDisplayName()
-            }
-        }
     }
     
     @ViewBuilder
@@ -2063,14 +2071,6 @@ struct UpdatedEnhancedBlockSelectionPanel: View {
                 .foregroundColor(.white.opacity(0.9))
                 .cornerRadius(6)
         }
-    }
-    
-    private func updateDisplayName() {
-        name = selectedBlock!.iconName
-            .split(separator: "-")
-            .map { $0.capitalized }
-            .joined(separator: " ")
-            .replacingOccurrences(of: "_", with: " ")
     }
 }
 

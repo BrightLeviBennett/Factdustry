@@ -245,6 +245,7 @@ struct GameView: View {
             // Core Shard (starting core)
             BlockType(
                 iconName: "coreShardComplete",
+                name: "Core: Shard",
                 size: 100,
                 sizeX: 2,
                 sizeY: 2,
@@ -1566,7 +1567,7 @@ struct GameView: View {
                     hoverTileCoordinates: hoverTileCoordinates,
                     isHoverColliding: isHoverColliding,
                     blockLibrary: GameView.enhancedBlockLibrary,
-                    transmissionManager: blockManager.networkManager,
+                    miningManager: miningManager, transmissionManager: blockManager.networkManager,
                     blockManager: blockManager,
                     mapViewFrame: $mapViewFrame,
                     respawnTrigger: $respawnShardling
@@ -2454,3 +2455,52 @@ case "escape":
 // gas planet faction name: Kanir
 
 // story: Lumina’s original homeworld was destroyed by a cosmic catastrophe. Tarkon is their chosen refuge, but Ferox has already established dominance, using the planet to expand their militaristic empire. Lumina must fight for their very survival.
+
+
+
+// MARK: - PassthroughRightClickView to only intercept secondary clicks
+#if canImport(UIKit)
+class PassthroughRightClickView: RightClickGestureView {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        #if targetEnvironment(macCatalyst)
+        if let mask = event?.buttonMask, mask.contains(.secondary) {
+            return true
+        }
+        return false
+        #else
+        return false
+        #endif
+    }
+}
+#endif
+
+
+
+// MARK: - SwiftUI wrapper for RightClickGestureView
+#if canImport(UIKit)
+import SwiftUI
+
+struct RightClickGestureViewRepresentable: UIViewRepresentable {
+    var onRightTap: ((CGPoint) -> Void)? = nil
+    var onRightDragStart: ((CGPoint) -> Void)? = nil
+    var onRightDragChanged: ((CGPoint) -> Void)? = nil
+    var onRightDragEnd: (() -> Void)? = nil
+
+    func makeUIView(context: Context) -> PassthroughRightClickView {
+        let view = PassthroughRightClickView(frame: .zero)
+        view.backgroundColor = .clear
+        view.onRightTap = { pt in onRightTap?(pt) }
+        view.onRightDragStart = { pt in onRightDragStart?(pt) }
+        view.onRightDragChanged = { pt in onRightDragChanged?(pt) }
+        view.onRightDragEnd = { onRightDragEnd?() }
+        return view
+    }
+
+    func updateUIView(_ uiView: PassthroughRightClickView, context: Context) {
+        uiView.onRightTap = { pt in onRightTap?(pt) }
+        uiView.onRightDragStart = { pt in onRightDragStart?(pt) }
+        uiView.onRightDragChanged = { pt in onRightDragChanged?(pt) }
+        uiView.onRightDragEnd = { onRightDragEnd?() }
+    }
+}
+#endif

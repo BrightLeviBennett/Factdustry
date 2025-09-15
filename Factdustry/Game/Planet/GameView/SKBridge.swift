@@ -13,11 +13,17 @@ import Combine
 private enum SKArt {
     static func tex(_ name: String) -> SKTexture? {
         let t = SKTexture(imageNamed: name)
-        return t.size().width > 0 ? t : nil
+        if t.size().width > 0 { return t }
+        let fallback = SKTexture(imageNamed: "404")
+        return fallback.size().width > 0 ? fallback : t // ensure non-nil
     }
     static func any(_ names: [String]) -> SKTexture? {
-        for n in names { if let t = tex(n) { return t } }
-        return nil
+        for n in names {
+            let t = SKTexture(imageNamed: n)
+            if t.size().width > 0 { return t }
+        }
+        let fallback = SKTexture(imageNamed: "404")
+        return fallback.size().width > 0 ? fallback : nil
     }
 }
 
@@ -58,6 +64,8 @@ final class SKUnitsScene: SKScene {
     private weak var cameraController: CameraController?
     private weak var transmissionManager: TransmissionNetworkManager?
     private weak var blockManager: BlockLoadingManager?
+    private weak var miningManager: OreMiningManager?
+    private var miningIndicatorNodes: [String: SKShapeNode] = [:]
     
     private var isInReturnMode: Bool = false
     private var lastSignificantMovementTime: TimeInterval = 0
@@ -93,7 +101,8 @@ final class SKUnitsScene: SKScene {
                    tileSize: CGFloat,
                    cameraController: CameraController,
                    transmissionManager: TransmissionNetworkManager?,
-                   blockManager: BlockLoadingManager?) {
+                   blockManager: BlockLoadingManager?,
+                   miningManager: OreMiningManager?) {
         self.mapData = mapData
         self.blockLibrary = blockLibrary
         self.tileSize = tileSize
@@ -104,6 +113,7 @@ final class SKUnitsScene: SKScene {
         // hookCamera(cameraController) // Disabled: camera now directly follows shardling
         hookProjectiles(transmissionManager)
         hookBlocks(blockManager)
+        hookMining(miningManager)
         hookUnitProduction(transmissionManager) // NEW: Hook unit production
         
         // Force an initial check for existing blocks
@@ -352,6 +362,70 @@ final class SKUnitsScene: SKScene {
             .store(in: &cancellables)
     }
     
+
+    private func hookMining(_ mgr: OreMiningManager?) {
+        guard let mgr = mgr else {
+            print("❌ No mining manager provided to hookMining")
+            return
+        }
+        self.miningManager = mgr
+        
+        // Observe active mining operations and update indicators
+        mgr.$activeMiningOperations
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] ops in
+                self?.syncMiningIndicators(ops)
+            }
+            .store(in: &cancellables)
+        
+        // Initial sync
+        syncMiningIndicators(mgr.activeMiningOperations)
+        print("✅ Mining manager hooked up")
+    }
+    
+    private func syncMiningIndicators(_ ops: [String: OreMiningManager.MiningOperation]) {
+        // Determine which indicators to remove
+        let currentKeys = Set(miningIndicatorNodes.keys)
+        let newKeys = Set(ops.keys)
+        
+        let toRemove = currentKeys.subtracting(newKeys)
+        for key in toRemove {
+            if let node = miningIndicatorNodes[key] {
+                node.removeFromParent()
+            }
+            miningIndicatorNodes.removeValue(forKey: key)
+        }
+        
+        // Add or update indicators for active ops
+        for (key, op) in ops {
+            let pos = CGPoint(
+                x: CGFloat(op.orePosition.x) * tileSize + tileSize * 0.5,
+                y: CGFloat(op.orePosition.y) * tileSize + tileSize * 0.5
+            )
+            if let node = miningIndicatorNodes[key] {
+                node.position = pos
+                node.isHidden = false
+            } else {
+                let radius = max(2.0, tileSize * 0.18)
+                let circle = SKShapeNode(circleOfRadius: radius)
+                circle.strokeColor = .yellow
+                circle.lineWidth = max(1.0, tileSize * 0.08)
+                circle.fillColor = .clear
+                circle.zPosition = effectsLayer.zPosition + 5
+                
+                circle.position = pos
+                effectsLayer.addChild(circle)
+                miningIndicatorNodes[key] = circle
+                
+                // Optional subtle pulse
+                let pulseUp = SKAction.scale(to: 1.15, duration: 0.4)
+                let pulseDown = SKAction.scale(to: 1.0, duration: 0.4)
+                circle.run(SKAction.repeatForever(SKAction.sequence([pulseUp, pulseDown])))
+            }
+        }
+    }
+    
+
     private func hookBlocks(_ mgr: BlockLoadingManager?) {
         guard let mgr = mgr else {
             print("❌ No block manager provided to hookBlocks")
@@ -745,6 +819,7 @@ extension Color {
 private struct SKUnitsOverlay: UIViewRepresentable {
     let mapData: MapData
     let blockLibrary: [BlockCategory: [BlockType]]
+    @ObservedObject var miningManager: OreMiningManager
     let tileSize: CGFloat
     @ObservedObject var cameraController: CameraController
     weak var transmissionManager: TransmissionNetworkManager?
@@ -777,7 +852,8 @@ private struct SKUnitsOverlay: UIViewRepresentable {
                         tileSize: tileSize,
                         cameraController: cameraController,
                         transmissionManager: transmissionManager,
-                        blockManager: blockManager)
+                        blockManager: blockManager,
+                        miningManager: miningManager)
         
         context.coordinator.scene = scene
         v.presentScene(scene)
@@ -819,6 +895,7 @@ struct SKEnhancedMapView: View {
     let hoverTileCoordinates: (x: Int, y: Int)?
     let isHoverColliding: Bool
     let blockLibrary: [BlockCategory: [BlockType]]
+    @ObservedObject var miningManager: OreMiningManager
     @ObservedObject var transmissionManager: TransmissionNetworkManager
     @ObservedObject var blockManager: BlockLoadingManager
     @Binding var mapViewFrame: CGRect
@@ -855,7 +932,7 @@ struct SKEnhancedMapView: View {
                     SKUnitsOverlay(
                         mapData: mapData,
                         blockLibrary: blockLibrary,
-                        tileSize: 32,
+                        miningManager: miningManager, tileSize: 32,
                         cameraController: cameraController,
                         transmissionManager: transmissionManager,
                         blockManager: blockManager,
