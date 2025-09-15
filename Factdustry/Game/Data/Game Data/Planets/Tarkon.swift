@@ -315,7 +315,22 @@ let Tarkon = Planet(name: "Tarkon",
                         CDSector(name: "Nightfall Depths", description: "Because very few asteroids landed on this side of the planet, there aren't many vents and gysers; so you'll need to find other sources of energy. Aquire coal, and research the 'Combustion Engine' and 'Combustion Generator' to utilize the large deposits of coal on this sector.", icon: "Nightfall-Depths"),
                         CDSector(name: "Aluminum Mountains", description: "Due to the mountainous terrain of this sector, flying and cralwer units will be the only possible options. Aquire aluminum, and research how to refine it, and utilize it for upgrading your units and turrets.", icon: "Aluminum-Mountains"),
                         CDSector(name: "Dark Valley", description: "A valley filled with coal, sulfur, and some new gases. This sector will also allow for many new research opportunities, as well as many enemy bases.", icon: "Dark-Valley"),
-                        CDSector(name: "Ruins", description: "This secctor is filled with old technolgy lost to time. Salvage what you can, and move on.", icon: "Ruins")
+                        CDSector(name: "Ruins", description: "This secctor is filled with old technolgy lost to time. Salvage what you can, and move on.", icon: "Ruins"),
+                        CDSector(name: "The Nexus", description:
+                        """
+                        This sector is NOT to be taken lightly. Multiple enemy bases have been located on this sector, some of them ferox, some of not, and they have come to a temporary truce, in order to deafeat you. Along with all that, this sector contains silver, produce, reaserch, and use it to your advantage.
+                        
+                        
+                        
+                        ++++=====Dev Notes=====++++
+                        
+                        As of right now, this is the final sector on tarkon. I hope that soon I will implement the interplanetary core launch pad, aziris, yndora, non-campaign planets, and more sectors on tarkon
+                        
+                        Consider this a challenge sector. Good Luck, you'll need it.
+                        
+                        ++++=====---------=====++++
+                            
+                        """, icon: "The Nexus")
                     ],
                     
                     statusEffects: [

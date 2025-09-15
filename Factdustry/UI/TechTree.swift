@@ -770,7 +770,7 @@ class TechTreeViewModel: ObservableObject {
         positionMap["Aluminum Mountains"] = GridPosition(x: 2, y: -5)
         positionMap["Dark Valley"       ] = GridPosition(x: 2, y: -6)
         positionMap["Ruins"             ] = GridPosition(x: 2, y: -7)
-        positionMap["The Nexus"         ] = GridPosition(x: 2, y: -7)
+        positionMap["The Nexus"         ] = GridPosition(x: 2, y: -8)
         
         // Apply positions to nodes
         for index in nodes.indices {
