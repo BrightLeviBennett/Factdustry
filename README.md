@@ -20,3 +20,10 @@ I upgraded my computer's OS to MacOS 26 (Tahoe), and it may or may not be caused
 Also, I am using a new 6 character number-letter combo like minecraft versions(e.g. 23w34a), so that I can name specific commits.
 
 -----==========-----
+
+-----==========-----
+
+#### --- Temporary Note ---
+I think that I won't publish an official relase until I at least have the first sector of tarkon working, although I supose we will see what happens.
+
+-----==========-----
