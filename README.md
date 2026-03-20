@@ -17,7 +17,12 @@ Now including:
 
 Now in godot, meaning that it actually fuctions and can be played on platforms other than ios/macos!
 
-*stares intensely at old xcode version [available here](https://github.com/BrightLeviBennett/Factdustry-old) that barely works and should NOT exist because of how horible it is*
+*stares intensely at old xcode version [available here](https://github.com/BrightLeviBennett/Factdustry-old) that barely works and should NOT be downloaded because of how horible it is*
+
+So TLDR:
+- 80% mindustry
+- 10% factorio
+- 10% *whatever this is*
 
 ## How To Download And Play
 
