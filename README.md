@@ -26,4 +26,9 @@ So TLDR:
 
 ## How To Download And Play
 
+Beta 1 coming soon!
+
 I have not released any releases yet, but when I release a release I will release this section about releases
+
+### Note on relase format:
+The numbering system I am using is [build num].a/b/c/d/e where the build num is the actual relase and the .a/b/c/d/e is the bug fix number.
