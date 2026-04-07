@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="FluidData" format=3]
+
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dxcr5uwb86tfc" path="res://textures/resources/petrolium.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_petroleum"
+display_name = "Petroleum"
+description = "Crude oil. Refined into fuels and plastics."
+icon = ExtResource("2")
+color = Color(0.2, 0.2, 0.25, 1)
+viscosity = 2.0

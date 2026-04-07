@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"beam_tower"
+display_name = "Beam Tower"
+description = "Long-range wireless power tower with massive coverage."
+category = 3
+color = Color(0.2, 0.6, 1.0, 1)
+max_health = 640.0
+build_cost = { "copper": 1000, "silicon": 600 }
+build_time = 4.0
+output_items = { "power": 40 }
+production_time = 1.0
+tags = PackedStringArray("power")

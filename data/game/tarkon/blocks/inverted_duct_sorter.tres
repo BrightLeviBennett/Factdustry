@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"inverted_duct_sorter"
+display_name = "Inverted Duct Sorter"
+description = "Blocks specific items in duct networks."
+category = 8
+color = Color(0.7, 0.8, 0.4, 1)
+max_health = 370.0
+build_cost = { "copper": 350, "silicon": 150 }
+build_time = 0.5
+transport_speed = 8.0
+tags = PackedStringArray("duct", "transport")

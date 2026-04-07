@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="UnitData" format=3]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"support"
+display_name = "Support"
+description = "Advanced support platform. Heals and shields allies."
+team = 0
+category = 5
+color = Color(0.3, 0.9, 0.6, 1)
+visual_size = 14.0
+max_health = 90.0
+move_speed = 85.0
+attack_damage = 8.0
+attack_speed = 1.0
+attack_range = 64.0
+detection_range = 500.0
+spawn_count = 1
+threat_value = 6.0

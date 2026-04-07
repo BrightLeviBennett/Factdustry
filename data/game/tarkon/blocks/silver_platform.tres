@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"silver_platform"
+display_name = "Silver Platform"
+description = "Elevated silver platform. Buildings on platforms gain defense bonuses."
+category = 5
+color = Color(0.8, 0.8, 0.9, 1)
+max_health = 190.0
+build_cost = { "copper": 500, "silicon": 250 }
+build_time = 0.5
+tags = PackedStringArray("platform")

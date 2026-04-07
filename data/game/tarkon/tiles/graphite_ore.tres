@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://cwmld648vcaly"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://csk2kb0grh6lp" path="res://textures/terrain/GraphiteOre.png" id="1_qcvvo"]
+
+[resource]
+script = ExtResource("1")
+id = &"graphite_ore"
+display_name = "Graphite Ore"
+description = "A dark deposit of graphite. Place a drill facing it to extract."
+icon = ExtResource("1_qcvvo")
+category = 2
+color = Color(0.25, 0.25, 0.3, 1)
+opacity = 0.9
+tags = PackedStringArray("ore", "mineral")
+minable_resource = &"mat_graphite"

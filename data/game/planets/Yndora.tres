@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="PlanetData" format=3 uid="uid://e2qn5qc8582y"]
+
+[ext_resource type="Script" uid="uid://faqlrfldd46n" path="res://data/game/planets/planet_data.gd" id="1_qpmw4"]
+[ext_resource type="Texture2D" uid="uid://uftowf4mhj7y" path="res://textures/UI/Yndora_preview.png" id="1_t0ap7"]
+
+[resource]
+script = ExtResource("1_qpmw4")
+id = &"Yndora"
+display_name = "Yndora"
+icon = ExtResource("1_t0ap7")
+surface_color = Color(0.2509804, 0.34901962, 1, 0.7411765)
+grid_density = 0.0
+camera_distance = 40.0
+metadata/_custom_type_script = "uid://faqlrfldd46n"

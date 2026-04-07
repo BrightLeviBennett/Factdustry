@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://83n6fvt5xl8e"]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dt8g1to4cj7ss" path="res://textures/resources/silicon.png" id="1_4g4d3"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_silicon"
+display_name = "Silicon"
+description = "Semiconductor material essential for electronics."
+icon = ExtResource("1_4g4d3")
+max_stack = 200
+category = 2
+color = Color(0.5, 0.5, 0.7, 1)
+base_value = 4.0

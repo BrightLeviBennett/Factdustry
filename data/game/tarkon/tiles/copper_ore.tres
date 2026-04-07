@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dch07t516ixdw"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b8fp1ekbv4cfs" path="res://textures/terrain/CopperOre.png" id="1_damef"]
+
+[resource]
+script = ExtResource("1")
+id = &"copper_ore"
+display_name = "Copper Ore"
+description = "A vein of copper embedded in the wall. Place a drill facing it to extract."
+icon = ExtResource("1_damef")
+category = 2
+color = Color(0.8, 0.5, 0.2, 1)
+opacity = 0.9
+tags = PackedStringArray("ore", "mineral")
+minable_resource = &"mat_copper"

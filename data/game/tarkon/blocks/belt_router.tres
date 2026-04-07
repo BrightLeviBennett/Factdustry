@@ -1,0 +1,20 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://e0hteidudcee"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://ci7wqejlg8mop" path="res://textures/blocks/item transportation/BeltRouter.jpeg" id="1_n775r"]
+
+[resource]
+script = ExtResource("1")
+id = &"belt_router"
+display_name = "Belt Router"
+description = "Splits one input belt into three outputs equally."
+icon = ExtResource("1_n775r")
+color = Color(0.9, 0.85, 0.3, 1)
+top_sprite = ExtResource("1_n775r")
+max_health = 200.0
+build_cost = {
+"copper": 8
+}
+build_time = 0.6
+transport_speed = 4.0
+tags = PackedStringArray("belt", "transport", "router")

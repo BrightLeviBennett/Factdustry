@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" path="res://textures/blocks/fluid transportation/FluidConduit.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+icon = ExtResource("2")
+id = &"fluid_conduit"
+display_name = "Fluid Conduit"
+description = "Basic pipe for transporting liquids and gases."
+category = 9
+color = Color(0.3, 0.6, 0.9, 1)
+max_health = 120.0
+build_cost = { "copper": 8, "graphite": 3 }
+build_time = 0.5
+transport_speed = 4.0
+transports_fluid = true
+tags = PackedStringArray("fluid", "transport")

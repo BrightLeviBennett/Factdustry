@@ -1,0 +1,25 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" path="res://textures/blocks/cores/coreShardComplete.png" id="2"]
+[ext_resource type="Texture2D" path="res://textures/blocks/cores/coreShardBase.png" id="3"]
+[ext_resource type="Texture2D" path="res://textures/blocks/cores/coreShardLumina.png" id="4"]
+[ext_resource type="Texture2D" path="res://textures/blocks/cores/coreShardFerox.png" id="5"]
+
+[resource]
+script = ExtResource("1")
+icon = ExtResource("2")
+base_sprite = ExtResource("3")
+lumina_overlay = ExtResource("4")
+ferox_overlay = ExtResource("5")
+id = &"core_shard"
+display_name = "Core: Shard"
+description = "The heart of your colony. Provides basic storage and power."
+category = 0
+color = Color(0.9, 0.75, 0.2, 1)
+max_health = 500.0
+grid_size = Vector2i(3, 3)
+tags = PackedStringArray("core")
+unit_capacity = 15
+storage_capacity = 4000
+build_time = 0.0

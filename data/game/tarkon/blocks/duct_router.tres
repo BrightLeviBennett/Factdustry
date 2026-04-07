@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"duct_router"
+display_name = "Duct Router"
+description = "Splits one duct into three outputs."
+category = 8
+color = Color(0.7, 0.8, 0.4, 1)
+max_health = 290.0
+build_cost = { "copper": 200, "silicon": 80 }
+build_time = 0.8
+transport_speed = 7.0
+tags = PackedStringArray("duct", "transport", "router")

@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"freight_loader"
+display_name = "Freight Loader"
+description = "Loads bulk freight onto transport systems."
+category = 7
+color = Color(0.2, 0.6, 0.55, 1)
+max_health = 380.0
+build_cost = { "copper": 350, "silicon": 150 }
+build_time = 1.5
+transport_speed = 11.0
+max_stored_items = 400
+tags = PackedStringArray("freight", "freight_loader")
+grid_size = Vector2i(6, 6)
+max_payload_size = 5

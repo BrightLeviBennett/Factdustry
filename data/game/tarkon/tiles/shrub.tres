@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://v7m5pg2beqkd"]
+
+[ext_resource type="Texture2D" uid="uid://brapt8pik1rmf" path="res://textures/terrain/Shrub.png" id="1_bt48c"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1_cuctn"]
+
+[resource]
+script = ExtResource("1_cuctn")
+id = &"shrub"
+display_name = "Shrub"
+icon = ExtResource("1_bt48c")
+category = 1
+render_tile_underneath = true
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

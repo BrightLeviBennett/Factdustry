@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_silver"
+display_name = "Silver"
+description = "Precious metal with excellent conductivity."
+max_stack = 200
+category = 0
+color = Color(0.85, 0.85, 0.9, 1)
+base_value = 5.0
+conveyable = true

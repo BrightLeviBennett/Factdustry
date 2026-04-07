@@ -1,0 +1,360 @@
+extends Node
+
+# ============================================================
+# REGISTRY.GD - Central Data Registry (Autoload)
+# ============================================================
+# Loads ALL .tres data files using threaded loading for performance.
+# Access from anywhere: Registry.get_item("glucose")
+#
+# Essential resources (items, blocks, units, fluids, tiles) are loaded
+# synchronously so they're available immediately. Non-essential resources
+# (status_effects, sectors, planets) are loaded in the background.
+# ============================================================
+
+# --- DICTIONARIES ---
+var items: Dictionary = {}
+var blocks: Dictionary = {}
+var units: Dictionary = {}
+var fluids: Dictionary = {}
+var status_effects: Dictionary = {}
+var tiles: Dictionary = {}
+var sectors: Dictionary = {}
+var planets: Dictionary = {}
+
+# --- ORDERED ARRAYS ---
+var items_list: Array[ItemData] = []
+var blocks_list: Array[BlockData] = []
+var units_list: Array[UnitData] = []
+var fluids_list: Array[FluidData] = []
+var status_effects_list: Array[StatusEffectData] = []
+var tiles_list: Array[TerrainTileData] = []
+var sectors_list: Array[SectorData] = []
+var planets_list: Array[PlanetData] = []
+
+# --- AUDIO CACHE ---
+## Pre-loaded audio streams. Add paths to _audio_paths to pre-load during startup.
+var audio: Dictionary = {}  # String path → AudioStream
+var _audio_paths: Array[String] = [
+	# Add audio file paths here when audio is implemented, e.g.:
+	# "res://audio/sfx/drill.ogg",
+	# "res://audio/music/menu.ogg",
+]
+
+## Emitted when all resources have finished loading (essential + background).
+signal all_resources_loaded
+
+## True when all resources are fully loaded.
+var is_fully_loaded := false
+
+## True when essential resources (items, blocks, units, fluids, tiles) are loaded.
+var essentials_loaded := false
+
+## Loading progress (0.0 to 1.0) for the loading screen.
+var load_progress := 0.0
+
+# --- THREADED LOADING STATE ---
+var _pending_loads: Array = []  # [{path, dict, list}]
+var _loading_complete := false
+var _total_load_count := 0
+var _loaded_count := 0
+
+
+func _ready() -> void:
+	# ALL resources loaded via threaded requests for smooth loading screen
+	_start_threaded_loads([
+		["res://data/game/tarkon/items/", items, items_list, true],
+		["res://data/game/tarkon/blocks/", blocks, blocks_list, true],
+		["res://data/game/tarkon/units/", units, units_list, true],
+		["res://data/game/tarkon/fluids/", fluids, fluids_list, true],
+		["res://data/game/tarkon/tiles/", tiles, tiles_list, true],
+		["res://data/game/tarkon/status_effects/", status_effects, status_effects_list, false],
+		["res://data/game/tarkon/sectors/", sectors, sectors_list, false],
+		["res://data/game/planets/", planets, planets_list, false],
+	])
+	# Pre-load audio files (when audio paths are added)
+	_preload_audio()
+
+
+func _process(_delta: float) -> void:
+	if _loading_complete:
+		return
+	_poll_threaded_loads()
+	_poll_audio_loads()
+
+
+# --- AUDIO PRE-LOADING ---
+var _pending_audio: Array[String] = []
+
+func _preload_audio() -> void:
+	for path in _audio_paths:
+		if ResourceLoader.exists(path):
+			ResourceLoader.load_threaded_request(path)
+			_pending_audio.append(path)
+			_total_load_count += 1
+
+func _poll_audio_loads() -> void:
+	var still_pending: Array[String] = []
+	for path in _pending_audio:
+		var status: int = ResourceLoader.load_threaded_get_status(path)
+		if status == ResourceLoader.THREAD_LOAD_LOADED:
+			var resource = ResourceLoader.load_threaded_get(path)
+			if resource is AudioStream:
+				audio[path] = resource
+			_loaded_count += 1
+		elif status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+			still_pending.append(path)
+		else:
+			_loaded_count += 1
+	_pending_audio = still_pending
+
+
+## Kicks off threaded load requests for all .tres files in the given directories.
+## Each group is [path, dict, list, is_essential].
+func _start_threaded_loads(groups: Array) -> void:
+	for group in groups:
+		var path: String = group[0]
+		var dict: Dictionary = group[1]
+		var list: Array = group[2]
+		var is_essential: bool = group[3] if group.size() > 3 else false
+		var dir = DirAccess.open(path)
+		if dir == null:
+			continue
+		dir.list_dir_begin()
+		var file_name = dir.get_next()
+		var seen := {}
+		while file_name != "":
+			# In exported builds .tres files may be converted to .res and/or
+			# have a .remap sidecar. Normalize all of them back to the .tres
+			# path that ResourceLoader understands.
+			var resource_path := ""
+			if file_name.ends_with(".tres"):
+				resource_path = path + file_name
+			elif file_name.ends_with(".res"):
+				resource_path = path + file_name.get_basename() + ".tres"
+			elif file_name.ends_with(".tres.remap"):
+				resource_path = path + file_name.trim_suffix(".remap")
+			elif file_name.ends_with(".res.remap"):
+				resource_path = path + file_name.trim_suffix(".res.remap") + ".tres"
+			if resource_path != "" and not seen.has(resource_path):
+				seen[resource_path] = true
+				ResourceLoader.load_threaded_request(resource_path)
+				_pending_loads.append({"path": resource_path, "dict": dict, "list": list, "essential": is_essential})
+				_total_load_count += 1
+			file_name = dir.get_next()
+		dir.list_dir_end()
+
+
+## Polls pending threaded loads and registers completed resources.
+func _poll_threaded_loads() -> void:
+	var still_pending: Array = []
+	var essentials_remaining := false
+	for entry in _pending_loads:
+		var status: int = ResourceLoader.load_threaded_get_status(entry["path"])
+		if status == ResourceLoader.THREAD_LOAD_LOADED:
+			var resource = ResourceLoader.load_threaded_get(entry["path"])
+			if resource and "id" in resource and resource.id != &"":
+				entry["dict"][resource.id] = resource
+				entry["list"].append(resource)
+			_loaded_count += 1
+		elif status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+			still_pending.append(entry)
+			if entry["essential"]:
+				essentials_remaining = true
+		else:
+			# THREAD_LOAD_FAILED or THREAD_LOAD_INVALID_RESOURCE — skip
+			_loaded_count += 1
+
+	_pending_loads = still_pending
+	load_progress = float(_loaded_count) / float(maxi(_total_load_count, 1))
+
+	# Mark essentials loaded once all essential entries are done
+	if not essentials_loaded and not essentials_remaining:
+		essentials_loaded = true
+		print("Registry: Essentials loaded — %d items, %d blocks, %d units, %d fluids, %d tiles" % [
+			items.size(), blocks.size(), units.size(), fluids.size(), tiles.size()])
+
+	if _pending_loads.is_empty():
+		_loading_complete = true
+		is_fully_loaded = true
+		essentials_loaded = true
+		print("Registry: All loaded — %d status_effects, %d sectors, %d planets" % [
+			status_effects.size(), sectors.size(), planets.size()])
+		all_resources_loaded.emit()
+
+
+# =========================
+# SYNCHRONOUS LOADING (for essential resources)
+# =========================
+
+func _load_all_resources(path: String, dict: Dictionary, list: Array) -> void:
+	var dir = DirAccess.open(path)
+	if dir == null:
+		push_warning("Registry: Could not open directory: " + path)
+		return
+
+	dir.list_dir_begin()
+	var file_name = dir.get_next()
+	var seen := {}
+
+	while file_name != "":
+		var resource_path := ""
+		if file_name.ends_with(".tres"):
+			resource_path = path + file_name
+		elif file_name.ends_with(".res"):
+			resource_path = path + file_name.get_basename() + ".tres"
+		elif file_name.ends_with(".tres.remap"):
+			resource_path = path + file_name.trim_suffix(".remap")
+		elif file_name.ends_with(".res.remap"):
+			resource_path = path + file_name.trim_suffix(".res.remap") + ".tres"
+
+		if resource_path != "" and not seen.has(resource_path):
+			seen[resource_path] = true
+			var resource = load(resource_path)
+
+			if resource and "id" in resource:
+				var id = resource.id
+				if id != &"":
+					dict[id] = resource
+					list.append(resource)
+				else:
+					push_warning("Registry: Resource has empty id: " + resource_path)
+			else:
+				push_warning("Registry: Could not load or invalid resource: " + resource_path)
+
+		file_name = dir.get_next()
+
+	dir.list_dir_end()
+
+
+# =========================
+# GETTERS
+# =========================
+
+func get_item(id: StringName) -> ItemData:
+	if items.has(id):
+		return items[id]
+	return null
+
+
+func get_block(id: StringName) -> BlockData:
+	if blocks.has(id):
+		return blocks[id]
+	return null
+
+
+func get_unit(id: StringName) -> UnitData:
+	if units.has(id):
+		return units[id]
+	return null
+
+
+func get_fluid(id: StringName) -> FluidData:
+	if fluids.has(id):
+		return fluids[id]
+	return null
+
+
+## Unified lookup — checks items first, then fluids.
+## Both ItemData and FluidData share id, display_name, icon, color.
+func get_item_or_fluid(id: StringName) -> Resource:
+	if items.has(id):
+		return items[id]
+	if fluids.has(id):
+		return fluids[id]
+	return null
+
+
+func get_status_effect(id: StringName) -> StatusEffectData:
+	if status_effects.has(id):
+		return status_effects[id]
+	return null
+
+
+func get_tile(id: StringName) -> TerrainTileData:
+	if tiles.has(id):
+		return tiles[id]
+	return null
+
+func get_sector(id: StringName) -> SectorData:
+	if sectors.has(id):
+		return sectors[id]
+	return null
+
+func get_planet(id: StringName) -> PlanetData:
+	if planets.has(id): return planets[id]
+	return null
+
+
+# =========================
+# QUERY HELPERS
+# =========================
+
+func get_blocks_by_category(category: BlockData.BlockCategory) -> Array[BlockData]:
+	var result: Array[BlockData] = []
+	for block in blocks_list:
+		if block.category == category:
+			result.append(block)
+	return result
+
+
+func get_units_by_team(team: UnitData.Team) -> Array[UnitData]:
+	var result: Array[UnitData] = []
+	for unit in units_list:
+		if unit.team == team:
+			result.append(unit)
+	return result
+
+
+func get_items_by_category(category: ItemData.ItemCategory) -> Array[ItemData]:
+	var result: Array[ItemData] = []
+	for item in items_list:
+		if item.category == category:
+			result.append(item)
+	return result
+
+
+
+
+func get_tiles_by_category(category: TerrainTileData.TileCategory) -> Array[TerrainTileData]:
+	var result: Array[TerrainTileData] = []
+	for tile in tiles_list:
+		if tile.category == category:
+			result.append(tile)
+	return result
+
+
+func get_floor_tiles() -> Array[TerrainTileData]:
+	return get_tiles_by_category(TerrainTileData.TileCategory.FLOOR)
+
+
+func get_wall_tiles() -> Array[TerrainTileData]:
+	return get_tiles_by_category(TerrainTileData.TileCategory.WALL)
+
+
+func get_debuffs() -> Array[StatusEffectData]:
+	var result: Array[StatusEffectData] = []
+	for effect in status_effects_list:
+		if effect.is_negative():
+			result.append(effect)
+	return result
+
+
+func get_buffs() -> Array[StatusEffectData]:
+	var result: Array[StatusEffectData] = []
+	for effect in status_effects_list:
+		if not effect.is_negative():
+			result.append(effect)
+	return result
+
+
+# =========================
+# FORMAT HELPERS
+# =========================
+
+## Formats a number for display. Amounts >= 1000 become "X.Xk".
+## Examples: 500 → "500", 1500 → "1.5k", 10203 → "10.2k", 999999 → "999.9k"
+static func format_amount(amount: int) -> String:
+	if amount < 1000:
+		return str(amount)
+	var thousands := amount / 1000.0
+	return "%.1fk" % thousands

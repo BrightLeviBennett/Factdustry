@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"vent_condenser"
+display_name = "Vent Condenser"
+description = "Collects steam from thermal vents into usable fluid."
+category = 9
+color = Color(0.3, 0.6, 0.9, 1)
+grid_size = Vector2i(3, 3)
+max_health = 200.0
+build_cost = { "copper": 15, "graphite": 5 }
+build_time = 0.5
+transport_speed = 5.0
+transports_fluid = true
+production_time = 1.5
+tags = PackedStringArray("fluid", "transport", "pump")

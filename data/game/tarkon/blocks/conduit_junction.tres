@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"conduit_junction"
+display_name = "Conduit Junction"
+description = "Merges three fluid inputs into one output pipe."
+category = 9
+color = Color(0.3, 0.6, 0.9, 1)
+max_health = 200.0
+build_cost = { "copper": 100, "silicon": 30 }
+build_time = 0.5
+transport_speed = 5.0
+transports_fluid = true
+tags = PackedStringArray("fluid", "transport")

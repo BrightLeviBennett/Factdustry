@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"freight_bridge"
+display_name = "Freight Bridge"
+description = "Bridges freight lines over infrastructure."
+category = 7
+color = Color(0.6, 0.5, 0.7, 1)
+max_health = 460.0
+build_cost = { "copper": 500, "silicon": 250 }
+build_time = 1.5
+transport_speed = 13.0
+tags = PackedStringArray("freight", "bridge", "linkable", "transport")
+grid_size = Vector2i(6, 6)
+max_payload_size = 5

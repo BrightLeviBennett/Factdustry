@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"core_bastion"
+display_name = "Core: Bastion"
+description = "Fortified core with integrated shields and turret mounts."
+category = 0
+color = Color(0.9, 0.75, 0.2, 1)
+max_health = 740.0
+grid_size = Vector2i(4, 4)
+build_cost = { "copper": 200, "silicon": 80 }
+build_time = 0.0
+tags = PackedStringArray("core")
+unit_capacity = 30
+storage_capacity = 11000

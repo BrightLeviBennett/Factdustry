@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"support_hover_fabricator"
+display_name = "Support Hover Fabricator"
+description = "Manufactures support hover drones."
+category = 6
+color = Color(0.4, 0.8, 0.6, 1)
+max_health = 280.0
+build_cost = { "copper": 100, "silicon": 30 }
+build_time = 4.0
+requires_power = true
+power_consumption = 5.0
+tags = PackedStringArray("fabricator", "units")

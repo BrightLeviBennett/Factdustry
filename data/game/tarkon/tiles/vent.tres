@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://cg7mkefoccld7"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1_gymuw"]
+[ext_resource type="Texture2D" uid="uid://ccxmrgn3rixd3" path="res://textures/terrain/Vent.png" id="1_hj0uc"]
+
+[resource]
+script = ExtResource("1_gymuw")
+id = &"vent"
+display_name = "Vent"
+icon = ExtResource("1_hj0uc")
+render_tile_underneath = null
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

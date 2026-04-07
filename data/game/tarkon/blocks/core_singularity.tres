@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"core_singularity"
+display_name = "Core: Singularity"
+description = "The ultimate core. Bends reality to fuel infinite production."
+category = 0
+color = Color(0.9, 0.75, 0.2, 1)
+max_health = 1140.0
+grid_size = Vector2i(6, 6)
+build_cost = { "copper": 1500, "silicon": 900 }
+build_time = 0.0
+tags = PackedStringArray("core")
+unit_capacity = 100
+storage_capacity = 50000

@@ -1,0 +1,32 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://dm2ejbudfhpae"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dkr4sqc44b0bk" path="res://textures/sectors/Dark_Valley.png" id="1_hs4qc"]
+
+[resource]
+script = ExtResource("1")
+id = &"dark_valley"
+display_name = "Dark Valley"
+description = "A valley filled with coal, sulfur, and some new gases. This sector will allow for many new research opportunities, but also contains many enemy bases."
+icon = ExtResource("1_hs4qc")
+planet_id = &"Tarkon"
+hex_q = -21
+hex_r = -1
+tier = 6
+threat_level = 7
+recommended_core = "Core: Fortress"
+color = null
+available_resources = {
+"mat_aluminum": 0.3,
+"mat_petroleum": 0.7,
+"mat_silicon": 0.6,
+"mat_steel": 0.5,
+"mat_titanium": 0.6
+}
+enemy_types = PackedStringArray("basic_cell", "phage", "white_blood_cell")
+nest_count = 6
+wave_multiplier = 2.0
+objective = 2
+unlocks = PackedStringArray("ruins")
+required_sectors = PackedStringArray("aluminum_mountains")
+tags = PackedStringArray("campaign", "sector", "toxic", "hazardous")

@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"core_fragment"
+display_name = "Core: Fragment"
+description = "A dormant core fragment. The seed of all expansion."
+category = 0
+color = Color(0.9, 0.75, 0.2, 1)
+max_health = 580.0
+build_cost = { "copper": 40, "graphite": 15 }
+build_time = 0.0
+tags = PackedStringArray("core")
+unit_capacity = 20
+storage_capacity = 6000

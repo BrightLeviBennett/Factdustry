@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"payload_mass_driver"
+display_name = "Payload Mass Driver"
+description = "Electromagnetic launcher for payload delivery."
+category = 7
+color = Color(0.5, 0.3, 0.8, 1)
+max_health = 300.0
+build_cost = { "copper": 200, "silicon": 80 }
+build_time = 1.5
+transport_speed = 9.0
+tags = PackedStringArray("payload", "mass_driver", "linkable")
+grid_size = Vector2i(3, 3)
+max_payload_size = 3

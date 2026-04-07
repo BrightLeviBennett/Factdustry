@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"large_steel_platform"
+display_name = "Large Steel Platform"
+description = "A large steel platform."
+category = 5
+color = Color(0.5, 0.5, 0.6, 1)
+max_health = 200.0
+grid_size = Vector2i(2, 2)
+build_cost = { "copper": 200, "silicon": 60 }
+build_time = 0.8
+tags = PackedStringArray("platform")

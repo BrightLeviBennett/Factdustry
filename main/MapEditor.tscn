@@ -1,0 +1,24 @@
+[gd_scene format=3 uid="uid://bf7hlw7obo3fv"]
+
+[ext_resource type="Script" uid="uid://by8ediec64f0m" path="res://main/map_editor.gd" id="1_editor"]
+[ext_resource type="Script" uid="uid://c752quh4ajg5h" path="res://main/terrain_system.gd" id="3_terrain"]
+[ext_resource type="Script" uid="uid://cbc4nhxlogbdr" path="res://main/editor_camera.gd" id="4_camera"]
+[ext_resource type="Script" uid="uid://gak652m80d8i" path="res://main/editor_hud.gd" id="5_hud"]
+[ext_resource type="Script" uid="uid://bkjdmcy14trde" path="res://main/building_system.gd" id="6_building"]
+
+[node name="Main" type="Node2D" unique_id=436623719]
+script = ExtResource("1_editor")
+
+[node name="TerrainSystem" type="Node2D" parent="." unique_id=1984758047]
+script = ExtResource("3_terrain")
+
+[node name="BuildingSystem" type="Node2D" parent="." unique_id=1880945878]
+script = ExtResource("6_building")
+
+[node name="EditorOverlay" type="Node2D" parent="." unique_id=2111982117]
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=1286096043]
+script = ExtResource("4_camera")
+
+[node name="EditorHUD" type="CanvasLayer" parent="." unique_id=1603354174]
+script = ExtResource("5_hud")

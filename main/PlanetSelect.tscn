@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cf23pix4pvkd4"]
+
+[ext_resource type="Script" uid="uid://cf0ahs6gbvudn" path="res://main/planet_select.gd" id="1_j6hdx"]
+
+[node name="PlanetSelect" type="Node3D" unique_id=1791105111]
+script = ExtResource("1_j6hdx")

@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"silicon_mixer"
+display_name = "Silicon Mixer"
+description = "Blends raw silicon into usable industrial compound."
+category = 2
+color = Color(0.6, 0.6, 0.7, 1)
+max_health = 260.0
+build_cost = { "copper": 100, "silicon": 30 }
+build_time = 3.0
+requires_power = true
+power_consumption = 3.0
+production_time = 3.0
+tags = PackedStringArray("production", "processing")

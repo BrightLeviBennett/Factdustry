@@ -1,0 +1,22 @@
+[gd_resource type="Resource" script_class="UnitData" format=3]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"hawk"
+display_name = "Hawk"
+description = "Powerful air superiority fighter."
+team = 0
+category = 4
+color = Color(0.5, 0.7, 1.0, 1)
+visual_size = 14.0
+max_health = 100.0
+move_speed = 135.0
+attack_damage = 30.0
+attack_speed = 1.0
+attack_range = 64.0
+movement_layer = 3
+detection_range = 500.0
+spawn_count = 1
+threat_value = 6.0

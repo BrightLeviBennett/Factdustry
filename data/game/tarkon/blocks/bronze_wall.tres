@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"bronze_wall"
+display_name = "Bronze Wall"
+description = "A solid bronze wall. Blocks enemies and projectiles."
+category = 5
+color = Color(0.7, 0.5, 0.2, 1)
+max_health = 440.0
+build_cost = { "copper": 700, "silicon": 400 }
+build_time = 0.5
+tags = PackedStringArray("wall", "defense")

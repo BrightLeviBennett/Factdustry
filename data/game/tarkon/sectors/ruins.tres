@@ -1,0 +1,32 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://b3f36r8bagve8"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://rer61o3508im" path="res://textures/sectors/Ruins.png" id="1_a6xjp"]
+
+[resource]
+script = ExtResource("1")
+id = &"ruins"
+display_name = "Ruins"
+description = "This secctor is filled with old technolgy lost to time. Salvage what you can, and move on."
+icon = ExtResource("1_a6xjp")
+planet_id = &"Tarkon"
+hex_q = -1
+hex_r = 1
+tier = 7
+threat_level = 8
+recommended_core = "Core: Crucible"
+color = null
+available_resources = {
+"mat_aluminum": 0.5,
+"mat_silicon": 0.7,
+"mat_silver": 0.3,
+"mat_steel": 0.6,
+"mat_titanium": 0.7
+}
+enemy_types = PackedStringArray("basic_cell", "phage", "white_blood_cell")
+nest_count = 7
+wave_multiplier = 2.5
+objective = 4
+unlocks = PackedStringArray("the_nexus")
+required_sectors = PackedStringArray("dark_valley")
+tags = PackedStringArray("campaign", "sector", "ruins", "salvage")

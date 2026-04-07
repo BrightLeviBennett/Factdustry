@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"overdrive_dome"
+display_name = "Overdrive Dome"
+description = "Massive production boost to all buildings in range."
+category = 7
+color = Color(1.0, 0.8, 0.2, 1)
+max_health = 550.0
+build_cost = { "copper": 500, "silicon": 250 }
+build_time = 4.5
+requires_power = true
+power_consumption = 7.0
+tags = PackedStringArray("support")

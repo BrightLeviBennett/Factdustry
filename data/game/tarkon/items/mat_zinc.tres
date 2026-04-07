@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_zinc"
+display_name = "Zinc"
+description = "Corrosion-resistant metal. Used in alloys and coatings."
+max_stack = 200
+category = 0
+color = Color(0.7, 0.7, 0.75, 1)
+base_value = 1.5
+conveyable = true

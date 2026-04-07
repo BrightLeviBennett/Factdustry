@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="PlanetData" format=3 uid="uid://cw1gi8evmq1lj"]
+
+[ext_resource type="Texture2D" uid="uid://wt1uuwx7eam8" path="res://textures/UI/Takon_preview.png" id="1_jh7jy"]
+[ext_resource type="Script" uid="uid://faqlrfldd46n" path="res://data/game/planets/planet_data.gd" id="1_l8m41"]
+
+[resource]
+script = ExtResource("1_l8m41")
+id = &"Tarkon"
+display_name = "Tarkon"
+icon = ExtResource("1_jh7jy")
+orbit_distance = 30.0
+orbit_angle = 123.5
+surface_color = Color(0.18039216, 0.40784314, 0.14901961, 0.74509805)
+atmosphere_color = Color(0, 0.8091761, 0.15728089, 0.3019608)
+grid_density = 0.0
+subdivision_level = 3
+camera_distance = 40.0
+metadata/_custom_type_script = "uid://faqlrfldd46n"

@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"giant_aluminum_wall"
+display_name = "Giant Aluminum Wall"
+description = "A giant aluminum wall segment."
+category = 5
+color = Color(0.7, 0.7, 0.8, 1)
+max_health = 1520.0
+grid_size = Vector2i(4, 4)
+build_cost = { "copper": 2000, "silicon": 1000 }
+build_time = 1.5
+tags = PackedStringArray("wall", "defense")

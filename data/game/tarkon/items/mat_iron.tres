@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://cvxknis8h7fre"]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://xodoaavrlf5c" path="res://textures/resources/iron.png" id="1_n5ieo"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_iron"
+display_name = "Iron"
+description = "Strong structural metal. Foundation of steel production."
+icon = ExtResource("1_n5ieo")
+max_stack = 200
+category = 1
+color = Color(0.6, 0.55, 0.5, 1)
+base_value = 2.5

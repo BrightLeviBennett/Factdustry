@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"impact_driller"
+display_name = "Impact Driller"
+description = "Percussive drill that breaks through harder deposits."
+category = 1
+color = Color(0.5, 0.7, 0.3, 1)
+max_health = 240.0
+build_cost = { "copper": 100, "silicon": 30 }
+build_time = 2.0
+output_items = { "ore": 6 }
+production_time = 2.0
+tags = PackedStringArray("mining", "extraction")

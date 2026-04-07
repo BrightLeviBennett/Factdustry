@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://hcwdrfcy4lnc"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"snowy_plains"
+display_name = "Snowy Plains"
+description = "This sector is a extremely flat, icy plain perfect for launching to another planet, but you'll have to protect your base from the frequent hail storms and research alternative power production methods due to the lack of vents and coal here."
+planet_id = &"Tarkon"
+hex_q = -5
+hex_r = -7
+available_resources = PackedStringArray()
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray()
+required_sectors = PackedStringArray("the_nexus")
+tags = PackedStringArray("campaign", "sector", "snow", "endgame")

@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="UnitData" format=3]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"hoverlift"
+display_name = "Hoverlift"
+description = "Heavy hover platform. Carries cargo and units."
+team = 0
+category = 2
+color = Color(0.3, 0.6, 0.8, 1)
+visual_size = 15.0
+max_health = 100.0
+move_speed = 100.0
+attack_damage = 12.0
+attack_speed = 1.0
+attack_range = 48.0
+armor = 15.0
+movement_layer = 2
+detection_range = 500.0
+spawn_count = 1
+threat_value = 5.0

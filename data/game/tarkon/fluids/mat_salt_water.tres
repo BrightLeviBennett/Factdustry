@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="FluidData" format=3]
+
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cnak8t6tjcd55" path="res://textures/resources/water.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_salt_water"
+display_name = "Salt Water"
+description = "Briny seawater. Can be desalinated or used in chemical processes."
+icon = ExtResource("2")
+color = Color(0.25, 0.45, 0.55, 1)
+viscosity = 1.2

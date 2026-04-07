@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"payload_bridge"
+display_name = "Payload Bridge"
+description = "Bridges payload lines over obstacles."
+category = 7
+color = Color(0.6, 0.5, 0.7, 1)
+max_health = 380.0
+build_cost = { "copper": 350, "silicon": 150 }
+build_time = 1.5
+transport_speed = 11.0
+tags = PackedStringArray("payload", "bridge", "linkable", "transport")
+grid_size = Vector2i(3, 3)
+max_payload_size = 3

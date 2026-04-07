@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3 uid="uid://cxtnxoatmiwgo"]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"acid_burn"
+display_name = "Acid Burn"
+description = "Corrosive acid eats away at the target, dealing damage over time and weakening armor."
+duration = 4.0
+stackable = true
+max_stacks = 3
+effect_type = 2
+tint_color = Color(0.7, 0.9, 0.1, 1)
+particle_color = Color(0.8, 1, 0.2, 1)
+defense_modifier = 1.3
+tick_damage = 3.0
+tick_interval = 0.5
+tags = PackedStringArray("acid", "chemical")

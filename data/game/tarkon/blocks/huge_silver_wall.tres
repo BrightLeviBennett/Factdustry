@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"huge_silver_wall"
+display_name = "Huge Silver Wall"
+description = "A huge silver wall segment."
+category = 5
+color = Color(0.8, 0.8, 0.9, 1)
+max_health = 1500.0
+grid_size = Vector2i(3, 3)
+build_cost = { "copper": 3000, "silicon": 1800 }
+build_time = 1.2
+tags = PackedStringArray("wall", "defense")

@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"power_distributor"
+display_name = "Power Distributor"
+description = "Central hub that balances power across your entire grid."
+category = 3
+color = Color(0.1, 0.5, 1.0, 1)
+max_health = 720.0
+build_cost = { "copper": 1500, "silicon": 900 }
+build_time = 4.0
+output_items = { "power": 45 }
+production_time = 1.0
+tags = PackedStringArray("power")

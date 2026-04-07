@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://df2yg0u167qxw"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"archive_scanner"
+display_name = "Archive Scanner"
+description = "Scans buried archive fragments and emits raw data over a data cable. Place near a recovered archive site to begin extraction."
+category = 0
+color = Color(0.4, 0.6, 0.9, 1)
+max_health = 280.0
+build_cost = {
+"copper": 120,
+"silicon": 60
+}
+build_time = 3.0
+requires_power = true
+power_consumption = 3.0
+electrical_power_use = 5.0
+tags = PackedStringArray("production", "archive", "archive_scanner")

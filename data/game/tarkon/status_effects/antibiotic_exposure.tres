@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"antibiotic_exposure"
+display_name = "Antibiotic Exposure"
+description = "Exposed to antibiotics. Production slows, defenses weaken. Build resistance to counter."
+duration = 10.0
+stackable = false
+refresh_on_reapply = true
+effect_type = 1
+tint_color = Color(1, 0.5, 0.5, 1)
+particle_color = Color(1, 0.3, 0.3, 1)
+damage_modifier = 0.7
+defense_modifier = 1.5
+production_modifier = 0.5
+tags = PackedStringArray("antibiotic", "chemical")

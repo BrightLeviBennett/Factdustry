@@ -1,0 +1,20 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"disarm"
+display_name = "Disarm"
+description = "Precision gauss turret that disables enemy weapons."
+category = 4
+color = Color(0.9, 0.3, 0.3, 1)
+max_health = 260.0
+build_cost = { "copper": 100, "silicon": 30 }
+build_time = 3.0
+requires_power = true
+power_consumption = 3.0
+attack_damage = 40.0
+attack_speed = 2.5
+attack_range = 9.0
+tags = PackedStringArray("turret", "defense")

@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://1ealiaipm0bg"]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_bauxite"
+display_name = "Bauxite"
+description = "Aluminum ore. Must be refined into alumina and then aluminum before use."
+max_stack = 200
+category = 1
+color = Color(0.7, 0.4, 0.3, 1)
+base_value = 3.0

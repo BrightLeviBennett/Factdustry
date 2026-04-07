@@ -1,0 +1,51 @@
+[gd_scene format=3 uid="uid://btep10novs8nb"]
+
+[ext_resource type="Script" uid="uid://beidr5k7tmojy" path="res://main/main.gd" id="1_fos0i"]
+[ext_resource type="Script" uid="uid://c752quh4ajg5h" path="res://main/terrain_system.gd" id="3_03owx"]
+[ext_resource type="Script" uid="uid://bkjdmcy14trde" path="res://main/building_system.gd" id="4_trn2v"]
+[ext_resource type="Script" uid="uid://i8ecsnub2csi" path="res://main/camera_controller.gd" id="5_03owx"]
+[ext_resource type="Script" uid="uid://bkv86v6h73qd7" path="res://main/unit_manager.gd" id="5_trn2v"]
+[ext_resource type="Script" uid="uid://cmmlf1jutyyl3" path="res://main/logistics_system.gd" id="5_wkp8b"]
+[ext_resource type="Script" uid="uid://11xbv5k31fll" path="res://main/hud.gd" id="6_3dxm6"]
+[ext_resource type="Script" uid="uid://bewi0as5ljjou" path="res://main/player_drone.gd" id="6_03owx"]
+[ext_resource type="Script" uid="uid://l6507wn54nde" path="res://main/combat_system.gd" id="8_5vvyt"]
+[ext_resource type="Script" uid="uid://ciieomyusxniu" path="res://main/database_ui.gd" id="9_03owx"]
+[ext_resource type="Script" uid="uid://b4ev5tjtijbjk" path="res://main/tech_tree_ui.gd" id="12_c6i3y"]
+[ext_resource type="Script" uid="uid://cesfkxlpfgvhe" path="res://main/power_system.gd" id="power_sys"]
+
+[node name="Main" type="Node2D" unique_id=1007502201]
+script = ExtResource("1_fos0i")
+
+[node name="TerrainSystem" type="Node2D" parent="." unique_id=1342984427]
+script = ExtResource("3_03owx")
+
+[node name="BuildingSystem" type="Node2D" parent="." unique_id=1897981151]
+script = ExtResource("4_trn2v")
+max_depth = 16.0
+
+[node name="PowerSystem" type="Node2D" parent="." unique_id=640376565]
+script = ExtResource("power_sys")
+
+[node name="LogisticsSystem" type="Node2D" parent="." unique_id=2061746658]
+script = ExtResource("5_wkp8b")
+
+[node name="UnitManager" type="Node2D" parent="." unique_id=1217671179]
+script = ExtResource("5_trn2v")
+
+[node name="CombatSystem" type="Node2D" parent="." unique_id=1331754618]
+script = ExtResource("8_5vvyt")
+
+[node name="PlayerDrone" type="Node2D" parent="." unique_id=1530151836]
+script = ExtResource("6_03owx")
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=339246257]
+script = ExtResource("5_03owx")
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=1474061633]
+script = ExtResource("6_3dxm6")
+
+[node name="TechTreeUI" type="CanvasLayer" parent="." unique_id=1993678078]
+script = ExtResource("12_c6i3y")
+
+[node name="DatabaseUI" type="CanvasLayer" parent="." unique_id=65150223]
+script = ExtResource("9_03owx")

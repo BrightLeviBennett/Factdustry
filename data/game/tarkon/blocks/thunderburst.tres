@@ -1,0 +1,20 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"thunderburst"
+display_name = "Thunderburst"
+description = "Electrical burst turret that chains between enemies."
+category = 4
+color = Color(0.9, 0.3, 0.3, 1)
+max_health = 500.0
+build_cost = { "copper": 500, "silicon": 250 }
+build_time = 5.0
+requires_power = true
+power_consumption = 6.0
+attack_damage = 45.0
+attack_speed = 0.6
+attack_range = 6.0
+tags = PackedStringArray("turret", "defense")

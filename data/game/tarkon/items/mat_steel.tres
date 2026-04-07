@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://l8evbj0g3k30"]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://ibceb0u0dqku" path="res://textures/resources/steel.png" id="1_1rv0u"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_steel"
+display_name = "Steel"
+description = "Iron-carbon alloy. Extremely strong and versatile."
+icon = ExtResource("1_1rv0u")
+max_stack = 200
+category = 2
+color = Color(0.55, 0.55, 0.6, 1)
+base_value = 5.0

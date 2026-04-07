@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://4ckfgq2kdtxo"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"waterfront_ruins"
+display_name = "Waterfront Ruins"
+description = "This sector contains remanents of a old costal defense, amoungst other ruins. You'll need to research the archive scanner and archive decoder to decode the archives on this sector allowing for new research opertunities."
+planet_id = &"Tarkon"
+hex_q = -10
+available_resources = PackedStringArray()
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray("nightfall_depths")
+required_sectors = PackedStringArray("ferrum_ridge")
+tags = PackedStringArray("campaign", "sector", "water")

@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"overflow_belt"
+display_name = "Overflow Belt"
+description = "Only passes items when the main path is backed up."
+category = 8
+color = Color(0.9, 0.85, 0.3, 1)
+max_health = 200.0
+build_cost = { "copper": 10 }
+build_time = 0.6
+transport_speed = 4.0
+tags = PackedStringArray("belt", "transport", "overflow")

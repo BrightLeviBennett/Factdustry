@@ -1,0 +1,24 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" path="res://textures/blocks/factories/WaterFilter.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+icon = ExtResource("2")
+id = &"water_filter"
+display_name = "Water Filter"
+description = "Purifies salt water. Input from behind; outputs water (front), salt (left), sand (right)."
+category = 2
+color = Color(0.3, 0.6, 0.9, 1)
+max_health = 340.0
+build_cost = { "copper": 200, "silicon": 80 }
+build_time = 3.0
+input_items = { "mat_salt_water": 1 }
+output_items = { "mat_water": 1, "mat_salt": 1, "mat_sand": 1 }
+requires_power = true
+power_consumption = 4.0
+production_time = 3.0
+side_inputs = { "2": "mat_salt_water" }
+side_outputs = { "0": "mat_water", "3": "mat_salt", "1": "mat_sand" }
+tags = PackedStringArray("production", "processing")

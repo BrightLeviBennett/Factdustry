@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://ctksb0l7im6ie"]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cdmqb4ue5e0ht" path="res://textures/resources/alumina.png" id="1_81q8d"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_alumina"
+display_name = "Alumina"
+description = "Refined Bauxite, The precursor to pure aluminum."
+icon = ExtResource("1_81q8d")
+max_stack = 200
+category = 2
+color = Color(0.8, 0.8, 0.85, 1)
+base_value = 6.0

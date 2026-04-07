@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://da1il80tgrctk"]
+
+[ext_resource type="Texture2D" uid="uid://s435vxkw0s1l" path="res://textures/terrain/Geyser.png" id="1_2wnsi"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_cdl1m"]
+
+[resource]
+script = ExtResource("2_cdl1m")
+id = &"geyser"
+display_name = "Geyser"
+icon = ExtResource("1_2wnsi")
+render_tile_underneath = null
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

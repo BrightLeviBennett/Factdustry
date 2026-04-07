@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"payload_unloader"
+display_name = "Payload Unloader"
+description = "Unloads payloads at their destination."
+category = 7
+color = Color(0.8, 0.6, 0.3, 1)
+max_health = 300.0
+build_cost = { "copper": 200, "silicon": 80 }
+build_time = 1.5
+transport_speed = 9.0
+max_stored_items = 200
+tags = PackedStringArray("payload", "payload_unloader")
+grid_size = Vector2i(3, 3)
+max_payload_size = 3

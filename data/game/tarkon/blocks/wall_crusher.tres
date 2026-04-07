@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"wall_crusher"
+display_name = "Wall Crusher"
+description = "Mines resources directly from rock walls."
+category = 1
+color = Color(0.6, 0.6, 0.5, 1)
+max_health = 240.0
+build_cost = { "copper": 100, "silicon": 30 }
+build_time = 2.0
+output_items = { "ore": 6 }
+production_time = 2.0
+tags = PackedStringArray("mining", "extraction")

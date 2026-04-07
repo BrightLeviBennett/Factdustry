@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"launchpad"
+display_name = "Launchpad"
+description = "Launches payloads and units to distant locations."
+category = 7
+color = Color(0.5, 0.5, 0.7, 1)
+max_health = 550.0
+build_cost = { "copper": 500, "silicon": 250 }
+build_time = 4.5
+requires_power = true
+power_consumption = 7.0
+tags = PackedStringArray("support")

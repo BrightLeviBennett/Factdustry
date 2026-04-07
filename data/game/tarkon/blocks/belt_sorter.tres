@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://hq2e5ktqkg0e"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"belt_sorter"
+display_name = "Belt Sorter"
+description = "Filters specific items to one side, rest pass through."
+color = Color(0.9, 0.85, 0.3, 1)
+max_health = 200.0
+build_cost = {
+"copper": 12
+}
+build_time = 0.8
+transport_speed = 4.0
+tags = PackedStringArray("belt", "transport", "sorter")

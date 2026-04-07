@@ -1,0 +1,30 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://ce4pan67ctu2k"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bdop1at8xqnbu" path="res://textures/sectors/Crevice.png" id="1_btr2t"]
+
+[resource]
+script = ExtResource("1")
+id = &"crevice"
+display_name = "Crevice"
+description = "A small crevice with a large river seperating your and the enemy's base. hover and flying units will be the only viable options."
+icon = ExtResource("1_btr2t")
+planet_id = &"Tarkon"
+hex_q = 2
+hex_r = null
+tier = 3
+threat_level = 4
+recommended_core = "Core: Fragment"
+color = null
+available_resources = {
+"mat_copper": 0.5,
+"mat_graphite": 0.5,
+"mat_iron": 0.6,
+"mat_silicon": 0.7
+}
+enemy_types = PackedStringArray("basic_cell", "phage", "white_blood_cell")
+nest_count = 4
+wave_multiplier = 1.2
+unlocks = PackedStringArray("ferrum_ridge")
+required_sectors = PackedStringArray("starting_grounds")
+tags = PackedStringArray("campaign", "sector")

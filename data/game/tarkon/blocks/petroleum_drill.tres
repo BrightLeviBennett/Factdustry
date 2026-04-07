@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" path="res://textures/blocks/resource extractors/PetroliumDrill.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+icon = ExtResource("2")
+id = &"petroleum_drill"
+display_name = "Petroleum Drill"
+description = "Specialized drill for extracting petroleum deposits."
+category = 1
+color = Color(0.3, 0.3, 0.3, 1)
+max_health = 320.0
+build_cost = { "copper": 200, "silicon": 80 }
+build_time = 2.0
+output_items = { "ore": 8 }
+production_time = 2.0
+tags = PackedStringArray("mining", "extraction")

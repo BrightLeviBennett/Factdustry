@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"wall_grinder"
+display_name = "Wall Grinder"
+description = "High-speed wall mining with improved throughput."
+category = 1
+color = Color(0.6, 0.6, 0.4, 1)
+max_health = 320.0
+build_cost = { "copper": 200, "silicon": 80 }
+build_time = 2.0
+output_items = { "ore": 8 }
+production_time = 2.0
+tags = PackedStringArray("mining", "extraction")

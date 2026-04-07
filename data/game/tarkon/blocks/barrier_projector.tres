@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"barrier_projector"
+display_name = "Barrier Projector"
+description = "Creates a protective energy barrier around nearby structures."
+category = 7
+color = Color(0.5, 0.5, 0.9, 1)
+max_health = 470.0
+build_cost = { "copper": 350, "silicon": 150 }
+build_time = 3.0
+requires_power = true
+power_consumption = 6.0
+tags = PackedStringArray("support")

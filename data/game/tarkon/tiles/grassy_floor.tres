@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dd5oqdjel2bwg"]
+
+[ext_resource type="Texture2D" uid="uid://dqq2eypd1yvdd" path="res://textures/terrain/GrassyFloor.png" id="1_anlyu"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_3yob1"]
+
+[resource]
+script = ExtResource("2_3yob1")
+id = &"grassy_floor"
+display_name = "Grassy Floor"
+icon = ExtResource("1_anlyu")
+render_tile_underneath = null
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

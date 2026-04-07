@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" path="res://textures/blocks/resource extractors/MineralExtractor.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+icon = ExtResource("2")
+id = &"mineral_extractor"
+display_name = "Mineral Extractor"
+description = "Precision extractor for rare mineral deposits."
+category = 1
+color = Color(0.4, 0.8, 0.6, 1)
+max_health = 240.0
+build_cost = { "copper": 100, "silicon": 30 }
+build_time = 2.0
+output_items = { "ore": 6 }
+production_time = 2.0
+tags = PackedStringArray("mining", "extraction")
