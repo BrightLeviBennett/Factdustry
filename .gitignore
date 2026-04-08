@@ -7,3 +7,11 @@
 
 # Claude
 .claude/
+
+# Build artifacts (export outputs)
+*.app/
+*.command
+*.dmg
+*.pck
+*.zip
+build/

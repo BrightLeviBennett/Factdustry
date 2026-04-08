@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://crmy7iplgnma7"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1_4rrqm"]
+
+[resource]
+script = ExtResource("1_4rrqm")
+id = &"aziris_outpost"
+display_name = "Aziris Outpost"
+description = "A Ferox outpost site on Aziris, Tarkon's gaseous mini-planet. take down the enmy and claim the aboundunt resources for yourself."
+planet_id = &"Aziris"
+available_resources = PackedStringArray()
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray()
+required_sectors = PackedStringArray()
+tags = PackedStringArray("campaign", "sector", "moon")

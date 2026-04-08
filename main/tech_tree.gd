@@ -413,7 +413,7 @@ func _register_cores() -> void:
 	_add(&"core_aegis",        "Core: Aegis",        [&"core_pantheon"],  [], {&"mat_copper": 1200, &"mat_steel": 370, &"mat_bronze": 60, &"mat_aluminum": 30}, Vector2(-2, 7))
 	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 2000, &"mat_steel": 600, &"mat_bronze": 100, &"mat_aluminum": 50}, Vector2(-2, 8))
 	# Archive line
-	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-starting_grounds"], {&"mat_copper": 180}, Vector2(-3, 1))
+	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-waterfront_ruins"], {&"mat_copper": 180}, Vector2(-3, 1))
 	_add(&"data_cable",        "Data Cable",         [&"archive_scanner"], [], {&"mat_copper": 40}, Vector2(-4, 1))
 	_add(&"archive_decoder",   "Archive Decoder",    [&"archive_scanner"], [], {&"mat_copper": 240}, Vector2(-3, 2))
 

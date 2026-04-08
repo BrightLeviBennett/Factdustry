@@ -1,0 +1,20 @@
+[gd_resource type="Resource" script_class="PlanetData" format=3 uid="uid://cn6ohnhasice"]
+
+[ext_resource type="Script" uid="uid://faqlrfldd46n" path="res://data/game/planets/planet_data.gd" id="1_bkdsl"]
+
+[resource]
+script = ExtResource("1_bkdsl")
+id = &"Aziris"
+display_name = "Aziris"
+orbit_distance = 99992220.0
+orbit_angle = 40.0
+parent_planet_id = &"Tarkon"
+surface_color = Color(0.015491941, 0.33221766, 0.46358043, 1)
+grid_color = Color(0.317633, 0.56671655, 0.638301, 1)
+atmosphere_color = Color(0.6, 0.55, 0.5, 0)
+grid_density = 0.0
+mesh_radius = 0.7
+hex_spacing = 8.0
+subdivision_level = 1
+camera_distance = 3.0
+metadata/_custom_type_script = "uid://faqlrfldd46n"

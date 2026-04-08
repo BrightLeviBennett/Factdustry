@@ -744,21 +744,51 @@ func _update_controlled_turret(delta: float) -> void:
 			var block_id = main.placed_buildings[grid_pos]
 			var bdata = Registry.get_block(block_id)
 			if bdata:
-				_control_attack_timer = bdata.attack_speed
+				# --- Ammo check (same Mindustry-style rule as auto-firing turrets) ---
+				# A turret with ammo_types configured cannot fire without consuming
+				# matching ammo from its storage, and a turret with no ammo_types
+				# cannot fire at all.
+				if bdata.ammo_types.is_empty():
+					return
+				var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+				var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+				var fire_damage: float = bdata.attack_damage
+				var fire_color: Color = bdata.color.lightened(0.3)
+				var fire_reload_mult: float = 1.0
+				var fire_speed: float = combat.default_projectile_speed
+				var ammo_found := false
+				for ammo in bdata.ammo_types:
+					if ammo == null or not (ammo is AmmoType):
+						continue
+					var ammo_data: AmmoType = ammo as AmmoType
+					if logistics and logistics.has_method("get_stored_item_count"):
+						var stored: int = logistics.get_stored_item_count(anchor, ammo_data.item_id)
+						var amt: int = maxi(ammo_data.amount_per_shot, 1)
+						if stored >= amt:
+							logistics.remove_from_storage(anchor, ammo_data.item_id, amt)
+							fire_damage = ammo_data.damage
+							fire_color = ammo_data.projectile_color
+							fire_reload_mult = ammo_data.reload_multiplier
+							fire_speed = ammo_data.projectile_speed
+							ammo_found = true
+							break
+				if not ammo_found:
+					return  # Out of ammo — can't fire even when manually controlled
+
+				_control_attack_timer = bdata.attack_speed * fire_reload_mult
 				var barrel_length: float = main.GRID_SIZE * 0.4
 				var fire_pos: Vector2 = turret_world + Vector2.from_angle(target_angle) * barrel_length
 				var direction: Vector2 = (mouse_pos - fire_pos).normalized()
 				var fire_range: float = bdata.attack_range * main.GRID_SIZE
 				var target_pos: Vector2 = fire_pos + direction * fire_range
-				var proj_color: Color = bdata.color.lightened(0.3)
 				combat._spawn_projectile(
 					fire_pos,
 					null,
 					target_pos,
 					"none",
-					combat.default_projectile_speed,
-					bdata.attack_damage,
-					proj_color,
+					fire_speed,
+					fire_damage,
+					fire_color,
 					"turret",
 					bdata.is_aoe,
 					bdata.aoe_radius,

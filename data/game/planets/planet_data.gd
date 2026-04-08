@@ -24,10 +24,13 @@ extends Resource
 @export var icon: Texture2D = null
 
 # --- ORBIT ---
-## Distance from the sun in 3D units
+## Distance from the orbit center (sun, or parent planet if set) in 3D units
 @export var orbit_distance: float = 12.0
-## Angle around the sun in degrees (0=front, 90=right, 180=back)
+## Angle around the orbit center in degrees (0=front, 90=right, 180=back)
 @export_range(0.0, 360.0, 0.1) var orbit_angle: float = 0.0
+## If set, this planet orbits another planet (a moon) instead of the sun.
+## Use the parent planet's id (e.g. &"Tarkon").
+@export var parent_planet_id: StringName = &""
 
 # --- APPEARANCE ---
 ## Base surface color (dark tones / procedural texture low values)

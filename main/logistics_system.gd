@@ -538,6 +538,10 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 	if _try_accept_constructor_item(grid_pos, item_id):
 		return true
 
+	# Accept into turret as ammo (any side, no direction restriction)
+	if _try_accept_turret_ammo(grid_pos, item_id):
+		return true
+
 	return false
 
 
@@ -714,6 +718,10 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 
 	# Constructor accepts items from any side
 	if _try_accept_constructor_item(to, item_id):
+		return true
+
+	# Turret accepts matching ammo from any side
+	if _try_accept_turret_ammo(to, item_id):
 		return true
 
 	return false
@@ -1792,6 +1800,55 @@ func _try_accept_constructor_item(grid_pos: Vector2i, item_id: StringName) -> bo
 		return false  # Already have enough of this item
 
 	state["collected"][StringName(cost_key)] = have + 1
+	return true
+
+
+## Tries to feed an item into a turret as ammo. The turret accepts the item
+## from any side (no direction restriction) iff the item id matches one of
+## the turret's AmmoType entries AND the turret has spare storage capacity.
+## Items are stored in block_storage[anchor]["items"] just like every other
+## building, so combat_system can pull them out via remove_from_storage.
+func _try_accept_turret_ammo(grid_pos: Vector2i, item_id: StringName) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null or not data.is_turret():
+		return false
+	if data.ammo_types.is_empty():
+		return false
+
+	# Confirm the item matches one of the turret's accepted ammos.
+	var accepted := false
+	for ammo in data.ammo_types:
+		if ammo == null or not (ammo is AmmoType):
+			continue
+		if (ammo as AmmoType).item_id == item_id:
+			accepted = true
+			break
+	if not accepted:
+		return false
+
+	# Resolve to the turret's anchor for multi-tile turrets.
+	var anchor = main.get_building_anchor(grid_pos)
+	var origin: Vector2i = anchor if anchor != null else grid_pos
+
+	# Initialise storage on demand.
+	if not block_storage.has(origin):
+		block_storage[origin] = {"items": {}, "fluids": {}}
+	var storage: Dictionary = block_storage[origin]
+	if not storage.has("items"):
+		storage["items"] = {}
+
+	# Respect the building's max_stored_items cap (default to 30 for turrets
+	# if the .tres didn't specify one).
+	var cap: int = data.max_stored_items if data.max_stored_items > 0 else 30
+	var current_total: int = 0
+	for k in storage["items"]:
+		current_total += int(storage["items"][k])
+	if current_total >= cap:
+		return false
+
+	storage["items"][item_id] = int(storage["items"].get(item_id, 0)) + 1
 	return true
 
 

@@ -952,15 +952,6 @@ func _add_ammo_entry(turret: BlockData, ammo: AmmoType) -> void:
 		sw.color = ammo.projectile_color
 		header.add_child(sw)
 
-	var name_lbl := Label.new()
-	var ammo_name: String = ammo.display_name
-	if ammo_name == "":
-		ammo_name = item.display_name if item else String(ammo.item_id)
-	name_lbl.text = ammo_name
-	name_lbl.add_theme_font_size_override("font_size", 14)
-	name_lbl.add_theme_color_override("font_color", text_color)
-	header.add_child(name_lbl)
-
 	# Cost stub on the right ("x N")
 	if ammo.amount_per_shot > 1:
 		var cost_lbl := Label.new()
@@ -970,10 +961,6 @@ func _add_ammo_entry(turret: BlockData, ammo: AmmoType) -> void:
 		header.add_child(cost_lbl)
 
 	_detail_container.add_child(header)
-
-	# --- Description (if set) ---
-	if ammo.description != "":
-		_add_text("  " + ammo.description, dim_text_color, 11)
 
 	# --- Damage stats ---
 	_add_stat("  Damage", str(ammo.damage), Color(1.0, 0.4, 0.4))

@@ -16,12 +16,6 @@ extends Resource
 # IDENTITY
 # =========================
 
-## Display name shown in the ammo selection UI
-@export var display_name: String = ""
-
-## Description shown in tooltips
-@export_multiline var description: String = ""
-
 ## Icon shown in the ammo selection UI (falls back to item icon)
 @export var icon: Texture2D
 

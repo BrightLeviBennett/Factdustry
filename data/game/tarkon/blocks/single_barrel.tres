@@ -1,22 +1,32 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://3u0me44fd1o6"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" path="res://textures/blocks/turrets/SingleBarrelBase.png" id="2"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_vt0v3"]
+[ext_resource type="Texture2D" uid="uid://dc1rf4ela0a6u" path="res://textures/blocks/turrets/SingleBarrelBase.png" id="2"]
+
+[sub_resource type="Resource" id="Resource_xjm3x"]
+script = ExtResource("1_vt0v3")
+item_id = &"mat_copper"
+projectile_color = Color(0.7273866, 0.29406038, 0, 1)
+metadata/_custom_type_script = "uid://mlvivi0chx0p"
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"single_barrel"
 display_name = "Single Barrel"
 description = "Basic projectile turret. Reliable but slow."
+icon = ExtResource("2")
 category = 4
 color = Color(0.9, 0.3, 0.3, 1)
 max_health = 180.0
-build_cost = { "copper": 15 }
+build_cost = {
+"copper": 15
+}
 build_time = 3.0
 requires_power = true
 power_consumption = 2.0
 attack_damage = 15.0
 attack_speed = 1.2
 attack_range = 5.0
+ammo_types = Array[Resource]([SubResource("Resource_xjm3x")])
 tags = PackedStringArray("turret", "defense")

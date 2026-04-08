@@ -166,6 +166,9 @@ func _build_3d_scene() -> void:
 	world_env.environment = env
 	add_child(world_env)
 
+	# --- Star field background ---
+	_build_starfield()
+
 	# --- Sun ---
 	_build_sun()
 
@@ -185,9 +188,13 @@ func _build_3d_scene() -> void:
 	planets_container.name = "Planets"
 	add_child(planets_container)
 
-	# Build each planet
+	# Build each planet — parents first so moons can find them.
 	for planet in Registry.planets_list:
-		_build_planet(planet)
+		if planet.parent_planet_id == &"":
+			_build_planet(planet)
+	for planet in Registry.planets_list:
+		if planet.parent_planet_id != &"":
+			_build_planet(planet)
 
 	# Draw orbit rings
 	_draw_orbit_rings()
@@ -226,12 +233,96 @@ func _build_sun() -> void:
 	add_child(sun_mesh)
 
 
+## Builds a star field — thousands of tiny billboard quads scattered on a
+## large sphere around the camera. Mindustry-style background flicker.
+func _build_starfield() -> void:
+	var STAR_COUNT := 1500
+	var STAR_RADIUS := 150.0  # Far enough away to feel infinite, inside camera.far
+
+	# Use a simple quad mesh — billboarded so each star always faces the camera.
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.6, 0.6)
+
+	# Generate a small radial-gradient texture so each billboard renders as a
+	# soft round dot instead of a flat square. 16x16 is plenty.
+	var img := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	var center := Vector2(7.5, 7.5)
+	for px in range(16):
+		for py in range(16):
+			var d: float = Vector2(px, py).distance_to(center) / 7.5
+			var a: float = clampf(1.0 - d, 0.0, 1.0)
+			# Smooth falloff so the edge feathers nicely
+			a = a * a
+			img.set_pixel(px, py, Color(1, 1, 1, a))
+	var star_tex := ImageTexture.create_from_image(img)
+
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	mat.billboard_keep_scale = true
+	mat.disable_receive_shadows = true
+	mat.albedo_color = Color(1, 1, 1, 1)
+	mat.albedo_texture = star_tex
+	mat.vertex_color_use_as_albedo = true
+	quad.material = mat
+
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.use_colors = true
+	multimesh.mesh = quad
+	multimesh.instance_count = STAR_COUNT
+
+	# Deterministic-ish random spread (different every run is fine here)
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+
+	for i in range(STAR_COUNT):
+		# Uniformly distributed point on a sphere
+		var u: float = rng.randf()
+		var v: float = rng.randf()
+		var theta: float = TAU * u
+		var phi: float = acos(2.0 * v - 1.0)
+		var x: float = STAR_RADIUS * sin(phi) * cos(theta)
+		var y: float = STAR_RADIUS * sin(phi) * sin(theta)
+		var z: float = STAR_RADIUS * cos(phi)
+
+		var t := Transform3D()
+		t.origin = Vector3(x, y, z)
+		# Random scale variation for star "size" diversity
+		var scale_jitter: float = rng.randf_range(0.4, 1.6)
+		t.basis = t.basis.scaled(Vector3.ONE * scale_jitter)
+		multimesh.set_instance_transform(i, t)
+
+		# Color variation: mostly white, occasional warm/cool tints, varying brightness.
+		var brightness: float = rng.randf_range(0.4, 1.0)
+		var tint: float = rng.randf()
+		var c: Color
+		if tint < 0.7:
+			c = Color(brightness, brightness, brightness, 1.0)            # white
+		elif tint < 0.85:
+			c = Color(brightness, brightness * 0.85, brightness * 0.6, 1.0)  # warm yellow
+		else:
+			c = Color(brightness * 0.7, brightness * 0.8, brightness, 1.0)   # cool blue
+		multimesh.set_instance_color(i, c)
+
+	var mm_inst := MultiMeshInstance3D.new()
+	mm_inst.name = "Starfield"
+	mm_inst.multimesh = multimesh
+	add_child(mm_inst)
+
+
 ## Builds one planet: mesh, atmosphere, click body, sector container.
 func _build_planet(planet: PlanetData) -> void:
 	var planet_node = Node3D.new()
 	planet_node.name = "Planet_" + str(planet.id)
 	planet_node.position = planet.get_orbit_position()
-	planets_container.add_child(planet_node)
+	# Moons: parent the node to their parent planet so the moon's local
+	# orbit_distance / orbit_angle become an offset from the parent.
+	if planet.parent_planet_id != &"" and planet_nodes.has(planet.parent_planet_id):
+		planet_nodes[planet.parent_planet_id].add_child(planet_node)
+	else:
+		planets_container.add_child(planet_node)
 	planet_nodes[planet.id] = planet_node
 
 	# --- Planet Sphere ---
@@ -974,6 +1065,10 @@ func _build_planet_tabs() -> void:
 	margin.add_child(planet_tabs_hbox)
 
 	for planet in Registry.planets_list:
+		# Hide moons (planets with a parent) from the tab list — they're
+		# selected by clicking them in 3D, not via a top-level tab.
+		if planet.parent_planet_id != &"":
+			continue
 		var btn = Button.new()
 		btn.custom_minimum_size = Vector2(120, 36)
 		btn.add_theme_font_size_override("font_size", 15)

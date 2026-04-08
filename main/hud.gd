@@ -1943,6 +1943,9 @@ func _get_blocks_for_category(cat: int) -> Array[BlockData]:
 	var result: Array[BlockData] = []
 	for block in Registry.blocks_list:
 		if block.category == cat:
+			# Hide debug-only / map-editor-only blocks from the in-game palette.
+			if block.id == &"power_source" or block.id == &"archive":
+				continue
 			# Only show blocks that are researched in the tech tree
 			if main.require_research and TechTree.nodes.has(block.id) and not TechTree.is_researched(block.id):
 				continue
