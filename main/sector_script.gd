@@ -291,7 +291,7 @@ const NAMED_COLORS := {
 	"yellow": Color.YELLOW, "orange": Color.ORANGE, "white": Color.WHITE,
 	"cyan": Color.CYAN, "magenta": Color.MAGENTA, "pink": Color.HOT_PINK,
 	"gray": Color.GRAY, "grey": Color.GRAY, "black": Color.WEB_GRAY, 
-	"brown": Color.SADDLE_BROWN
+	"brown": Color.SADDLE_BROWN, "purple": Color.DARK_ORCHID
 }
 
 

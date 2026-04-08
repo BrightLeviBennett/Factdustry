@@ -9,6 +9,7 @@ display_name = "Support Hover Fabricator"
 description = "Manufactures support hover drones."
 category = 6
 color = Color(0.4, 0.8, 0.6, 1)
+grid_size = Vector2i(3, 3)
 max_health = 280.0
 build_cost = { "copper": 100, "silicon": 30 }
 build_time = 4.0

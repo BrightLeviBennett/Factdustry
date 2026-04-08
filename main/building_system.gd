@@ -862,9 +862,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Ctrl+right-click is unit control on macOS (ctrl+click = right-click)
 			if event.ctrl_pressed:
 				return
-			# Skip right-click entirely when player has units selected
+			# Skip right-click entirely when the player is in unit mode
+			# with units selected (unit mode owns right-click for commands).
+			# Outside of unit mode, right-click goes to demolish even if
+			# units are still selected in the background.
 			var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-			if unit_mgr and unit_mgr.selected_units.size() > 0:
+			if unit_mgr and unit_mgr.unit_mode_active and unit_mgr.selected_units.size() > 0:
 				return
 			if event.pressed:
 				_drag_placing = false
