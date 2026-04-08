@@ -404,8 +404,8 @@ func _register_all_nodes() -> void:
 
 func _register_cores() -> void:
 	_add(&"core_shard",        "Core: Shard",        [],                  [], {}, Vector2(0, 0))
-	_add(&"core_fragment",     "Core: Fragment",     [&"core_shard"],     [], {&"mat_copper": 50}, Vector2(-2, 1))
-	_add(&"core_remanent",     "Core: Remanent",     [&"core_fragment"],     [], {&"mat_copper": 100, &"mat_silicon": 30}, Vector2(-2, 2))
+	_add(&"core_fragment",     "Core: Fragment",     [&"core_shard"],     [&"mat_steel"], {&"mat_copper": 50}, Vector2(-2, 1))
+	_add(&"core_remanent",     "Core: Remanent",     [&"core_fragment"],  [], {&"mat_copper": 100, &"mat_silicon": 30}, Vector2(-2, 2))
 	_add(&"core_bastion",      "Core: Bastion",      [&"core_remanent"],  [], {&"mat_copper": 200, &"mat_graphite": 40, &"mat_steel": 20}, Vector2(-2, 3))
 	_add(&"core_fortress",     "Core: Fortress",     [&"core_bastion"],   [], {&"mat_copper": 350, &"mat_steel": 80}, Vector2(-2, 4))
 	_add(&"core_crucible",     "Core: Crucible",     [&"core_fortress"],  [], {&"mat_copper": 500, &"mat_steel": 150, &"mat_brass": 30}, Vector2(-2, 5))
@@ -414,8 +414,8 @@ func _register_cores() -> void:
 	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 2000, &"mat_steel": 600, &"mat_bronze": 100, &"mat_aluminum": 50}, Vector2(-2, 8))
 	# Archive line
 	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-waterfront_ruins"], {&"mat_copper": 180}, Vector2(-3, 1))
-	_add(&"data_cable",        "Data Cable",         [&"archive_scanner"], [], {&"mat_copper": 40}, Vector2(-4, 1))
-	_add(&"archive_decoder",   "Archive Decoder",    [&"archive_scanner"], [], {&"mat_copper": 240}, Vector2(-3, 2))
+	_add(&"data_cable",        "Data Cable",         [&"archive_scanner"],[], {&"mat_copper": 40}, Vector2(-4, 1))
+	_add(&"archive_decoder",   "Archive Decoder",    [&"archive_scanner"],[], {&"mat_copper": 240}, Vector2(-3, 2))
 
 func _register_campaign() -> void:
 	_add(&"starting_grounds",    "Starting Grounds",    [&"core_shard"],          [], {}, Vector2(2, 1), true)
@@ -529,7 +529,7 @@ func _register_materials() -> void:
 	_add(&"mat_propane",        "Propane",         [&"mat_petroleum"],                   [], {}, Vector2(28, 5), true)
 
 func _register_production() -> void:
-	_add(&"carbon_dioxide_concentrator", "Carbon Dioxide Concentrator", [&"core_shard"],                       [&"mat_graphite"], {&"mat_copper": 40, &"mat_graphite": 15}, Vector2(-6, 1))
+	_add(&"carbon_dioxide_concentrator", "Carbon Dioxide Concentrator", [&"core_shard"],                       [&"Not in campaign temporarily"], {&"mat_copper": 40, &"mat_graphite": 15}, Vector2(-6, 1))
 	_add(&"silicon_mixer",               "Silicon Mixer",               [&"carbon_dioxide_concentrator"],      [], {&"mat_copper": 100, &"mat_silicon": 35, &"mat_graphite": 20}, Vector2(-6, 2))
 	_add(&"steel_furnace",               "Steel Furnace",               [&"silicon_mixer"],                    [], {&"mat_copper": 180, &"mat_steel": 60, &"mat_graphite": 40}, Vector2(-7, 3))
 	_add(&"graphite_electrolyzer",       "Graphite Electrolyzer",       [&"silicon_mixer"],                    [], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_graphite": 30}, Vector2(-6, 3))
