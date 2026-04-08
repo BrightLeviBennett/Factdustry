@@ -145,3 +145,7 @@ renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
 environment/defaults/default_clear_color=Color(0, 0, 0, 1)
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/manifest_builder/plugin.cfg")

@@ -322,9 +322,15 @@ func _has_rot_port(pos: Vector2i, dir_idx: int) -> bool:
 
 	var rot: int = main.building_rotation.get(pos, 0)
 
-	# Shafts transmit power in both directions regardless of facing
+	# Shafts only transmit along their rotation axis (front and back).
+	# rotation 0/2 = horizontal axis → ports on right (0) and left (2)
+	# rotation 1/3 = vertical axis   → ports on down (1) and up (3)
 	if data.tags.has("shaft"):
-		return true
+		var axis_horizontal: bool = (rot % 2) == 0
+		if axis_horizontal:
+			return dir_idx == 0 or dir_idx == 2
+		else:
+			return dir_idx == 1 or dir_idx == 3
 
 	# Gearboxes connect all 4 directions (input from back, output to front+sides)
 	if data.tags.has("gearbox"):
