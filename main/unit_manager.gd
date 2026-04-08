@@ -37,6 +37,12 @@ const MIN_SEPARATION_DIST := 0.5
 
 # --- SELECTION ---
 var selected_units: Array[Node2D] = []
+
+## True when the player is in "unit mode" (toggled with the unit_mode key).
+## While true, left-click box-select and right-click unit commands are active,
+## and selection rings are drawn. While false, those inputs are ignored and
+## selection rings are hidden, but previously-selected units keep their orders.
+var unit_mode_active := false
 ## True when unit_manager handled a right-click this frame (prevents demolish)
 var handled_right_click := false
 ## True when we consumed the right-click press (so we also consume release)
@@ -139,65 +145,48 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 
-	# --- LEFT-CLICK: deselect all units (skip when directly controlling) ---
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-		if controlled_entity == null and selected_units.size() > 0:
-			_deselect_all()
+	# --- Toggle unit mode (U key) ---
+	if event.is_action_pressed("unit_mode"):
+		unit_mode_active = not unit_mode_active
+		# If any box-select drag was in progress, cancel it when leaving unit mode.
+		if not unit_mode_active and _box_selecting:
+			_box_selecting = false
+		queue_redraw()
+		# Force every selected player unit to redraw so its selection ring updates.
+		for u in selected_units:
+			if is_instance_valid(u):
+				u.queue_redraw()
+		get_viewport().set_input_as_handled()
+		return
 
-	# --- RIGHT-CLICK: unit selection & move commands ---
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
-		var mouse_world := get_global_mouse_position()
+	# --- LEFT-CLICK: box-select drag (only in unit mode, no building queued) ---
+	if unit_mode_active and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		var lm_world := get_global_mouse_position()
 		if event.pressed:
-			_consumed_right_press = false
-			if event.shift_pressed:
-				# Shift + right-click: start box select
+			if controlled_entity == null and main.selected_building == &"":
 				_box_selecting = true
-				_box_start = mouse_world
-				_box_end = mouse_world
-				_consumed_right_press = true
-				handled_right_click = true
-				get_viewport().set_input_as_handled()
-				return
-
-			# Plain right-click: check if clicking on a player unit
-			#var clicked_unit := _get_player_unit_at(mouse_world)
-			#if clicked_unit:
-				## Toggle selection
-				#clicked_unit.is_selected = not clicked_unit.is_selected
-				#if clicked_unit.is_selected:
-					#if not selected_units.has(clicked_unit):
-						#selected_units.append(clicked_unit)
-				#else:
-					#selected_units.erase(clicked_unit)
-				#_consumed_right_press = true
-				#handled_right_click = true
-				#get_viewport().set_input_as_handled()
-				#return
-
-			# Right-click NOT on unit — issue move command if units are selected
-			if selected_units.size() > 0:
-				_command_move(mouse_world)
-				_consumed_right_press = true
-				handled_right_click = true
+				_box_start = lm_world
+				_box_end = lm_world
 				get_viewport().set_input_as_handled()
 				return
 		else:
-			# Right-click released — consume if we consumed the press
 			if _box_selecting:
 				_box_selecting = false
 				_finish_box_select()
-				_consumed_right_press = false
-				handled_right_click = true
 				get_viewport().set_input_as_handled()
 				return
-			#if _consumed_right_press:
-				#_consumed_right_press = false
-				#handled_right_click = true
-				#get_viewport().set_input_as_handled()
-				#return
 
-	if event is InputEventMouseMotion and _box_selecting:
+	if unit_mode_active and event is InputEventMouseMotion and _box_selecting:
 		_box_end = get_global_mouse_position()
+
+	# --- RIGHT-CLICK: command selected units (move / attack) — unit mode only ---
+	if unit_mode_active and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		if selected_units.size() > 0:
+			_issue_right_click_command(get_global_mouse_position())
+			_consumed_right_press = true
+			handled_right_click = true
+			get_viewport().set_input_as_handled()
+			return
 
 
 func _get_player_unit_at(world_pos: Vector2) -> Node2D:
@@ -220,11 +209,14 @@ func _finish_box_select() -> void:
 		Vector2(min(_box_start.x, _box_end.x), min(_box_start.y, _box_end.y)),
 		Vector2(abs(_box_end.x - _box_start.x), abs(_box_end.y - _box_start.y))
 	)
-	# Ignore tiny boxes (accidental clicks) — keep existing selection
-	# but issue a move command if units are selected (shift+right-click on ground)
+	# Tiny drag → treat as a single click: select the unit under the cursor
+	# (replacing the current selection), or deselect all if nothing was clicked.
 	if rect.size.x < 8.0 and rect.size.y < 8.0:
-		if selected_units.size() > 0:
-			_command_move(_box_end)
+		var clicked := _get_player_unit_at(_box_end)
+		_deselect_all()
+		if clicked:
+			clicked.is_selected = true
+			selected_units.append(clicked)
 		return
 	# Deselect all first
 	for unit in selected_units:
@@ -240,6 +232,75 @@ func _finish_box_select() -> void:
 			selected_units.append(unit)
 
 
+## Dispatches a right-click command from the user based on what's under the cursor:
+##   - enemy unit  → command selected units to attack it
+##   - ferox building → command selected units to attack it
+##   - empty ground → command selected units to move there
+func _issue_right_click_command(world_pos: Vector2) -> void:
+	if selected_units.is_empty():
+		return
+	# 1. Enemy unit under cursor?
+	var clicked_enemy: Node2D = null
+	var best_dist := INF
+	for e in enemies:
+		if not is_instance_valid(e) or e.is_dead:
+			continue
+		if e.team == UnitData.Team.PLAYER:
+			continue
+		var d: float = world_pos.distance_to(e.position)
+		var r: float = maxf(e.unit_size * 2.0, 16.0)
+		if d <= r and d < best_dist:
+			best_dist = d
+			clicked_enemy = e
+	if clicked_enemy != null:
+		_command_attack_unit(clicked_enemy)
+		return
+
+	# 2. Ferox building under cursor?
+	var grid_pos: Vector2i = main.world_to_grid(world_pos)
+	if main.placed_buildings.has(grid_pos):
+		var faction: int = main.get_building_faction(grid_pos)
+		if faction == main.Faction.FEROX:
+			var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+			_command_attack_building(anchor)
+			return
+
+	# 3. Otherwise move there
+	_command_move(world_pos)
+
+
+## Assigns an enemy unit as the manual target for all selected units.
+func _command_attack_unit(enemy: Node2D) -> void:
+	for unit in selected_units:
+		if not is_instance_valid(unit) or unit.is_dead:
+			continue
+		if unit == controlled_entity:
+			continue
+		unit.manual_target_unit = enemy
+		unit.manual_target_building = null
+		unit.move_target = null
+		unit.target_unit = enemy
+		unit.target_building = null
+		unit.path = PackedVector2Array()
+		unit.path_index = 0
+
+
+## Assigns a building as the manual target for all selected units.
+func _command_attack_building(bldg_anchor: Vector2i) -> void:
+	for unit in selected_units:
+		if not is_instance_valid(unit) or unit.is_dead:
+			continue
+		if unit == controlled_entity:
+			continue
+		unit.manual_target_building = bldg_anchor
+		unit.manual_target_unit = null
+		unit.move_target = null
+		unit.target_building = bldg_anchor
+		unit.target_unit = null
+		unit.path = PackedVector2Array()
+		unit.path_index = 0
+
+
 func _command_move(world_pos: Vector2) -> void:
 	# Gather living selected units (skip the controlled unit — it uses WASD)
 	var living: Array[Node2D] = []
@@ -247,6 +308,9 @@ func _command_move(world_pos: Vector2) -> void:
 		if is_instance_valid(unit) and not unit.is_dead:
 			if unit == controlled_entity:
 				continue
+			# Clear any previous manual target — this is a plain move order.
+			unit.manual_target_unit = null
+			unit.manual_target_building = null
 			living.append(unit)
 
 	if living.size() == 0:
@@ -1151,9 +1215,66 @@ func assign_path_to_position(unit: Node2D, world_pos: Vector2) -> void:
 		var world_path := PackedVector2Array()
 		for point in id_path:
 			world_path.append(point + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0))
+		# Smooth the path — skip waypoints that have line-of-sight to a later one.
+		world_path = _smooth_path(world_path, grid)
 		unit.set_path(world_path, null)
 	else:
 		unit.set_path(PackedVector2Array(), null)
+
+
+## Path smoothing via straight-line visibility. Walks the path and, from each
+## waypoint, looks ahead for the furthest waypoint that has clear line-of-sight
+## (no solid cell on the segment between them). Returns a compacted path with
+## fewer zigzags. This is purely visual/quality-of-life — it doesn't change
+## how A* computes the path, just removes redundant intermediate points.
+func _smooth_path(path: PackedVector2Array, grid: AStarGrid2D) -> PackedVector2Array:
+	if path.size() <= 2:
+		return path
+	var smoothed := PackedVector2Array()
+	smoothed.append(path[0])
+	var i := 0
+	while i < path.size() - 1:
+		# Find the furthest j from i that still has clear LOS from path[i].
+		var j := path.size() - 1
+		while j > i + 1:
+			if _has_line_of_sight(path[i], path[j], grid):
+				break
+			j -= 1
+		smoothed.append(path[j])
+		i = j
+	return smoothed
+
+
+## Grid-based line-of-sight check (Bresenham-ish): walks the grid cells under
+## the segment from a to b and returns false if any of them is solid.
+func _has_line_of_sight(a: Vector2, b: Vector2, grid: AStarGrid2D) -> bool:
+	var gs: float = main.GRID_SIZE
+	var ax: int = int(a.x / gs)
+	var ay: int = int(a.y / gs)
+	var bx: int = int(b.x / gs)
+	var by: int = int(b.y / gs)
+	var dx: int = absi(bx - ax)
+	var dy: int = absi(by - ay)
+	var sx: int = 1 if ax < bx else -1
+	var sy: int = 1 if ay < by else -1
+	var err: int = dx - dy
+	var x: int = ax
+	var y: int = ay
+	while true:
+		var p := Vector2i(x, y)
+		if p.x >= 0 and p.x < main.GRID_WIDTH and p.y >= 0 and p.y < main.GRID_HEIGHT:
+			if grid.is_point_solid(p):
+				return false
+		if x == bx and y == by:
+			break
+		var e2: int = err * 2
+		if e2 > -dy:
+			err -= dy
+			x += sx
+		if e2 < dx:
+			err += dx
+			y += sy
+	return true
 
 
 # =========================
@@ -1391,7 +1512,8 @@ func _recompute_crawler_wall_passability() -> void:
 # =========================
 
 func _draw() -> void:
-	if _box_selecting:
+	# Box-select rectangle — only in unit mode
+	if unit_mode_active and _box_selecting:
 		var rect := Rect2(
 			Vector2(min(_box_start.x, _box_end.x), min(_box_start.y, _box_end.y)),
 			Vector2(abs(_box_end.x - _box_start.x), abs(_box_end.y - _box_start.y))
@@ -1407,8 +1529,9 @@ func _draw() -> void:
 		draw_arc(center, ring_radius, 0, TAU, 24, Color(0.3, 0.8, 1.0, 0.8), 2.0)
 		draw_arc(center, ring_radius + 1.5, 0, TAU, 24, Color(0.3, 0.8, 1.0, 0.3), 1.0)
 
-	# Draw move-target diamonds and path lines for selected units
-	_draw_move_targets()
+	# Draw move-target diamonds and path lines for selected units — unit mode only
+	if unit_mode_active:
+		_draw_move_targets()
 
 
 ## Draws a small diamond at each selected unit's move target and a line from

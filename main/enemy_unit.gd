@@ -35,6 +35,13 @@ var target_unit: Variant = null  # Node2D — enemy unit targeted by player unit
 # When a player unit is given a move command, it moves there instead of idling.
 var move_target: Variant = null  # Vector2 or null
 
+# --- MANUAL COMBAT ORDERS (player right-click) ---
+# When set, the unit chases & attacks this target until it's destroyed.
+# These persist across re-pathing, while target_unit / target_building can be
+# reassigned by auto-combat for opportunistic fire.
+var manual_target_unit: Variant = null       # Node2D or null
+var manual_target_building: Variant = null   # Vector2i or null
+
 # --- RUNTIME TEAM ---
 # Set by UnitManager at spawn time (overrides team which defaults to PLAYER in .tres)
 var team: int = UnitData.Team.ENEMY
@@ -88,17 +95,132 @@ func _process(delta: float) -> void:
 	if main.world_paused:
 		return
 
-	if path.size() > 0 and path_index < path.size():
-		_follow_path(delta)
-	elif _is_rebuilder():
-		_try_rebuild(delta)
-	elif data and team == UnitData.Team.PLAYER:
-		_try_player_combat(delta)
+	# PLAYER UNIT: allow shooting while moving. Opportunistic fire always ticks,
+	# and manual targets (right-click orders) are pursued persistently.
+	if data and team == UnitData.Team.PLAYER and not is_controlled:
+		_player_update(delta)
 	else:
-		_try_attack(delta)
+		if path.size() > 0 and path_index < path.size():
+			_follow_path(delta)
+		elif _is_rebuilder():
+			_try_rebuild(delta)
+		else:
+			_try_attack(delta)
 
 	_check_stuck(delta)
 	queue_redraw()
+
+
+## Player-unit combined movement + combat tick.
+## - Manual targets (right-click) are pursued until destroyed.
+## - Otherwise auto-combat finds opportunistic targets.
+## - Opportunistic firing runs EVERY frame so units can shoot while moving.
+func _player_update(delta: float) -> void:
+	# Validate manual targets (they might be destroyed meanwhile)
+	if manual_target_unit != null:
+		if not is_instance_valid(manual_target_unit) or manual_target_unit.is_dead:
+			manual_target_unit = null
+	if manual_target_building != null:
+		if not main.placed_buildings.has(manual_target_building):
+			manual_target_building = null
+
+	# Decrement the shared attack timer so both path-following and auto-combat can fire.
+	attack_timer = maxf(attack_timer - delta, -1.0)
+
+	# 1. Pursue a manual target if we have one
+	if manual_target_unit != null or manual_target_building != null:
+		_pursue_manual_target(delta)
+	# 2. Otherwise, if the player issued a pure move order, just travel
+	elif move_target != null and path.size() > 0 and path_index < path.size():
+		_follow_path(delta)
+	# 3. Otherwise, fall through to auto-combat
+	else:
+		# Clear a completed move_target so auto-combat can re-engage
+		if move_target != null and (path.size() == 0 or path_index >= path.size()):
+			move_target = null
+		_try_player_combat(delta)
+
+	# Always attempt an opportunistic shot at any in-range hostile.
+	_opportunistic_fire()
+
+
+## Pursues whatever manual target is set: path toward it, stop in range, attack.
+func _pursue_manual_target(delta: float) -> void:
+	var target_pos: Vector2
+	var atk_range: float = data.attack_range if data else 32.0
+	var effective_range: float = atk_range
+
+	if manual_target_unit != null:
+		target_pos = manual_target_unit.position
+		target_unit = manual_target_unit
+		target_building = null
+	else:
+		target_pos = main.grid_to_world(manual_target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		target_building = manual_target_building
+		target_unit = null
+		effective_range = maxf(atk_range, main.GRID_SIZE * 1.5)
+
+	var dist := position.distance_to(target_pos)
+	if dist > effective_range:
+		# Need to move closer. Re-request a path occasionally if we have none.
+		if path.size() == 0 or path_index >= path.size():
+			unit_manager.request_path_to_position_async_with_target(self, target_pos, manual_target_building)
+		else:
+			_follow_path(delta)
+		return
+
+	# In range — stop moving and attack.
+	if path.size() > 0:
+		path = PackedVector2Array()
+		path_index = 0
+
+	if attack_timer > 0:
+		return
+	attack_timer = attack_cooldown
+	if manual_target_unit != null:
+		_attack_enemy_unit()
+	elif manual_target_building != null:
+		_attack_ferox_building()
+
+
+## Scans for any in-range hostile and fires a shot if the attack timer is ready.
+## Does NOT move or change path. Runs every frame for all player units.
+func _opportunistic_fire() -> void:
+	if attack_timer > 0:
+		return
+	var atk_range: float = data.attack_range if data else 0.0
+	if atk_range <= 0.0:
+		return
+	var range_sq: float = atk_range * atk_range
+
+	# Prefer the currently-designated target if still valid and in range.
+	if manual_target_unit != null and is_instance_valid(manual_target_unit) and not manual_target_unit.is_dead:
+		if position.distance_squared_to(manual_target_unit.position) <= range_sq:
+			attack_timer = attack_cooldown
+			target_unit = manual_target_unit
+			_attack_enemy_unit()
+			return
+
+	# Any nearby enemy unit
+	for e in unit_manager.enemies:
+		if not is_instance_valid(e) or e.is_dead:
+			continue
+		if e.team == UnitData.Team.PLAYER:
+			continue
+		if position.distance_squared_to(e.position) <= range_sq:
+			attack_timer = attack_cooldown
+			target_unit = e
+			_attack_enemy_unit()
+			return
+
+	# Then any nearby FEROX building (opportunistic)
+	if manual_target_building != null and main.placed_buildings.has(manual_target_building):
+		var bw: Vector2 = main.grid_to_world(manual_target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		if position.distance_squared_to(bw) <= range_sq:
+			attack_timer = attack_cooldown
+			target_building = manual_target_building
+			_attack_ferox_building()
+			return
 
 
 func _follow_path(delta: float) -> void:
@@ -194,16 +316,9 @@ func _try_attack(delta: float) -> void:
 # =========================
 
 ## Player units auto-target nearby FEROX enemies and buildings when idle.
-func _try_player_combat(delta: float) -> void:
-	# Don't auto-fight if player is directly controlling this unit
-	if is_controlled:
-		return
-	# Don't auto-fight if the player gave a move command
-	if move_target != null:
-		return
-
-	attack_timer -= delta
-
+## NOTE: attack_timer is ticked by _player_update now (once per frame), so we
+## don't decrement it again here.
+func _try_player_combat(_delta: float) -> void:
 	# Validate current targets
 	if target_unit != null:
 		if not is_instance_valid(target_unit) or target_unit.is_dead:
@@ -239,17 +354,18 @@ func _try_player_combat(delta: float) -> void:
 	# Not in range — pathfind toward target
 	if dist > effective_range:
 		if path.size() == 0 or path_index >= path.size():
-			# Use async path request — result arrives next frame
-			# Pass target_building so it's preserved when the path result is applied
 			unit_manager.request_path_to_position_async_with_target(self, target_pos, target_building)
+		else:
+			_follow_path(_delta)
 		return
 
-	# In range — attack!
+	# In range — stop moving and fire
+	if path.size() > 0:
+		path = PackedVector2Array()
+		path_index = 0
 	if attack_timer > 0:
 		return
-
 	attack_timer = attack_cooldown
-
 	if target_unit != null:
 		_attack_enemy_unit()
 	elif target_building != null:
@@ -670,6 +786,9 @@ func _draw_health_bar() -> void:
 
 func _draw_selection_ring() -> void:
 	if not is_selected:
+		return
+	# Only draw the selection ring while the player is in unit mode.
+	if unit_manager and "unit_mode_active" in unit_manager and not unit_manager.unit_mode_active:
 		return
 	var ring_radius := unit_size + 4.0
 	draw_arc(Vector2.ZERO, ring_radius, 0, TAU, 24, Color(1.0, 0.84, 0.0, 0.9), 2.0)

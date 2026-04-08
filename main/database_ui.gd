@@ -609,6 +609,18 @@ func _show_block_details(block: BlockData) -> void:
 		if block.is_aoe:
 			_add_stat("AoE Radius", "%s px" % str(block.aoe_radius), Color(1.0, 0.6, 0.3))
 
+		# --- Ammo entries (Mindustry-style listing of every accepted ammo type) ---
+		if block.ammo_types.size() > 0:
+			_add_separator()
+			_add_section("Ammo")
+			for ammo_res in block.ammo_types:
+				if ammo_res == null or not (ammo_res is AmmoType):
+					continue
+				_add_ammo_entry(block, ammo_res as AmmoType)
+		else:
+			_add_separator()
+			_add_text("Requires ammo to fire — none configured.", Color(1.0, 0.5, 0.4), 12)
+
 	if block.is_transport():
 		_add_separator()
 		_add_section("Transport")
@@ -909,6 +921,125 @@ func _add_stat_bar(label_text: String, value: float, max_value: float, bar_color
 	bar_container.add_child(bar_fill)
 
 	_detail_container.add_child(hbox)
+
+
+## Renders one AmmoType under a turret's database entry — Mindustry-style:
+## item icon + name as the header, then a card listing damage / reload / range
+## bonus / pellets / lifetime / pierce / homing / knockback / splash / status /
+## targeting filters, with anything left at default values omitted.
+func _add_ammo_entry(turret: BlockData, ammo: AmmoType) -> void:
+	# --- Header: item icon + ammo display name ---
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 8)
+
+	var item = Registry.get_item_or_fluid(ammo.item_id)
+	var icon_tex: Texture2D = null
+	if ammo.icon:
+		icon_tex = ammo.icon
+	elif item and item.icon:
+		icon_tex = item.icon
+
+	if icon_tex:
+		var tex_rect := TextureRect.new()
+		tex_rect.texture = icon_tex
+		tex_rect.custom_minimum_size = Vector2(20, 20)
+		tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		header.add_child(tex_rect)
+	else:
+		var sw := ColorRect.new()
+		sw.custom_minimum_size = Vector2(20, 20)
+		sw.color = ammo.projectile_color
+		header.add_child(sw)
+
+	var name_lbl := Label.new()
+	var ammo_name: String = ammo.display_name
+	if ammo_name == "":
+		ammo_name = item.display_name if item else String(ammo.item_id)
+	name_lbl.text = ammo_name
+	name_lbl.add_theme_font_size_override("font_size", 14)
+	name_lbl.add_theme_color_override("font_color", text_color)
+	header.add_child(name_lbl)
+
+	# Cost stub on the right ("x N")
+	if ammo.amount_per_shot > 1:
+		var cost_lbl := Label.new()
+		cost_lbl.text = "× %d" % ammo.amount_per_shot
+		cost_lbl.add_theme_font_size_override("font_size", 13)
+		cost_lbl.add_theme_color_override("font_color", dim_text_color)
+		header.add_child(cost_lbl)
+
+	_detail_container.add_child(header)
+
+	# --- Description (if set) ---
+	if ammo.description != "":
+		_add_text("  " + ammo.description, dim_text_color, 11)
+
+	# --- Damage stats ---
+	_add_stat("  Damage", str(ammo.damage), Color(1.0, 0.4, 0.4))
+	if ammo.building_damage_mult != 1.0:
+		_add_stat("  vs Buildings", "×%.2f" % ammo.building_damage_mult, Color(1.0, 0.7, 0.4))
+	if ammo.unit_damage_mult != 1.0:
+		_add_stat("  vs Units", "×%.2f" % ammo.unit_damage_mult, Color(1.0, 0.7, 0.4))
+	if ammo.pierce_armor > 0.0:
+		_add_stat("  Armor Pierce", str(ammo.pierce_armor), Color(0.9, 0.6, 0.9))
+	if ammo.pierce_count > 0:
+		_add_stat("  Pierces", "%d targets" % ammo.pierce_count, Color(0.9, 0.6, 0.9))
+
+	# --- Reload / fire rate ---
+	var effective_reload: float = turret.attack_speed * ammo.reload_multiplier
+	if ammo.reload_multiplier != 1.0:
+		_add_stat("  Reload", "%.2fs (×%.2f)" % [effective_reload, ammo.reload_multiplier], Color(1.0, 0.8, 0.3))
+	else:
+		_add_stat("  Reload", "%.2fs" % effective_reload, Color(1.0, 0.8, 0.3))
+	if ammo.range_bonus != 0.0:
+		var effective_range: float = turret.attack_range + ammo.range_bonus
+		_add_stat("  Range", "%.0f (+%.0f)" % [effective_range, ammo.range_bonus], Color(0.4, 0.7, 1.0))
+	if ammo.projectiles_per_shot > 1:
+		_add_stat("  Pellets", "%d /shot" % ammo.projectiles_per_shot, Color(0.7, 0.8, 1.0))
+	if ammo.inaccuracy > 0.0:
+		_add_stat("  Inaccuracy", "%.1f°" % ammo.inaccuracy, Color(0.7, 0.7, 0.8))
+
+	# --- Ballistics ---
+	_add_stat("  Speed", "%.0f px/s" % ammo.projectile_speed, Color(0.6, 0.9, 0.7))
+	if ammo.projectile_lifetime > 0.0 and ammo.projectile_lifetime != 4.0:
+		_add_stat("  Lifetime", "%.1fs" % ammo.projectile_lifetime, dim_text_color)
+	if ammo.homing > 0.0:
+		_add_stat("  Homing", "%.0f%%" % (ammo.homing * 100.0), Color(1.0, 0.7, 0.9))
+	if ammo.knockback > 0.0:
+		_add_stat("  Knockback", "%.0f px" % ammo.knockback, Color(0.9, 0.8, 0.5))
+
+	# --- Splash ---
+	if ammo.is_splash and ammo.splash_radius > 0.0:
+		_add_stat("  Splash Radius", "%.0f px" % ammo.splash_radius, Color(1.0, 0.6, 0.3))
+		if ammo.splash_damage_mult != 1.0:
+			_add_stat("  Splash Damage", "×%.2f" % ammo.splash_damage_mult, Color(1.0, 0.6, 0.3))
+
+	# --- DoT / status ---
+	if ammo.burn_damage > 0.0:
+		_add_stat("  Burn", "%.0f dmg/s × %.1fs" % [ammo.burn_damage, ammo.burn_duration], Color(1.0, 0.5, 0.2))
+	if ammo.status_effect != null:
+		var status_name: String = "applied"
+		if "display_name" in ammo.status_effect and ammo.status_effect.display_name != "":
+			status_name = ammo.status_effect.display_name
+		var dur_suffix: String = " (%.1fs)" % ammo.status_duration if ammo.status_duration > 0.0 else ""
+		_add_stat("  Status", status_name + dur_suffix, Color(0.9, 0.5, 1.0))
+
+	# --- Targeting filters ---
+	if not ammo.collides_air or not ammo.collides_ground:
+		var filt: String = ""
+		if ammo.collides_air and not ammo.collides_ground:
+			filt = "Air only"
+		elif ammo.collides_ground and not ammo.collides_air:
+			filt = "Ground only"
+		else:
+			filt = "Cannot hit anything!"
+		_add_stat("  Targets", filt, Color(0.7, 0.9, 1.0))
+
+	# Spacer between ammo entries
+	var spacer := Control.new()
+	spacer.custom_minimum_size = Vector2(0, 6)
+	_detail_container.add_child(spacer)
 
 
 func _add_modifier_stat(label_text: String, modifier: float) -> void:

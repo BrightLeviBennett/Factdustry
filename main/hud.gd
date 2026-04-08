@@ -267,7 +267,9 @@ func _process(delta: float) -> void:
 		_last_cost_building = &""
 
 	# Show unit mode panel when shift is held
-	unit_mode_panel.visible = Input.is_action_pressed("unit_mode")
+	# Unit mode panel — visible whenever the UnitManager is in unit mode.
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	unit_mode_panel.visible = unit_mgr != null and "unit_mode_active" in unit_mgr and unit_mgr.unit_mode_active
 
 	# Update portrait UI
 	_update_portrait_panel()

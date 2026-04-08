@@ -267,9 +267,26 @@ func _update_turrets(delta: float) -> void:
 
 		# --- Ammo check: if turret has ammo_types, it needs resources to fire ---
 		var fire_damage: float = data.attack_damage
-		var fire_speed_mult: float = 1.0
+		var fire_reload_mult: float = 1.0
 		var fire_color: Color = data.color.lightened(0.3)
+		var fire_speed: float = default_projectile_speed
+		var fire_aoe: bool = data.is_aoe
+		var fire_aoe_radius: float = data.aoe_radius
+		var fire_lifetime: float = 2.0
+		var fire_radius: float = 4.0
+		var fire_pierce: int = 0
+		var fire_homing: float = 0.0
+		var fire_knockback: float = 0.0
+		var fire_inaccuracy: float = 0.0
+		var fire_pellets: int = 1
+		var fire_range_bonus: float = 0.0
 		var fire_status: Resource = null
+		var fire_trail_color: Color = fire_color
+		var fire_collides_air: bool = true
+		var fire_collides_ground: bool = true
+		var fire_bldg_mult: float = 1.0
+		var fire_unit_mult: float = 1.0
+		var fire_splash_mult: float = 1.0
 
 		if data.ammo_types.size() > 0:
 			var _logistics = get_node_or_null("/root/Main/LogisticsSystem")
@@ -279,57 +296,110 @@ func _update_turrets(delta: float) -> void:
 				if ammo == null or not (ammo is AmmoType):
 					continue
 				var ammo_data: AmmoType = ammo as AmmoType
-				# Check if turret has this ammo in its storage
 				if _logistics and _logistics.has_method("get_stored_item_count"):
 					var stored: int = _logistics.get_stored_item_count(anchor, ammo_data.item_id)
-					if stored > 0:
-						_logistics.remove_from_storage(anchor, ammo_data.item_id, 1)
+					var amt: int = maxi(ammo_data.amount_per_shot, 1)
+					if stored >= amt:
+						_logistics.remove_from_storage(anchor, ammo_data.item_id, amt)
 						fire_damage = ammo_data.damage
-						fire_speed_mult = ammo_data.speed_multiplier
+						fire_reload_mult = ammo_data.reload_multiplier
 						fire_color = ammo_data.projectile_color
 						fire_status = ammo_data.status_effect
+						fire_speed = ammo_data.projectile_speed
+						fire_lifetime = ammo_data.projectile_lifetime
+						fire_radius = ammo_data.projectile_radius
+						fire_pierce = ammo_data.pierce_count
+						fire_homing = ammo_data.homing
+						fire_knockback = ammo_data.knockback
+						fire_inaccuracy = ammo_data.inaccuracy
+						fire_pellets = ammo_data.projectiles_per_shot
+						fire_range_bonus = ammo_data.range_bonus
+						fire_trail_color = ammo_data.get_trail_color()
+						fire_collides_air = ammo_data.collides_air
+						fire_collides_ground = ammo_data.collides_ground
+						fire_bldg_mult = ammo_data.building_damage_mult
+						fire_unit_mult = ammo_data.unit_damage_mult
+						# Splash overrides the block-level AoE if the ammo opts in
+						if ammo_data.is_splash:
+							fire_aoe = true
+							fire_aoe_radius = ammo_data.splash_radius
+							fire_splash_mult = ammo_data.splash_damage_mult
 						ammo_found = true
 						break
 			if not ammo_found:
 				continue  # No ammo available — can't fire
+		# When the turret has NO ammo_types configured at all, it CANNOT fire.
+		# (Mindustry-style: every turret must be loaded.)
+		else:
+			continue
 
 		# Fire!
-		turret_cooldowns[grid_pos] = data.attack_speed * fire_speed_mult
+		turret_cooldowns[grid_pos] = data.attack_speed * fire_reload_mult
 
 		# Spawn projectile from the barrel TIP, not the building center
 		var barrel_length = main.GRID_SIZE * 0.4
 		var fire_pos = turret_world + Vector2.from_angle(turret_angles[grid_pos]) * barrel_length
 
-		var proj_color = fire_color
+		# Spawn one projectile per pellet, applying inaccuracy spread.
+		for pellet_i in range(maxi(fire_pellets, 1)):
+			var spread_rad: float = 0.0
+			if fire_inaccuracy > 0.0:
+				spread_rad = deg_to_rad(randf_range(-fire_inaccuracy, fire_inaccuracy))
+			var pellet_angle: float = (target_world - fire_pos).angle() + spread_rad
+			var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * (target_world - fire_pos).length()
 
-		if shoot_at_unit:
-			_spawn_projectile(
-				fire_pos,
-				nearest_unit,
-				nearest_unit.position,
-				"enemy",
-				default_projectile_speed,
-				fire_damage,
-				proj_color,
-				"turret",
-				data.is_aoe,
-				data.aoe_radius,
-				turret_faction,
-			)
-		else:
-			_spawn_projectile(
-				fire_pos,
-				nearest_bldg,
-				target_world,
-				"building",
-				default_projectile_speed,
-				fire_damage,
-				proj_color,
-				"turret",
-				data.is_aoe,
-				data.aoe_radius,
-				turret_faction,
-			)
+			if shoot_at_unit:
+				_spawn_projectile(
+					fire_pos,
+					nearest_unit,
+					nearest_unit.position if pellet_i == 0 and fire_pellets == 1 else pellet_target,
+					"enemy",
+					fire_speed,
+					fire_damage * fire_unit_mult,
+					fire_color,
+					"turret",
+					fire_aoe,
+					fire_aoe_radius,
+					turret_faction,
+					{
+						"lifetime": fire_lifetime,
+						"radius": fire_radius,
+						"pierce": fire_pierce,
+						"homing": fire_homing,
+						"knockback": fire_knockback,
+						"trail_color": fire_trail_color,
+						"collides_air": fire_collides_air,
+						"collides_ground": fire_collides_ground,
+						"status": fire_status,
+						"splash_mult": fire_splash_mult,
+					},
+				)
+			else:
+				_spawn_projectile(
+					fire_pos,
+					nearest_bldg,
+					target_world if pellet_i == 0 and fire_pellets == 1 else pellet_target,
+					"building",
+					fire_speed,
+					fire_damage * fire_bldg_mult,
+					fire_color,
+					"turret",
+					fire_aoe,
+					fire_aoe_radius,
+					turret_faction,
+					{
+						"lifetime": fire_lifetime,
+						"radius": fire_radius,
+						"pierce": fire_pierce,
+						"homing": fire_homing,
+						"knockback": fire_knockback,
+						"trail_color": fire_trail_color,
+						"collides_air": fire_collides_air,
+						"collides_ground": fire_collides_ground,
+						"status": fire_status,
+						"splash_mult": fire_splash_mult,
+					},
+				)
 
 
 # =========================
@@ -465,8 +535,9 @@ func _spawn_projectile(
 	aoe: bool,
 	aoe_radius: float,
 	source_faction: int = 0,  # 0 = LUMINA, 1 = FEROX
+	extras: Dictionary = {},
 ) -> void:
-	projectiles.append({
+	var proj: Dictionary = {
 		"pos": start_pos,
 		"target_ref": target_ref,
 		"target_pos": target_pos,
@@ -474,13 +545,26 @@ func _spawn_projectile(
 		"speed": speed,
 		"damage": damage,
 		"color": color,
-		"radius": 4.0,
+		"radius": float(extras.get("radius", 4.0)),
 		"source": source,
 		"aoe": aoe,
 		"aoe_radius": aoe_radius,
 		"source_faction": source_faction,
-		"trail": [],  # Array of past positions for trail effect
-	})
+		"trail": [],
+		# --- Mindustry-style extras (from AmmoType) ---
+		"lifetime": float(extras.get("lifetime", 4.0)),
+		"age": 0.0,
+		"pierce_remaining": int(extras.get("pierce", 0)),
+		"hit_targets": {},  # de-dupes pierce hits
+		"homing": float(extras.get("homing", 0.0)),
+		"knockback": float(extras.get("knockback", 0.0)),
+		"trail_color": extras.get("trail_color", color),
+		"collides_air": bool(extras.get("collides_air", true)),
+		"collides_ground": bool(extras.get("collides_ground", true)),
+		"status": extras.get("status", null),
+		"splash_mult": float(extras.get("splash_mult", 1.0)),
+	}
+	projectiles.append(proj)
 
 
 func _update_projectiles(delta: float) -> void:
@@ -490,8 +574,25 @@ func _update_projectiles(delta: float) -> void:
 	for i in range(projectiles.size()):
 		var proj = projectiles[i]
 
+		# Lifetime expiry — Mindustry-style despawn after N seconds.
+		proj["age"] = proj.get("age", 0.0) + delta
+		if proj["age"] >= proj.get("lifetime", 999.0):
+			to_remove.append(i)
+			continue
+
 		# Update target position if the target is still alive/valid
 		_update_target_pos(proj)
+
+		# Homing: bend the target_pos toward the live target each frame
+		var homing: float = proj.get("homing", 0.0)
+		if homing > 0.0 and proj["target_type"] == "enemy":
+			var enemy = proj.get("target_ref")
+			if is_instance_valid(enemy) and not enemy.is_dead:
+				var to_enemy: Vector2 = enemy.position - proj["pos"]
+				var current_dir: Vector2 = (proj["target_pos"] - proj["pos"]).normalized()
+				var desired: Vector2 = to_enemy.normalized()
+				var bent: Vector2 = current_dir.lerp(desired, clampf(homing, 0.0, 1.0)).normalized()
+				proj["target_pos"] = proj["pos"] + bent * to_enemy.length()
 
 		# Store trail position
 		proj["trail"].append(proj["pos"])
@@ -553,6 +654,10 @@ func _update_target_pos(proj: Dictionary) -> void:
 
 
 func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
+	var splash_mult: float = float(proj.get("splash_mult", 1.0))
+	var knockback: float = float(proj.get("knockback", 0.0))
+	var status: Resource = proj.get("status")
+
 	match proj["target_type"]:
 		"enemy":
 			if proj["aoe"] and unit_mgr:
@@ -563,23 +668,81 @@ func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 				else:
 					units_in_blast = unit_mgr.get_enemies_in_range(proj["target_pos"], proj["aoe_radius"])
 				for unit in units_in_blast:
-					if is_instance_valid(unit) and not unit.is_dead:
-						unit.take_damage(proj["damage"])
+					if not is_instance_valid(unit) or unit.is_dead:
+						continue
+					if not _can_hit_unit(proj, unit):
+						continue
+					unit.take_damage(proj["damage"] * splash_mult)
+					_apply_knockback(unit, proj["target_pos"], knockback)
+					_apply_status(unit, status)
 			else:
 				# Single target
 				var enemy = proj["target_ref"]
-				if is_instance_valid(enemy) and not enemy.is_dead:
+				if is_instance_valid(enemy) and not enemy.is_dead and _can_hit_unit(proj, enemy):
 					enemy.take_damage(proj["damage"])
+					_apply_knockback(enemy, proj["pos"], knockback)
+					_apply_status(enemy, status)
 
 		"building":
-			var grid_pos = proj["target_ref"] as Vector2i
-			if main.placed_buildings.has(grid_pos):
-				main.damage_building(grid_pos, proj["damage"])
+			# Splash on buildings: also damage buildings inside the radius
+			if proj["aoe"]:
+				var center: Vector2 = proj["target_pos"]
+				var r: float = proj["aoe_radius"]
+				var r_sq: float = r * r
+				var checked := {}
+				for grid_pos in main.placed_buildings:
+					var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+					if checked.has(anchor):
+						continue
+					checked[anchor] = true
+					var bw: Vector2 = main.grid_to_world(anchor) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+					if bw.distance_squared_to(center) <= r_sq:
+						main.damage_building(anchor, proj["damage"] * splash_mult)
+			else:
+				var grid_pos = proj["target_ref"] as Vector2i
+				if main.placed_buildings.has(grid_pos):
+					main.damage_building(grid_pos, proj["damage"])
 
 		"drone":
 			var drone = get_node_or_null("/root/Main/PlayerDrone")
 			if drone:
 				drone.take_damage(proj["damage"])
+
+
+## Returns true if this projectile is allowed to hit the given unit, based on
+## its collides_air / collides_ground filters.
+func _can_hit_unit(proj: Dictionary, unit: Node2D) -> bool:
+	var collides_air: bool = bool(proj.get("collides_air", true))
+	var collides_ground: bool = bool(proj.get("collides_ground", true))
+	if collides_air and collides_ground:
+		return true
+	# UnitData.MovementLayer: 0=ground, 1=crawler, 2=hover, 3=flying
+	var ml: int = unit.data.movement_layer if unit.data else 0
+	var is_air: bool = ml == 3
+	if is_air and not collides_air:
+		return false
+	if not is_air and not collides_ground:
+		return false
+	return true
+
+
+## Applies knockback to a unit by nudging its world position away from origin.
+func _apply_knockback(unit: Node2D, origin: Vector2, amount: float) -> void:
+	if amount <= 0.0:
+		return
+	var dir: Vector2 = (unit.position - origin)
+	if dir.length_squared() < 0.01:
+		return
+	unit.position += dir.normalized() * amount
+
+
+## Applies a status effect to a unit. Currently a no-op stub — units don't have
+## a status system yet. Wired up so AmmoType can pass effects through.
+func _apply_status(unit: Node2D, effect: Resource) -> void:
+	if effect == null or unit == null:
+		return
+	if unit.has_method("apply_status_effect"):
+		unit.apply_status_effect(effect)
 
 
 # =========================
