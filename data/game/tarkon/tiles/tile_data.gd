@@ -80,6 +80,15 @@ enum TileCategory {
 @export var is_liquid: bool = false
 ## What item ID this liquid source yields when pumped (empty = no extraction)
 @export var extracted_liquid: StringName = &""
+## Water depth for liquid tiles. 0 = not water / safe ground.
+##   1 = shallow (ankle-deep). Ground/crawler units can cross at half speed,
+##       accumulate submersion damage, take a blue tint. Pumps placeable.
+##       Any non-platform block is blocked from placement.
+##   2 = waist-deep. Same as depth 1 for units. Pumps placeable.
+##       Only platforms are placeable; other blocks require a platform on top.
+##   3 = deep water. Units still traverse (same rules) but no blocks of any
+##       kind can be placed directly; platforms are required first.
+@export_range(0, 3) var water_depth: int = 0
 
 
 # =========================

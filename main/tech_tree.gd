@@ -581,7 +581,7 @@ func _register_support() -> void:
 
 func _register_units() -> void:
 	_add(&"tank_fabricator",          "Tank Fabricator",          [&"core_shard"],                [], {&"mat_copper": 60}, Vector2(-25, 1))
-	_add(&"ant",                      "Ant",                      [&"tank_fabricator"],           [], {&"mat_copper": 100, &"mat_steel": 30}, Vector2(-28, 2))
+	_add(&"ant",                      "Ant",                      [&"tank_fabricator"],           [], {&"mat_copper": 100}, Vector2(-28, 2))
 	_add(&"beattle",                  "Beattle",                  [&"ant"],                       [&"Not unlockable in campaign"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_graphite": 20}, Vector2(-28, 3))
 	_add(&"termite",                  "Termite",                  [&"beattle"],                   [], {&"mat_copper": 300, &"mat_steel": 130}, Vector2(-28, 4))
 	_add(&"armadillo",                "Armadillo",                [&"beattle"],                   [], {&"mat_copper": 350, &"mat_steel": 160}, Vector2(-28, 5))
@@ -601,11 +601,11 @@ func _register_units() -> void:
 	_add(&"support",                  "Support",                  [&"assist"],                    [], {&"mat_copper": 650, &"mat_graphite": 220, &"mat_steel": 170}, Vector2(-27, 6))
 	_add(&"protect",                  "Protect",                  [&"support"],                   [], {&"mat_copper": 900, &"mat_graphite": 300, &"mat_steel": 270}, Vector2(-27, 7))
 	# Hover branch
-	_add(&"hover_fabricator",         "Hover Fabricator",         [&"tank_fabricator"],           [&"-L-crevice"], {&"mat_copper": 130, &"mat_silicon": 45}, Vector2(-26, 2))
-	_add(&"hoverboard",              "Hoverboard",                [&"hover_fabricator"],          [], {&"mat_copper": 220, &"mat_silicon": 70, &"mat_graphite": 25}, Vector2(-26, 3))
-	_add(&"hover_transport",          "Hover-transport",          [&"hoverboard"],                [], {&"mat_copper": 350, &"mat_silicon": 120, &"mat_steel": 40}, Vector2(-26, 4))
+	_add(&"hover_fabricator",         "Hover Fabricator",         [&"tank_fabricator"],           [&"-L-crevice"], {&"mat_copper": 130}, Vector2(-26, 2))
+	_add(&"hoverboard",               "Hoverboard",               [&"hover_fabricator"],          [], {&"mat_copper": 220, &"mat_graphite": 25}, Vector2(-26, 3))
+	_add(&"hover_transport",          "Hover-transport",          [&"hoverboard"],                [&"Not unlockable in campaign"], {&"mat_copper": 350, &"mat_silicon": 120, &"mat_steel": 40}, Vector2(-26, 4))
 	_add(&"hoverlift",                "Hoverlift",                [&"hover_transport"],           [], {&"mat_copper": 500, &"mat_silicon": 180, &"mat_steel": 95}, Vector2(-26, 5))
-	_add(&"hovercraft",              "Hovercraft",                [&"hoverlift"],                 [], {&"mat_copper": 700, &"mat_silicon": 250, &"mat_steel": 165}, Vector2(-26, 6))
+	_add(&"hovercraft",               "Hovercraft",               [&"hoverlift"],                 [], {&"mat_copper": 700, &"mat_silicon": 250, &"mat_steel": 165}, Vector2(-26, 6))
 	_add(&"hovership",                "Hovership",                [&"hovercraft"],                [], {&"mat_copper": 1000, &"mat_silicon": 380, &"mat_steel": 250}, Vector2(-26, 7))
 	# Ship branch
 	_add(&"ship_fabricator",          "Ship Fabricator",          [&"tank_fabricator"],           [&"Not unlockable in campaign"], {&"mat_copper": 140, &"mat_graphite": 40}, Vector2(-25, 2))

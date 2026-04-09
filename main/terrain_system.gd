@@ -274,6 +274,15 @@ func has_wall(grid_pos: Vector2i) -> bool:
 	return wall_tiles.has(grid_pos)
 
 
+## Returns the water depth of the floor tile at a position, or 0 if the tile
+## isn't water. 1 = shallow, 2 = medium, 3 = deep.
+func get_water_depth_at(grid_pos: Vector2i) -> int:
+	var floor_data = get_floor_at(grid_pos)
+	if floor_data == null:
+		return 0
+	return floor_data.water_depth
+
+
 ## Returns the speed modifier at a position.
 ## Walls override floor modifiers.
 func get_speed_modifier(grid_pos: Vector2i) -> float:

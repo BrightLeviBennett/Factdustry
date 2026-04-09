@@ -263,7 +263,9 @@
 	"res://data/game/tarkon/tiles/shrub.tres",
 	"res://data/game/tarkon/tiles/sulfur_ore.tres",
 	"res://data/game/tarkon/tiles/vent.tres",
-    "res://data/game/tarkon/tiles/water.tres"
+	"res://data/game/tarkon/tiles/water.tres",
+	"res://data/game/tarkon/tiles/water_deep.tres",
+    "res://data/game/tarkon/tiles/water_medium.tres"
   ],
   "status_effects": [
 	"res://data/game/tarkon/status_effects/acid_burn.tres",
@@ -286,7 +288,7 @@
     "res://data/game/tarkon/sectors/zinc_deposits.tres"
   ],
   "planets": [
-	"Remove this text to enable: res://data/game/planets/Aziris.tres",
+	"res://data/game/planets/Aziris.tres",
 	"res://data/game/planets/Tarkon.tres",
     "res://data/game/planets/Yndora.tres"
   ]

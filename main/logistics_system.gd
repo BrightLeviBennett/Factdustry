@@ -3039,6 +3039,10 @@ func _update_factories(delta: float) -> void:
 				# Don't start production if storage is full (skip for unit fabricators)
 				if not is_unit_fabricator and _is_storage_full(origin, data):
 					continue
+				# Don't start unit production if the unit isn't researched yet.
+				# Require-research respects the settings toggle (main.require_research).
+				if is_unit_fabricator and main.require_research and TechTree.nodes.has(data.produced_unit) and not TechTree.is_researched(data.produced_unit):
+					continue
 				# Don't start unit production if at unit cap for this type
 				if is_unit_fabricator and main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
 					continue

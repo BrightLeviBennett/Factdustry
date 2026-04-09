@@ -612,16 +612,39 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 	if data == null:
 		return false
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	var is_platform: bool = data.tags.has("platform")
+	var is_pump: bool = data.tags.has("pump")
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var check_pos = grid_pos + Vector2i(x, y)
 			if not main.is_within_bounds(check_pos):
 				return false
-			if not main.is_cell_empty(check_pos):
-				if main.placed_buildings.get(check_pos, &"") != block_id:
-					return false
+			# Water depth rules: a platform underneath counts as "dry ground"
+			# for the purpose of allowing other blocks on top, so check for an
+			# existing platform at this cell first.
+			var has_platform_under: bool = false
+			if main.placed_buildings.has(check_pos):
+				var cell_block_id: StringName = main.placed_buildings[check_pos]
+				if cell_block_id != block_id:
+					var cell_data = Registry.get_block(cell_block_id)
+					if cell_data and cell_data.tags.has("platform"):
+						has_platform_under = true
+					else:
+						return false
 			if terrain and terrain.has_wall(check_pos):
 				return false
+			if terrain:
+				var depth: int = terrain.get_water_depth_at(check_pos)
+				if depth > 0 and not has_platform_under:
+					# Platforms can be placed on any water depth (they bridge it).
+					if is_platform:
+						pass
+					# Pumps can be placed on depth 1 or 2 water (needs to stand
+					# on the liquid surface to extract).
+					elif is_pump and depth <= 2:
+						pass
+					else:
+						return false
 	return true
 
 

@@ -2207,7 +2207,16 @@ func _on_abandon() -> void:
 					cores_to_destroy.append(anchor)
 	for anchor in cores_to_destroy:
 		main.destroy_building(anchor)
-	print("HUD: Abandoned sector — all player cores destroyed.")
+
+	# Wipe the on-disk sector save so re-launching the sector starts fresh.
+	# (main.sector_lost is set by the core-destruction flow, which stops the
+	# autosave in _process from re-writing this file.)
+	var sid: StringName = SaveManager.active_sector_id
+	if sid != &"":
+		SaveManager.delete_sector(str(sid))
+		print("HUD: Abandoned sector '%s' — cores destroyed and save wiped." % sid)
+	else:
+		print("HUD: Abandoned sector — all player cores destroyed.")
 
 
 # =========================

@@ -54,6 +54,13 @@ var rebuild_timer := 0.0
 const REBUILD_TIME := 3.0  # Seconds to rebuild a building
 var _rebuild_arrived := false  # True when unit is at the rebuild location
 
+# --- WATER SUBMERSION ---
+# Tracks how long a ground/crawler unit has been standing in water. Used for
+# visual tint and the drowning damage-over-time. Reset to 0 while out of water.
+var _water_time: float = 0.0
+## Seconds a ground/crawler unit can spend in water before it drowns and dies.
+const WATER_DROWN_TIME := 8.0
+
 # --- STUCK DETECTION ---
 # When a unit has a destination but stays nearly stationary for STUCK_TIME seconds,
 # it disperses away from nearby units so groups don't pile up forever.
@@ -108,7 +115,37 @@ func _process(delta: float) -> void:
 			_try_attack(delta)
 
 	_check_stuck(delta)
+	_tick_water(delta)
 	queue_redraw()
+
+
+## Ticks water submersion effects for ground / crawler units.
+## Hover and flying units skip the check entirely (they just glide over).
+## Ground/crawler units in water:
+##   - move at the tile's speed_modifier (handled by _follow_path reading the tile)
+##   - accumulate _water_time which tints them progressively blue
+##   - die after WATER_DROWN_TIME seconds of continuous submersion
+## _water_time is cleared the moment the unit steps back onto dry land.
+func _tick_water(delta: float) -> void:
+	if is_dead or data == null:
+		return
+	# Hover (2) and Flying (3) ignore water entirely.
+	var ml: int = data.movement_layer
+	if ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING:
+		_water_time = 0.0
+		return
+	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	if terrain == null:
+		return
+	var grid_pos: Vector2i = main.world_to_grid(position)
+	var depth: int = terrain.get_water_depth_at(grid_pos)
+	if depth <= 0:
+		_water_time = 0.0
+		return
+	# Submerged.
+	_water_time += delta
+	if _water_time >= WATER_DROWN_TIME:
+		take_damage(max_health)  # Fatal — drowned.
 
 
 ## Player-unit combined movement + combat tick.
@@ -258,7 +295,15 @@ func _follow_path(delta: float) -> void:
 		move_target = null
 		return
 
-	var step = move_speed * delta
+	# Ground/crawler units in water move at half speed (ignored by hover/flying).
+	var speed_mult: float = 1.0
+	if data:
+		var ml_f: int = data.movement_layer
+		if ml_f == UnitData.MovementLayer.GROUND or ml_f == UnitData.MovementLayer.CRAWLER:
+			var terrain_f = get_node_or_null("/root/Main/TerrainSystem")
+			if terrain_f and terrain_f.get_water_depth_at(main.world_to_grid(position)) > 0:
+				speed_mult = 0.5
+	var step = move_speed * speed_mult * delta
 
 	if step >= distance:
 		position = target_pos
@@ -702,48 +747,64 @@ func _draw() -> void:
 	_draw_selection_ring()
 
 
+## Returns the current body color, blended toward deep blue based on how long
+## the unit has been submerged. At 0 time → base unit_color. At drown time →
+## almost fully blue. Hover/flying units never accumulate _water_time so they
+## always draw with their base color.
+func _get_display_color() -> Color:
+	if _water_time <= 0.0:
+		return unit_color
+	var t: float = clampf(_water_time / WATER_DROWN_TIME, 0.0, 1.0)
+	var water_tint := Color(0.15, 0.35, 0.8, unit_color.a)
+	return unit_color.lerp(water_tint, t * 0.75)
+
+
 func _draw_circle_shape() -> void:
-	draw_circle(Vector2.ZERO, unit_size, unit_color)
-	draw_arc(Vector2.ZERO, unit_size, 0, TAU, 24, unit_color.lightened(0.3), 1.5)
+	var c := _get_display_color()
+	draw_circle(Vector2.ZERO, unit_size, c)
+	draw_arc(Vector2.ZERO, unit_size, 0, TAU, 24, c.lightened(0.3), 1.5)
 
 
 func _draw_diamond_shape() -> void:
 	var s = unit_size
+	var c := _get_display_color()
 	var points = PackedVector2Array([
 		Vector2(0, -s), Vector2(s, 0), Vector2(0, s), Vector2(-s, 0)
 	])
-	draw_polygon(points, [unit_color, unit_color, unit_color, unit_color])
+	draw_polygon(points, [c, c, c, c])
 	draw_polyline(
 		PackedVector2Array([Vector2(0, -s), Vector2(s, 0), Vector2(0, s), Vector2(-s, 0), Vector2(0, -s)]),
-		unit_color.lightened(0.3), 1.5
+		c.lightened(0.3), 1.5
 	)
 
 
 func _draw_triangle_shape() -> void:
 	var s = unit_size
+	var c := _get_display_color()
 	var points = PackedVector2Array([
 		Vector2(0, -s), Vector2(s, s * 0.7), Vector2(-s, s * 0.7)
 	])
-	draw_polygon(points, [unit_color, unit_color, unit_color])
+	draw_polygon(points, [c, c, c])
 	draw_polyline(
 		PackedVector2Array([Vector2(0, -s), Vector2(s, s * 0.7), Vector2(-s, s * 0.7), Vector2(0, -s)]),
-		unit_color.lightened(0.3), 1.5
+		c.lightened(0.3), 1.5
 	)
 
 
 func _draw_hexagon_shape() -> void:
+	var c := _get_display_color()
 	var points = PackedVector2Array()
 	var colors = PackedColorArray()
 	for i in range(6):
 		var angle = i * TAU / 6.0
 		points.append(Vector2(cos(angle), sin(angle)) * unit_size)
-		colors.append(unit_color)
+		colors.append(c)
 	draw_polygon(points, colors)
 	var outline = PackedVector2Array()
 	for i in range(7):
 		var angle = i * TAU / 6.0
 		outline.append(Vector2(cos(angle), sin(angle)) * unit_size)
-	draw_polyline(outline, unit_color.lightened(0.3), 1.5)
+	draw_polyline(outline, c.lightened(0.3), 1.5)
 
 
 func _draw_rebuild_progress() -> void:
