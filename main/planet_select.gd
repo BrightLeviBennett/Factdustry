@@ -134,8 +134,9 @@ func _ready() -> void:
 
 
 func _deferred_zoom_to_planet() -> void:
-	if Registry.planets_list.size() > 0:
-		_zoom_to_planet(Registry.planets_list[0])
+	var target = _default_planet()
+	if target != null:
+		_zoom_to_planet(target)
 		_update_planet_tab_highlight()
 
 
@@ -143,9 +144,24 @@ func _on_registry_loaded() -> void:
 	_build_3d_scene()
 	_update_camera()
 	_update_info_panel()
-	if Registry.planets_list.size() > 0:
-		_zoom_to_planet(Registry.planets_list[0])
+	var target = _default_planet()
+	if target != null:
+		_zoom_to_planet(target)
 		_update_planet_tab_highlight()
+
+
+## Returns the planet that should be focused when the screen opens.
+## Prefers Tarkon (the campaign starting planet) and falls back to the first
+## loaded planet if Tarkon isn't available for some reason.
+func _default_planet() -> PlanetData:
+	var tarkon = Registry.get_planet(&"Tarkon") if Registry.has_method("get_planet") else null
+	if tarkon == null:
+		tarkon = Registry.planets.get(&"Tarkon", null)
+	if tarkon != null:
+		return tarkon
+	if Registry.planets_list.size() > 0:
+		return Registry.planets_list[0]
+	return null
 
 
 # =========================
