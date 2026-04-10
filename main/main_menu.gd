@@ -187,8 +187,10 @@ func _build_loading_screen() -> void:
 
 
 func _load_textures() -> void:
-	# Background — may not exist yet
-	if ResourceLoader.exists("res://textures/UI/MainScreenBackground.png"):
+	# Background: prefer MMB.jpeg, fall back to the old MainScreenBackground.png
+	if ResourceLoader.exists("res://textures/UI/MMB.jpeg"):
+		bg_texture = load("res://textures/UI/MMB.jpeg")
+	elif ResourceLoader.exists("res://textures/UI/MainScreenBackground.png"):
 		bg_texture = load("res://textures/UI/MainScreenBackground.png")
 
 	title_texture = load("res://textures/UI/Title.png")

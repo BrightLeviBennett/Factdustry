@@ -434,6 +434,86 @@ func place_building_with_faction(grid_pos: Vector2i, block_id: StringName, rotat
 	return true
 
 
+## Returns a swap-group identifier for a block, or &"" if the block isn't
+## part of any swappable family. Blocks in the same group can replace each
+## other on placement (costing the new block's build_time), so you can e.g.
+## replace a Belt Junction with a Conveyor Belt by just clicking on it.
+##
+## Groups:
+##   &"belt"        — conveyor_belt and all its variants (junctions, routers,
+##                    sorters, bridges, overflow/underflow)
+##   &"duct"        — ducts and their variants
+##   &"conduit"     — fluid conduits and their variants
+##   &"payload"     — payload transport parts
+##   &"freight"     — freight transport parts
+##   &"shaft_power" — shaft, gearbox, overhead belt (rotational power line)
+func _get_swap_group(data: BlockData) -> StringName:
+	if data == null:
+		return &""
+	var id_str := String(data.id)
+	# Belts
+	if id_str == "conveyor_belt" or id_str.begins_with("belt_") \
+			or id_str == "overflow_belt" or id_str == "underflow_belt" \
+			or id_str == "inverted_belt_sorter":
+		return &"belt"
+	# Ducts
+	if id_str == "duct" or id_str.begins_with("duct_") \
+			or id_str == "overflow_duct" or id_str == "underflow_duct" \
+			or id_str == "inverted_duct_sorter":
+		return &"duct"
+	# Fluid conduits
+	if id_str == "fluid_conduit" or id_str.begins_with("conduit_") \
+			or id_str == "overflow_conduit" or id_str == "underflow_conduit" \
+			or id_str == "inverted_conduit_sorter":
+		return &"conduit"
+	# Payload transport
+	if id_str == "payload_conveyor" or id_str == "payload_router" \
+			or id_str == "payload_junction" or id_str == "payload_bridge" \
+			or id_str == "payload_loader" or id_str == "payload_unloader":
+		return &"payload"
+	# Freight transport
+	if id_str == "freight_conveyor" or id_str == "freight_router" \
+			or id_str == "freight_junction" or id_str == "freight_bridge" \
+			or id_str == "freight_loader" or id_str == "freight_unloader":
+		return &"freight"
+	# Rotational power line
+	if id_str == "shaft" or id_str == "gearbox" or id_str == "overhead_belt":
+		return &"shaft_power"
+	return &""
+
+
+## Swaps an existing 1x1 building for a different 1x1 building at the same
+## cell, clearing any logistics/power state the old block had and then placing
+## the new one with the new block's build_time. Used by the belt/shaft swap
+## feature in try_place_building.
+func _swap_building_in_place(grid_pos: Vector2i, old_data: BlockData, new_data: BlockData) -> bool:
+	# Destroy the existing block first — this fires building_destroyed so every
+	# system clears its per-anchor state (conveyor_items, sorter_filters,
+	# factory_buffers, power networks, etc.) and refunds nothing.
+	destroy_building(grid_pos)
+
+	# Deduct the new block's cost.
+	if require_resources:
+		for item_id in new_data.build_cost:
+			resources[item_id] -= new_data.build_cost[item_id]
+
+	# Place the new block at the same cell, rotation = placement_rotation.
+	placed_buildings[grid_pos] = new_data.id
+	building_health[grid_pos] = new_data.max_health
+	building_rotation[grid_pos] = placement_rotation
+	building_origins[grid_pos] = grid_pos
+	building_factions[grid_pos] = Faction.LUMINA
+
+	# Start build animation (takes the new block's full build_time).
+	if new_data.build_time > 0:
+		building_build_progress[grid_pos] = 0.0
+		build_order.append(grid_pos)
+
+	resources_changed.emit(resources)
+	building_placed.emit(new_data.id, grid_pos)
+	return true
+
+
 func try_place_building(grid_pos: Vector2i) -> bool:
 	if selected_building == &"":
 		return false
@@ -453,6 +533,23 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 						building_rotation[grid_pos + Vector2i(x, y)] = placement_rotation
 				building_placed.emit(selected_building, grid_pos)
 			return true
+
+	# --- Same-group swap: placing a belt part on top of another belt part
+	# (or duct/conduit/payload/freight/shaft) replaces the existing block with
+	# the new one, still paying the new block's build time. Only works for
+	# 1x1 blocks (the families all use 1x1 parts).
+	if data.grid_size == Vector2i(1, 1) and placed_buildings.has(grid_pos):
+		var existing_id: StringName = placed_buildings[grid_pos]
+		if existing_id != selected_building:
+			var existing_data = Registry.get_block(existing_id)
+			if existing_data != null and existing_data.grid_size == Vector2i(1, 1):
+				var new_group: StringName = _get_swap_group(data)
+				var old_group: StringName = _get_swap_group(existing_data)
+				if new_group != &"" and new_group == old_group:
+					# Only LUMINA can swap its own blocks.
+					if get_building_faction(grid_pos) == Faction.LUMINA:
+						if can_afford(selected_building):
+							return _swap_building_in_place(grid_pos, existing_data, data)
 
 	if not can_afford(selected_building):
 		return false
@@ -476,11 +573,16 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 			if tile_id != &"vent":
 				return false
 
-	# Extractors must face ore
+	# Extractors must face ore — or, for wall miners, a blackstone wall.
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
 		var building_sys = get_node_or_null("BuildingSystem")
-		if building_sys and not building_sys._is_facing_ore(grid_pos, placement_rotation):
-			return false
+		if building_sys:
+			if data.tags.has("wall_miner"):
+				if not building_sys._is_facing_wall(grid_pos, placement_rotation, selected_building):
+					return false
+			else:
+				if not building_sys._is_facing_ore(grid_pos, placement_rotation):
+					return false
 
 	# Pumps must be on liquid
 	if data.tags.has("pump"):
@@ -778,8 +880,14 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	# Extractor placement checks
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
 		var building_sys = get_node_or_null("BuildingSystem")
-		if building_sys and not building_sys._is_facing_ore(grid_pos, int(payload.get("rotation", 0)), block_id):
-			return false
+		if building_sys:
+			var pay_rot := int(payload.get("rotation", 0))
+			if data.tags.has("wall_miner"):
+				if not building_sys._is_facing_wall(grid_pos, pay_rot, block_id):
+					return false
+			else:
+				if not building_sys._is_facing_ore(grid_pos, pay_rot, block_id):
+					return false
 
 	# Vent-powered check
 	if data.tags.has("vent_powered") and terrain:

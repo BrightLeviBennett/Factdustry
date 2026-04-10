@@ -41,6 +41,12 @@ var _floor_edge_distance: Dictionary = {}  # Vector2i -> int
 ## Distance from each hidden floor tile to the nearest visible floor tile.
 var _hidden_floor_distance: Dictionary = {}  # Vector2i -> int
 var _floor_edge_dirty := true
+
+# --- WATER DEPTH ---
+## Auto-computed water depth for each water floor tile: Vector2i → int (1-3).
+## Distance from the nearest non-water floor tile. Recomputed when floor tiles change.
+var _water_depth_map: Dictionary = {}  # Vector2i -> int
+var _water_depth_dirty := true
 ## Floor tiles within fewer than this distance of void start fading (higher = wider fade)
 const FLOOR_FADE_START := 6
 ## How many tiles into a hidden region the fade extends
@@ -48,7 +54,12 @@ const HIDDEN_FADE_TILES := 2
 ## Pre-baked per-corner darkness for each floor tile. Rebuilt when _floor_edge_dirty.
 var _fade_darkness: Dictionary = {}  # Vector2i -> [tl, tr, br, bl]
 
+# --- WATER RENDERING ---
+## Sand texture drawn under water at shallow/medium depths.
+var _sand_texture: Texture2D = null
+
 func _ready() -> void:
+	_sand_texture = load("res://textures/terrain/Sand.png") if ResourceLoader.exists("res://textures/terrain/Sand.png") else null
 	await get_tree().process_frame
 
 
@@ -119,9 +130,11 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 			unit_mgr._recompute_crawler_wall_passability()
 		walls_changed.emit()
 		_floor_edge_dirty = true
+		_water_depth_dirty = true
 	else:
 		floor_tiles[grid_pos] = tile_id
 		_floor_edge_dirty = true
+		_water_depth_dirty = true
 
 	queue_redraw()
 
@@ -156,6 +169,7 @@ func remove_tile(grid_pos: Vector2i) -> void:
 	elif floor_tiles.has(grid_pos):
 		floor_tiles.erase(grid_pos)
 		_floor_edge_dirty = true
+		_water_depth_dirty = true
 	else:
 		return
 
@@ -274,13 +288,13 @@ func has_wall(grid_pos: Vector2i) -> bool:
 	return wall_tiles.has(grid_pos)
 
 
-## Returns the water depth of the floor tile at a position, or 0 if the tile
+## Returns the auto-computed water depth at a position, or 0 if the tile
 ## isn't water. 1 = shallow, 2 = medium, 3 = deep.
+## Computed via BFS distance from the nearest non-water floor tile.
 func get_water_depth_at(grid_pos: Vector2i) -> int:
-	var floor_data = get_floor_at(grid_pos)
-	if floor_data == null:
-		return 0
-	return floor_data.water_depth
+	if _water_depth_dirty:
+		_rebuild_water_depth()
+	return _water_depth_map.get(grid_pos, 0)
 
 
 ## Returns the speed modifier at a position.
@@ -330,6 +344,69 @@ func select_tile(tile_id: StringName) -> void:
 # =========================
 # FLOOR EDGE FADE
 # =========================
+
+## Rebuilds the auto-computed water depth map via BFS.
+## Every water floor tile gets a depth of 1-3 based on its distance from the
+## nearest non-water floor tile (including void / wall edges).
+##   distance 1 from land → depth 1 (shallow)
+##   distance 2           → depth 2 (medium)
+##   distance 3+          → depth 3 (deep)
+func _rebuild_water_depth() -> void:
+	_water_depth_dirty = false
+	_water_depth_map.clear()
+
+	# 1. Identify all water cells and seed the BFS with non-water floor
+	#    cells that are adjacent to at least one water cell.
+	var water_cells := {}  # all floor cells that are water
+	for pos in floor_tiles:
+		var td = Registry.get_tile(floor_tiles[pos])
+		if td and td.is_liquid and td.tags.has("water"):
+			water_cells[pos] = true
+
+	if water_cells.is_empty():
+		return
+
+	# BFS seed: every water cell that is adjacent to a non-water cell
+	# (non-water = no floor tile, or floor tile without "water" tag, or wall).
+	var dist: Dictionary = {}  # Vector2i → int distance from land
+	var queue: Array[Vector2i] = []
+	var neighbors := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+
+	for pos in water_cells:
+		for nb in neighbors:
+			var adj: Vector2i = pos + nb
+			if not water_cells.has(adj):
+				# This water cell borders land/void → distance 1
+				if not dist.has(pos):
+					dist[pos] = 1
+					queue.append(pos)
+				break
+
+	# 2. BFS outward: each unvisited water neighbor gets distance + 1.
+	var head := 0
+	while head < queue.size():
+		var pos: Vector2i = queue[head]
+		head += 1
+		var d: int = dist[pos]
+		for nb in neighbors:
+			var adj: Vector2i = pos + nb
+			if water_cells.has(adj) and not dist.has(adj):
+				dist[adj] = d + 1
+				queue.append(adj)
+
+	# 3. Map distance to depth tiers and store.
+	#   dist 1-4  → depth 1 (shallow)
+	#   dist 5-8  → depth 2 (medium)
+	#   dist 9+   → depth 3 (deep)
+	for pos in dist:
+		var d: int = dist[pos]
+		if d <= 4:
+			_water_depth_map[pos] = 1
+		elif d <= 8:
+			_water_depth_map[pos] = 2
+		else:
+			_water_depth_map[pos] = 3
+
 
 ## Rebuild the floor-edge distance cache (BFS inward from edges).
 func _rebuild_floor_edge_cache() -> void:
@@ -535,7 +612,27 @@ func _draw_floor_tiles() -> void:
 			continue
 
 		var world_pos = main.grid_to_world(grid_pos)
-		_draw_tile_texture(data, world_pos, size, data.opacity)
+
+		# Water tiles: draw sand underneath then water on top with depth-based
+		# blend. Depth 1 = 50% sand / 50% water, depth 2 = 30% sand / 70% water,
+		# depth 3 = 100% water (no sand visible).
+		var depth: int = get_water_depth_at(grid_pos)
+		if depth > 0 and _sand_texture != null:
+			var rect := Rect2(world_pos, Vector2(size, size))
+			if depth <= 2:
+				var sand_alpha: float = 0.5 if depth == 1 else 0.3
+				draw_texture_rect(_sand_texture, rect, false, Color(1, 1, 1, sand_alpha * data.opacity))
+			# Water layer on top
+			var water_alpha: float
+			if depth == 1:
+				water_alpha = 0.5
+			elif depth == 2:
+				water_alpha = 0.7
+			else:
+				water_alpha = 1.0
+			_draw_tile_texture(data, world_pos, size, water_alpha * data.opacity)
+		else:
+			_draw_tile_texture(data, world_pos, size, data.opacity)
 
 		# Pre-baked fade overlay (skip if fade disabled or no darkness at this tile)
 		if fade_off:

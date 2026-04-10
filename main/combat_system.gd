@@ -257,6 +257,13 @@ func _update_turrets(delta: float) -> void:
 				continue  # Building destroyed since scan
 			target_world = main.grid_to_world(nearest_bldg) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 
+		# Live range re-check: the targeting worker may have pre-computed this
+		# target when it was in range, but the target may have moved away since.
+		# Skip aiming AND firing if the target is now outside attack_range.
+		var live_range_px: float = data.attack_range * main.GRID_SIZE
+		if live_range_px > 0.0 and turret_world.distance_to(target_world) > live_range_px:
+			continue
+
 		# Smoothly rotate the turret head toward the target
 		var target_angle: float = (target_world - turret_world).angle()
 		var current_angle = turret_angles[grid_pos]
@@ -348,6 +355,11 @@ func _update_turrets(delta: float) -> void:
 			var pellet_angle: float = (target_world - fire_pos).angle() + spread_rad
 			var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * (target_world - fire_pos).length()
 
+			# Turret effective range in pixels (base range in grid tiles + any
+			# ammo range bonus). Projectiles despawn once they've traveled this
+			# far from their spawn point.
+			var fire_max_range: float = (data.attack_range * main.GRID_SIZE) + fire_range_bonus
+
 			if shoot_at_unit:
 				_spawn_projectile(
 					fire_pos,
@@ -372,6 +384,7 @@ func _update_turrets(delta: float) -> void:
 						"collides_ground": fire_collides_ground,
 						"status": fire_status,
 						"splash_mult": fire_splash_mult,
+						"max_range": fire_max_range,
 					},
 				)
 			else:
@@ -398,6 +411,7 @@ func _update_turrets(delta: float) -> void:
 						"collides_ground": fire_collides_ground,
 						"status": fire_status,
 						"splash_mult": fire_splash_mult,
+						"max_range": fire_max_range,
 					},
 				)
 
@@ -539,6 +553,7 @@ func _spawn_projectile(
 ) -> void:
 	var proj: Dictionary = {
 		"pos": start_pos,
+		"spawn_pos": start_pos,
 		"target_ref": target_ref,
 		"target_pos": target_pos,
 		"target_type": target_type,
@@ -554,6 +569,7 @@ func _spawn_projectile(
 		# --- Mindustry-style extras (from AmmoType) ---
 		"lifetime": float(extras.get("lifetime", 4.0)),
 		"age": 0.0,
+		"max_range": float(extras.get("max_range", 0.0)),  # 0 = no range cap
 		"pierce_remaining": int(extras.get("pierce", 0)),
 		"hit_targets": {},  # de-dupes pierce hits
 		"homing": float(extras.get("homing", 0.0)),
@@ -579,6 +595,15 @@ func _update_projectiles(delta: float) -> void:
 		if proj["age"] >= proj.get("lifetime", 999.0):
 			to_remove.append(i)
 			continue
+
+		# Max-range despawn — stop the projectile once it has travelled further
+		# than the turret's effective range from where it was fired.
+		var max_range: float = float(proj.get("max_range", 0.0))
+		if max_range > 0.0:
+			var spawn_pos: Vector2 = proj.get("spawn_pos", proj["pos"])
+			if proj["pos"].distance_to(spawn_pos) >= max_range:
+				to_remove.append(i)
+				continue
 
 		# Update target position if the target is still alive/valid
 		_update_target_pos(proj)
@@ -633,6 +658,12 @@ func _update_projectiles(delta: float) -> void:
 
 
 func _update_target_pos(proj: Dictionary) -> void:
+	# Only home in on the live target position if the ammo's homing value is
+	# > 0. Non-homing projectiles keep flying toward the position the target
+	# was at when the shot was fired (ballistic behavior).
+	var homing_strength: float = float(proj.get("homing", 0.0))
+	if homing_strength <= 0.0:
+		return
 	match proj["target_type"]:
 		"enemy":
 			# Target is an enemy Node2D

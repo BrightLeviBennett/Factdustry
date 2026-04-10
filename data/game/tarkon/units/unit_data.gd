@@ -115,6 +115,10 @@ enum TargetPriority {
 # --- PRODUCTION ---
 ## Time in seconds for a fabricator to build this unit
 @export var build_time: float = 5.0
+## Items a fabricator must consume to produce this unit.
+## Keys are short item ids (e.g. "copper", "silicon") matching BlockData.build_cost.
+## Example: { "copper": 100, "silicon": 40 }
+@export var build_cost: Dictionary = {}
 
 
 # =========================

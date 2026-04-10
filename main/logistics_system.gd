@@ -251,36 +251,56 @@ func _update_drills(delta: float) -> void:
 			continue
 
 		var rot: int = main.building_rotation.get(origin, 0)
-		# Check front edge + one tile ahead for ore
+		# Check front edge + one tile ahead for the thing this drill mines.
 		var mine_cells = _get_extended_front_edge(origin, data.grid_size, rot)
 		var front_cells = _get_front_edge(origin, data.grid_size, rot)
+
+		# Wall miners (wall_crusher) mine blackstone walls into their configured
+		# output_items; regular drills mine ore deposits via ore.minable_resource.
+		var is_wall_miner: bool = data.tags.has("wall_miner")
+
 		var ore: TerrainTileData = null
-		for cell in mine_cells:
-			ore = terrain.get_ore_at(cell)
-			if ore != null and ore.minable_resource != &"":
-				break
+		var wall_found: bool = false
+		if is_wall_miner:
+			for cell in mine_cells:
+				if terrain.get_ore_at(cell) != null:
+					continue
+				if StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall":
+					wall_found = true
+					break
+			if not wall_found:
+				continue
+		else:
+			for cell in mine_cells:
+				ore = terrain.get_ore_at(cell)
+				if ore != null and ore.minable_resource != &"":
+					break
+			if ore == null or ore.minable_resource == &"":
+				continue
 
-		if ore == null or ore.minable_resource == &"":
-			continue
-
-		# Calculate efficiency: how many front-edge tiles face ore (direct or +1 ahead)
+		# Calculate efficiency: fraction of front-edge tiles that face the target
+		# (direct hit or one tile further ahead).
 		var front_count: int = front_cells.size()
-		var ore_count: int = 0
+		var hit_count: int = 0
+		var dir: Vector2i
+		match rot:
+			0: dir = Vector2i(1, 0)
+			1: dir = Vector2i(0, 1)
+			2: dir = Vector2i(-1, 0)
+			3: dir = Vector2i(0, -1)
+			_: dir = Vector2i(1, 0)
 		for cell in front_cells:
-			if terrain.get_ore_at(cell) != null:
-				ore_count += 1
+			if is_wall_miner:
+				var c1_ok: bool = terrain.get_ore_at(cell) == null and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall"
+				var c2_ok: bool = terrain.get_ore_at(cell + dir) == null and StringName(terrain.wall_tiles.get(cell + dir, &"")) == &"blackstone_wall"
+				if c1_ok or c2_ok:
+					hit_count += 1
 			else:
-				# Check one tile further ahead
-				var dir: Vector2i
-				match rot:
-					0: dir = Vector2i(1, 0)
-					1: dir = Vector2i(0, 1)
-					2: dir = Vector2i(-1, 0)
-					3: dir = Vector2i(0, -1)
-					_: dir = Vector2i(1, 0)
-				if terrain.get_ore_at(cell + dir) != null:
-					ore_count += 1
-		var efficiency: float = float(ore_count) / float(front_count) if front_count > 0 else 1.0
+				if terrain.get_ore_at(cell) != null:
+					hit_count += 1
+				elif terrain.get_ore_at(cell + dir) != null:
+					hit_count += 1
+		var efficiency: float = float(hit_count) / float(front_count) if front_count > 0 else 1.0
 
 		# Check rotational power requirement
 		if data.rotational_power_use > 0:
@@ -292,8 +312,23 @@ func _update_drills(delta: float) -> void:
 		if drill_timers[origin] > 0:
 			continue
 
-		# Don't produce if storage for this resource type is full — stall timer at 0
-		if _is_storage_full_for(origin, data, ore.minable_resource):
+		# Figure out which item(s) this cycle produces and how many of each.
+		# Regular drills produce 1 × minable_resource from the ore tile.
+		# Wall miners produce data.output_items (item_id → amount).
+		var produced: Dictionary = {}
+		if is_wall_miner:
+			for raw_id in data.output_items:
+				produced[StringName(raw_id)] = int(data.output_items[raw_id])
+		else:
+			produced[ore.minable_resource] = 1
+
+		# Don't produce if storage for any of these items is full — stall at 0.
+		var any_full: bool = false
+		for item_id in produced:
+			if _is_storage_full_for(origin, data, item_id):
+				any_full = true
+				break
+		if any_full:
 			drill_timers[origin] = 0.0
 			continue
 
@@ -301,22 +336,23 @@ func _update_drills(delta: float) -> void:
 		drill_timers[origin] = cycle_time
 
 		var output_cells = _get_all_output_cells(origin, data.grid_size, rot)
-		var pushed := false
-		for out_pos in output_cells:
-			if _is_cross_faction(origin, out_pos):
-				continue
-			var push_entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
-			if _try_push_item(out_pos, ore.minable_resource, push_entry_dir):
-				pushed = true
-				if main.has_signal("item_mined"):
-					main.item_mined.emit(ore.minable_resource)
-				break
-		# If couldn't push to any output, try storing internally
-		if not pushed:
-			if _add_to_storage(origin, ore.minable_resource, data):
-				if main.has_signal("item_mined"):
-					main.item_mined.emit(ore.minable_resource)
-			# else: storage full AND can't push — drill stalls (timer already reset, next cycle will also fail)
+		for item_id in produced:
+			var amount: int = int(produced[item_id])
+			for _i in range(amount):
+				var pushed := false
+				for out_pos in output_cells:
+					if _is_cross_faction(origin, out_pos):
+						continue
+					var push_entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
+					if _try_push_item(out_pos, item_id, push_entry_dir):
+						pushed = true
+						if main.has_signal("item_mined"):
+							main.item_mined.emit(item_id)
+						break
+				if not pushed:
+					if _add_to_storage(origin, item_id, data):
+						if main.has_signal("item_mined"):
+							main.item_mined.emit(item_id)
 
 ## Finds the top-left origin cell of a multi-tile building.
 ## For 1x1 buildings, just returns grid_pos.
@@ -398,6 +434,20 @@ func _get_all_output_cells(origin: Vector2i, grid_size: Vector2i, rotation: int)
 	if rotation != 0:
 		for y in range(grid_size.y):
 			cells.append(Vector2i(origin.x + grid_size.x, origin.y + y))
+	return cells
+
+
+## Like _get_all_output_cells but always returns the full ring of cells
+## around a building footprint, regardless of rotation. Used for
+## omnidirectional factories that push on every side.
+func _get_full_ring(origin: Vector2i, grid_size: Vector2i) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	for x in range(grid_size.x):
+		cells.append(Vector2i(origin.x + x, origin.y - 1))
+		cells.append(Vector2i(origin.x + x, origin.y + grid_size.y))
+	for y in range(grid_size.y):
+		cells.append(Vector2i(origin.x - 1, origin.y + y))
+		cells.append(Vector2i(origin.x + grid_size.x, origin.y + y))
 	return cells
 
 
@@ -1345,7 +1395,9 @@ func _block_uses_storage(data: BlockData) -> bool:
 	return data.category == BlockData.BlockCategory.EXTRACTORS \
 		or data.category == BlockData.BlockCategory.TURRETS \
 		or not data.side_outputs.is_empty() \
-		or data.tags.has("pump")
+		or not data.output_items.is_empty() \
+		or data.tags.has("pump") \
+		or data.tags.has("omnidirectional")
 
 
 ## Adds an item or fluid to a building's internal storage.
@@ -1475,7 +1527,12 @@ func _update_storage_unloading(_delta: float) -> void:
 		var data: BlockData = Registry.get_block(block_id) if block_id != &"" else null
 		var grid_size: Vector2i = data.grid_size if data else Vector2i(1, 1)
 		var rot: int = main.building_rotation.get(origin, 0)
-		var output_cells: Array = _get_all_output_cells(origin, grid_size, rot)
+		# Omnidirectional blocks push from all four edges regardless of rotation.
+		var output_cells: Array
+		if data and data.tags.has("omnidirectional"):
+			output_cells = _get_full_ring(origin, grid_size)
+		else:
+			output_cells = _get_all_output_cells(origin, grid_size, rot)
 
 		var items_to_remove := {}
 		for item_id in storage["items"]:
@@ -1484,6 +1541,9 @@ func _update_storage_unloading(_delta: float) -> void:
 				continue
 			for out_pos in output_cells:
 				if _is_cross_faction(origin, out_pos):
+					continue
+				# Don't push onto a conveyor that's feeding INTO this building.
+				if _conveyor_feeds_toward_building(out_pos, origin, grid_size):
 					continue
 				var entry_dir: int = _get_entry_dir_from_building(out_pos, origin, grid_size)
 				if _is_conveyor_cell(out_pos) and not conveyor_items.has(out_pos):
@@ -1584,6 +1644,18 @@ func _is_conveyor_cell(grid_pos: Vector2i) -> bool:
 	if data.tags.has("payload") or data.tags.has("freight"):
 		return false
 	return data.is_transport() and not data.transports_fluid
+
+
+## Returns true if the cell at conv_pos is a conveyor whose direction points
+## TOWARD toward_pos (i.e. the conveyor is feeding that neighbor). Used to
+## prevent a factory from trying to output onto a conveyor that is already
+## pushing items into it — that would create a deadlock.
+func _conveyor_feeds_into(conv_pos: Vector2i, toward_pos: Vector2i) -> bool:
+	if not _is_conveyor_cell(conv_pos):
+		return false
+	var rot: int = main.building_rotation.get(conv_pos, 0)
+	var forward: Vector2i = DIR_VECTORS[rot % 4]
+	return conv_pos + forward == toward_pos
 
 
 ## Returns true if the cell has a fluid transport (pipe/conduit, NOT pumps).
@@ -3004,7 +3076,9 @@ func _update_factories(delta: float) -> void:
 		var data = Registry.get_block(block_id)
 		if data == null:
 			continue
-		if data.side_inputs.is_empty() and data.side_outputs.is_empty() and data.produced_unit == &"":
+		# Omnidirectional factories intentionally have empty side_inputs/side_outputs,
+		# so keep them in the loop — the processing logic handles them separately.
+		if data.side_inputs.is_empty() and data.side_outputs.is_empty() and data.produced_unit == &"" and not data.tags.has("omnidirectional"):
 			continue
 
 		# Handle multi-tile factories (use anchor as origin)
@@ -3049,9 +3123,10 @@ func _update_factories(delta: float) -> void:
 				# Check if all required inputs are met
 				if _factory_has_all_inputs(state, data):
 					# Consume inputs and start processing
-					for raw_id in data.input_items:
+					var effective_inputs := _get_effective_inputs(data)
+					for raw_id in effective_inputs:
 						var sn_id := StringName(raw_id)
-						var needed: int = data.input_items[raw_id]
+						var needed: int = int(effective_inputs[raw_id])
 						var have: int = state["inputs"].get(sn_id, 0)
 						state["inputs"][sn_id] = have - needed
 						if state["inputs"][sn_id] <= 0:
@@ -3073,12 +3148,24 @@ func _update_factories(delta: float) -> void:
 						state["phase"] = "collecting"
 					else:
 						state["phase"] = "outputting"
-						# Build pending outputs list (convert to StringName values)
+						# Build pending outputs list. Omnidirectional factories
+						# have no side_outputs — derive the pending list from
+						# output_items instead (one entry per item unit to push).
 						var pending := {}
-						for rel_dir_key in data.side_outputs:
-							var out_id := StringName(data.side_outputs[rel_dir_key])
-							pending[rel_dir_key] = out_id
-							main.item_produced.emit(out_id)
+						if data.tags.has("omnidirectional"):
+							var slot: int = 0
+							for raw_id in data.output_items:
+								var out_sn := StringName(raw_id)
+								var amt: int = int(data.output_items[raw_id])
+								for i in range(amt):
+									pending[str(slot)] = out_sn
+									slot += 1
+									main.item_produced.emit(out_sn)
+						else:
+							for rel_dir_key in data.side_outputs:
+								var out_id := StringName(data.side_outputs[rel_dir_key])
+								pending[rel_dir_key] = out_id
+								main.item_produced.emit(out_id)
 						state["pending_outputs"] = pending
 
 			"outputting":
@@ -3087,12 +3174,45 @@ func _update_factories(delta: float) -> void:
 					state["phase"] = "collecting"
 
 
+## Returns the effective input requirement dict for a factory.
+## For unit fabricators, this is the produced unit's build_cost (with the
+## short item ids like "copper" normalized to full runtime ids like
+## "mat_copper" so they match what conveyors carry).
+## For regular factories, it's the BlockData's input_items as-is.
+func _get_effective_inputs(data: BlockData) -> Dictionary:
+	if data.produced_unit != &"":
+		var unit = Registry.get_unit(data.produced_unit)
+		if unit != null and not unit.build_cost.is_empty():
+			return _normalize_item_keys(unit.build_cost)
+	return data.input_items
+
+
+## Normalizes an item dict's keys to the full "mat_*" form used by runtime
+## item_ids on conveyors. Accepts keys like "copper" → "mat_copper" and
+## leaves already-prefixed keys ("mat_copper") alone. Used so that unit
+## build_cost dicts (which use the short BlockData.build_cost convention)
+## can be compared against runtime conveyor item StringNames.
+func _normalize_item_keys(d: Dictionary) -> Dictionary:
+	var out := {}
+	for raw_id in d:
+		var s := String(raw_id)
+		var normalized: String = s if s.begins_with("mat_") else "mat_" + s
+		# If the normalized id doesn't exist as an item, fall back to the
+		# original so we don't silently lose non-material inputs.
+		if Registry.get_item_or_fluid(StringName(normalized)) == null \
+				and Registry.get_item_or_fluid(StringName(s)) != null:
+			normalized = s
+		out[normalized] = d[raw_id]
+	return out
+
+
 ## Returns true if the factory's input buffer has all required items.
 ## Handles String/.tres keys vs StringName/runtime keys.
 func _factory_has_all_inputs(state: Dictionary, data: BlockData) -> bool:
-	for raw_id in data.input_items:
+	var inputs := _get_effective_inputs(data)
+	for raw_id in inputs:
 		var sn_id := StringName(raw_id)
-		var needed: int = data.input_items[raw_id]
+		var needed: int = int(inputs[raw_id])
 		if state["inputs"].get(sn_id, 0) < needed:
 			return false
 	return true
@@ -3101,31 +3221,80 @@ func _factory_has_all_inputs(state: Dictionary, data: BlockData) -> bool:
 ## Tries to push all pending outputs to their target cells.
 ## If a push fails, the item goes into block storage instead.
 ## Successfully delivered outputs are removed from pending_outputs.
+##
+## Omnidirectional factories (tag "omnidirectional") ignore side_outputs and
+## instead try every cell around their full footprint, skipping conveyors
+## that are pointing INTO the factory (those are input-feeders).
 func _factory_try_output(origin: Vector2i, data: BlockData, state: Dictionary) -> void:
 	var rot: int = main.building_rotation.get(origin, 0)
 	var delivered := []
+	var is_omni: bool = data.tags.has("omnidirectional")
 
-	for rel_dir_key in state["pending_outputs"]:
-		var rel_dir: int = int(rel_dir_key)
-		var world_dir: int = (rel_dir + rot) % 4
-		var target_pos: Vector2i = origin + DIR_VECTORS[world_dir]
-		var out_item: StringName = state["pending_outputs"][rel_dir_key]
-		var entry_dir: int = (world_dir + 2) % 4  # Item enters target from opposite side
+	if is_omni:
+		# Build the ring of cells around the factory's full footprint.
+		var ring: Array[Vector2i] = _get_all_output_cells(origin, data.grid_size, rot)
+		for rel_dir_key in state["pending_outputs"]:
+			var out_item: StringName = state["pending_outputs"][rel_dir_key]
+			var pushed := false
+			for target_pos in ring:
+				if _is_cross_faction(origin, target_pos):
+					continue
+				# Skip conveyors that are pointing INTO the factory (feeders).
+				if _conveyor_feeds_toward_building(target_pos, origin, data.grid_size):
+					continue
+				var push_entry_dir := _get_entry_dir_from_building(target_pos, origin, data.grid_size)
+				if _try_push_item(target_pos, out_item, push_entry_dir):
+					pushed = true
+					break
+			if pushed:
+				delivered.append(rel_dir_key)
+			else:
+				# Couldn't push anywhere — fall back to internal storage.
+				if _add_to_storage(origin, out_item, data):
+					delivered.append(rel_dir_key)
+	else:
+		for rel_dir_key in state["pending_outputs"]:
+			var rel_dir: int = int(rel_dir_key)
+			var world_dir: int = (rel_dir + rot) % 4
+			var target_pos: Vector2i = origin + DIR_VECTORS[world_dir]
+			var out_item: StringName = state["pending_outputs"][rel_dir_key]
+			var entry_dir: int = (world_dir + 2) % 4  # Item enters target from opposite side
 
-		# Block cross-faction factory output
-		if _is_cross_faction(origin, target_pos):
-			# Can't push cross-faction, try storing instead
-			if _add_to_storage(origin, out_item, data):
+			# Skip conveyors that are pointing INTO the factory (feeders).
+			if _conveyor_feeds_into(target_pos, origin):
+				# Can't use this side — fall back to storage for this cycle.
+				if _add_to_storage(origin, out_item, data):
+					delivered.append(rel_dir_key)
+				continue
+
+			# Block cross-faction factory output
+			if _is_cross_faction(origin, target_pos):
+				if _add_to_storage(origin, out_item, data):
+					delivered.append(rel_dir_key)
+			elif _try_push_item(target_pos, out_item, entry_dir):
 				delivered.append(rel_dir_key)
-		elif _try_push_item(target_pos, out_item, entry_dir):
-			delivered.append(rel_dir_key)
-		else:
-			# Push failed — store in block storage
-			if _add_to_storage(origin, out_item, data):
-				delivered.append(rel_dir_key)
+			else:
+				if _add_to_storage(origin, out_item, data):
+					delivered.append(rel_dir_key)
 
 	for key in delivered:
 		state["pending_outputs"].erase(key)
+
+
+## Returns true if a cell is a conveyor whose forward direction points into
+## ANY cell of the given building footprint. Multi-tile variant of
+## _conveyor_feeds_into.
+func _conveyor_feeds_toward_building(conv_pos: Vector2i, origin: Vector2i, grid_size: Vector2i) -> bool:
+	if not _is_conveyor_cell(conv_pos):
+		return false
+	var rot: int = main.building_rotation.get(conv_pos, 0)
+	var forward: Vector2i = DIR_VECTORS[rot % 4]
+	var target: Vector2i = conv_pos + forward
+	# Check if target lands inside the footprint rect.
+	if target.x >= origin.x and target.x < origin.x + grid_size.x \
+	and target.y >= origin.y and target.y < origin.y + grid_size.y:
+		return true
+	return false
 
 
 ## Spawns a unit in front of a fabricator building (centered on the facing side).
@@ -3185,7 +3354,15 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	if not main.placed_buildings.has(grid_pos):
 		return false
 	var data = Registry.get_block(main.placed_buildings[grid_pos])
-	if data == null or data.side_inputs.is_empty():
+	if data == null:
+		return false
+
+	# Omnidirectional factories accept on every side and don't need side_inputs set.
+	# Unit fabricators also accept from any side — their inputs come from the
+	# produced unit's build_cost, not side_inputs.
+	var is_omni: bool = data.tags.has("omnidirectional")
+	var is_unit_fab_early: bool = data.produced_unit != &""
+	if not is_omni and not is_unit_fab_early and data.side_inputs.is_empty():
 		return false
 
 	# Find the building's origin for multi-tile factories
@@ -3205,10 +3382,38 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	var state = factory_buffers[origin]
 	var is_unit_fab: bool = data.produced_unit != &""
 
-	# Regular factories only accept during collecting; unit fabricators accept during processing too
+	# Regular factories only accept during collecting; unit fabricators accept
+	# during processing too. Omnidirectional factories ALSO accept in every
+	# phase — they buffer inputs up to max_stored_items so the belt-fed
+	# ingredient side can keep topping up while the factory is mid-cycle.
 	if state["phase"] != "collecting":
-		if not is_unit_fab or state["phase"] != "processing":
+		var accepts_in_processing: bool = is_unit_fab or is_omni
+		if not accepts_in_processing or state["phase"] != "processing":
+			if not is_omni or state["phase"] != "outputting":
+				return false
+
+	# Omnidirectional / unit-fabricator path: accept any item that matches one
+	# of the factory's effective inputs, regardless of entry direction. Inputs
+	# buffer up to max_stored_items per ingredient (defaults to 10× recipe
+	# amount so the factory can keep running for a while without a belt
+	# refilling every cycle).
+	if is_omni or is_unit_fab_early:
+		var effective_inputs := _get_effective_inputs(data)
+		var recipe_amt: int = -1
+		for raw_id in effective_inputs:
+			if StringName(raw_id) == item_id:
+				recipe_amt = int(effective_inputs[raw_id])
+				break
+		if recipe_amt < 0:
+			return false  # Not one of this factory's inputs
+		if recipe_amt < 1:
+			recipe_amt = 1
+		var cap_o: int = data.max_stored_items if data.max_stored_items > 0 else recipe_amt * 10
+		var have_o: int = state["inputs"].get(item_id, 0)
+		if have_o >= cap_o:
 			return false
+		state["inputs"][item_id] = have_o + 1
+		return true
 
 	# Check each input side to see if entry_dir matches
 	for rel_dir_key in data.side_inputs:

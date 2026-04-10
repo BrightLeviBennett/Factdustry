@@ -1,4 +1,10 @@
 {
+	"archive_decoder_state": {
+
+	},
+	"archive_holdings": {
+
+	},
 	"block_storage": {
 
 	},
@@ -417,15 +423,24 @@
 		"96,19": "mechanical_drill",
 		"96,20": "mechanical_drill"
 	},
+	"constructor_state": {
+
+	},
 	"conveyor_items": {
 
 	},
 	"core_position": "54,51",
+	"crane_states": {
+
+	},
+	"deconstructor_state": {
+
+	},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1775173517.42777
+		"timestamp": 1775756064.05434
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -2879,6 +2894,9 @@
 			"91,20"
 		]
 	],
+	"loader_state": {
+
+	},
 	"ore_tiles": {
 		"37,47": "copper_ore",
 		"38,47": "copper_ore",
@@ -2911,6 +2929,9 @@
 		"94,23": "copper_ore",
 		"95,22": "copper_ore",
 		"96,21": "copper_ore"
+	},
+	"payload_items": {
+
 	},
 	"player_units": [],
 	"resources": {
@@ -3212,12 +3233,12 @@
 			],
 			"conditions": [
 				{
-					"amount": 1,
+					"amount": 1.0,
 					"block_id": "mechanical_drill",
 					"type": "placed"
 				},
 				{
-					"amount": 1,
+					"amount": 1.0,
 					"block_id": "conveyor_belt",
 					"type": "placed"
 				}
@@ -3292,6 +3313,69 @@
 					"type": "remove_box"
 				}
 			]
+		},
+		{
+			"actions": [
+				{
+					"color": "white",
+					"from": "46,63",
+					"id": "PBB1",
+					"to": "47,64",
+					"type": "draw_box"
+				},
+				{
+					"color": "white",
+					"from": "46,55",
+					"id": "PBB2",
+					"to": "48,57",
+					"type": "draw_box"
+				},
+				{
+					"from": "44,61",
+					"id": "PBT1",
+					"text": "(-white)Research and place a [image]Wall Crusher to grind sand from the walls.",
+					"to": "48,61",
+					"type": "draw_text"
+				},
+				{
+					"from": "45,54",
+					"id": "PBT2",
+					"text": "(-white)Research and place a [res://textures/blocks/factories/SiliconMixer.png]Silicon Mixer.\n(-white)You'll need to provide it with graphite, sand and power.",
+					"to": "48,54",
+					"type": "draw_text"
+				}
+			],
+			"conditions": [
+				{
+					"block_id": "wall_crusher",
+					"type": "placed"
+				},
+				{
+					"block_id": "silicon_mixer",
+					"type": "placed"
+				}
+			],
+			"name": "Place Blocks",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
+				{
+					"type": "clear_boxes"
+				}
+			]
+		},
+		{
+			"actions": [],
+			"conditions": [
+				{
+					"amount": 10.0,
+					"item_id": "mat_silicon",
+					"type": "deposited"
+				}
+			],
+			"name": "Produce silicon",
+			"on_exit": []
 		},
 		{
 			"actions": [
@@ -3539,6 +3623,9 @@
 
 	},
 	"type": "sector",
+	"unloader_state": {
+
+	},
 	"version": 3,
 	"wall_tiles": {
 		"23,46": "grassy_wall",

@@ -929,9 +929,17 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 	if data.produced_unit != &"":
 		if _logistics and _logistics.factory_buffers.has(origin):
 			var state = _logistics.factory_buffers[origin]
-			for raw_id in data.input_items:
+			# Unit fabricators consume the produced unit's build_cost.
+			# Normalize short ids ("copper") to full item ids ("mat_copper")
+			# so we look up the runtime buffer with the same key the conveyor
+			# pushes items under.
+			var ufab_unit = Registry.get_unit(data.produced_unit)
+			var ufab_raw: Dictionary = ufab_unit.build_cost if ufab_unit and not ufab_unit.build_cost.is_empty() else data.input_items
+			var ufab_inputs: Dictionary = _logistics._normalize_item_keys(ufab_raw) if _logistics.has_method("_normalize_item_keys") else ufab_raw
+			for raw_id in ufab_inputs:
 				var sn_id := StringName(raw_id)
-				var cap: int = data.max_stored_items if data.max_stored_items > 0 else data.input_items[raw_id]
+				var recipe: int = int(ufab_inputs[raw_id])
+				var cap: int = data.max_stored_items if data.max_stored_items > 0 else recipe
 				var have: int = state["inputs"].get(sn_id, 0)
 				var item = Registry.get_item_or_fluid(sn_id)
 				var item_name: String = item.display_name if item else str(sn_id)
@@ -1057,6 +1065,8 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		elif not data.input_items.is_empty() and _logistics.factory_buffers.has(origin):
 			var fb = _logistics.factory_buffers[origin]
 			var inputs: Dictionary = fb.get("inputs", {})
+			# Omnidirectional factories buffer inputs up to max_stored_items.
+			var is_omni_bldg: bool = data.tags.has("omnidirectional")
 			var has_need := false
 			for raw_id in data.input_items:
 				var sn_id := StringName(raw_id)
@@ -1065,12 +1075,15 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				if have < needed:
 					has_need = true
 					break
-			if has_need:
+			if has_need or is_omni_bldg:
 				_add_tooltip_separator()
 				for raw_id in data.input_items:
 					var sn_id := StringName(raw_id)
-					var needed: int = int(data.input_items[raw_id])
+					var recipe_amt: int = int(data.input_items[raw_id])
 					var have: int = int(inputs.get(sn_id, 0))
+					var needed: int = recipe_amt
+					if is_omni_bldg:
+						needed = data.max_stored_items if data.max_stored_items > 0 else recipe_amt * 10
 					var item = Registry.get_item_or_fluid(sn_id)
 					var hbox = HBoxContainer.new()
 					hbox.add_theme_constant_override("separation", 4)
@@ -1086,21 +1099,49 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					var lbl = Label.new()
 					lbl.text = "%d / %d" % [have, needed]
 					lbl.add_theme_font_size_override("font_size", 12)
-					lbl.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3) if have >= needed else Color(0.9, 0.5, 0.3))
+					lbl.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3) if have >= recipe_amt else Color(0.9, 0.5, 0.3))
 					lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 					hbox.add_child(lbl)
 					tooltip_vbox.add_child(hbox)
 
 	# --- Storage Contents ---
-	if _logistics and _logistics.block_storage.has(origin):
-		var storage = _logistics.block_storage[origin]
-		var has_items: bool = not storage["items"].is_empty()
-		var has_fluids: bool = not storage["fluids"].is_empty()
-		if has_items or has_fluids:
+	# For omnidirectional factories, also list the input buffer under the
+	# Storage section so the player can see sand/graphite/etc. piling up there.
+	var is_omni_storage: bool = data.tags.has("omnidirectional")
+	var factory_inputs: Dictionary = {}
+	if is_omni_storage and _logistics and _logistics.factory_buffers.has(origin):
+		factory_inputs = _logistics.factory_buffers[origin].get("inputs", {})
+	var has_factory_inputs: bool = false
+	for k in factory_inputs:
+		if int(factory_inputs[k]) > 0:
+			has_factory_inputs = true
+			break
+
+	if _logistics and (_logistics.block_storage.has(origin) or has_factory_inputs):
+		var storage_items: Dictionary = {}
+		var storage_fluids: Dictionary = {}
+		if _logistics.block_storage.has(origin):
+			var storage = _logistics.block_storage[origin]
+			storage_items = storage["items"]
+			storage_fluids = storage["fluids"]
+		var has_items: bool = not storage_items.is_empty()
+		var has_fluids: bool = not storage_fluids.is_empty()
+		if has_items or has_fluids or has_factory_inputs:
 			_add_tooltip_separator()
 			_add_tooltip_line("Storage:", Color(0.7, 0.75, 0.8))
-			for item_id in storage["items"]:
-				var count: int = int(storage["items"][item_id])
+			# Input buffer contents (omnidirectional factories only)
+			for sn_id in factory_inputs:
+				var in_count: int = int(factory_inputs[sn_id])
+				if in_count <= 0:
+					continue
+				var in_item = Registry.get_item_or_fluid(sn_id)
+				var in_name: String = in_item.display_name if in_item else str(sn_id)
+				var in_max_str := ""
+				if data.max_stored_items > 0:
+					in_max_str = "/%d" % data.max_stored_items
+				_add_tooltip_line("  %s: %d%s" % [in_name, in_count, in_max_str], Color(0.7, 0.85, 0.7))
+			for item_id in storage_items:
+				var count: int = int(storage_items[item_id])
 				if count <= 0:
 					continue
 				var item = Registry.get_item_or_fluid(item_id)
@@ -1109,8 +1150,8 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				if data.max_stored_items > 0:
 					max_str = "/%d" % data.max_stored_items
 				_add_tooltip_line("  %s: %d%s" % [item_name, count, max_str], Color(0.8, 0.85, 0.8))
-			for fluid_id in storage["fluids"]:
-				var amount: float = float(storage["fluids"][fluid_id])
+			for fluid_id in storage_fluids:
+				var amount: float = float(storage_fluids[fluid_id])
 				if amount <= 0:
 					continue
 				var fluid = Registry.get_fluid(fluid_id)
@@ -2171,6 +2212,8 @@ func _open_settings() -> void:
 
 
 func _open_escape_menu() -> void:
+	if escape_menu == null or main == null:
+		return
 	escape_menu_open = true
 	escape_menu.visible = true
 	main.world_paused = true

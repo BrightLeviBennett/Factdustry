@@ -614,6 +614,12 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	var is_platform: bool = data.tags.has("platform")
 	var is_pump: bool = data.tags.has("pump")
+	# If the new block is a member of a swap family (belt/duct/conduit/etc),
+	# cells already holding another same-family block count as placeable —
+	# the click handler in main.try_place_building will swap them.
+	var new_swap_group: StringName = &""
+	if data.grid_size == Vector2i(1, 1) and main.has_method("_get_swap_group"):
+		new_swap_group = main._get_swap_group(data)
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var check_pos = grid_pos + Vector2i(x, y)
@@ -629,6 +635,13 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 					var cell_data = Registry.get_block(cell_block_id)
 					if cell_data and cell_data.tags.has("platform"):
 						has_platform_under = true
+					elif cell_data and new_swap_group != &"" \
+							and cell_data.grid_size == Vector2i(1, 1) \
+							and main._get_swap_group(cell_data) == new_swap_group \
+							and main.get_building_faction(check_pos) == main.Faction.LUMINA:
+						# Swap-compatible: cell is placeable. The swap itself
+						# happens in main.try_place_building.
+						pass
 					else:
 						return false
 			if terrain and terrain.has_wall(check_pos):
@@ -669,10 +682,14 @@ func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 		return false
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 
-	# Extractor must face ore
+	# Extractor must face ore — or, for wall_miner extractors, a blackstone wall.
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
-		if not _is_facing_ore(grid_pos, main.placement_rotation):
-			return false
+		if data.tags.has("wall_miner"):
+			if not _is_facing_wall(grid_pos, main.placement_rotation, block_id):
+				return false
+		else:
+			if not _is_facing_ore(grid_pos, main.placement_rotation):
+				return false
 	# Pump must be on liquid
 	elif data.tags.has("pump"):
 		if not _is_on_liquid(grid_pos):
@@ -738,6 +755,44 @@ func _is_facing_ore(grid_pos: Vector2i, rotation: int, block_id: StringName = &"
 		if terrain.get_ore_at(cell + dir) != null:
 			return true
 	return false
+
+
+## Returns true if this building's front edge faces a blackstone wall tile
+## (or has one directly behind that front cell). Mirrors the +1-ahead check
+## the mechanical drill uses for ores. Only blackstone_wall tiles without
+## an ore deposit count — ore walls are reserved for regular drills.
+func _is_facing_wall(grid_pos: Vector2i, rotation: int, block_id: StringName = &"") -> bool:
+	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	if terrain == null:
+		return false
+	var bid: StringName = block_id if block_id != &"" else main.selected_building
+	var data = Registry.get_block(bid)
+	if data == null:
+		return false
+
+	var dir: Vector2i
+	match rotation:
+		0: dir = Vector2i(1, 0)
+		1: dir = Vector2i(0, 1)
+		2: dir = Vector2i(-1, 0)
+		3: dir = Vector2i(0, -1)
+		_: dir = Vector2i(1, 0)
+
+	var front_cells = _get_front_edge(grid_pos, data.grid_size, rotation)
+	for cell in front_cells:
+		if _is_mineable_wall(terrain, cell):
+			return true
+		if _is_mineable_wall(terrain, cell + dir):
+			return true
+	return false
+
+
+## Wall-miner helper: true if the cell is a blackstone_wall with no ore on it.
+func _is_mineable_wall(terrain: Node, cell: Vector2i) -> bool:
+	if terrain.get_ore_at(cell) != null:
+		return false
+	var wall_id = terrain.wall_tiles.get(cell, &"")
+	return StringName(wall_id) == &"blackstone_wall"
 
 
 ## Returns true if any cardinal neighbor of this building is an archive block.

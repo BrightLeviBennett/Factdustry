@@ -6,12 +6,11 @@
 [resource]
 script = ExtResource("1")
 id = &"water"
-display_name = "Water (Shallow)"
-description = "Shallow fresh water. Ground units can wade through at half speed. Fluid pumps can be placed here."
+display_name = "Water"
+description = "A body of fresh water. Depth is computed automatically from distance to shore. Ground units wade at half speed; they drown if submerged too long."
 icon = ExtResource("2")
-color = Color(0.35, 0.55, 0.9, 1)
+color = Color(0.2, 0.4, 0.8, 1)
 speed_modifier = 0.5
 tags = PackedStringArray("liquid", "water")
 is_liquid = true
 extracted_liquid = &"mat_water"
-water_depth = 1

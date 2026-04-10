@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://qg2qq6srbiqs"
-path="res://.godot/imported/download-1.png-23b621b2db2748963f6e85eba41c78e0.ctex"
+uid="uid://dtiy7meokk1gx"
+path="res://.godot/imported/SiliconMixer.png-d4768874eb97e166e655c9b797d15ecc.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/UI/download-1.png"
-dest_files=["res://.godot/imported/download-1.png-23b621b2db2748963f6e85eba41c78e0.ctex"]
+source_file="res://textures/blocks/factories/SiliconMixer.png"
+dest_files=["res://.godot/imported/SiliconMixer.png-d4768874eb97e166e655c9b797d15ecc.ctex"]
 
 [params]
 

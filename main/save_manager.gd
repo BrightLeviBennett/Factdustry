@@ -621,6 +621,7 @@ func save_sector(sector_name: String) -> bool:
 		"buildings": _serialize_buildings(main.placed_buildings),
 		"building_rotation": _serialize_rotation(main.building_rotation),
 		"building_factions": _serialize_factions(main.building_factions),
+		"building_health": _serialize_health(main.building_health),
 		"linked_pairs": _serialize_links(links),
 		"sorter_filters": _serialize_sorter_filters(),
 		"script_steps": _serialize_script_steps(),
@@ -741,11 +742,14 @@ func load_sector_from_path(path: String) -> bool:
 			else:
 				sector_script.call_deferred("start_script")
 
-	# --- Rebuild health from BlockData.max_health ---
-	for grid_pos in main.placed_buildings:
-		var block_data = Registry.get_block(main.placed_buildings[grid_pos])
-		if block_data:
-			main.building_health[grid_pos] = block_data.max_health
+	# --- Restore building health (use saved values if present, else max_health) ---
+	if data.has("building_health") and data["building_health"] is Dictionary:
+		_deserialize_building_health(main, data["building_health"])
+	else:
+		for grid_pos in main.placed_buildings:
+			var block_data = Registry.get_block(main.placed_buildings[grid_pos])
+			if block_data:
+				main.building_health[grid_pos] = block_data.max_health
 
 	# --- Rebuild building_origins from grid_size ---
 	_rebuild_building_origins(main)
