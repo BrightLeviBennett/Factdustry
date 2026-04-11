@@ -12,16 +12,9 @@ icon = ExtResource("1_od8q8")
 planet_id = &"Tarkon"
 hex_q = 1
 hex_r = -1
-tier = 2
-threat_level = 3
-color = null
-available_resources = {
-"mat_coal": 0.5,
-"mat_copper": 0.6,
-"mat_iron": 0.9,
-"mat_sand": 0.3
-}
-enemy_types = PackedStringArray("basic_cell", "phage")
+available_resources = PackedStringArray()
+wave_units_data = PackedStringArray()
 unlocks = PackedStringArray("waterfront_ruins")
 required_sectors = PackedStringArray("crevice")
+map_path = "res://data/game/tarkon/maps/FR.sector.json"
 tags = PackedStringArray("campaign", "sector")

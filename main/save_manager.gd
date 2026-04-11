@@ -146,6 +146,12 @@ func load_map_from_path(path: String) -> bool:
 	terrain.tile_health.clear()
 	terrain.multi_tile_origins.clear()
 
+	# Restore map size if saved
+	if data.has("grid_width"):
+		main.GRID_WIDTH = int(data["grid_width"])
+	if data.has("grid_height"):
+		main.GRID_HEIGHT = int(data["grid_height"])
+
 	# Detect v2 by version key OR presence of floor_tiles key
 	var version = data.get("version", 1)
 	if version >= 2 or data.has("floor_tiles"):
@@ -293,6 +299,12 @@ func load_game(save_name: String) -> bool:
 	main.building_health.clear()
 	main.building_rotation.clear()
 	main.building_factions.clear()
+
+	# --- Restore map size ---
+	if data.has("grid_width"):
+		main.GRID_WIDTH = int(data["grid_width"])
+	if data.has("grid_height"):
+		main.GRID_HEIGHT = int(data["grid_height"])
 
 	# --- Load tiles ---
 	var version = data.get("version", 1)
@@ -695,6 +707,12 @@ func load_sector_from_path(path: String) -> bool:
 		main.linked_pairs.clear()
 	if power_sys and power_sys.get("linked_pairs") != null:
 		power_sys.linked_pairs.clear()
+
+	# --- Restore map size ---
+	if data.has("grid_width"):
+		main.GRID_WIDTH = int(data["grid_width"])
+	if data.has("grid_height"):
+		main.GRID_HEIGHT = int(data["grid_height"])
 
 	# --- Load terrain ---
 	_deserialize_layer(terrain.floor_tiles, data.get("floor_tiles", {}))

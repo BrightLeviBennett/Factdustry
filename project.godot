@@ -30,6 +30,8 @@ TechTree="*uid://skp78ngoxv7k"
 
 window/size/viewport_width=1500
 window/size/viewport_height=1050
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [editor]
 

@@ -215,11 +215,15 @@ func _create_toolbar() -> void:
 	cursor_pos_label.custom_minimum_size.x = 100
 	hbox.add_child(cursor_pos_label)
 
+	_add_action_btn(hbox, "Settings", _toggle_settings)
 	_add_action_btn(hbox, "Back to Menu", _on_back_to_menu)
 
 	# Highlight the defaults
 	_update_tool_highlight()
 	_update_mode_highlight()
+
+	# --- Settings panel (map size etc.) ---
+	_create_settings_panel()
 
 
 func _add_mode_btn(parent: HBoxContainer, label: String, mode: int) -> void:
@@ -700,6 +704,111 @@ func _on_new() -> void:
 
 func _on_back_to_menu() -> void:
 	get_tree().change_scene_to_file("res://main/MainMenu.tscn")
+
+
+# =========================
+# SETTINGS PANEL
+# =========================
+
+var _settings_panel: PanelContainer
+var _settings_open := false
+var _width_input: SpinBox
+var _height_input: SpinBox
+
+func _create_settings_panel() -> void:
+	_settings_panel = PanelContainer.new()
+	_settings_panel.anchor_left = 0.5
+	_settings_panel.anchor_right = 0.5
+	_settings_panel.anchor_top = 0.5
+	_settings_panel.anchor_bottom = 0.5
+	_settings_panel.offset_left = -140
+	_settings_panel.offset_right = 140
+	_settings_panel.offset_top = -100
+	_settings_panel.offset_bottom = 100
+	_settings_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.08, 0.08, 0.1, 0.95)))
+	_settings_panel.visible = false
+	add_child(_settings_panel)
+
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	_settings_panel.add_child(vbox)
+
+	# Title
+	var title = Label.new()
+	title.text = "Map Settings"
+	title.add_theme_font_size_override("font_size", 16)
+	title.add_theme_color_override("font_color", Color(1.0, 0.84, 0.0))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(title)
+
+	# Map Width
+	var w_hbox = HBoxContainer.new()
+	w_hbox.add_theme_constant_override("separation", 8)
+	var w_label = Label.new()
+	w_label.text = "Map Width:"
+	w_label.custom_minimum_size.x = 90
+	w_hbox.add_child(w_label)
+	_width_input = SpinBox.new()
+	_width_input.min_value = 20
+	_width_input.max_value = 500
+	_width_input.step = 10
+	_width_input.value = main.GRID_WIDTH
+	_width_input.custom_minimum_size.x = 100
+	w_hbox.add_child(_width_input)
+	vbox.add_child(w_hbox)
+
+	# Map Height
+	var h_hbox = HBoxContainer.new()
+	h_hbox.add_theme_constant_override("separation", 8)
+	var h_label = Label.new()
+	h_label.text = "Map Height:"
+	h_label.custom_minimum_size.x = 90
+	h_hbox.add_child(h_label)
+	_height_input = SpinBox.new()
+	_height_input.min_value = 20
+	_height_input.max_value = 500
+	_height_input.step = 10
+	_height_input.value = main.GRID_HEIGHT
+	_height_input.custom_minimum_size.x = 100
+	h_hbox.add_child(_height_input)
+	vbox.add_child(h_hbox)
+
+	# Apply + Close buttons
+	var btn_hbox = HBoxContainer.new()
+	btn_hbox.add_theme_constant_override("separation", 8)
+	btn_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+
+	var apply_btn = Button.new()
+	apply_btn.text = "Apply"
+	apply_btn.pressed.connect(_on_settings_apply)
+	btn_hbox.add_child(apply_btn)
+
+	var close_btn = Button.new()
+	close_btn.text = "Close"
+	close_btn.pressed.connect(func(): _settings_panel.visible = false; _settings_open = false)
+	btn_hbox.add_child(close_btn)
+
+	vbox.add_child(btn_hbox)
+
+
+func _toggle_settings() -> void:
+	_settings_open = not _settings_open
+	_settings_panel.visible = _settings_open
+	if _settings_open:
+		_width_input.value = main.GRID_WIDTH
+		_height_input.value = main.GRID_HEIGHT
+
+
+func _on_settings_apply() -> void:
+	var new_w := int(_width_input.value)
+	var new_h := int(_height_input.value)
+	if new_w != main.GRID_WIDTH or new_h != main.GRID_HEIGHT:
+		main.GRID_WIDTH = new_w
+		main.GRID_HEIGHT = new_h
+		var overlay = main.get_node_or_null("EditorOverlay")
+		if overlay:
+			overlay.queue_redraw()
+		_show_status("Map size changed to %d × %d" % [new_w, new_h])
 
 
 # =========================

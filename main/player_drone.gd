@@ -22,7 +22,7 @@ var max_health: float
 var health_regen: float
 
 # --- SETTINGS (not in .tres, specific to drone behavior) ---
-@export var build_range := 5
+@export var build_range := 10
 
 # --- STATE ---
 var health: float

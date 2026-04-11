@@ -16,8 +16,8 @@ extends Node2D
 
 # --- GRID CONSTANTS (must match main.gd) ---
 const GRID_SIZE := 64
-const GRID_WIDTH := 100
-const GRID_HEIGHT := 100
+var GRID_WIDTH := 100
+var GRID_HEIGHT := 100
 
 # --- FACTIONS (must match main.gd) ---
 enum Faction { LUMINA, FEROX }
@@ -965,6 +965,16 @@ func _draw_grid() -> void:
 	for y in range(min_y, max_y + 1):
 		var py: float = y * gs
 		_overlay.draw_line(Vector2(min_x * gs, py), Vector2(max_x * gs, py), color, 1.0)
+
+	# Map boundary — thick colored border at the grid limits
+	var bound_color := Color(1.0, 0.3, 0.3, 0.5)
+	var bound_w := 2.5
+	var map_w: float = GRID_WIDTH * gs
+	var map_h: float = GRID_HEIGHT * gs
+	_overlay.draw_line(Vector2(0, 0), Vector2(map_w, 0), bound_color, bound_w)
+	_overlay.draw_line(Vector2(0, map_h), Vector2(map_w, map_h), bound_color, bound_w)
+	_overlay.draw_line(Vector2(0, 0), Vector2(0, map_h), bound_color, bound_w)
+	_overlay.draw_line(Vector2(map_w, 0), Vector2(map_w, map_h), bound_color, bound_w)
 
 
 func _draw_core_marker() -> void:

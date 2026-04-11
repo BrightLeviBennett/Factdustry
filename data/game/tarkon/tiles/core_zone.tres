@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://crmbpdhr3m4x8"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://byqd1ceg3d83m" path="res://textures/terrain/coreZone.png" id="1_l58aq"]
+
+[resource]
+script = ExtResource("1")
+id = &"core_zone"
+display_name = "Core Zone"
+description = "Reinforced foundation. Only core blocks can be placed here."
+icon = ExtResource("1_l58aq")
+color = Color(0.25, 0.3, 0.35, 1)
+tags = PackedStringArray("core_zone")

@@ -254,6 +254,7 @@
 	"res://data/game/tarkon/tiles/blackstone_floor.tres",
 	"res://data/game/tarkon/tiles/blackstone_wall.tres",
 	"res://data/game/tarkon/tiles/copper_ore.tres",
+	"res://data/game/tarkon/tiles/core_zone.tres",
 	"res://data/game/tarkon/tiles/geyser.tres",
 	"res://data/game/tarkon/tiles/graphite_ore.tres",
 	"res://data/game/tarkon/tiles/grassy_floor.tres",

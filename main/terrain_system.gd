@@ -413,7 +413,9 @@ func _rebuild_floor_edge_cache() -> void:
 	_floor_edge_dirty = false
 	_floor_edge_distance.clear()
 	var sector_script = get_node_or_null("/root/Main/SectorScript")
-	# Seed: visible floor tiles adjacent to void (no floor, no wall) or hidden tiles
+	# Seed: visible floor tiles adjacent to void or hidden tiles.
+	# Walls only block the fade if they have floor behind them (interior walls).
+	# Edge walls (walls with void on at least one side) let the fade through.
 	var queue: Array[Vector2i] = []
 	for grid_pos in floor_tiles:
 		if sector_script and sector_script.is_tile_hidden(grid_pos):
@@ -421,9 +423,17 @@ func _rebuild_floor_edge_cache() -> void:
 		for offset in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
 			var nb = grid_pos + offset
 			var nb_is_void: bool = not floor_tiles.has(nb) and not wall_tiles.has(nb)
-			# Only hidden floors (not hidden walls) trigger edge fade — walls still block void visually
+			# A wall neighbor lets the fade through if the wall itself borders
+			# void on any side (it's an edge wall, not an interior wall).
+			var nb_is_edge_wall := false
+			if wall_tiles.has(nb) and not floor_tiles.has(nb):
+				for wo in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
+					var wnb = nb + wo
+					if not floor_tiles.has(wnb) and not wall_tiles.has(wnb):
+						nb_is_edge_wall = true
+						break
 			var nb_is_hidden: bool = sector_script != null and floor_tiles.has(nb) and not wall_tiles.has(nb) and sector_script.is_tile_hidden(nb)
-			if nb_is_void or nb_is_hidden:
+			if nb_is_void or nb_is_edge_wall or nb_is_hidden:
 				_floor_edge_distance[grid_pos] = 0
 				queue.append(grid_pos)
 				break

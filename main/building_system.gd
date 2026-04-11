@@ -669,6 +669,51 @@ func _is_in_build_range(grid_pos: Vector2i) -> bool:
 	return true
 
 
+## Like _can_place_at but skips the drone build-range check and uses a
+## specific rotation instead of main.placement_rotation. Used for the ghost
+## queue — blocks placed outside range are validated the same way as regular
+## placement (terrain, facing ore/wall, pump-on-liquid, core zone, etc.)
+## except the range requirement is deferred until the drone walks over.
+func _can_place_ignoring_range(grid_pos: Vector2i, block_id: StringName, rotation: int) -> bool:
+	if not _can_place_terrain(grid_pos, block_id):
+		return false
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return false
+	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	# Core zone
+	if terrain and data.tags.has("core"):
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				var check_pos = grid_pos + Vector2i(x, y)
+				var floor_data = terrain.get_floor_at(check_pos)
+				if floor_data == null or not floor_data.tags.has("core_zone"):
+					return false
+	# Extractor must face ore / wall
+	if data.category == BlockData.BlockCategory.EXTRACTORS:
+		if data.tags.has("wall_miner"):
+			if not _is_facing_wall(grid_pos, rotation, block_id):
+				return false
+		else:
+			if not _is_facing_ore(grid_pos, rotation, block_id):
+				return false
+	# Pump must be on liquid
+	elif data.tags.has("pump"):
+		if not _is_on_liquid(grid_pos):
+			return false
+	# Archive scanner must face archive
+	elif data.tags.has("archive_scanner"):
+		if not _is_facing_archive(grid_pos, rotation, block_id):
+			return false
+	# Vent-powered
+	if data.tags.has("vent_powered"):
+		if terrain:
+			var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+			if terrain.floor_tiles.get(center, &"") != &"vent":
+				return false
+	return true
+
+
 func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 	if not _can_place_terrain(grid_pos, block_id):
 		return false
@@ -681,6 +726,16 @@ func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 	if data == null:
 		return false
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+
+	# Core zone rule: core blocks MUST be on a core_zone tile.
+	# Non-core blocks CAN be placed on core_zone tiles (no restriction).
+	if terrain and data.tags.has("core"):
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				var check_pos = grid_pos + Vector2i(x, y)
+				var floor_data = terrain.get_floor_at(check_pos)
+				if floor_data == null or not floor_data.tags.has("core_zone"):
+					return false
 
 	# Extractor must face ore — or, for wall_miner extractors, a blackstone wall.
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
@@ -921,8 +976,8 @@ func _unhandled_input(event: InputEvent) -> void:
 								main.placement_rotation = cell_rot
 								main.selected_building = cell_block
 								main.try_place_building(cell)
-							elif _can_place_terrain(cell, cell_block) and not queued_positions.has(cell):
-								# Out of range but valid terrain: queue as ghost
+							elif _can_place_ignoring_range(cell, cell_block, cell_rot) and not queued_positions.has(cell):
+								# Out of range but valid placement: queue as ghost
 								_paused_queue.append({
 									"grid_pos": cell,
 									"block_id": cell_block,
@@ -968,17 +1023,38 @@ func _unhandled_input(event: InputEvent) -> void:
 					_demolish_end = main.world_to_grid(mouse_world)
 					# If it was just a click (no drag movement)
 					if _demolish_start == _demolish_end:
-						# If clicking on a building, queue it for deconstruction
-						if main.placed_buildings.has(_demolish_start):
-							var click_block_id = main.placed_buildings[_demolish_start]
-							var click_data = Registry.get_block(click_block_id)
-							var click_faction = main.get_building_faction(_demolish_start)
-							if click_faction == FACTION_LUMINA and (click_data == null or not click_data.tags.has("core")):
-								var click_anchor: Vector2i = main.building_origins.get(_demolish_start, _demolish_start)
-								if main.has_method("start_deconstruct"):
-									main.start_deconstruct(click_anchor)
-						else:
-							main.select_building(&"")
+						# First check if clicking on a queued ghost block — remove it.
+						# For multi-tile ghosts, check all cells of each entry.
+						var removed_ghost := false
+						for qi in range(_paused_queue.size() - 1, -1, -1):
+							var entry_pos: Vector2i = _paused_queue[qi]["grid_pos"]
+							var entry_data = Registry.get_block(_paused_queue[qi]["block_id"])
+							var gw: int = entry_data.grid_size.x if entry_data else 1
+							var gh: int = entry_data.grid_size.y if entry_data else 1
+							var hit := false
+							for gx in range(gw):
+								for gy in range(gh):
+									if entry_pos + Vector2i(gx, gy) == _demolish_start:
+										hit = true
+										break
+								if hit:
+									break
+							if hit:
+								_paused_queue.remove_at(qi)
+								removed_ghost = true
+								break
+						if not removed_ghost:
+							# If clicking on a building, queue it for deconstruction
+							if main.placed_buildings.has(_demolish_start):
+								var click_block_id = main.placed_buildings[_demolish_start]
+								var click_data = Registry.get_block(click_block_id)
+								var click_faction = main.get_building_faction(_demolish_start)
+								if click_faction == FACTION_LUMINA and (click_data == null or not click_data.tags.has("core")):
+									var click_anchor: Vector2i = main.building_origins.get(_demolish_start, _demolish_start)
+									if main.has_method("start_deconstruct"):
+										main.start_deconstruct(click_anchor)
+							else:
+								main.select_building(&"")
 					elif not ("world_paused" in main and main.world_paused):
 						_demolish_rect(_demolish_start, _demolish_end)
 					queue_redraw()
@@ -1642,6 +1718,8 @@ func _draw_placed_buildings() -> void:
 			if _ss_side and _ss_side.is_tile_hidden(grid_pos):
 				continue
 			var fade_alpha := _get_wall_fade_alpha(grid_pos)
+			if not terrain.wall_tiles.has(grid_pos):
+				continue
 			var tile_data = Registry.get_tile(terrain.wall_tiles[grid_pos])
 			if tile_data == null or tile_data.height <= 0:
 				continue
@@ -1713,6 +1791,8 @@ func _draw_placed_buildings() -> void:
 			if _ss_wall and _ss_wall.is_tile_hidden(grid_pos):
 				continue
 			var top_size = float(main.GRID_SIZE) - margin * 2
+			if not terrain.wall_tiles.has(grid_pos):
+				continue
 			var tile_data = Registry.get_tile(terrain.wall_tiles[grid_pos])
 			if tile_data == null:
 				continue

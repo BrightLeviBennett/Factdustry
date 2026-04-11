@@ -19,8 +19,8 @@ extends Node2D
 
 # --- GRID SETTINGS ---
 const GRID_SIZE := 64
-const GRID_WIDTH := 100
-const GRID_HEIGHT := 100
+var GRID_WIDTH := 100
+var GRID_HEIGHT := 100
 
 # --- RESOURCE TRACKING ---
 # Starting resources for the player.
@@ -564,6 +564,15 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 			# Can't place on walls
 			if terrain and terrain.has_wall(check_pos):
 				return false
+
+	# Core zone rule: core blocks MUST be on core_zone floor tiles.
+	if terrain and data.tags.has("core"):
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				var check_pos = grid_pos + Vector2i(x, y)
+				var floor_data = terrain.get_floor_at(check_pos)
+				if floor_data == null or not floor_data.tags.has("core_zone"):
+					return false
 
 	# Vent-powered buildings must be centered on a vent tile
 	if data.tags.has("vent_powered"):
