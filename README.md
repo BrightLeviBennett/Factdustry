@@ -29,7 +29,3 @@ So TLDR:
 Go to the relases section and find the relase with the highest number and leter, find the version labeled for your os type then download it.
 
 If on mac you will have to go to where you installed it in terminal then run xattr -rd com.apple.quarantine "Factdustry.app"
-
-
-### Note on relase format:
-The numbering system I am using is [build num].a/b/c/d/e where the build num is the actual relase and the .a/b/c/d/e is the bug fix number.
