@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bvmtw8as0bfm4"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://dup6eqc33pkw4" path="res://textures/blocks/item transportation/BeltJunction.jpeg" id="1_fbmvr"]
+[ext_resource type="Texture2D" uid="uid://bwi5ln6kpl1km" path="res://textures/blocks/item transportation/BeltJunction.png" id="1_fbmvr"]
 
 [resource]
 script = ExtResource("1")

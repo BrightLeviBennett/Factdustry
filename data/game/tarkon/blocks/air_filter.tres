@@ -1,20 +1,23 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dcpivnpk4bi42"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" path="res://textures/blocks/factories/AirFilter.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://doobi1mti2cmr" path="res://textures/blocks/factories/AirFilter.png" id="2"]
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"air_filter"
 display_name = "Air Filter"
 description = "Filters atmospheric gases for specific element extraction."
+icon = ExtResource("2")
 category = 2
+tags = PackedStringArray("production", "processing")
 color = Color(0.7, 0.8, 0.9, 1)
 max_health = 420.0
-build_cost = { "copper": 350, "silicon": 150 }
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
 build_time = 3.0
+production_time = 3.0
 requires_power = true
 power_consumption = 5.0
-production_time = 3.0
-tags = PackedStringArray("production", "processing")

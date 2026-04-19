@@ -211,7 +211,7 @@ func _select_tab(tab_name: String) -> void:
 func _build_game_tab() -> void:
 	_add_section("General")
 	_add_toggle("Show FPS", _get_show_fps(), func(v): _set_show_fps(v))
-	_add_toggle("Autosave", true, func(v): pass)  # Placeholder
+	_add_toggle("Autosave", true, func(_v): pass)  # Placeholder
 	_add_toggle("Require Research to Place Blocks",
 		main.require_research if main else true,
 		func(v):
@@ -221,11 +221,49 @@ func _build_game_tab() -> void:
 				if hud and hud.has_method("_refresh_block_menu"):
 					hud._refresh_block_menu()
 	)
+	_add_toggle("Unlock All Tech (sandbox)",
+		TechTree.unlock_all,
+		func(v):
+			TechTree.unlock_all = v
+			# Notify listeners that node states have effectively changed so
+			# the HUD block menu and any open tech tree UI refresh immediately.
+			for nid in TechTree.nodes:
+				TechTree.node_state_changed.emit(nid, TechTree.get_state(nid))
+			var hud = get_node_or_null("/root/Main/HUD")
+			if hud and hud.has_method("_refresh_block_menu"):
+				hud._refresh_block_menu()
+			# The tech tree renders into its internal tree_canvas Control.
+			# queue_redraw on the CanvasLayer doesn't propagate to a Control
+			# child, so redraw the canvas directly. Any open tooltip is
+			# refreshed too so ??? names update instantly.
+			var tree_ui = get_node_or_null("/root/Main/TechTreeUI")
+			if tree_ui:
+				if "tree_canvas" in tree_ui and tree_ui.tree_canvas:
+					tree_ui.tree_canvas.queue_redraw()
+				if tree_ui.has_method("_update_resource_panel"):
+					tree_ui._update_resource_panel()
+	)
+	_add_toggle("Parallax Effect",
+		true,
+		func(v):
+			var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+			if building_sys and "parallax_enabled" in building_sys:
+				building_sys.parallax_enabled = v
+	)
+	var cam = get_node_or_null("/root/Main/Camera2D")
+	var current_sens: float = cam.pan_rotate_threshold if cam and "pan_rotate_threshold" in cam else 1.5
+	_add_slider("Trackpad Rotation Sensitivity", clampf(1.0 / current_sens, 0.1, 2.0),
+		func(v):
+			var c = get_node_or_null("/root/Main/Camera2D")
+			if c and "pan_rotate_threshold" in c:
+				# Higher slider = more sensitive = lower threshold
+				c.pan_rotate_threshold = clampf(1.0 / maxf(v, 0.1), 0.5, 10.0)
+	)
 
 func _get_show_fps() -> bool:
 	return Engine.is_printing_error_messages()
 
-func _set_show_fps(v: bool) -> void:
+func _set_show_fps(_v: bool) -> void:
 	pass  # TODO: implement FPS counter
 
 
@@ -360,7 +398,7 @@ func _apply_rebind(action: StringName, event: InputEvent) -> void:
 func _reset_binding(action: StringName) -> void:
 	InputMap.action_erase_events(action)
 	# Re-add the project default
-	var defaults = ProjectSettings.get_property_list()
+	var _defaults = ProjectSettings.get_property_list()
 	# Reload from ProjectSettings
 	var key: String = "input/" + String(action)
 	if ProjectSettings.has_setting(key):

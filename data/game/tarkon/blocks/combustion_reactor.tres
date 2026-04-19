@@ -1,0 +1,20 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cfdmbsjayv0se"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"combustion_reactor"
+display_name = "Combustion Reactor"
+description = "Combusts coal to produce power. More efficient if provided water or a combustable gas."
+category = 3
+color = Color(0.9, 0.5, 0.2, 1)
+max_health = 160.0
+build_cost = {
+"copper": 50
+}
+build_time = 1.5
+output_items = {
+"power": 10
+}
+tags = PackedStringArray("power")

@@ -1,19 +1,22 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://deuegqfwx33yp"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" path="res://textures/blocks/power/VentTurbine.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://c1he5cedlo20h" path="res://textures/blocks/power/VentTurbine.png" id="2"]
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"vent_turbine"
 display_name = "Vent Turbine"
 description = "Harnesses thermal vents for passive power generation."
+icon = ExtResource("2")
 category = 3
 color = Color(0.8, 0.6, 0.3, 1)
+top_sprite = ExtResource("2")
 grid_size = Vector2i(3, 3)
 max_health = 240.0
-build_cost = { "copper": 15 }
+build_cost = {
+"copper": 15
+}
 build_time = 1.5
-rotational_power_gen = 20.0
+electrical_power_gen = 20.0
 tags = PackedStringArray("power", "vent_powered")

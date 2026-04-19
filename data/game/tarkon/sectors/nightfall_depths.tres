@@ -1,14 +1,14 @@
 [gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://d2mljyu8jbm13"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://ti2evtqjsmxn" path="res://textures/sectors/Nightfall_Depths.png" id="1_knqek"]
+[ext_resource type="Texture2D" uid="uid://dyo0sypahtyd6" path="res://textures/sectors/NightfallDepths.png" id="1_rw7fy"]
 
 [resource]
 script = ExtResource("1")
 id = &"nightfall_depths"
 display_name = "Nightfall Depths"
 description = "Because very few asteroids landed on this side of the planet, there aren't many vents and gysers; so you'll need to find other sources of energy. Aquire coal, and research the 'Combustion Engine' and 'Combustion Generator' to utilize the large deposits of coal on this sector."
-icon = ExtResource("1_knqek")
+icon = ExtResource("1_rw7fy")
 planet_id = &"Tarkon"
 hex_q = -22
 hex_r = -1

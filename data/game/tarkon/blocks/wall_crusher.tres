@@ -1,24 +1,27 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bk4nvjoaaq860"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bgywh0qohjm65" path="res://textures/blocks/resource extractors/WallCrusher/WallCrusher.png" id="1_uuuo3"]
 
 [resource]
 script = ExtResource("1")
 id = &"wall_crusher"
 display_name = "Wall Crusher"
 description = "Crushes solid rock walls into sand. Must face a blackstone wall. Requires rotational power."
+icon = ExtResource("1_uuuo3")
 category = 1
 color = Color(0.6, 0.6, 0.5, 1)
+top_sprite = ExtResource("1_uuuo3")
 grid_size = Vector2i(2, 2)
 max_health = 240.0
 build_cost = {
 "copper": 100,
-"silicon": 30
+"graphite": 30
 }
 build_time = 2.0
 output_items = {
 "mat_sand": 2
 }
 production_time = 2.0
-rotational_power_use = 10.0
-tags = PackedStringArray("mining", "extractor", "wall_miner")
+electrical_power_use = 10.0
+tags = PackedStringArray("mining", "extractor", "wall_miner", "crusher_heads")

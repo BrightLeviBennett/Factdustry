@@ -1,17 +1,20 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dgxmmkm82qm7m"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://jl21k12ia1ni" path="res://textures/blocks/power/CableNode.png" id="1_4uxnv"]
 
 [resource]
 script = ExtResource("1")
-id = &"beam_node"
-display_name = "Beam Node"
-description = "Wireless power relay point. Transmits energy via focused beam."
+id = &"cable_node"
+display_name = "Cable Node"
+description = "Transmits electrical power in a straight line (up/down/left/right) with a range of 5 tiles. Place between generators and consumers to extend your power network."
+icon = ExtResource("1_4uxnv")
 category = 3
-color = Color(0.3, 0.7, 1.0, 1)
+color = Color(0.3, 0.7, 1, 1)
+top_sprite = ExtResource("1_4uxnv")
 max_health = 560.0
-build_cost = { "copper": 700, "silicon": 400 }
-build_time = 3.0
-output_items = { "power": 35 }
-production_time = 1.0
-tags = PackedStringArray("power")
+build_cost = {
+"copper": 15
+}
+build_time = 2.0
+tags = PackedStringArray("power", "cable_node")

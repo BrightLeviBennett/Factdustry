@@ -51,7 +51,6 @@ const BUTTON_FONT_SIZE := 16
 
 var bg_texture: Texture2D
 var _planet_select_scene: PackedScene
-var _planet_select_instance: Node
 var title_texture: Texture2D
 var button_texture: Texture2D
 var database_ui: CanvasLayer

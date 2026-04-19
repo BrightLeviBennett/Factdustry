@@ -2,7 +2,8 @@
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 [ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_vt0v3"]
-[ext_resource type="Texture2D" uid="uid://dc1rf4ela0a6u" path="res://textures/blocks/turrets/SingleBarrelBase.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://12n0k6gpubv5" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://by2pljep5kji" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="3"]
 
 [sub_resource type="Resource" id="Resource_xjm3x"]
 script = ExtResource("1_vt0v3")
@@ -18,6 +19,7 @@ description = "Basic projectile turret. Reliable but slow."
 icon = ExtResource("2")
 category = 4
 color = Color(0.9, 0.3, 0.3, 1)
+turret_head_sprite = ExtResource("3")
 max_health = 180.0
 build_cost = {
 "copper": 15

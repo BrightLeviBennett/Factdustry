@@ -238,7 +238,7 @@ func _is_node_visible(nid: StringName) -> bool:
 ## Draws a U-shaped connection between two nodes that sit in the same row.
 ## The horizontal segment is routed through the gap immediately above or
 ## below the shared row, picked so it doesn't cross other visible nodes.
-func _draw_same_row_connection(pp: Vector2, cp: Vector2, nw: float, nh: float,
+func _draw_same_row_connection(pp: Vector2, cp: Vector2, _nw: float, nh: float,
 		child_id: StringName, parent_id: StringName, rects: Array, lc: Color) -> void:
 	var row_top: float = minf(pp.y, cp.y) - nh / 2.0
 	var row_bot: float = maxf(pp.y, cp.y) + nh / 2.0
@@ -302,7 +302,7 @@ func _draw_same_row_connection(pp: Vector2, cp: Vector2, nw: float, nh: float,
 ## avoids passing under non-target node rectangles when possible.
 ## Computes the empty vertical gaps along the segment's x range and picks
 ## the gap whose center is closest to the geometric midpoint.
-func _pick_clear_mid_y(pp: Vector2, cp: Vector2, nw: float, nh: float,
+func _pick_clear_mid_y(pp: Vector2, cp: Vector2, _nw: float, nh: float,
 		child_id: StringName, parent_id: StringName, rects: Array) -> float:
 	var default_mid: float = (pp.y + cp.y) / 2.0
 	# Horizontal extents of the segment, padded slightly to catch grazes.
@@ -528,7 +528,7 @@ func _zoom_at(mouse_pos: Vector2, delta: float) -> void:
 	# After zoom: scroll_new = world_point * new_zoom - mouse_in_scroll
 
 	# mouse_in_scroll is relative to the ScrollContainer's visible area
-	var mouse_in_scroll = Vector2(
+	var _mouse_in_scroll = Vector2(
 		tree_scroll.scroll_horizontal + mouse_pos.x / old_zoom * old_zoom,
 		tree_scroll.scroll_vertical + mouse_pos.y / old_zoom * old_zoom
 	)
@@ -677,7 +677,7 @@ func _update_tooltip(nid: StringName, screen_pos: Vector2) -> void:
 					# Locked resource dependency — show "Mine ???" or "Produce ???"
 					const MINABLE_RESOURCES: Array[StringName] = [
 						&"mat_copper", &"mat_graphite", &"mat_iron",
-						&"mat_tin", &"mat_silver", &"mat_zinc",
+						&"mat_silver", &"mat_zinc",
 					]
 					if pid in MINABLE_RESOURCES:
 						display_name = "Mine ???"

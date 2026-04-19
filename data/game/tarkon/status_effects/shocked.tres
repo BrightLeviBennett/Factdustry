@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://sjunqatdoryp" path="res://textures/status effects/Shocked.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"shocked"
+display_name = "Shocked"
+description = "Stunned by a jolt. Cannot move or attack for a brief moment."
+icon = ExtResource("2")
+duration = 1.0
+stackable = false
+refresh_on_reapply = true
+effect_type = 4
+tint_color = Color(1, 1, 0.5, 1)
+particle_color = Color(1, 1, 0.7, 1)
+stuns = true
+tags = PackedStringArray("electric", "stun")

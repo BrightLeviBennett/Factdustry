@@ -1,14 +1,14 @@
 [gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://cbm6g5gfh2a4q"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://bbdjcq1t100x0" path="res://textures/sectors/Ferrum_Ridge.png" id="1_od8q8"]
+[ext_resource type="Texture2D" uid="uid://bgggxdwhq5yba" path="res://textures/sectors/FerrumRidge.png" id="1_6nqbp"]
 
 [resource]
 script = ExtResource("1")
 id = &"ferrum_ridge"
 display_name = "Ferrum Ridge"
 description = "This sector has many gysers, making it ideal for iron extraction and refinment into steel."
-icon = ExtResource("1_od8q8")
+icon = ExtResource("1_6nqbp")
 planet_id = &"Tarkon"
 hex_q = 1
 hex_r = -1

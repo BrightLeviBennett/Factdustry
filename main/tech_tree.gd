@@ -24,6 +24,21 @@ signal tech_tree_ready
 var is_loaded := false
 var _thread: Thread
 
+## Campaign sector ids, in capture order. Used both to register the capture
+## chain rules and to normalize legacy save data that stored sectors in the
+## (no-longer-used) UNLOCKED state.
+const CAMPAIGN_CHAIN: Array[StringName] = [
+	&"starting_grounds", &"crevice", &"ferrum_ridge", &"waterfront_ruins",
+	&"nightfall_depths", &"zinc_deposits", &"aluminum_mountains", &"dark_valley",
+	&"ruins", &"the_nexus", &"snowy_plains",
+]
+
+## When true, every tech-tree node is treated as RESEARCHED regardless of
+## its real unlock state. Flipped by the "Unlock All Tech" setting in the
+## Game tab of the pause menu. Off by default — the normal research rules
+## apply. Turning it off again instantly reverts to the real state.
+var unlock_all: bool = false
+
 
 func _ready() -> void:
 	_thread = Thread.new()
@@ -58,6 +73,10 @@ func _finish_loading() -> void:
 
 func get_state(id: StringName) -> NodeState:
 	if not nodes.has(id): return NodeState.LOCKED
+	# Sandbox/cheat: short-circuit to RESEARCHED for everything. Keeps the
+	# underlying state dicts untouched so toggling it off instantly reverts.
+	if unlock_all:
+		return NodeState.RESEARCHED
 	# Event-only nodes stay LOCKED until force-unlocked or force-researched
 	if nodes[id].get("event_only", false):
 		if nodes[id]["amount_spent"].has(&"_event_researched"):
@@ -87,6 +106,17 @@ func get_state(id: StringName) -> NodeState:
 func is_researched(id: StringName) -> bool: return get_state(id) == NodeState.RESEARCHED
 func is_unlocked(id: StringName) -> bool: return get_state(id) == NodeState.UNLOCKED
 func is_locked(id: StringName) -> bool: return get_state(id) == NodeState.LOCKED
+
+## Returns true if the player has actually captured this sector (beat its
+## objective). Sectors that are merely accessible but not yet captured
+## return false. Backed by the hidden "-C-sector_id" marker so this stays
+## accurate even though sector nodes themselves render as RESEARCHED as
+## soon as they become accessible.
+func is_sector_captured(sector_id: StringName) -> bool:
+	var marker := StringName("-C-%s" % sector_id)
+	if not nodes.has(marker):
+		return false
+	return nodes[marker]["amount_spent"].has(&"_event_researched")
 
 
 # ================================
@@ -216,6 +246,17 @@ func load_save_data(data: Dictionary) -> void:
 		if nodes[id]["parents"].is_empty() and nodes[id]["research_cost"].is_empty() and not nodes[id].get("event_only", false):
 			_force_researched(id)
 	_force_researched(&"starting_grounds")
+	# Legacy migration: campaign sectors used to sit in UNLOCKED between
+	# "previous sector captured" and "this sector captured". We no longer
+	# use that state — upgrade any `_event_unlocked`-only sector to
+	# `_event_researched` so the tech tree renders it with the same outline
+	# as a finished node.
+	for sector_id in CAMPAIGN_CHAIN:
+		if not nodes.has(sector_id):
+			continue
+		var spent: Dictionary = nodes[sector_id]["amount_spent"]
+		if spent.has(&"_event_unlocked") and not spent.has(&"_event_researched"):
+			_force_researched(sector_id)
 
 
 # ================================
@@ -234,16 +275,20 @@ func _register_unlock_rules() -> void:
 	# Materials unlock when their resource is first mined
 	_add_rule("item_mined", &"mat_copper", &"mat_copper")
 	_add_rule("item_mined", &"mat_graphite", &"mat_graphite")
+	# Iron is produced by the mineral extractor, not mined — unlock it as
+	# soon as the extractor emits its first unit.
+	_add_rule("item_produced", &"mat_iron", &"mat_iron")
 
-	# Campaign sector chain
-	var campaign_chain: Array[StringName] = [
-		&"starting_grounds", &"crevice", &"ferrum_ridge", &"waterfront_ruins",
-		&"nightfall_depths", &"zinc_deposits", &"aluminum_mountains", &"dark_valley",
-		&"ruins", &"the_nexus", &"snowy_plains",
-	]
-	# Capturing a sector: unlock the next one, research the current one
+	# Campaign sector chain (shared with the save-migration pass in load_save_data).
+	var campaign_chain: Array[StringName] = CAMPAIGN_CHAIN
+	# Capturing a sector researches BOTH the captured sector and the next
+	# one in the chain. Sectors never sit in the UNLOCKED state — they go
+	# straight from LOCKED to RESEARCHED so the tech tree shows them with
+	# the same "researched" outline finished nodes use. Landing/capture
+	# progression for non-sector tech is still handled by the hidden
+	# "-L-" / "-C-" markers registered below.
 	for i in range(campaign_chain.size() - 1):
-		_add_rule("sector_captured", campaign_chain[i], campaign_chain[i + 1], true)
+		_add_rule("sector_captured", campaign_chain[i], campaign_chain[i + 1])
 	for sector_id in campaign_chain:
 		_add_rule("sector_captured", sector_id, sector_id)
 
@@ -409,9 +454,9 @@ func _register_cores() -> void:
 	_add(&"core_bastion",      "Core: Bastion",      [&"core_remanent"],  [], {&"mat_copper": 200, &"mat_graphite": 40, &"mat_steel": 20}, Vector2(-2, 3))
 	_add(&"core_fortress",     "Core: Fortress",     [&"core_bastion"],   [], {&"mat_copper": 350, &"mat_steel": 80}, Vector2(-2, 4))
 	_add(&"core_crucible",     "Core: Crucible",     [&"core_fortress"],  [], {&"mat_copper": 500, &"mat_steel": 150, &"mat_brass": 30}, Vector2(-2, 5))
-	_add(&"core_pantheon",     "Core: Pantheon",     [&"core_crucible"],  [], {&"mat_copper": 800, &"mat_steel": 230, &"mat_bronze": 40}, Vector2(-2, 6))
-	_add(&"core_aegis",        "Core: Aegis",        [&"core_pantheon"],  [], {&"mat_copper": 1200, &"mat_steel": 370, &"mat_bronze": 60, &"mat_aluminum": 30}, Vector2(-2, 7))
-	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 2000, &"mat_steel": 600, &"mat_bronze": 100, &"mat_aluminum": 50}, Vector2(-2, 8))
+	_add(&"core_pantheon",     "Core: Pantheon",     [&"core_crucible"],  [], {&"mat_copper": 800, &"mat_steel": 230}, Vector2(-2, 6))
+	_add(&"core_aegis",        "Core: Aegis",        [&"core_pantheon"],  [], {&"mat_copper": 1200, &"mat_steel": 370, &"mat_aluminum": 30}, Vector2(-2, 7))
+	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 2000, &"mat_steel": 600, &"mat_aluminum": 50}, Vector2(-2, 8))
 	# Archive line
 	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-waterfront_ruins"], {&"mat_copper": 180}, Vector2(-3, 1))
 	_add(&"data_cable",        "Data Cable",         [&"archive_scanner"],[], {&"mat_copper": 40}, Vector2(-4, 1))
@@ -432,15 +477,12 @@ func _register_campaign() -> void:
 
 func _register_power() -> void:
 	_add(&"vent_turbine",         "Vent Turbine",         [&"core_shard"],              [&"mat_copper"], {&"mat_copper": 30}, Vector2(0, 1))
-	_add(&"shaft",                "Shaft",                [&"vent_turbine"],            [], {&"mat_copper": 30}, Vector2(-1, 1))
-	_add(&"gearbox",              "Gearbox",              [&"shaft"],                   [], {&"mat_copper": 40}, Vector2(-1, 2))
-	_add(&"overhead_belt",        "Overhead Belt",        [&"gearbox"],                 [&"mat_graphite"], {&"mat_copper": 60, &"mat_graphite": 20}, Vector2(-1, 3))
-	_add(&"rotational_generator", "Rotational Generator", [&"vent_turbine"],            [&"-L-ferrum_ridge"], {&"mat_copper": 80, &"mat_silicon": 30}, Vector2(0, 2))
-	_add(&"combustion_engine",    "Combustion Engine",    [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 50, &"mat_graphite": 15}, Vector2(1, 1))
-	_add(&"combustion_generator", "Combustion Generator", [&"rotational_generator"],    [&"mat_coal"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
-	_add(&"beam_node",            "Beam Node",            [&"rotational_generator"],    [], {&"mat_copper": 150, &"mat_silicon": 60}, Vector2(-0, 3))
-	_add(&"beam_tower",           "Beam Tower",           [&"beam_node"],               [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_silicon": 100, &"mat_steel": 70}, Vector2(0, 4))
-	_add(&"power_distributor",    "Power Distributor",    [&"beam_tower"],              [], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(0, 5))
+	_add(&"solar_panel",          "Solar Panel",          [&"vent_turbine"],            [], {&"mat_copper": 50, &"mat_silicon": 20}, Vector2(-1, 2))
+	_add(&"solar_array",          "Solar Array",          [&"solar_panel"],             [], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(-1, 3))
+	_add(&"cable_node",           "Cable Node",           [&"vent_turbine"],            [], {&"mat_copper": 80, &"mat_silicon": 30}, Vector2(0, 2))
+	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(0, 3))
+	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(0, 4))
+	_add(&"combustion_generator", "Combustion Generator", [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
 
 func _register_belt_transport() -> void:
 	_add(&"conveyor_belt",       "Conveyor Belt",       [&"core_shard"],        [&"mat_copper"], {&"mat_copper": 20}, Vector2(5, 1))
@@ -504,7 +546,6 @@ func _register_materials() -> void:
 	_add(&"mat_sand",           "Sand",            [&"mat_salt_water"],                  [], {}, Vector2(25, 2), true)
 	_add(&"mat_graphite",       "Graphite",        [&"mat_copper"],                      [], {}, Vector2(27, 2), true)
 	_add(&"mat_iron",           "Iron",            [&"mat_copper"],                      [], {}, Vector2(29, 2), true)
-	_add(&"mat_tin",            "Tin",             [&"mat_copper"],                      [], {}, Vector2(30, 2), true)
 	_add(&"mat_silver",         "Silver",          [&"mat_copper"],                      [], {}, Vector2(31, 2), true)
 	_add(&"mat_zinc",           "Zinc",            [&"mat_copper"],                      [], {}, Vector2(32, 2), true)
 	# Row 3 — Second generation
@@ -512,8 +553,7 @@ func _register_materials() -> void:
 	_add(&"mat_hydrogen",       "Hydrogen",        [&"mat_water"],                       [], {}, Vector2(23.5, 3), true)
 	_add(&"mat_silicon",        "Silicon",         [&"mat_sand", &"mat_graphite"],       [], {}, Vector2(25, 3), true)
 	_add(&"mat_steel",          "Steel",           [&"mat_iron", &"mat_graphite"],       [], {}, Vector2(29, 3), true)
-	_add(&"mat_bronze",         "Bronze",          [&"mat_tin", &"mat_silver"],          [], {}, Vector2(30.5, 3), true)
-	_add(&"mat_brass",          "Brass",           [&"mat_zinc"],                        [], {}, Vector2(32, 3), true)
+	_add(&"mat_brass",          "Brass",           [&"mat_copper", &"mat_zinc"],         [], {}, Vector2(32, 3), true)
 	# Row 4 — Third generation
 	_add(&"mat_coal",           "Coal",            [&"mat_petroleum"],                   [], {}, Vector2(26, 4), true)
 	_add(&"mat_petroleum",      "Petroleum",       [&"mat_graphite"],                    [], {}, Vector2(27, 4), true)
@@ -583,7 +623,7 @@ func _register_units() -> void:
 	_add(&"beattle",                  "Beattle",                  [&"ant"],                       [&"unit_refabricator"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_graphite": 20}, Vector2(-28, 3))
 	_add(&"termite",                  "Termite",                  [&"beattle"],                   [&"unit_upgrader"], {&"mat_copper": 300, &"mat_steel": 130}, Vector2(-28, 4))
 	_add(&"armadillo",                "Armadillo",                [&"beattle"],                   [&"unit_assembler"], {&"mat_copper": 350, &"mat_steel": 160}, Vector2(-28, 5))
-	_add(&"turtle",                   "Turtle",                   [&"armadillo"],                 [&"unit_reassembler"], {&"mat_copper": 600, &"mat_steel": 280, &"mat_bronze": 30}, Vector2(-28, 6))
+	_add(&"turtle",                   "Turtle",                   [&"armadillo"],                 [&"unit_reassembler"], {&"mat_copper": 600, &"mat_steel": 280}, Vector2(-28, 6))
 	# Crawler branch
 	_add(&"crawler_fabricator",       "Crawler Fabricator",       [&"tank_fabricator"],           [&"-L-aluminum_mountains"], {&"mat_copper": 120, &"mat_silicon": 40}, Vector2(-29, 2))
 	_add(&"geckeo",                   "Geckeo",                   [&"crawler_fabricator"],        [], {&"mat_copper": 250, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(-29, 3))
@@ -649,69 +689,33 @@ func _register_walls() -> void:
 	_add(&"large_copper_wall",   "Large Copper Wall",   [&"copper_wall"],      [], {&"mat_copper": 45}, Vector2(-33, 1))
 	_add(&"huge_copper_wall",    "Huge Copper Wall",    [&"large_copper_wall"],[&"Not unlockable in campaign"], {&"mat_copper": 65}, Vector2(-34, 1))
 	_add(&"giant_copper_wall",   "Giant Copper Wall",   [&"huge_copper_wall"], [], {&"mat_copper": 100}, Vector2(-35, 1))
-	# Iron tier
-	_add(&"iron_wall",           "Iron Wall",           [&"copper_wall"],      [&"Not unlockable in campaign"], {&"mat_copper": 40, &"mat_steel": 20}, Vector2(-32, 2))
-	_add(&"large_iron_wall",     "Large Iron Wall",     [&"iron_wall"],        [], {&"mat_copper": 60, &"mat_steel": 30}, Vector2(-33, 2))
-	_add(&"huge_iron_wall",      "Huge Iron Wall",      [&"large_iron_wall"],  [], {&"mat_copper": 90, &"mat_steel": 45}, Vector2(-34, 2))
-	_add(&"giant_iron_wall",     "Giant Iron Wall",     [&"huge_iron_wall"],   [], {&"mat_copper": 135, &"mat_steel": 70}, Vector2(-35, 2))
-	# Compound size variants
-	_add(&"compound_wall",       "Compound Wall",       [&"copper_wall"],      [&"Not unlockable in campaign"], {&"mat_copper": 50, &"mat_graphite": 15}, Vector2(-31, 2))
-	_add(&"large_compound_wall", "Large Compound Wall", [&"compound_wall"],    [], {&"mat_copper": 75, &"mat_graphite": 22}, Vector2(-31, 3))
-	_add(&"huge_compound_wall",  "Huge Compound Wall",  [&"large_compound_wall"],[], {&"mat_copper": 110, &"mat_graphite": 35}, Vector2(-31, 4))
-	_add(&"giant_compound_wall", "Giant Compound Wall", [&"huge_compound_wall"],[], {&"mat_copper": 170, &"mat_graphite": 50}, Vector2(-31, 5))
 	# Steel tier
-	_add(&"steel_wall",          "Steel Wall",          [&"iron_wall"],        [], {&"mat_copper": 60, &"mat_steel": 45}, Vector2(-32, 3))
-	_add(&"large_steel_wall",    "Large Steel Wall",    [&"steel_wall"],       [], {&"mat_copper": 90, &"mat_steel": 67}, Vector2(-33, 3))
-	_add(&"huge_steel_wall",     "Huge Steel Wall",     [&"large_steel_wall"], [], {&"mat_copper": 135, &"mat_steel": 101}, Vector2(-34, 3))
-	_add(&"giant_steel_wall",    "Giant Steel Wall",    [&"huge_steel_wall"],  [], {&"mat_copper": 200, &"mat_steel": 150}, Vector2(-35, 3))
+	_add(&"steel_wall",          "Steel Wall",          [&"copper_wall"],        [], {&"mat_copper": 60, &"mat_steel": 45}, Vector2(-32, 2))
+	_add(&"large_steel_wall",    "Large Steel Wall",    [&"steel_wall"],       [], {&"mat_copper": 90, &"mat_steel": 67}, Vector2(-33, 2))
+	_add(&"huge_steel_wall",     "Huge Steel Wall",     [&"large_steel_wall"], [], {&"mat_copper": 135, &"mat_steel": 101}, Vector2(-34, 2))
+	_add(&"giant_steel_wall",    "Giant Steel Wall",    [&"huge_steel_wall"],  [], {&"mat_copper": 200, &"mat_steel": 150}, Vector2(-35, 2))
 	# Brass tier
-	_add(&"brass_wall",          "Brass Wall",          [&"steel_wall"],       [], {&"mat_copper": 80, &"mat_brass": 30, &"mat_steel": 20}, Vector2(-32, 4))
-	_add(&"large_brass_wall",    "Large Brass Wall",    [&"brass_wall"],       [], {&"mat_copper": 120, &"mat_brass": 45, &"mat_steel": 30}, Vector2(-33, 4))
-	_add(&"huge_brass_wall",     "Huge Brass Wall",     [&"large_brass_wall"], [], {&"mat_copper": 180, &"mat_brass": 68, &"mat_steel": 45}, Vector2(-34, 4))
-	_add(&"giant_brass_wall",    "Giant Brass Wall",    [&"huge_brass_wall"],  [], {&"mat_copper": 270, &"mat_brass": 100, &"mat_steel": 68}, Vector2(-35, 4))
+	_add(&"brass_wall",          "Brass Wall",          [&"steel_wall"],       [], {&"mat_copper": 80, &"mat_brass": 30, &"mat_steel": 20}, Vector2(-32, 3))
+	_add(&"large_brass_wall",    "Large Brass Wall",    [&"brass_wall"],       [], {&"mat_copper": 120, &"mat_brass": 45, &"mat_steel": 30}, Vector2(-33, 3))
+	_add(&"huge_brass_wall",     "Huge Brass Wall",     [&"large_brass_wall"], [], {&"mat_copper": 180, &"mat_brass": 68, &"mat_steel": 45}, Vector2(-34, 3))
+	_add(&"giant_brass_wall",    "Giant Brass Wall",    [&"huge_brass_wall"],  [], {&"mat_copper": 270, &"mat_brass": 100, &"mat_steel": 68}, Vector2(-35, 3))
 	# Aluminum tier
-	_add(&"aluminum_wall",       "Aluminum Wall",       [&"brass_wall"],       [], {&"mat_copper": 100, &"mat_aluminum": 40, &"mat_steel": 25}, Vector2(-32, 5))
-	_add(&"large_aluminum_wall", "Large Aluminum Wall", [&"aluminum_wall"],    [], {&"mat_copper": 150, &"mat_aluminum": 60, &"mat_steel": 38}, Vector2(-33, 5))
-	_add(&"huge_aluminum_wall",  "Huge Aluminum Wall",  [&"large_aluminum_wall"],[], {&"mat_copper": 225, &"mat_aluminum": 90, &"mat_steel": 56}, Vector2(-34, 5))
-	_add(&"giant_aluminum_wall", "Giant Aluminum Wall", [&"huge_aluminum_wall"],[], {&"mat_copper": 340, &"mat_aluminum": 135, &"mat_steel": 85}, Vector2(-35, 5))
-	# Bronze tier
-	_add(&"bronze_wall",         "Bronze Wall",         [&"aluminum_wall"],    [], {&"mat_copper": 130, &"mat_bronze": 50, &"mat_steel": 30}, Vector2(-32, 6))
-	_add(&"large_bronze_wall",   "Large Bronze Wall",   [&"bronze_wall"],      [], {&"mat_copper": 195, &"mat_bronze": 75, &"mat_steel": 45}, Vector2(-33, 6))
-	_add(&"huge_bronze_wall",    "Huge Bronze Wall",    [&"large_bronze_wall"],[], {&"mat_copper": 290, &"mat_bronze": 112, &"mat_steel": 68}, Vector2(-34, 6))
-	_add(&"giant_bronze_wall",   "Giant Bronze Wall",   [&"huge_bronze_wall"], [], {&"mat_copper": 440, &"mat_bronze": 170, &"mat_steel": 100}, Vector2(-35, 6))
+	_add(&"aluminum_wall",       "Aluminum Wall",       [&"brass_wall"],       [], {&"mat_copper": 100, &"mat_aluminum": 40, &"mat_steel": 25}, Vector2(-32, 4))
+	_add(&"large_aluminum_wall", "Large Aluminum Wall", [&"aluminum_wall"],    [], {&"mat_copper": 150, &"mat_aluminum": 60, &"mat_steel": 38}, Vector2(-33, 4))
+	_add(&"huge_aluminum_wall",  "Huge Aluminum Wall",  [&"large_aluminum_wall"],[], {&"mat_copper": 225, &"mat_aluminum": 90, &"mat_steel": 56}, Vector2(-34, 4))
+	_add(&"giant_aluminum_wall", "Giant Aluminum Wall", [&"huge_aluminum_wall"],[], {&"mat_copper": 340, &"mat_aluminum": 135, &"mat_steel": 85}, Vector2(-35, 4))
 	# Silver tier
-	_add(&"silver_wall",         "Silver Wall",         [&"bronze_wall"],      [], {&"mat_copper": 160, &"mat_silver": 60, &"mat_bronze": 35, &"mat_steel": 40}, Vector2(-32, 7))
-	_add(&"large_silver_wall",   "Large Silver Wall",   [&"silver_wall"],      [], {&"mat_copper": 240, &"mat_silver": 90, &"mat_bronze": 52, &"mat_steel": 60}, Vector2(-33, 7))
-	_add(&"huge_silver_wall",    "Huge Silver Wall",    [&"large_silver_wall"],[], {&"mat_copper": 360, &"mat_silver": 135, &"mat_bronze": 78, &"mat_steel": 90}, Vector2(-34, 7))
-	_add(&"giant_silver_wall",   "Giant Silver Wall",   [&"huge_silver_wall"], [], {&"mat_copper": 540, &"mat_silver": 200, &"mat_bronze": 120, &"mat_steel": 135}, Vector2(-35, 7))
+	_add(&"silver_wall",         "Silver Wall",         [&"aluminum_wall"],    [], {&"mat_copper": 160, &"mat_silver": 60, &"mat_steel": 40}, Vector2(-32, 5))
+	_add(&"large_silver_wall",   "Large Silver Wall",   [&"silver_wall"],      [], {&"mat_copper": 240, &"mat_silver": 90, &"mat_steel": 60}, Vector2(-33, 5))
+	_add(&"huge_silver_wall",    "Huge Silver Wall",    [&"large_silver_wall"],[], {&"mat_copper": 360, &"mat_silver": 135, &"mat_steel": 90}, Vector2(-34, 5))
+	_add(&"giant_silver_wall",   "Giant Silver Wall",   [&"huge_silver_wall"], [], {&"mat_copper": 540, &"mat_silver": 200, &"mat_steel": 135}, Vector2(-35, 5))
 
 func _register_platforms() -> void:
 	# Copper tier (base)
 	_add(&"copper_platform",         "Copper Platform",         [&"core_shard"],           [&"Not unlockable in campaign"], {&"mat_copper": 25}, Vector2(-38, 1))
 	_add(&"large_copper_platform",   "Large Copper Platform",   [&"copper_platform"],      [], {&"mat_copper": 38}, Vector2(-38, 2))
-	_add(&"huge_copper_platform",    "Huge Copper Platform",    [&"large_copper_platform"],[], {&"mat_copper": 55}, Vector2(-39, 2))
-	_add(&"giant_copper_platform",   "Giant Copper Platform",   [&"huge_copper_platform"], [], {&"mat_copper": 85}, Vector2(-40, 2))
-	# Steel tier
-	_add(&"steel_platform",          "Steel Platform",          [&"copper_platform"],      [], {&"mat_copper": 35, &"mat_steel": 12}, Vector2(-37, 2))
-	_add(&"large_steel_platform",    "Large Steel Platform",    [&"steel_platform"],       [], {&"mat_copper": 52, &"mat_steel": 18}, Vector2(-38, 3))
-	_add(&"huge_steel_platform",     "Huge Steel Platform",     [&"large_steel_platform"], [], {&"mat_copper": 78, &"mat_steel": 27}, Vector2(-39, 3))
-	_add(&"giant_steel_platform",    "Giant Steel Platform",    [&"huge_steel_platform"],  [], {&"mat_copper": 120, &"mat_steel": 40}, Vector2(-40, 3))
-	# Brass tier
-	_add(&"brass_platform",          "Brass Platform",          [&"steel_platform"],       [], {&"mat_copper": 50, &"mat_brass": 20, &"mat_steel": 10}, Vector2(-37, 3))
-	_add(&"large_brass_platform",    "Large Brass Platform",    [&"brass_platform"],       [], {&"mat_copper": 75, &"mat_brass": 30, &"mat_steel": 15}, Vector2(-38, 4))
-	_add(&"huge_brass_platform",     "Huge Brass Platform",     [&"large_brass_platform"], [], {&"mat_copper": 112, &"mat_brass": 45, &"mat_steel": 22}, Vector2(-39, 4))
-	_add(&"giant_brass_platform",    "Giant Brass Platform",    [&"huge_brass_platform"],  [], {&"mat_copper": 170, &"mat_brass": 68, &"mat_steel": 34}, Vector2(-40, 4))
-	# Bronze tier
-	_add(&"bronze_platform",         "Bronze Platform",         [&"brass_platform"],       [], {&"mat_copper": 70, &"mat_bronze": 30, &"mat_steel": 15}, Vector2(-37, 4))
-	_add(&"large_bronze_platform",   "Large Bronze Platform",   [&"bronze_platform"],      [], {&"mat_copper": 105, &"mat_bronze": 45, &"mat_steel": 22}, Vector2(-38, 5))
-	_add(&"huge_bronze_platform",    "Huge Bronze Platform",    [&"large_bronze_platform"],[], {&"mat_copper": 158, &"mat_bronze": 68, &"mat_steel": 33}, Vector2(-39, 5))
-	_add(&"giant_bronze_platform",   "Giant Bronze Platform",   [&"huge_bronze_platform"], [], {&"mat_copper": 235, &"mat_bronze": 100, &"mat_steel": 50}, Vector2(-40, 5))
-	# Silver tier
-	_add(&"silver_platform",         "Silver Platform",         [&"bronze_platform"],      [], {&"mat_copper": 90, &"mat_silver": 35, &"mat_bronze": 20, &"mat_steel": 18}, Vector2(-37, 5))
-	_add(&"large_silver_platform",   "Large Silver Platform",   [&"silver_platform"],      [], {&"mat_copper": 135, &"mat_silver": 52, &"mat_bronze": 30, &"mat_steel": 27}, Vector2(-38, 6))
-	_add(&"huge_silver_platform",    "Huge Silver Platform",    [&"large_silver_platform"],[], {&"mat_copper": 200, &"mat_silver": 78, &"mat_bronze": 45, &"mat_steel": 40}, Vector2(-39, 6))
-	_add(&"giant_silver_platform",   "Giant Silver Platform",   [&"huge_silver_platform"], [], {&"mat_copper": 300, &"mat_silver": 120, &"mat_bronze": 68, &"mat_steel": 60}, Vector2(-40, 6))
-
+	_add(&"huge_copper_platform",    "Huge Copper Platform",    [&"large_copper_platform"],[], {&"mat_copper": 55}, Vector2(-38, 3))
+	_add(&"giant_copper_platform",   "Giant Copper Platform",   [&"huge_copper_platform"], [], {&"mat_copper": 85}, Vector2(-38, 4))
 
 ## Archive nodes — each represents a recoverable archive. Decoding the
 ## matching archive in-world (Archive + Scanner + Decoder + power) auto-

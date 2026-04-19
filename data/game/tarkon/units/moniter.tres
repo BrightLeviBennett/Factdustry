@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="UnitData" format=3]
+[gd_resource type="Resource" script_class="UnitData" format=3 uid="uid://dbqcord68f5nr"]
 
 [ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
 
@@ -8,14 +8,11 @@ id = &"moniter"
 display_name = "Moniter"
 description = "Apex predator. Devastating in close combat."
 team = 0
-category = 0
 color = Color(0.5, 0.8, 0.3, 1)
 visual_size = 14.0
+move_speed = 1.562
 max_health = 150.0
-move_speed = 100.0
 attack_damage = 50.0
-attack_speed = 1.0
-attack_range = 32.0
-detection_range = 500.0
+immunities = PackedStringArray()
 spawn_count = 1
 threat_value = 8.0

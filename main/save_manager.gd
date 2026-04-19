@@ -469,12 +469,30 @@ func save_sector(sector_name: String) -> bool:
 	# Save build progress & order (only in gameplay, not map editor)
 	var build_progress_save := {}
 	var build_order_save: Array = []
+	var work_order_save: Array = []
+	var resources_consumed_save := {}
+	var resources_refunded_save := {}
 	if "building_build_progress" in main:
 		for anchor in main.building_build_progress:
 			build_progress_save[_vec2i_to_str(anchor)] = main.building_build_progress[anchor]
 	if "build_order" in main:
 		for anchor in main.build_order:
 			build_order_save.append(_vec2i_to_str(anchor))
+	if "work_order" in main:
+		for anchor in main.work_order:
+			work_order_save.append(_vec2i_to_str(anchor))
+	if "building_resources_consumed" in main:
+		for anchor in main.building_resources_consumed:
+			var inner := {}
+			for rk in main.building_resources_consumed[anchor]:
+				inner[str(rk)] = int(main.building_resources_consumed[anchor][rk])
+			resources_consumed_save[_vec2i_to_str(anchor)] = inner
+	if "building_resources_refunded" in main:
+		for anchor in main.building_resources_refunded:
+			var inner := {}
+			for rk in main.building_resources_refunded[anchor]:
+				inner[str(rk)] = int(main.building_resources_refunded[anchor][rk])
+			resources_refunded_save[_vec2i_to_str(anchor)] = inner
 
 	# Save player units
 	var units_save: Array = []
@@ -612,7 +630,7 @@ func save_sector(sector_name: String) -> bool:
 				held_save = {}
 				for k in cs["held_payload"]:
 					held_save[str(k)] = cs["held_payload"][k]
-			var tp = cs.get("target_pos")
+			var _tp = cs.get("target_pos")
 			crane_states_save[_vec2i_to_str(pos)] = {
 				"arm_angle": cs.get("arm_angle", 0.0),
 				"arm_extension": cs.get("arm_extension", 20.0),
@@ -641,6 +659,9 @@ func save_sector(sector_name: String) -> bool:
 		"drone_position": drone_pos,
 		"build_progress": build_progress_save,
 		"build_order": build_order_save,
+		"work_order": work_order_save,
+		"building_resources_consumed": resources_consumed_save,
+		"building_resources_refunded": resources_refunded_save,
 		"player_units": units_save,
 		"block_storage": block_storage_save,
 		"conveyor_items": conveyor_items_save,
@@ -787,7 +808,7 @@ func load_sector_from_path(path: String) -> bool:
 				if "_drone_position_restored" in main:
 					main._drone_position_restored = true
 
-	# --- Restore build progress & order (only in gameplay, not map editor) ---
+	# --- Restore build progress & order ---
 	if "building_build_progress" in main:
 		main.building_build_progress.clear()
 		if data.has("build_progress") and data["build_progress"] is Dictionary:
@@ -798,6 +819,44 @@ func load_sector_from_path(path: String) -> bool:
 		if data.has("build_order") and data["build_order"] is Array:
 			for entry in data["build_order"]:
 				main.build_order.append(_str_to_vec2i(str(entry)))
+
+	# --- Restore unified work queue (new format) ---
+	if "work_order" in main:
+		main.work_order.clear()
+		if data.has("work_order") and data["work_order"] is Array:
+			for entry in data["work_order"]:
+				main.work_order.append(_str_to_vec2i(str(entry)))
+		elif not main.build_order.is_empty():
+			# Migrate old build_order into work_order
+			for anchor in main.build_order:
+				main.work_order.append(anchor)
+	if "building_resources_consumed" in main:
+		main.building_resources_consumed.clear()
+		if data.has("building_resources_consumed") and data["building_resources_consumed"] is Dictionary:
+			for key in data["building_resources_consumed"]:
+				var inner := {}
+				for rk in data["building_resources_consumed"][key]:
+					inner[StringName(rk)] = int(data["building_resources_consumed"][key][rk])
+				main.building_resources_consumed[_str_to_vec2i(key)] = inner
+		else:
+			# Old save: assume all resources were consumed (old system deducted up front)
+			for anchor in main.building_build_progress:
+				var block_id = main.placed_buildings.get(anchor, &"")
+				var bdata = Registry.get_block(block_id)
+				if bdata:
+					var consumed := {}
+					for item_id in bdata.build_cost:
+						var rk: StringName = main._resolve_resource_key(str(item_id))
+						consumed[rk] = int(bdata.build_cost[item_id])
+					main.building_resources_consumed[anchor] = consumed
+	if "building_resources_refunded" in main:
+		main.building_resources_refunded.clear()
+		if data.has("building_resources_refunded") and data["building_resources_refunded"] is Dictionary:
+			for key in data["building_resources_refunded"]:
+				var inner := {}
+				for rk in data["building_resources_refunded"][key]:
+					inner[StringName(rk)] = int(data["building_resources_refunded"][key][rk])
+				main.building_resources_refunded[_str_to_vec2i(key)] = inner
 
 	# --- Rebuild pathfinding ---
 	if unit_mgr:
@@ -1001,16 +1060,25 @@ func load_sector(sector_name: String) -> bool:
 func _rebuild_multi_tile_origins(terrain: Node2D) -> void:
 	terrain.multi_tile_origins.clear()
 	var processed := {}
+	# Cache _is_multi_tile(tile_id) per id so we stop re-entering Registry
+	# for every floor cell (100x100 map × N floor types).
+	var is_mt_cache := {}
 	for grid_pos in terrain.floor_tiles:
 		if processed.has(grid_pos):
 			continue
-		var tile_id = terrain.floor_tiles[grid_pos]
-		if not terrain._is_multi_tile(tile_id):
+		var tile_id: StringName = terrain.floor_tiles[grid_pos]
+		var is_mt: bool
+		if is_mt_cache.has(tile_id):
+			is_mt = is_mt_cache[tile_id]
+		else:
+			is_mt = terrain._is_multi_tile(tile_id)
+			is_mt_cache[tile_id] = is_mt
+		if not is_mt:
 			continue
 		# This cell is the origin of a 3x3 multi-tile
 		for dx in range(-1, 2):
 			for dy in range(-1, 2):
-				var cell = grid_pos + Vector2i(dx, dy)
+				var cell: Vector2i = grid_pos + Vector2i(dx, dy)
 				terrain.multi_tile_origins[cell] = grid_pos
 				processed[cell] = true
 

@@ -1,6 +1,7 @@
 [gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://dpi4qtq4oq2qj"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dvy0ic6b4y2y0" path="res://textures/sectors/ZincDeposits.png" id="1_savjh"]
 
 [resource]
 script = ExtResource("1")
@@ -11,6 +12,7 @@ description = "An old Ferox mining field, filled with zinc deposits amoung coppe
 Most of the defense infrastrucsture has withered away due to minimal upkeep, and therefore should be an easy target.
 
 You'll need to refine the zinc and copper into brass, and use it to upgrade your defenses."
+icon = ExtResource("1_savjh")
 planet_id = &"Tarkon"
 hex_q = -18
 hex_r = 3

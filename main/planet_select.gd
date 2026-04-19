@@ -377,12 +377,13 @@ func _build_planet(planet: PlanetData) -> void:
 	planet_node.add_child(body)
 	body_to_planet[body] = planet
 
+	# A second, slightly larger click-sphere makes picking the planet easier
+	# at distance without changing the visible mesh. Added to the same body.
 	var shape = SphereShape3D.new()
 	shape.radius = planet.mesh_radius * 1.2
 	var col = CollisionShape3D.new()
 	col.shape = shape
 	body.add_child(col)
-	planet_node.add_child(body)
 
 	planet_bodies[body] = planet
 
@@ -568,9 +569,12 @@ func _get_cell_outline_color(planet_id: StringName, cell_idx: int) -> Color:
 	if not cell_map.has(cell_idx):
 		return COLOR_EMPTY
 	var sector: SectorData = cell_map[cell_idx]
-	if TechTree.is_researched(sector.id):
+	# Sectors render as RESEARCHED in the tech tree as soon as they become
+	# accessible, so "captured" vs "unlocked but not yet captured" has to be
+	# distinguished by the hidden "-C-sector_id" marker instead of NodeState.
+	if TechTree.is_sector_captured(sector.id):
 		return COLOR_CAPTURED
-	elif TechTree.is_unlocked(sector.id):
+	elif not TechTree.is_locked(sector.id):
 		return COLOR_UNLOCKED
 	return COLOR_LOCKED
 

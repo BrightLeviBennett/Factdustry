@@ -207,9 +207,8 @@ func _scan_unit_targets(snap: Dictionary) -> Array[Dictionary]:
 		var unit_pos: Vector2 = unit_info["pos"]
 		var detect_range: float = unit_info["detect_range"]
 
-		# Find nearest enemy unit
+		# Find nearest enemy unit (we only need id + dist — pos was dead).
 		var nearest_enemy_id: int = -1
-		var nearest_enemy_pos := Vector2.ZERO
 		var nearest_enemy_dist := INF
 
 		for e in enemies:
@@ -219,7 +218,6 @@ func _scan_unit_targets(snap: Dictionary) -> Array[Dictionary]:
 			if dist <= detect_range and dist < nearest_enemy_dist:
 				nearest_enemy_dist = dist
 				nearest_enemy_id = e["id"]
-				nearest_enemy_pos = e["pos"]
 
 		# Find nearest FEROX building
 		var nearest_bldg := Vector2i(-1, -1)

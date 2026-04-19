@@ -9,6 +9,15 @@ extends Node2D
 
 @onready var main: Node2D = get_node("/root/Main")
 
+# Cached sibling references (populated in _ready). Avoids scene-tree
+# lookups from the hot _process loop and its unit-iteration sub-calls.
+var _combat_sys: Node
+var _building_sys: Node
+var _drone: Node2D
+var _logistics: Node2D
+var _terrain: Node2D
+var _sector_script: Node
+
 var enemy_script = preload("res://main/enemy_unit.gd")
 var nest_script = preload("res://main/enemy_nest.gd")
 
@@ -61,11 +70,53 @@ var _crane_e_held := false
 var _crane_q_held := false
 ## Attack cooldown for the controlled entity
 var _control_attack_timer := 0.0
+## Last world-space position of the controlled entity. Updated each tick so
+## that if a controlled unit dies we still know where to respawn the drone.
+var _last_control_pos: Vector2 = Vector2.ZERO
+
+
+
+func _combat_sys_ref() -> Node:
+	if _combat_sys == null:
+		_combat_sys = get_node_or_null("/root/Main/CombatSystem")
+	return _combat_sys
+
+func _building_sys_ref() -> Node:
+	if _building_sys == null:
+		_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	return _building_sys
+
+func _drone_ref() -> Node2D:
+	if _drone == null:
+		_drone = get_node_or_null("/root/Main/PlayerDrone")
+	return _drone
+
+func _logistics_ref() -> Node2D:
+	if _logistics == null:
+		_logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	return _logistics
+
+func _terrain_ref() -> Node2D:
+	if _terrain == null:
+		_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	return _terrain
+
+func _sector_script_ref() -> Node:
+	if _sector_script == null:
+		_sector_script = get_node_or_null("/root/Main/SectorScript")
+	return _sector_script
 
 
 func _ready() -> void:
 	# Wait for Registry and main to initialize
 	await get_tree().process_frame
+
+	_combat_sys = get_node_or_null("/root/Main/CombatSystem")
+	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	_drone = get_node_or_null("/root/Main/PlayerDrone")
+	_logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	_sector_script = get_node_or_null("/root/Main/SectorScript")
 
 	_setup_astar()
 	_setup_path_worker()
@@ -383,7 +434,7 @@ func _take_control_of_turret(grid_pos: Vector2i) -> void:
 	controlled_type = "turret"
 	_control_attack_timer = 0.0
 	# Tell CombatSystem to skip auto-targeting for this turret
-	var combat = get_node_or_null("/root/Main/CombatSystem")
+	var combat = _combat_sys_ref()
 	if combat:
 		combat.manually_controlled_turret = grid_pos
 
@@ -394,7 +445,7 @@ func _take_control_of_crane(anchor: Vector2i) -> void:
 	controlled_entity = anchor
 	controlled_type = "crane"
 	# Initialize crane state in building system
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 	if building_sys and "crane_states" in building_sys:
 		if not building_sys.crane_states.has(anchor):
 			building_sys.crane_states[anchor] = {
@@ -410,21 +461,55 @@ func _take_control_of_crane(anchor: Vector2i) -> void:
 func _release_control() -> void:
 	if controlled_entity == null:
 		return
+	# Capture the world position we should respawn the drone at — the
+	# controlled entity's current location (or last known location if the
+	# entity was destroyed while under control).
+	var respawn_pos: Variant = _get_controlled_world_pos()
 	if controlled_type == "unit":
 		var unit: Node2D = controlled_entity
 		if is_instance_valid(unit):
 			unit.is_controlled = false
 	elif controlled_type == "turret":
-		var combat = get_node_or_null("/root/Main/CombatSystem")
+		var combat = _combat_sys_ref()
 		if combat:
 			combat.manually_controlled_turret = null
 	# Crane keeps its state (may be holding a payload)
 	controlled_entity = null
 	controlled_type = ""
-	# Respawn the shardling at the core
-	var drone = get_node_or_null("/root/Main/PlayerDrone")
+	# Respawn the shardling over whatever you were just controlling. If we
+	# couldn't resolve a position (shouldn't happen), fall back to the core.
+	var drone = _drone_ref()
 	if drone:
-		drone._move_to_core()
+		if respawn_pos != null and drone.has_method("respawn_at"):
+			drone.respawn_at(respawn_pos)
+		elif respawn_pos != null:
+			drone.position = respawn_pos
+		else:
+			drone._move_to_core()
+
+
+## Resolves the current controlled entity's world position. Used so R-release
+## respawns the drone where the entity is, even if the entity was destroyed
+## mid-control (grid positions for turrets/cranes stay valid regardless).
+func _get_controlled_world_pos() -> Variant:
+	match controlled_type:
+		"unit":
+			if is_instance_valid(controlled_entity):
+				return (controlled_entity as Node2D).position
+			return _last_control_pos
+		"turret", "crane":
+			var anchor: Vector2i = controlled_entity
+			var gs: float = float(main.GRID_SIZE)
+			var size := Vector2i(1, 1)
+			if main.placed_buildings.has(anchor):
+				var bd = Registry.get_block(main.placed_buildings[anchor])
+				if bd:
+					size = bd.grid_size
+			return Vector2(
+				(float(anchor.x) + float(size.x) * 0.5) * gs,
+				(float(anchor.y) + float(size.y) * 0.5) * gs
+			)
+	return _last_control_pos
 
 
 func _update_controlled_entity(delta: float) -> void:
@@ -440,6 +525,13 @@ func _update_controlled_entity(delta: float) -> void:
 	elif controlled_type == "crane":
 		_update_controlled_crane(delta)
 
+	# Cache the entity's current world position so _release_control can
+	# still respawn the drone in-place even if the entity was destroyed
+	# this frame (e.g. controlled unit died).
+	var cur: Variant = _get_controlled_world_pos()
+	if cur is Vector2:
+		_last_control_pos = cur
+
 
 func _update_controlled_crane(delta: float) -> void:
 	var anchor: Vector2i = controlled_entity
@@ -447,7 +539,7 @@ func _update_controlled_crane(delta: float) -> void:
 		_release_control()
 		return
 
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 	if not building_sys or not "crane_states" in building_sys:
 		return
 	if not building_sys.crane_states.has(anchor):
@@ -462,7 +554,7 @@ func _update_controlled_crane(delta: float) -> void:
 	var crane_center: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
 
 	# Center camera on crane (like turret control)
-	var drone = get_node_or_null("/root/Main/PlayerDrone")
+	var drone = _drone_ref()
 	if drone:
 		drone.position = crane_center
 
@@ -490,7 +582,7 @@ func _update_controlled_crane(delta: float) -> void:
 		_crane_q_held = true
 		if state["held_payload"] != null and state["held_payload"].get("type", "") == "building":
 			var bdata_q = Registry.get_block(StringName(state["held_payload"].get("block_id", "")))
-			var building_sys_q = get_node_or_null("/root/Main/BuildingSystem")
+			var building_sys_q = _building_sys_ref()
 			var is_dir: bool = building_sys_q != null and bdata_q != null and building_sys_q._is_directional(bdata_q.id)
 			if is_dir:
 				state["held_payload"]["rotation"] = (int(state["held_payload"].get("rotation", 0)) + 1) % 4
@@ -505,7 +597,7 @@ func _update_controlled_crane(delta: float) -> void:
 	# When not holding, keep current angle as the new default (don't lerp back)
 
 
-func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2, max_reach: float) -> void:
+func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2, _max_reach: float) -> void:
 	# Compute grabber position: slides along the arm to match the mouse distance
 	var arm_angle: float = state.get("arm_angle", 0.0)
 	var arm_ext: float = state.get("arm_extension", 0.0)
@@ -518,7 +610,7 @@ func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2,
 
 	if state["held_payload"] == null:
 		# First: check if there's a payload on a conveyor at this position
-		var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+		var logistics = _logistics_ref()
 		if logistics and "payload_items" in logistics:
 			var conv_anchor: Vector2i = main.building_origins.get(grid_target, grid_target)
 			if logistics.payload_items.has(conv_anchor):
@@ -563,7 +655,7 @@ func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2,
 	else:
 		# Try to drop payload
 		var payload: Dictionary = state["held_payload"]
-		var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+		var logistics = _logistics_ref()
 
 		# Check if dropping onto a payload/freight conveyor
 		if logistics and logistics.has_method("_is_payload_cell") and logistics._is_payload_cell(grid_target):
@@ -623,6 +715,44 @@ func _update_controlled_unit(delta: float) -> void:
 	var move_x: float = Input.get_axis("move_left", "move_right")
 	var move_y: float = Input.get_axis("move_up", "move_down")
 	var velocity := Vector2(move_x, move_y)
+
+	# Tank steering: WASD picks a desired world-direction; the tank's motion
+	# is delegated to the unit's shared tank-steer helper so manual driving
+	# uses the same arc-around-pivot model as AI path following. We snapshot
+	# the position first so we can revert into a wall if the arc pushed the
+	# tank into a blocked cell.
+	if unit.data and unit.data.tank_steering and velocity.length() > 0:
+		var desired_face: float = velocity.normalized().angle()
+		var forward_step: float = unit.move_speed * delta
+		# Clear auto-targets while the player is actively driving.
+		unit.path = PackedVector2Array()
+		unit.path_index = 0
+		unit.move_target = null
+		unit.target_unit = null
+		unit.target_building = null
+
+		var pre_pos: Vector2 = unit.position
+		unit._tank_steer_step(desired_face, forward_step, unit.position, 0.0)
+
+		if unit.data.movement_layer == UnitData.MovementLayer.FLYING:
+			var map_wf: float = main.GRID_SIZE * main.GRID_WIDTH
+			var map_hf: float = main.GRID_SIZE * main.GRID_HEIGHT
+			unit.position.x = clampf(unit.position.x, 0.0, map_wf)
+			unit.position.y = clampf(unit.position.y, 0.0, map_hf)
+		else:
+			# Revert translation (not rotation) if the new cell is solid.
+			var grid_chk: AStarGrid2D = _get_grid_for_unit(unit)
+			var cg: Vector2i = main.world_to_grid(unit.position)
+			cg.x = clampi(cg.x, 0, main.GRID_WIDTH - 1)
+			cg.y = clampi(cg.y, 0, main.GRID_HEIGHT - 1)
+			if grid_chk.is_point_solid(cg):
+				unit.position = pre_pos
+			else:
+				var map_wg: float = main.GRID_SIZE * main.GRID_WIDTH
+				var map_hg: float = main.GRID_SIZE * main.GRID_HEIGHT
+				unit.position.x = clampf(unit.position.x, 0.0, map_wg)
+				unit.position.y = clampf(unit.position.y, 0.0, map_hg)
+		return
 
 	if velocity.length() > 0:
 		velocity = velocity.normalized()
@@ -691,7 +821,7 @@ func _update_controlled_unit(delta: float) -> void:
 	# --- Fire on left mouse held (like the player drone does) ---
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &"":
 		if _control_attack_timer <= 0:
-			var combat = get_node_or_null("/root/Main/CombatSystem")
+			var combat = _combat_sys_ref()
 			if combat and unit.data:
 				_control_attack_timer = unit.attack_cooldown
 				var mouse_pos: Vector2 = get_global_mouse_position()
@@ -716,13 +846,13 @@ func _update_controlled_unit(delta: float) -> void:
 				)
 
 
-func _update_controlled_turret(delta: float) -> void:
+func _update_controlled_turret(_delta: float) -> void:
 	var grid_pos: Vector2i = controlled_entity
 	if not main.placed_buildings.has(grid_pos):
 		_release_control()
 		return
 
-	var combat = get_node_or_null("/root/Main/CombatSystem")
+	var combat = _combat_sys_ref()
 	if not combat:
 		return
 
@@ -751,7 +881,7 @@ func _update_controlled_turret(delta: float) -> void:
 				if bdata.ammo_types.is_empty():
 					return
 				var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-				var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+				var logistics = _logistics_ref()
 				var fire_damage: float = bdata.attack_damage
 				var fire_color: Color = bdata.color.lightened(0.3)
 				var fire_reload_mult: float = 1.0
@@ -816,7 +946,7 @@ func _setup_astar() -> void:
 	astar_crawler.update()
 
 	# Mark terrain walls as solid in GROUND grid
-	var terrain_sys = get_node_or_null("/root/Main/TerrainSystem")
+	var terrain_sys = _terrain_ref()
 	if terrain_sys:
 		for grid_pos in terrain_sys.wall_tiles:
 			var tile_data = Registry.get_tile(terrain_sys.wall_tiles[grid_pos])
@@ -845,7 +975,7 @@ func _setup_astar() -> void:
 	_recompute_crawler_wall_passability()
 
 	# Mark hidden tiles as solid in ALL grids (impassable barrier)
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	var sector_script = _sector_script_ref()
 	if sector_script:
 		for x in range(main.GRID_WIDTH):
 			for y in range(main.GRID_HEIGHT):
@@ -857,7 +987,7 @@ func _setup_astar() -> void:
 
 
 func _setup_path_worker() -> void:
-	var terrain_sys = get_node_or_null("/root/Main/TerrainSystem")
+	var terrain_sys = _terrain_ref()
 
 	# GROUND solids: non-transport buildings + terrain walls that block pathfinding
 	var ground_solids: Array[Vector2i] = []
@@ -888,7 +1018,7 @@ func _setup_path_worker() -> void:
 				hover_solids.append(grid_pos)
 
 	# Add hidden tiles to all solid lists (impassable barrier)
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	var sector_script = _sector_script_ref()
 	if sector_script:
 		for x in range(main.GRID_WIDTH):
 			for y in range(main.GRID_HEIGHT):
@@ -1130,7 +1260,7 @@ func on_enemy_died(enemy: Node2D) -> void:
 	main.stats_enemy_units_destroyed += 1
 	# Notify sector script of FEROX unit death
 	if enemy.team == UnitData.Team.ENEMY and enemy.data:
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script:
 			sector_script.on_ferox_unit_destroyed(enemy.data.id)
 
@@ -1461,7 +1591,7 @@ func _recompute_crawler_wall_passability() -> void:
 	# Step 1: Collect terrain wall positions that block pathfinding
 	var all_wall_positions: Dictionary = {}
 
-	var terrain_sys = get_node_or_null("/root/Main/TerrainSystem")
+	var terrain_sys = _terrain_ref()
 	if terrain_sys:
 		for grid_pos in terrain_sys.wall_tiles:
 			var tile_data = Registry.get_tile(terrain_sys.wall_tiles[grid_pos])

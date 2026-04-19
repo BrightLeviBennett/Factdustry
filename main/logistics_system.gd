@@ -31,6 +31,16 @@ extends Node2D
 
 @onready var main: Node2D = get_node("/root/Main")
 
+# --- CACHED SIBLING REFERENCES (populated in _ready) ---
+# Centralized here so the hot _process sub-functions don't re-query the
+# scene tree every call. Safe because these siblings live for the lifetime
+# of the main scene.
+var _terrain: Node2D
+var _power_sys: Node
+var _sector_script: Node
+var _building_sys: Node
+var _unit_mgr: Node
+
 # --- DIRECTION CONSTANTS ---
 # Index: 0=right, 1=down, 2=left, 3=up
 # These match the rotation values stored in main.building_rotation.
@@ -153,6 +163,13 @@ var unloader_state := {}
 #   "charge": float — charge progress (0.0 to 1.0)
 var mass_driver_state := {}
 
+# --- BELT UNLOADER STATE ---
+# Key = Vector2i (unloader origin)
+# Value = Dictionary:
+#   "timer": float — cooldown until next pull
+#   "round_robin": int — rotates which source neighbor to pull from
+var belt_unloader_state := {}
+
 # --- MASS DRIVER PROJECTILES ---
 # Array of {from: Vector2, to: Vector2, payload_data: Dictionary, progress: float}
 var mass_driver_projectiles: Array = []
@@ -178,8 +195,40 @@ const ITEM_RADIUS := 8.0
 const ITEM_TEXTURE_SIZE := 20.0
 
 
+
+func _terrain_ref() -> Node2D:
+	if _terrain == null:
+		_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	return _terrain
+
+func _power_sys_ref() -> Node:
+	if _power_sys == null:
+		_power_sys = get_node_or_null("/root/Main/PowerSystem")
+	return _power_sys
+
+func _sector_script_ref() -> Node:
+	if _sector_script == null:
+		_sector_script = get_node_or_null("/root/Main/SectorScript")
+	return _sector_script
+
+func _building_sys_ref() -> Node:
+	if _building_sys == null:
+		_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	return _building_sys
+
+func _unit_mgr_ref() -> Node:
+	if _unit_mgr == null:
+		_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	return _unit_mgr
+
+
 func _ready() -> void:
 	await get_tree().process_frame
+	_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	_power_sys = get_node_or_null("/root/Main/PowerSystem")
+	_sector_script = get_node_or_null("/root/Main/SectorScript")
+	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
 	main.building_placed.connect(_on_building_placed)
 	main.building_destroyed.connect(_on_building_destroyed)
 
@@ -200,6 +249,7 @@ func _process(delta: float) -> void:
 	_update_mass_drivers(delta)
 	_update_pipes(delta)
 	_update_storage_unloading(delta)
+	_update_belt_unloaders(delta)
 	queue_redraw()
 
 
@@ -236,7 +286,7 @@ func _update_drills(delta: float) -> void:
 		processed[origin] = true
 
 		# Skip disabled or under-construction buildings
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(origin):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
@@ -246,7 +296,7 @@ func _update_drills(delta: float) -> void:
 			var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
 			drill_timers[origin] = cycle_time
 
-		var terrain = get_node_or_null("/root/Main/TerrainSystem")
+		var terrain = _terrain_ref()
 		if terrain == null:
 			continue
 
@@ -303,9 +353,9 @@ func _update_drills(delta: float) -> void:
 		var efficiency: float = float(hit_count) / float(front_count) if front_count > 0 else 1.0
 
 		# Check rotational power requirement
-		if data.rotational_power_use > 0:
-			var power_sys = get_node_or_null("/root/Main/PowerSystem")
-			if power_sys and not power_sys.is_rotational_powered(origin):
+		if data.electrical_power_use > 0:
+			var power_sys = _power_sys_ref()
+			if power_sys and not power_sys.is_electrical_powered(origin):
 				continue  # Not enough rotational power — skip
 
 		drill_timers[origin] -= delta * efficiency
@@ -470,10 +520,10 @@ func _get_entry_dir_from_building(out_pos: Vector2i, origin: Vector2i, grid_size
 
 func _update_pumps(delta: float) -> void:
 	var processed_pumps := {}
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	var terrain = _terrain_ref()
 	if terrain == null:
 		return
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	var sector_script = _sector_script_ref()
 
 	for grid_pos in main.placed_buildings:
 		var block_id = main.placed_buildings[grid_pos]
@@ -615,6 +665,12 @@ func _update_conveyors(delta: float) -> void:
 			if not conveyor_items.has(grid_pos):
 				continue  # Already transferred by a previous iteration
 
+			# Items sitting on an in-progress / derelict / deconstructing
+			# transport cell don't move. They pick back up once the block
+			# finishes construction.
+			if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+				continue
+
 			var item = conveyor_items[grid_pos]
 
 			# --- BRIDGE: teleport to linked output bridge ---
@@ -657,8 +713,23 @@ func _update_conveyors(delta: float) -> void:
 
 			# --- ROUTER: distribute to 3 output directions (round-robin) ---
 			if _is_router_cell(grid_pos):
-				if _try_router_transfer(grid_pos, item):
-					conveyor_items.erase(grid_pos)
+				# Use pre-decided exit direction if available
+				var exit_dir: int = item.get("exit_dir", -1)
+				if exit_dir >= 0:
+					var next_pos: Vector2i = grid_pos + DIR_VECTORS[exit_dir]
+					var entry_dir: int = (exit_dir + 2) % 4
+					if not _is_cross_faction(grid_pos, next_pos) and _try_transfer_item(next_pos, item["item_id"], entry_dir):
+						conveyor_items.erase(grid_pos)
+					else:
+						# Pre-decided path blocked. Try the other outputs; if any
+						# succeeds, transfer. If ALL blocked, leave exit_dir intact
+						# so the item visually stalls at the chosen exit instead
+						# of flicking through all 3 edges every frame.
+						if _try_router_transfer(grid_pos, item):
+							conveyor_items.erase(grid_pos)
+				else:
+					if _try_router_transfer(grid_pos, item):
+						conveyor_items.erase(grid_pos)
 				continue
 
 			# --- Normal conveyor: push forward ---
@@ -671,6 +742,15 @@ func _update_conveyors(delta: float) -> void:
 				continue
 
 			if _try_transfer_item(next_pos, item["item_id"], entry_dir):
+				conveyor_items.erase(grid_pos)
+				continue
+
+			# Forward transfer failed. As a fallback, try to side-dump into
+			# any perpendicular non-conveyor neighbour that will accept this
+			# item (turrets, factories, constructors). Matches the Mindustry
+			# convenience where a belt adjacent to an ammo-hungry turret
+			# auto-feeds it without needing a router.
+			if _try_belt_side_dump(grid_pos, drilRotation, item["item_id"]):
 				conveyor_items.erase(grid_pos)
 
 		# --- Junction perpendicular-axis items ---
@@ -688,7 +768,11 @@ func _update_conveyors(delta: float) -> void:
 	# --- PHASE 2: ADVANCE ---
 	# Move all items forward along their conveyor cell.
 	# Each conveyor uses its own transport_speed from BlockData.
+	# Items on inactive (under-construction/derelict/decon) cells hold their
+	# progress — they literally don't slide this frame.
 	for grid_pos in conveyor_items:
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
 		var item = conveyor_items[grid_pos]
 		if item["progress"] < 1.0:
 			var speed := conveyor_speed
@@ -699,8 +783,20 @@ func _update_conveyors(delta: float) -> void:
 					speed = data.transport_speed
 			item["progress"] = minf(item["progress"] + speed * delta, 1.0)
 
+	# Pre-decide exit direction for router items so they animate correctly
+	for grid_pos in conveyor_items:
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
+		var item = conveyor_items[grid_pos]
+		if _is_router_cell(grid_pos) and not item.has("exit_dir"):
+			var exit_dir: int = _pick_router_exit(grid_pos, item)
+			if exit_dir >= 0:
+				item["exit_dir"] = exit_dir
+
 	# Advance junction perpendicular-axis items too
 	for grid_pos in junction_items:
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
 		var item = junction_items[grid_pos]
 		if item["progress"] < 1.0:
 			var speed := conveyor_speed
@@ -716,6 +812,14 @@ func _update_conveyors(delta: float) -> void:
 ## Fluids are routed to pipes; items to conveyors.
 ## entry_dir: direction the item entered from (0-3), or -1 for default.
 func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) -> bool:
+	# Reject transfers into any block that isn't fully built (under
+	# construction, deconstructing, or derelict). Items just pile up on the
+	# upstream belt until the destination finishes construction. The core
+	# itself is always active so it's allowed to absorb even if is_building_inactive
+	# would otherwise return true for a derelict variant.
+	if not _is_core_cell(to) and main.has_method("is_building_inactive") and main.is_building_inactive(to):
+		return false
+
 	# Core absorbs if not full — reject if storage full (item stays on belt)
 	if _is_core_cell(to):
 		return _absorb_item(item_id, to)
@@ -749,7 +853,7 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 			return false
 
 		# Special blocks: items pass through instantly (no visual sliding)
-		var _is_instant := (_is_router_cell(to) or _is_sorter_cell(to)
+		var _is_instant := (_is_sorter_cell(to)
 			or _is_inverted_sorter_cell(to) or _is_overflow_cell(to)
 			or _is_underflow_cell(to) or _is_bridge_cell(to))
 
@@ -820,13 +924,234 @@ func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 	return false
 
 
+## Fallback used when a belt can't push its item forward: tries the two
+## perpendicular neighbours for a non-conveyor block that will accept this
+## item (turret ammo, factory input, constructor). Never dumps sideways into
+## another belt — that would silently reroute items in surprising ways.
+##
+## When BOTH sides could take the item, prefer the one with more free space
+## so two identical turrets sandwiching a belt stay balanced — otherwise a
+## fixed side-priority lets one turret hoard all the ammo while the opposite
+## one starves.
+func _try_belt_side_dump(grid_pos: Vector2i, belt_rot: int, item_id: StringName) -> bool:
+	var sides: Array[int] = [(belt_rot + 1) % 4, (belt_rot + 3) % 4]
+	# Sort sides by emptier-first so the neighbour that most recently
+	# consumed ammo / used an input gets the next item.
+	var scored: Array = []  # Array of [free_space, side_dir]
+	for side_dir in sides:
+		var side_pos: Vector2i = grid_pos + DIR_VECTORS[side_dir]
+		if _is_cross_faction(grid_pos, side_pos):
+			continue
+		if not main.placed_buildings.has(side_pos):
+			continue
+		if _is_conveyor_cell(side_pos):
+			continue
+		scored.append([_side_dump_free_space(side_pos, item_id), side_dir])
+	scored.sort_custom(func(a, b): return a[0] > b[0])
+
+	for entry in scored:
+		var side_dir: int = entry[1]
+		var side_pos: Vector2i = grid_pos + DIR_VECTORS[side_dir]
+		var entry_dir: int = (side_dir + 2) % 4
+		if _try_transfer_item(side_pos, item_id, entry_dir):
+			return true
+	return false
+
+
+## Estimates how much room a side-dump target has for a given item. Higher =
+## more open to a new item. Used to sort side-dump candidates so the emptier
+## neighbour wins. Returns 0 for targets that can't take the item at all so
+## they sort behind anything that can.
+func _side_dump_free_space(grid_pos: Vector2i, item_id: StringName) -> int:
+	var data = Registry.get_block(main.placed_buildings.get(grid_pos, &""))
+	if data == null:
+		return 0
+	var anchor = main.get_building_anchor(grid_pos)
+	var origin: Vector2i = anchor if anchor != null else grid_pos
+
+	# Turret ammo storage: free = cap - current_total.
+	if data.is_turret() and not data.ammo_types.is_empty():
+		var matches := false
+		for ammo in data.ammo_types:
+			if ammo is AmmoType and (ammo as AmmoType).item_id == item_id:
+				matches = true
+				break
+		if not matches:
+			return 0
+		var cap: int = data.max_stored_items if data.max_stored_items > 0 else 30
+		var used: int = 0
+		if block_storage.has(origin):
+			for k in block_storage[origin]["items"]:
+				used += int(block_storage[origin]["items"][k])
+		return maxi(cap - used, 0)
+
+	# Factory buffer: free = cap - current amount of this item.
+	var is_omni: bool = data.tags.has("omnidirectional")
+	var is_unit_fab: bool = data.produced_unit != &""
+	if is_omni or is_unit_fab or not data.side_inputs.is_empty():
+		var eff_inputs := _get_effective_inputs(data)
+		var recipe_amt: int = 0
+		for raw_id in eff_inputs:
+			if StringName(raw_id) == item_id:
+				recipe_amt = int(eff_inputs[raw_id])
+				break
+		if recipe_amt <= 0:
+			return 0
+		var cap2: int = data.max_stored_items if data.max_stored_items > 0 else recipe_amt * 10
+		var have: int = 0
+		if factory_buffers.has(origin):
+			have = int(factory_buffers[origin]["inputs"].get(item_id, 0))
+		return maxi(cap2 - have, 0)
+
+	# Constructor: free = (needed - collected) for this item's cost slot.
+	if data.tags.has("constructor") and constructor_state.has(origin):
+		var state = constructor_state[origin]
+		if state["phase"] != "collecting":
+			return 0
+		var sel: StringName = state["selected_block"]
+		if sel == &"":
+			return 0
+		var tdata = Registry.get_block(sel)
+		if tdata == null:
+			return 0
+		for raw_id in tdata.build_cost:
+			if StringName(raw_id) == item_id or StringName("mat_" + str(raw_id)) == item_id:
+				var needed: int = int(tdata.build_cost[raw_id])
+				var have_c: int = int(state["collected"].get(StringName(str(raw_id)), 0))
+				return maxi(needed - have_c, 0)
+	return 0
+
+
+## Non-mutating "will this block accept this item?" check. Used by the
+## router picker so it only locks an exit direction onto adjacent buildings
+## that can actually take the item — walls, incompatible factory sides,
+## and full storage inputs all return false and the picker looks elsewhere.
+func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+		return false
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null:
+		return false
+
+	# --- Factory-style accept (omnidirectional, side_inputs, unit_fabricator) ---
+	var is_omni: bool = data.tags.has("omnidirectional")
+	var is_unit_fab: bool = data.produced_unit != &""
+	if is_omni or is_unit_fab:
+		var eff_inputs := _get_effective_inputs(data)
+		for raw_id in eff_inputs:
+			if StringName(raw_id) == item_id:
+				var anchor = main.get_building_anchor(grid_pos)
+				var origin: Vector2i = anchor if anchor != null else grid_pos
+				var cap: int = data.max_stored_items if data.max_stored_items > 0 else int(eff_inputs[raw_id]) * 10
+				var have: int = 0
+				if factory_buffers.has(origin):
+					have = int(factory_buffers[origin]["inputs"].get(item_id, 0))
+				return have < cap
+	elif not data.side_inputs.is_empty():
+		var anchor2 = main.get_building_anchor(grid_pos)
+		var origin2: Vector2i = anchor2 if anchor2 != null else grid_pos
+		var rot: int = main.building_rotation.get(origin2, 0)
+		for rel_dir_key in data.side_inputs:
+			var rel_dir: int = int(rel_dir_key)
+			if (rel_dir + rot) % 4 == entry_dir:
+				if StringName(data.side_inputs[rel_dir_key]) == item_id:
+					return true
+				return false
+
+	# --- Constructor (any side, needs item in selected block's build_cost) ---
+	if data.tags.has("constructor"):
+		var anchor_c = main.get_building_anchor(grid_pos)
+		var origin_c: Vector2i = anchor_c if anchor_c != null else grid_pos
+		if not constructor_state.has(origin_c):
+			return false
+		var state = constructor_state[origin_c]
+		if state["phase"] != "collecting":
+			return false
+		var sel: StringName = state["selected_block"]
+		if sel == &"":
+			return false
+		var tdata = Registry.get_block(sel)
+		if tdata == null:
+			return false
+		for raw_id in tdata.build_cost:
+			if StringName(raw_id) == item_id or StringName("mat_" + str(raw_id)) == item_id:
+				var have_c: int = int(state["collected"].get(StringName(str(raw_id)), 0))
+				return have_c < int(tdata.build_cost[raw_id])
+		return false
+
+	# --- Turret ammo (any side) ---
+	if data.is_turret() and not data.ammo_types.is_empty():
+		for ammo in data.ammo_types:
+			if ammo == null or not (ammo is AmmoType):
+				continue
+			if (ammo as AmmoType).item_id == item_id:
+				return true
+		return false
+
+	return false
+
+
+## Picks the exit direction for a router item without transferring it.
+## Advances the round-robin index so subsequent items go different ways.
+## Returns -1 if no output is available.
+func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
+	var item_entry_dir: int = item.get("entry_dir", -1)
+	var exclude_dir: int = item_entry_dir
+	if exclude_dir < 0:
+		var rot: int = main.building_rotation.get(grid_pos, 0)
+		exclude_dir = (rot + 2) % 4
+
+	var outputs: Array[int] = []
+	for dir_idx in range(4):
+		if dir_idx != exclude_dir:
+			outputs.append(dir_idx)
+
+	if not router_output_index.has(grid_pos):
+		router_output_index[grid_pos] = 0
+
+	var rr_start: int = router_output_index[grid_pos] % outputs.size()
+
+	# First pass: look for a direction with an accepting destination. Only
+	# advance round-robin when we actually commit to an output so that a
+	# fully-blocked router doesn't churn the index every frame.
+	for attempt in range(outputs.size()):
+		var idx: int = (rr_start + attempt) % outputs.size()
+		var out_dir: int = outputs[idx]
+		var next_pos: Vector2i = grid_pos + DIR_VECTORS[out_dir]
+		var entry_dir: int = (out_dir + 2) % 4
+
+		if _is_cross_faction(grid_pos, next_pos):
+			continue
+
+		# Empty conveyor ahead = perfect output.
+		if _is_conveyor_cell(next_pos) and not conveyor_items.has(next_pos):
+			router_output_index[grid_pos] = (idx + 1) % outputs.size()
+			return out_dir
+		# Non-conveyor building (factory, turret, constructor, etc.) —
+		# only lock onto this direction if the building will actually
+		# accept this specific item from this side. Otherwise we'd
+		# animate the item toward a wall or an incompatible input side
+		# and leave it stalled on the router.
+		if main.placed_buildings.has(next_pos) and not _is_conveyor_cell(next_pos):
+			if _could_block_accept_item(next_pos, item["item_id"], entry_dir):
+				router_output_index[grid_pos] = (idx + 1) % outputs.size()
+				return out_dir
+
+	# Fallback: all outputs blocked. Return the current round-robin direction
+	# WITHOUT advancing the index, so the item waits on a stable exit edge
+	# until something frees up.
+	return outputs[rr_start] if outputs.size() > 0 else -1
+
+
 # =========================
 # BELT BRIDGE
 # =========================
 
 ## Returns true if this bridge is the input end of a link (pair[0]).
 func _is_bridge_input(grid_pos: Vector2i) -> bool:
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	var power_sys = _power_sys_ref()
 	if power_sys == null:
 		return false
 	for pair in power_sys.linked_pairs:
@@ -837,7 +1162,7 @@ func _is_bridge_input(grid_pos: Vector2i) -> bool:
 
 ## Teleports an item from an input bridge to its linked output bridge.
 func _try_bridge_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	var power_sys = _power_sys_ref()
 	if power_sys == null:
 		return false
 
@@ -872,12 +1197,13 @@ func _try_bridge_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 # BELT JUNCTION
 # =========================
 
-## Returns true if entry_dir aligns with the junction's primary axis
-## (the junction's facing direction or its opposite).
-func _is_junction_primary_axis(grid_pos: Vector2i, entry_dir: int) -> bool:
-	var rot: int = main.building_rotation.get(grid_pos, 0)
-	var back_dir: int = (rot + 2) % 4
-	return entry_dir == back_dir or entry_dir == rot
+## Returns true if entry_dir aligns with the junction's primary axis.
+## Junctions are non-directional: horizontal (left/right) is always primary,
+## vertical (up/down) is always perpendicular.
+func _is_junction_primary_axis(_grid_pos: Vector2i, entry_dir: int) -> bool:
+	# 0 = right, 2 = left → primary (horizontal)
+	# 1 = down, 3 = up   → perpendicular (vertical)
+	return entry_dir == 0 or entry_dir == 2
 
 
 ## Pass item straight through the junction (exit = opposite of entry).
@@ -1016,6 +1342,10 @@ func _update_payloads(delta: float) -> void:
 		for grid_pos in cells_with_full_payloads:
 			if not payload_items.has(grid_pos):
 				continue  # Already transferred
+			# Payload cells that aren't finished building don't hand off
+			# their payload — the carrier just sits at the end of the belt.
+			if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+				continue
 
 			var entry = payload_items[grid_pos]
 			var payload_data: Dictionary = entry["payload_data"]
@@ -1024,7 +1354,7 @@ func _update_payloads(delta: float) -> void:
 			# --- BRIDGE: teleport to linked output bridge ---
 			if _is_bridge_cell(grid_pos):
 				if _is_bridge_input(grid_pos):
-					var power_sys = get_node_or_null("/root/Main/PowerSystem")
+					var power_sys = _power_sys_ref()
 					if power_sys:
 						var partner: Variant = null
 						for pair in power_sys.linked_pairs:
@@ -1103,6 +1433,10 @@ func _update_payloads(delta: float) -> void:
 
 	# --- PHASE 2: ADVANCE ---
 	for grid_pos in payload_items:
+		# Don't advance payloads on inactive cells — the carrier freezes until
+		# the underlying conveyor finishes construction.
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
 		var entry = payload_items[grid_pos]
 		if entry["progress"] < 1.0:
 			var speed := conveyor_speed
@@ -1211,6 +1545,11 @@ func _try_transfer_payload(to: Vector2i, payload_data: Dictionary, entry_dir: in
 
 ## Adds fluid to a pipe cell. Returns true if successful.
 func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float) -> bool:
+	# Fluid can't enter a pipe that isn't fully built, is deconstructing, or is
+	# derelict. This blocks every caller (pumps, factories, storage unloading,
+	# belt-unloaders) without having to check at each site.
+	if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+		return false
 	var fluid = Registry.get_fluid(fluid_id)
 	if fluid == null:
 		return false
@@ -1237,11 +1576,16 @@ func _update_pipes(delta: float) -> void:
 	# --- Phase A: Find networks and equalize ---
 	var visited := {}
 
-	# Also check all placed pipe cells (even empty ones) for equalization
+	# Also check all placed pipe cells (even empty ones) for equalization.
+	# Skip inactive pipes so they can't equalize fluid through a cell that
+	# isn't finished building yet.
 	var all_pipe_cells := {}
 	for grid_pos in main.placed_buildings:
-		if _is_pipe_cell(grid_pos):
-			all_pipe_cells[grid_pos] = true
+		if not _is_pipe_cell(grid_pos):
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
+		all_pipe_cells[grid_pos] = true
 
 	for grid_pos in all_pipe_cells:
 		if visited.has(grid_pos):
@@ -1355,10 +1699,15 @@ func _find_pipe_network(start: Vector2i) -> Array[Vector2i]:
 
 		for dir in range(4):
 			var neighbor: Vector2i = pos + DIR_VECTORS[dir]
-			if not seen.has(neighbor) and _is_pipe_cell(neighbor):
-				if main.get_building_faction(neighbor) == start_faction:
-					seen[neighbor] = true
-					queue.append(neighbor)
+			if seen.has(neighbor) or not _is_pipe_cell(neighbor):
+				continue
+			# Don't cross into pipes that aren't finished building / are being
+			# deconstructed / are derelict — fluid can't flow through them.
+			if main.has_method("is_building_inactive") and main.is_building_inactive(neighbor):
+				continue
+			if main.get_building_faction(neighbor) == start_faction:
+				seen[neighbor] = true
+				queue.append(neighbor)
 
 	return network
 
@@ -1521,6 +1870,11 @@ func _update_storage_unloading(_delta: float) -> void:
 			to_clean.append(origin)
 			continue
 
+		# Buildings that aren't fully built shouldn't leak stored items/fluids
+		# onto adjacent conveyors — skip until construction completes.
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+
 		# Try to push stored items onto adjacent conveyors
 		# For multi-tile buildings, check all output cells (not just origin neighbors)
 		var block_id: StringName = main.placed_buildings.get(origin, &"")
@@ -1563,6 +1917,16 @@ func _update_storage_unloading(_delta: float) -> void:
 						if int(storage["items"][item_id]) <= 0:
 							items_to_remove[item_id] = true
 						break
+				# Also try pushing directly into an adjacent factory's input
+				# buffer. Without this, two omnidirectional factories placed
+				# next to each other (e.g. mineral extractor → steel furnace)
+				# can't feed each other — the storage would only drain onto
+				# belts or cores otherwise.
+				if _try_accept_factory_item(out_pos, item_id, entry_dir):
+					storage["items"][item_id] = int(storage["items"][item_id]) - 1
+					if int(storage["items"][item_id]) <= 0:
+						items_to_remove[item_id] = true
+					break
 
 		for item_id in items_to_remove:
 			storage["items"].erase(item_id)
@@ -1592,6 +1956,107 @@ func _update_storage_unloading(_delta: float) -> void:
 			var s = block_storage[pos]
 			if s["items"].is_empty() and s["fluids"].is_empty():
 				block_storage.erase(pos)
+
+
+# =========================
+# BELT UNLOADER (Mindustry-style)
+# =========================
+
+## Ticks every belt unloader block. Each tick it:
+##   1. Finds an adjacent building with block_storage that has items.
+##   2. Pulls one item (respecting the sorter filter if set).
+##   3. Pushes it onto an adjacent conveyor facing away from the unloader.
+## Uses round-robin so it distributes pulls across multiple source neighbors.
+func _update_belt_unloaders(_delta: float) -> void:
+	var processed := {}
+	for grid_pos in main.placed_buildings:
+		var block_id = main.placed_buildings[grid_pos]
+		var data = Registry.get_block(block_id)
+		if data == null or not data.tags.has("unloader"):
+			continue
+		var anchor = main.get_building_anchor(grid_pos)
+		var origin: Vector2i = anchor if anchor != null else grid_pos
+		if processed.has(origin):
+			continue
+		processed[origin] = true
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+
+		if not belt_unloader_state.has(origin):
+			belt_unloader_state[origin] = {"timer": 0.0, "round_robin": 0}
+		var state: Dictionary = belt_unloader_state[origin]
+
+		state["timer"] -= _delta
+		if state["timer"] > 0:
+			continue
+		# Unload speed: use the block's transport_speed as items/sec
+		var speed: float = data.transport_speed if data.transport_speed > 0 else 4.0
+		state["timer"] = 1.0 / speed
+
+		# Item filter (reuses sorter_filters dict — click the unloader to set)
+		var filter_id: StringName = sorter_filters.get(origin, &"")
+
+		# Gather source neighbors (buildings with block_storage) and
+		# sink neighbors (conveyors with no item that face away from us).
+		var sources: Array[Vector2i] = []
+		var sinks: Array[Vector2i] = []
+		for dir_idx in range(4):
+			var nb: Vector2i = origin + DIR_VECTORS[dir_idx]
+			if _is_cross_faction(origin, nb):
+				continue
+			if not main.placed_buildings.has(nb):
+				continue
+			var nb_anchor: Vector2i = main.building_origins.get(nb, nb)
+			# Sink: empty conveyor cell facing away from us
+			if _is_conveyor_cell(nb) and not conveyor_items.has(nb):
+				sinks.append(nb)
+			# Source: any building with items in block_storage
+			elif block_storage.has(nb_anchor) and not block_storage[nb_anchor]["items"].is_empty():
+				sources.append(nb_anchor)
+
+		if sources.is_empty() or sinks.is_empty():
+			continue
+
+		# Round-robin across sources
+		var rr: int = state["round_robin"] % sources.size()
+		state["round_robin"] = rr + 1
+		var src: Vector2i = sources[rr]
+		var storage: Dictionary = block_storage[src]
+
+		# Pick the first matching item (or any item if no filter)
+		var pulled_id: StringName = &""
+		if filter_id != &"":
+			if storage["items"].has(filter_id) and int(storage["items"][filter_id]) > 0:
+				pulled_id = filter_id
+		else:
+			for item_id in storage["items"]:
+				if int(storage["items"][item_id]) > 0:
+					pulled_id = item_id
+					break
+		if pulled_id == &"":
+			continue
+
+		# Push onto the first open sink
+		var pushed := false
+		for sink_pos in sinks:
+			if conveyor_items.has(sink_pos):
+				continue
+			var entry_dir: int = -1
+			for d in range(4):
+				if origin + DIR_VECTORS[d] == sink_pos:
+					entry_dir = (d + 2) % 4
+					break
+			conveyor_items[sink_pos] = {
+				"item_id": pulled_id,
+				"progress": 0.0,
+				"entry_dir": entry_dir,
+			}
+			pushed = true
+			break
+		if pushed:
+			storage["items"][pulled_id] = int(storage["items"][pulled_id]) - 1
+			if int(storage["items"][pulled_id]) <= 0:
+				storage["items"].erase(pulled_id)
 
 
 # =========================
@@ -1809,6 +2274,7 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	loader_state.erase(grid_pos)
 	unloader_state.erase(grid_pos)
 	mass_driver_state.erase(grid_pos)
+	belt_unloader_state.erase(grid_pos)
 	# Drop any in-flight projectiles to/from this driver
 	for i in range(mass_driver_projectiles.size() - 1, -1, -1):
 		var proj: Dictionary = mass_driver_projectiles[i]
@@ -1941,7 +2407,7 @@ func _update_constructors(delta: float) -> void:
 		processed[origin] = true
 
 		# Skip disabled or under-construction buildings
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(origin):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
@@ -2052,7 +2518,7 @@ func _update_deconstructors(delta: float) -> void:
 		processed[origin] = true
 
 		# Skip disabled or under-construction buildings
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(origin):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
@@ -2207,7 +2673,7 @@ func _get_all_perimeter_cells(origin: Vector2i, grid_size: Vector2i) -> Array[Ve
 # =========================
 
 ## Processes all loaders: accept storage payload → fill from conveyors → output.
-func _update_loaders(delta: float) -> void:
+func _update_loaders(_delta: float) -> void:
 	var processed := {}
 
 	for grid_pos in main.placed_buildings:
@@ -2225,7 +2691,7 @@ func _update_loaders(delta: float) -> void:
 		processed[origin] = true
 
 		# Skip disabled or under-construction buildings
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(origin):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
@@ -2270,7 +2736,6 @@ func _update_loaders(delta: float) -> void:
 					state["phase"] = "filling"
 
 					# Determine fill targets based on storage capacity
-					var fill := {}
 					if target_data.max_stored_items > 0:
 						# Fill target = remaining capacity
 						var stored: Dictionary = payload_data.get("stored_items", {})
@@ -2345,7 +2810,7 @@ func _update_loaders(delta: float) -> void:
 # =========================
 
 ## Processes all unloaders: accept storage payload → extract items → output empty payload.
-func _update_unloaders(delta: float) -> void:
+func _update_unloaders(_delta: float) -> void:
 	var processed := {}
 
 	for grid_pos in main.placed_buildings:
@@ -2363,7 +2828,7 @@ func _update_unloaders(delta: float) -> void:
 		processed[origin] = true
 
 		# Skip disabled or under-construction buildings
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(origin):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
@@ -2494,7 +2959,7 @@ func _update_unloaders(delta: float) -> void:
 
 ## Mass drivers accept payloads from adjacent conveyors, charge up, and launch to a linked partner.
 func _update_mass_drivers(delta: float) -> void:
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	var power_sys = _power_sys_ref()
 	if not power_sys:
 		return
 	var processed := {}
@@ -2776,8 +3241,8 @@ func _draw_mass_drivers() -> void:
 
 
 func _draw_items() -> void:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
-	var _ss_items = get_node_or_null("/root/Main/SectorScript")
+	var building_sys = _building_sys_ref()
+	var _ss_items = _sector_script_ref()
 
 	for grid_pos in conveyor_items:
 		if _ss_items and _ss_items.is_tile_hidden(grid_pos):
@@ -2792,7 +3257,10 @@ func _draw_items() -> void:
 
 		# Figure out which direction this conveyor faces
 		var rotation = main.building_rotation.get(grid_pos, 0)
-		var dir_vec = Vector2(DIR_VECTORS[rotation])
+		# Routers use their pre-decided exit_dir instead of cell rotation
+		var exit_dir: int = entry.get("exit_dir", -1)
+		var effective_dir: int = exit_dir if exit_dir >= 0 else rotation
+		var dir_vec = Vector2(DIR_VECTORS[effective_dir])
 
 		# World position of the cell center
 		var world_pos = main.grid_to_world(grid_pos)
@@ -2805,7 +3273,7 @@ func _draw_items() -> void:
 
 		# Determine entry direction (default = behind the belt)
 		var entry_dir: int = entry.get("entry_dir", -1)
-		var back_dir: int = (rotation + 2) % 4
+		var back_dir: int = (effective_dir + 2) % 4
 		if entry_dir < 0 or entry_dir > 3:
 			entry_dir = back_dir
 
@@ -2880,8 +3348,8 @@ func _draw_items() -> void:
 ## Building payloads draw their block icon; unit payloads draw the unit icon.
 ## Size is ~48px, centered on the cell, interpolated between cells based on progress.
 func _draw_payloads() -> void:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
-	var _ss_payload = get_node_or_null("/root/Main/SectorScript")
+	var building_sys = _building_sys_ref()
+	var _ss_payload = _sector_script_ref()
 	var gs: float = main.GRID_SIZE
 
 	for grid_pos in payload_items:
@@ -2969,7 +3437,7 @@ func _draw_payloads() -> void:
 
 
 func _draw_drill_progress_bars() -> void:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 
 	for grid_pos in drill_timers:
 		if not main.placed_buildings.has(grid_pos):
@@ -2986,7 +3454,7 @@ func _draw_drill_progress_bars() -> void:
 		var pct = clampf(1.0 - (remaining / cycle_time), 0.0, 1.0)
 
 		# Also check if there's actually a deposit underneath
-		var terrain = get_node_or_null("/root/Main/TerrainSystem")
+		var terrain = _terrain_ref()
 		if terrain == null:
 			continue
 
@@ -3018,7 +3486,7 @@ func _draw_drill_progress_bars() -> void:
 
 
 func _draw_pump_progress_bars() -> void:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 
 	for grid_pos in pump_timers:
 		if not main.placed_buildings.has(grid_pos):
@@ -3035,7 +3503,7 @@ func _draw_pump_progress_bars() -> void:
 		var pct = clampf(1.0 - (remaining / cycle_time), 0.0, 1.0)
 
 		# Check if there's actually a liquid tile underneath
-		var terrain = get_node_or_null("/root/Main/TerrainSystem")
+		var terrain = _terrain_ref()
 		if terrain == null:
 			continue
 		var liquid_tile = terrain.get_liquid_at(grid_pos)
@@ -3089,13 +3557,25 @@ func _update_factories(delta: float) -> void:
 		processed[origin] = true
 
 		# Skip disabled or under-construction buildings
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(origin):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
 			continue
 
+		# Skip factories that need electrical power but aren't powered.
+		var power_sys_f = _power_sys_ref()
+		if data.electrical_power_use > 0 and power_sys_f:
+			if not power_sys_f.is_electrical_powered(origin):
+				continue
+
 		var is_unit_fabricator: bool = data.produced_unit != &""
+
+		# Unit fabricators ALWAYS require electrical power to produce, even if
+		# their .tres doesn't explicitly set electrical_power_use.
+		if is_unit_fabricator and power_sys_f:
+			if not power_sys_f.is_electrical_powered(origin):
+				continue
 
 		# Initialize state if needed
 		if not factory_buffers.has(origin):
@@ -3143,9 +3623,11 @@ func _update_factories(delta: float) -> void:
 				state["timer"] -= delta
 				if state["timer"] <= 0:
 					if is_unit_fabricator:
-						# Spawn unit in front of the building and go back to collecting
-						_spawn_fabricated_unit(origin, data)
-						state["phase"] = "collecting"
+						# Enter the ejection animation phase. Actual placement/
+						# payload-push happens when the animation finishes.
+						state["timer"] = 0.0
+						state["phase"] = "ejecting"
+						state["eject_progress"] = 0.0
 					else:
 						state["phase"] = "outputting"
 						# Build pending outputs list. Omnidirectional factories
@@ -3171,6 +3653,32 @@ func _update_factories(delta: float) -> void:
 			"outputting":
 				_factory_try_output(origin, data, state)
 				if state["pending_outputs"].is_empty():
+					state["phase"] = "collecting"
+
+			"ejecting":
+				# Animate the finished unit from the fabricator center toward
+				# the front edge. When it arrives, try to place it in the
+				# world or push it onto a payload conveyor.
+				var eject_speed: float = 1.6
+				state["eject_progress"] = minf(1.0, float(state.get("eject_progress", 0.0)) + delta * eject_speed)
+				if state["eject_progress"] >= 1.0:
+					var payload_data := {
+						"type": "unit",
+						"unit_id": data.produced_unit,
+					}
+					if _try_deliver_fabricated_unit(origin, data, payload_data):
+						state["phase"] = "collecting"
+						state.erase("eject_progress")
+					else:
+						state["phase"] = "holding"
+						state["held_payload"] = payload_data
+
+			"holding":
+				# Keep retrying delivery until it succeeds.
+				var held = state.get("held_payload", null)
+				if held != null and _try_deliver_fabricated_unit(origin, data, held):
+					state.erase("held_payload")
+					state.erase("eject_progress")
 					state["phase"] = "collecting"
 
 
@@ -3297,6 +3805,58 @@ func _conveyor_feeds_toward_building(conv_pos: Vector2i, origin: Vector2i, grid_
 	return false
 
 
+## Attempts to deliver a freshly-built unit out of a fabricator.
+## Tries (in priority order):
+##   1. Push the unit as a payload onto the front cell if it's a payload conveyor
+##      (or similar) that can currently accept it.
+##   2. Spawn the unit directly into the world if the front tile is valid for
+##      that unit's movement layer (i.e. not a wall for ground/crawler units,
+##      not occupied by a building for ground units).
+## Returns true if delivery succeeded; false means the caller should keep the
+## unit as a held payload and retry on the next tick.
+func _try_deliver_fabricated_unit(origin: Vector2i, data: BlockData, payload_data: Dictionary) -> bool:
+	# Unit cap (player only). Enemy fabricators don't respect this.
+	var faction: int = main.get_building_faction(origin)
+	if faction != main.Faction.FEROX:
+		if main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
+			return false
+
+	var rot: int = main.building_rotation.get(origin, 0)
+	var front_cells: Array[Vector2i] = _get_front_edge(origin, data.grid_size, rot)
+	if front_cells.is_empty():
+		return false
+
+	# 1) Try to push as a payload onto an accepting front cell.
+	var entry_dir: int = (rot + 2) % 4
+	for cell in front_cells:
+		if _is_payload_cell(cell) and _try_push_payload(cell, payload_data, entry_dir):
+			return true
+
+	# 2) Try to spawn the unit directly in the world if the front is clear.
+	var unit_data = Registry.get_unit(data.produced_unit)
+	if unit_data == null:
+		return false
+
+	var ml: int = unit_data.movement_layer
+	var is_flying: bool = (ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING)
+
+	# A blocked-on-front fabricator should hold rather than spawn. For ground
+	# units all cells must be clear of buildings AND terrain walls. Flying/hover
+	# ignore walls. Crawlers ignore buildings but not large terrain walls;
+	# approximate with the same rule as ground for now.
+	var terrain = _terrain_ref()
+	for cell in front_cells:
+		if main.placed_buildings.has(cell) and not is_flying:
+			return false
+		if not is_flying and terrain != null and terrain.wall_tiles.has(cell):
+			var tile_data = Registry.get_tile(terrain.wall_tiles[cell])
+			if tile_data and tile_data.blocks_pathfinding:
+				return false
+
+	_spawn_fabricated_unit(origin, data)
+	return true
+
+
 ## Spawns a unit in front of a fabricator building (centered on the facing side).
 func _spawn_fabricated_unit(origin: Vector2i, data: BlockData) -> void:
 	var unit_data = Registry.get_unit(data.produced_unit)
@@ -3329,7 +3889,7 @@ func _spawn_fabricated_unit(origin: Vector2i, data: BlockData) -> void:
 		_:
 			spawn_world = center + Vector2((sx * 0.5 + 0.5) * gs, 0)
 
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr:
 		var faction: int = main.get_building_faction(origin)
 		if faction == main.Faction.FEROX:
@@ -3343,7 +3903,7 @@ func _spawn_fabricated_unit(origin: Vector2i, data: BlockData) -> void:
 		if faction != main.Faction.FEROX:
 			if "stats_units_produced" in main:
 				main.stats_units_produced += 1
-			var sector_script = get_node_or_null("/root/Main/SectorScript")
+			var sector_script = _sector_script_ref()
 			if sector_script:
 				sector_script.on_unit_produced(data.produced_unit)
 
@@ -3442,7 +4002,7 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 
 
 func _draw_factory_progress_bars() -> void:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 
 	for grid_pos in factory_buffers:
 		var state = factory_buffers[grid_pos]

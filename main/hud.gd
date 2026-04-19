@@ -75,11 +75,18 @@ var block_tooltip: PanelContainer
 var tooltip_vbox: VBoxContainer
 var _last_hovered_grid := Vector2i(-9999, -9999)
 var _logistics: Node2D
+# Cached sibling refs (populated in _ready). Avoid re-looking-up from _process.
+var _unit_mgr: Node
+var _drone: Node2D
+var _combat_sys: Node
+var _building_sys: Node
+var _power_sys: Node
 var _tooltip_refresh_timer := 0.0
 const TOOLTIP_REFRESH_INTERVAL := 0.25  # Refresh tooltip every 0.25 seconds
 
 # Build cost panel (shown when placing a block)
 var build_cost_panel: PanelContainer
+var _cost_dirty := false
 var build_cost_vbox: VBoxContainer
 var _last_cost_building := &""
 
@@ -112,10 +119,42 @@ const BLOCK_BTN_SIZE := 48.0
 const CAT_BTN_SIZE := 40.0
 
 
+
+func _unit_mgr_ref() -> Node:
+	if _unit_mgr == null:
+		_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	return _unit_mgr
+
+func _drone_ref() -> Node2D:
+	if _drone == null:
+		_drone = get_node_or_null("/root/Main/PlayerDrone")
+	return _drone
+
+func _combat_sys_ref() -> Node:
+	if _combat_sys == null:
+		_combat_sys = get_node_or_null("/root/Main/CombatSystem")
+	return _combat_sys
+
+func _building_sys_ref() -> Node:
+	if _building_sys == null:
+		_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	return _building_sys
+
+func _power_sys_ref() -> Node:
+	if _power_sys == null:
+		_power_sys = get_node_or_null("/root/Main/PowerSystem")
+	return _power_sys
+
+
 func _ready() -> void:
 	await get_tree().process_frame
 	main = get_node("/root/Main")
 	_logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	_drone = get_node_or_null("/root/Main/PlayerDrone")
+	_combat_sys = get_node_or_null("/root/Main/CombatSystem")
+	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	_power_sys = get_node_or_null("/root/Main/PowerSystem")
 
 	_create_portrait_panel()
 	_create_resource_panel()
@@ -191,7 +230,7 @@ func _process(delta: float) -> void:
 	# Toggle whole HUD visibility with the "i" key
 	if Input.is_action_just_pressed("toggle_ui"):
 		visible = not visible
-		var drone = get_node_or_null("/root/Main/PlayerDrone")
+		var drone = _drone_ref()
 		if drone:
 			drone.queue_redraw()
 
@@ -234,18 +273,20 @@ func _process(delta: float) -> void:
 	var mouse_world := Vector2.ZERO
 	var camera = get_viewport().get_camera_2d()
 	if camera:
-		mouse_world = camera.get_screen_center_position() + (get_viewport().get_mouse_position() - get_viewport().get_visible_rect().size / 2.0)
+		mouse_world = camera.get_screen_center_position() + (get_viewport().get_mouse_position() - get_viewport().get_visible_rect().size / 2.0) / camera.zoom
 	else:
 		mouse_world = get_viewport().get_mouse_position()
 
 	var hovered_grid: Vector2i = main.world_to_grid(mouse_world)
 
 	if main.selected_building != &"":
-		# Placing a block — show build cost
+		# Placing a block — show build cost. Rebuilds when the block changes
+		# or when _cost_dirty is set (by the resources_changed signal).
 		block_tooltip.visible = false
 		_last_hovered_grid = Vector2i(-9999, -9999)
-		if _last_cost_building != main.selected_building:
+		if _last_cost_building != main.selected_building or _cost_dirty:
 			_last_cost_building = main.selected_building
+			_cost_dirty = false
 			_update_build_cost_panel(main.selected_building)
 		build_cost_panel.visible = true
 	elif main.placed_buildings.has(hovered_grid):
@@ -268,7 +309,7 @@ func _process(delta: float) -> void:
 
 	# Show unit mode panel when shift is held
 	# Unit mode panel — visible whenever the UnitManager is in unit mode.
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	unit_mode_panel.visible = unit_mgr != null and "unit_mode_active" in unit_mgr and unit_mgr.unit_mode_active
 
 	# Update portrait UI
@@ -402,9 +443,9 @@ func _set_portrait_bar(fill_rect: ColorRect, pct: float) -> void:
 
 
 func _update_portrait_panel() -> void:
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-	var drone = get_node_or_null("/root/Main/PlayerDrone")
-	var combat = get_node_or_null("/root/Main/CombatSystem")
+	var unit_mgr = _unit_mgr_ref()
+	var drone = _drone_ref()
+	var combat = _combat_sys_ref()
 
 	var is_controlling := unit_mgr != null and unit_mgr.controlled_entity != null
 	var ctrl_type: String = unit_mgr.controlled_type if unit_mgr else ""
@@ -796,14 +837,7 @@ func _update_category_highlights() -> void:
 
 func _create_info_label() -> void:
 	info_label = Label.new()
-	info_label.anchor_left = 0.5
-	info_label.anchor_right = 0.5
-	info_label.offset_left = -300
-	info_label.offset_right = 300
-	info_label.offset_top = 80
-	info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	info_label.add_theme_color_override("font_color", Color(0.8, 0.9, 0.8))
-	info_label.add_theme_font_size_override("font_size", 14)
+	info_label.visible = false  # Removed — build cost info is in the build cost panel
 	add_child(info_label)
 
 
@@ -1005,22 +1039,15 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		_add_tooltip_line("Efficiency: %.2f/s" % rate, Color(0.7, 0.9, 0.7))
 
 	# --- Power Status ---
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	var power_sys = _power_sys_ref()
 	if power_sys:
-		if data.rotational_power_use > 0:
-			var powered: bool = power_sys.is_rotational_powered(origin)
-			var color := Color(0.3, 0.9, 0.3) if powered else Color(0.9, 0.3, 0.3)
-			var status_text := "Rot. Power: ON" if powered else "Rot. Power: OFF"
-			_add_tooltip_line(status_text, color)
 		if data.electrical_power_use > 0:
 			var powered: bool = power_sys.is_electrical_powered(origin)
 			var color := Color(0.3, 0.9, 0.3) if powered else Color(0.9, 0.3, 0.3)
-			var status_text := "Elec. Power: ON" if powered else "Elec. Power: OFF"
+			var status_text := "Power: ON" if powered else "Power: OFF"
 			_add_tooltip_line(status_text, color)
-		if data.rotational_power_gen > 0:
-			_add_tooltip_line("Generates: %.0f rot. power" % data.rotational_power_gen, Color(0.5, 0.8, 1.0))
 		if data.electrical_power_gen > 0:
-			_add_tooltip_line("Generates: %.0f elec. power" % data.electrical_power_gen, Color(0.5, 0.8, 1.0))
+			_add_tooltip_line("Generates: %.0f power" % data.electrical_power_gen, Color(0.5, 0.8, 1.0))
 
 	# --- Needed Resources (for factories/constructors/drills with pending inputs) ---
 	if _logistics:
@@ -1173,7 +1200,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		_add_tooltip_line("Phase: %s" % phase.capitalize(), phase_color)
 
 	# --- Archive: show contained archive ---
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 	if data.id == &"archive" and building_sys and "archive_holdings" in building_sys:
 		var aid: StringName = building_sys.archive_holdings.get(origin, &"")
 		if aid == &"":
@@ -1206,7 +1233,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 ## Returns a human-readable description of why an archive decoder is not currently
 ## decoding (or "ready" if it should be).
 func _diagnose_archive_decoder(anchor: Vector2i) -> String:
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	var power_sys = _power_sys_ref()
 	if power_sys and not power_sys.is_electrical_powered(anchor):
 		return "no electrical power"
 	const DIRS := [Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(0, -1)]
@@ -1227,7 +1254,7 @@ func _diagnose_archive_decoder(anchor: Vector2i) -> String:
 			continue
 		scanner_powered = true
 		var rot: int = main.building_rotation.get(n_anchor, 0)
-		var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+		var building_sys = _building_sys_ref()
 		if building_sys == null:
 			continue
 		var front = building_sys._get_front_edge(n_anchor, n_data.grid_size, rot)
@@ -1514,10 +1541,11 @@ func _update_build_cost_panel(block_id: StringName) -> void:
 	else:
 		for item_id in data.build_cost:
 			var required: int = int(data.build_cost[item_id])
-			var have: int = int(main.resources.get(item_id, 0))
-			var item = Registry.get_item_or_fluid(item_id)
+			var rk: StringName = main._resolve_resource_key(str(item_id))
+			var have: int = int(main.resources.get(rk, 0))
+			var item = Registry.get_item_or_fluid(rk)
 			if item == null:
-				item = Registry.get_item_or_fluid(StringName("mat_" + str(item_id)))
+				item = Registry.get_item_or_fluid(item_id)
 
 			var cost_hbox = HBoxContainer.new()
 			cost_hbox.add_theme_constant_override("separation", 6)
@@ -1634,9 +1662,8 @@ func _on_building_selected(block_id: StringName) -> void:
 
 
 func _on_resources_changed(res: Dictionary) -> void:
-	# Refresh build cost panel if placing a building (so colors update)
-	if main.selected_building != &"":
-		_last_cost_building = &""  # Force rebuild on next frame
+	# Mark build cost panel dirty so it refreshes this frame with live counts.
+	_cost_dirty = true
 
 	for c in resource_grid.get_children():
 		c.queue_free()
@@ -1938,7 +1965,7 @@ func _select_schematic(sname: String) -> void:
 	place_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var data_ref: Dictionary = data
 	place_btn.pressed.connect(func():
-		var bsys = get_node_or_null("/root/Main/BuildingSystem")
+		var bsys = _building_sys_ref()
 		if bsys:
 			bsys.start_schematic_placement(data_ref)
 		_schematic_viewer.queue_free()

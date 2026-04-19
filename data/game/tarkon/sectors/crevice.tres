@@ -1,14 +1,14 @@
 [gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://ce4pan67ctu2k"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://bdop1at8xqnbu" path="res://textures/sectors/Crevice.png" id="1_btr2t"]
+[ext_resource type="Texture2D" uid="uid://bob5mbt2g6x56" path="res://textures/sectors/Crevice.png" id="1_j6lwg"]
 
 [resource]
 script = ExtResource("1")
 id = &"crevice"
 display_name = "Crevice"
 description = "A small crevice with a large river seperating your and the enemy's base. hover units will be the only viable options to attack."
-icon = ExtResource("1_btr2t")
+icon = ExtResource("1_j6lwg")
 planet_id = &"Tarkon"
 hex_q = 2
 available_resources = PackedStringArray()

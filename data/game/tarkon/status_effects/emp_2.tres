@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cd1vf2mdfw5ml" path="res://textures/status effects/EMP2.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"emp_2"
+display_name = "EMP (Moderate)"
+description = "Weapons systems knocked offline. Movement is crippled."
+icon = ExtResource("2")
+duration = 3.0
+stackable = false
+refresh_on_reapply = true
+effect_type = 4
+tint_color = Color(0.45, 0.6, 1, 1)
+particle_color = Color(0.6, 0.75, 1, 1)
+speed_modifier = 0.5
+damage_modifier = 0.0
+silences = true
+tags = PackedStringArray("emp", "electric", "disarm")

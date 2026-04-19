@@ -21,6 +21,14 @@ extends Node2D
 
 @onready var main: Node2D = get_node("/root/Main")
 
+# Cached sibling references (populated in _ready).
+var _unit_mgr: Node
+var _drone: Node2D
+var _terrain: Node2D
+var _building_sys: Node
+var _sector_script: Node
+var _logistics: Node2D
+
 # --- PROJECTILE DATA ---
 # Each projectile is a Dictionary with these keys:
 #   "pos"       : Vector2  — current world position
@@ -79,8 +87,46 @@ var _turret_targets: Dictionary = {}  # Vector2i -> Dictionary
 var unit_target_results: Dictionary = {}  # int -> Dictionary
 
 
+
+func _unit_mgr_ref() -> Node:
+	if _unit_mgr == null:
+		_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	return _unit_mgr
+
+func _drone_ref() -> Node2D:
+	if _drone == null:
+		_drone = get_node_or_null("/root/Main/PlayerDrone")
+	return _drone
+
+func _terrain_ref() -> Node2D:
+	if _terrain == null:
+		_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	return _terrain
+
+func _building_sys_ref() -> Node:
+	if _building_sys == null:
+		_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	return _building_sys
+
+func _sector_script_ref() -> Node:
+	if _sector_script == null:
+		_sector_script = get_node_or_null("/root/Main/SectorScript")
+	return _sector_script
+
+func _logistics_ref() -> Node2D:
+	if _logistics == null:
+		_logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	return _logistics
+
+
 func _ready() -> void:
 	await get_tree().process_frame
+	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	_drone = get_node_or_null("/root/Main/PlayerDrone")
+	_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	_sector_script = get_node_or_null("/root/Main/SectorScript")
+	_logistics = get_node_or_null("/root/Main/LogisticsSystem")
 	main.building_placed.connect(_on_building_placed)
 	main.building_destroyed.connect(_on_building_destroyed)
 	_targeting_worker = TargetingWorker.new()
@@ -124,7 +170,7 @@ func _push_targeting_snapshot() -> void:
 	if _targeting_worker == null:
 		return
 
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr == null:
 		return
 
@@ -160,7 +206,7 @@ func _push_targeting_snapshot() -> void:
 		if grid_pos == manually_controlled_turret:
 			continue
 		# Skip disabled or under-construction buildings
-		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(grid_pos):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
@@ -206,7 +252,7 @@ func _push_targeting_snapshot() -> void:
 # =========================
 
 func _update_turrets(delta: float) -> void:
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr == null:
 		return
 
@@ -296,18 +342,18 @@ func _update_turrets(delta: float) -> void:
 		var fire_splash_mult: float = 1.0
 
 		if data.ammo_types.size() > 0:
-			var _logistics = get_node_or_null("/root/Main/LogisticsSystem")
+			var log_ref: Node2D = _logistics
 			var ammo_found := false
 			var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 			for ammo in data.ammo_types:
 				if ammo == null or not (ammo is AmmoType):
 					continue
 				var ammo_data: AmmoType = ammo as AmmoType
-				if _logistics and _logistics.has_method("get_stored_item_count"):
-					var stored: int = _logistics.get_stored_item_count(anchor, ammo_data.item_id)
+				if log_ref and log_ref.has_method("get_stored_item_count"):
+					var stored: int = log_ref.get_stored_item_count(anchor, ammo_data.item_id)
 					var amt: int = maxi(ammo_data.amount_per_shot, 1)
 					if stored >= amt:
-						_logistics.remove_from_storage(anchor, ammo_data.item_id, amt)
+						log_ref.remove_from_storage(anchor, ammo_data.item_id, amt)
 						fire_damage = ammo_data.damage
 						fire_reload_mult = ammo_data.reload_multiplier
 						fire_color = ammo_data.projectile_color
@@ -424,7 +470,7 @@ func _update_drone_combat(delta: float) -> void:
 	drone_cooldown -= delta
 
 	# Don't fire drone while manually controlling a unit/turret
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr and unit_mgr.controlled_entity != null:
 		drone_is_shooting = false
 		return
@@ -438,7 +484,12 @@ func _update_drone_combat(delta: float) -> void:
 	if not drone_is_shooting or drone_cooldown > 0:
 		return
 
-	var drone = get_node_or_null("/root/Main/PlayerDrone")
+	# Don't shoot when clicking on GUI controls (block menu, HUD buttons, etc.)
+	if get_viewport().gui_get_hovered_control() != null:
+		drone_is_shooting = false
+		return
+
+	var drone = _drone_ref()
 	if drone == null:
 		return
 
@@ -448,7 +499,7 @@ func _update_drone_combat(delta: float) -> void:
 		return
 
 	# Check if terrain paint mode is active — don't shoot while painting
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	var terrain = _terrain_ref()
 	if terrain and terrain.paint_mode:
 		return
 
@@ -584,7 +635,7 @@ func _spawn_projectile(
 
 
 func _update_projectiles(delta: float) -> void:
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	var to_remove: Array[int] = []
 
 	for i in range(projectiles.size()):
@@ -679,7 +730,7 @@ func _update_target_pos(proj: Dictionary) -> void:
 				proj["target_pos"] = main.grid_to_world(grid_pos) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 
 		"drone":
-			var drone = get_node_or_null("/root/Main/PlayerDrone")
+			var drone = _drone_ref()
 			if drone:
 				proj["target_pos"] = drone.position
 
@@ -735,7 +786,7 @@ func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 					main.damage_building(grid_pos, proj["damage"])
 
 		"drone":
-			var drone = get_node_or_null("/root/Main/PlayerDrone")
+			var drone = _drone_ref()
 			if drone:
 				drone.take_damage(proj["damage"])
 
@@ -864,9 +915,9 @@ func _draw() -> void:
 	_draw_turret_ranges()
 
 func _draw_turret_heads() -> void:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 
-	var _ss_turret = get_node_or_null("/root/Main/SectorScript")
+	var _ss_turret = _sector_script_ref()
 	for grid_pos in turret_angles:
 		if not main.placed_buildings.has(grid_pos):
 			continue
@@ -888,25 +939,46 @@ func _draw_turret_heads() -> void:
 		center += offset
 
 		var angle = turret_angles[grid_pos]
-		var head_radius = main.GRID_SIZE * 0.22
-		var barrel_length = main.GRID_SIZE * 0.4
-		var barrel_width = 4.0
 
-		# --- Draw the barrel (a thick line from center outward) ---
-		var barrel_end = center + Vector2.from_angle(angle) * barrel_length
-		var barrel_color = data.color.darkened(0.2)
-		draw_line(center, barrel_end, barrel_color, barrel_width + 2.0)
-		draw_line(center, barrel_end, data.color.lightened(0.1), barrel_width)
+		# If the block defines a turret_head_sprite, draw that rotated to the
+		# aim angle at its native pixel size (like cable wires), instead of
+		# stretching to the block's tile size.
+		if data.turret_head_sprite:
+			var tex: Texture2D = data.turret_head_sprite
+			var tex_size: Vector2 = tex.get_size() * 0.3
+			# Barrel is assumed to point up in the source image, so add PI/2
+			# to convert aim-angle (0 = +x/right) to texture-angle.
+			var draw_angle: float = angle + PI / 2.0
+			draw_set_transform(center, draw_angle)
+			draw_texture_rect(
+				tex,
+				# Pivot at bottom-center (the "back" when facing up) so the turret
+				# rotates around its base attachment point, not its center.
+				Rect2(Vector2(-tex_size.x * 0.5, -tex_size.y + 14.0), tex_size),
+				false
+			)
+			draw_set_transform(Vector2.ZERO, 0.0)
+		else:
+			# Fallback: generic circle+barrel placeholder.
+			var head_radius = main.GRID_SIZE * 0.22
+			var barrel_length = main.GRID_SIZE * 0.4
+			var barrel_width = 4.0
 
-		# --- Draw the muzzle (small circle at barrel tip) ---
-		draw_circle(barrel_end, barrel_width * 0.6, data.color.lightened(0.3))
+			# --- Draw the barrel (a thick line from center outward) ---
+			var barrel_end = center + Vector2.from_angle(angle) * barrel_length
+			var barrel_color = data.color.darkened(0.2)
+			draw_line(center, barrel_end, barrel_color, barrel_width + 2.0)
+			draw_line(center, barrel_end, data.color.lightened(0.1), barrel_width)
 
-		# --- Draw the turret head (circle on top of building) ---
-		draw_circle(center, head_radius, data.color.darkened(0.15))
-		draw_arc(center, head_radius, 0, TAU, 24, data.color.lightened(0.2), 1.5)
+			# --- Draw the muzzle (small circle at barrel tip) ---
+			draw_circle(barrel_end, barrel_width * 0.6, data.color.lightened(0.3))
 
-		# --- Draw a small dot in the center ---
-		draw_circle(center, 3.0, data.color.lightened(0.4))
+			# --- Draw the turret head (circle on top of building) ---
+			draw_circle(center, head_radius, data.color.darkened(0.15))
+			draw_arc(center, head_radius, 0, TAU, 24, data.color.lightened(0.2), 1.5)
+
+			# --- Draw a small dot in the center ---
+			draw_circle(center, 3.0, data.color.lightened(0.4))
 
 func _draw_projectiles() -> void:
 	for proj in projectiles:

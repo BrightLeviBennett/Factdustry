@@ -54,6 +54,20 @@ var rebuild_timer := 0.0
 const REBUILD_TIME := 3.0  # Seconds to rebuild a building
 var _rebuild_arrived := false  # True when unit is at the rebuild location
 
+# --- AIM ANGLE (for units with head_sprite) ---
+# Current head facing in radians; 0 = +x (right). Smoothly lerps toward
+# the angle of the active target each frame. Also used as a fallback body
+# facing when the unit has a base_sprite but no head_sprite.
+var aim_angle: float = 0.0
+var _has_aim_target: bool = false
+
+# --- FACING ANGLE (body/chassis rotation) ---
+# Smoothly tracks the unit's movement direction, mirroring how the shardling
+# rotates its sprite to face where it's going. Used to rotate base_sprite.
+var facing_angle: float = 0.0
+var _prev_position: Vector2 = Vector2.ZERO
+var _facing_initialized: bool = false
+
 # --- WATER SUBMERSION ---
 # Tracks how long a ground/crawler unit has been standing in water. Used for
 # visual tint and the drowning damage-over-time. Reset to 0 while out of water.
@@ -72,22 +86,56 @@ const STUCK_RADIUS := 5.0  # Must move at least this many pixels in STUCK_TIME t
 # --- REFERENCES (set by UnitManager) ---
 var main: Node2D
 var unit_manager: Node2D
+# Cached sibling refs (populated in _ready). Avoid per-process lookups.
+var _terrain: Node2D
+var _combat_sys: Node
+
+
+
+func _terrain_ref() -> Node2D:
+	if _terrain == null:
+		_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	return _terrain
+
+func _combat_sys_ref() -> Node:
+	if _combat_sys == null:
+		_combat_sys = get_node_or_null("/root/Main/CombatSystem")
+	return _combat_sys
 
 
 func _ready() -> void:
-	# Load stats from the UnitData resource
+	_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	_combat_sys = get_node_or_null("/root/Main/CombatSystem")
+	# Load stats from the UnitData resource. UnitData.move_speed is stored in
+	# tiles/sec; convert once here into pixels/sec (what _tick_movement uses).
 	if data:
 		max_health = data.max_health
-		move_speed = data.move_speed
+		move_speed = data.move_speed * float(main.GRID_SIZE)
 		damage = data.attack_damage
 		attack_cooldown = data.attack_speed
 		unit_color = data.color
-		unit_size = data.visual_size
+		# Hitbox radius: if the unit has textured rendering (base/head sprites),
+		# derive unit_size from the on-screen texture footprint so hitboxes,
+		# click targets, and projectile hit checks match what the player sees.
+		# Falls back to the authored visual_size for shape-based units.
+		var tex_for_hitbox: Texture2D = null
+		if data.base_sprite != null:
+			tex_for_hitbox = data.base_sprite
+		elif data.head_sprite != null:
+			tex_for_hitbox = data.head_sprite
+		if tex_for_hitbox != null:
+			var scale_f: float = data.sprite_scale if data.sprite_scale > 0.0 else 1.0
+			var sz: Vector2 = tex_for_hitbox.get_size() * scale_f
+			# Average half-extent: roughly inscribed-circle radius for a square
+			# sprite, and a sensible middle ground for rectangular ones.
+			unit_size = (sz.x + sz.y) * 0.25
+		else:
+			unit_size = data.visual_size
 	else:
-		# Fallbacks
+		# Fallbacks (1.25 t/s * 64 px/tile = 80 px/s)
 		push_warning("EnemyUnit: No UnitData assigned!")
 		max_health = 50.0
-		move_speed = 80.0
+		move_speed = 1.25 * float(main.GRID_SIZE)
 		damage = 10.0
 		attack_cooldown = 1.0
 		unit_color = Color(1.0, 0.3, 0.3)
@@ -116,7 +164,173 @@ func _process(delta: float) -> void:
 
 	_check_stuck(delta)
 	_tick_water(delta)
+	_tick_aim_angle(delta)
+	_tick_facing_angle(delta)
 	queue_redraw()
+
+
+## Smoothly rotates `facing_angle` toward the unit's current movement direction.
+## Mirrors the shardling's chassis-rotates-to-face-travel behavior. When the
+## unit is standing still, facing_angle keeps its last value instead of
+## snapping back to 0.
+func _tick_facing_angle(delta: float) -> void:
+	if not _facing_initialized:
+		_prev_position = position
+		_facing_initialized = true
+		# Seed facing to the first aim target if we have one so newly-spawned
+		# units don't visibly swing from 0° on their first step.
+		if _has_aim_target:
+			facing_angle = aim_angle
+		return
+	# Tank-steering units drive their own facing from _follow_path (so the
+	# chassis leads the motion instead of chasing it). Skip the velocity-
+	# based update for them to avoid fighting that logic.
+	if data and data.tank_steering:
+		_prev_position = position
+		return
+	var velocity: Vector2 = position - _prev_position
+	_prev_position = position
+	# Require a small minimum movement to avoid jitter from pathing rounding.
+	if velocity.length_squared() < 0.25:
+		return
+	var desired: float = velocity.angle()
+	var turn_speed: float = data.body_turn_speed if data else 2.0
+	facing_angle = _rotate_toward(facing_angle, desired, turn_speed * delta)
+
+
+## Smoothly rotates `aim_angle` toward the best available reference point.
+## Priority: active combat target → nearest hostile within detection_range →
+## current path waypoint. When none apply, the head keeps its last angle
+## (same idle behavior as a turret with no target).
+func _tick_aim_angle(delta: float) -> void:
+	var target_pos: Vector2
+	var have_target: bool = false
+	# Manual control: aim at the mouse cursor, matching controlled-turret behavior.
+	if is_controlled:
+		target_pos = get_global_mouse_position()
+		have_target = true
+	elif target_unit != null and is_instance_valid(target_unit) and not target_unit.is_dead:
+		target_pos = target_unit.position
+		have_target = true
+	elif target_building != null and main.placed_buildings.has(target_building):
+		target_pos = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		have_target = true
+	else:
+		var scan_pos: Variant = _find_nearest_hostile_pos()
+		if scan_pos != null:
+			target_pos = scan_pos
+			have_target = true
+		elif path.size() > 0 and path_index < path.size():
+			target_pos = path[path_index]
+			if target_pos.distance_squared_to(position) > 1.0:
+				have_target = true
+
+	_has_aim_target = have_target
+	if not have_target:
+		return
+	var desired: float = (target_pos - position).angle()
+	var turn_speed: float = data.head_turn_speed if data else 3.0
+	aim_angle = _rotate_toward(aim_angle, desired, turn_speed * delta)
+
+
+## Rotates `from` toward `to` by at most `max_step` radians. Unlike lerp_angle
+## this moves at a constant speed (matching the crane arm), so heavy units
+## feel mechanical rather than magnetized to their target.
+func _rotate_toward(from: float, to: float, max_step: float) -> float:
+	var diff: float = wrapf(to - from, -PI, PI)
+	if absf(diff) <= max_step:
+		return to
+	return wrapf(from + signf(diff) * max_step, -PI, PI)
+
+
+## One step of tank-style locomotion.
+##
+## `desired_face` is the world-space angle we want to drive toward.
+## `forward_step` is the distance the tank can cover this frame (pixels).
+## `waypoint` / `dist_to_waypoint` are optional: when dist_to_waypoint > 0,
+## the helper will honor path-waypoint snapping/advancement. Pass 0 when
+## there is no path (manual control).
+##
+## Behavior:
+## - When turn_radius > 0, the tank arcs around a pivot offset perpendicular
+##   to its current facing. Rotation and translation happen together at a
+##   rate determined by forward_step / turn_radius, so the chassis traces a
+##   real curve (matches the labeled sketch the player drew).
+## - When turn_radius <= 0, the tank pivots in place at body_turn_speed
+##   until aligned, then drives forward. Same fallback as the old model.
+func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector2, dist_to_waypoint: float) -> void:
+	var angle_err: float = wrapf(desired_face - facing_angle, -PI, PI)
+	var turn_radius: float = data.turn_radius if data else 0.0
+	var turn_speed: float = data.body_turn_speed if data and data.body_turn_speed > 0.0 else 2.0
+
+	# Already aligned (or close enough): drive straight forward.
+	if absf(angle_err) < 0.01 or forward_step <= 0.0:
+		var straight_dir: Vector2 = Vector2.RIGHT.rotated(facing_angle)
+		if dist_to_waypoint > 0.0 and forward_step >= dist_to_waypoint:
+			position = waypoint
+			path_index += 1
+		else:
+			position += straight_dir * forward_step
+		return
+
+	if turn_radius > 0.0:
+		# Arc around a pivot perpendicular to the chassis. `signf(angle_err)`
+		# picks which side the pivot sits on so the tank curves toward the
+		# desired heading rather than away from it.
+		var side_dir: Vector2 = Vector2.RIGHT.rotated(facing_angle + signf(angle_err) * PI / 2.0)
+		var pivot: Vector2 = position + side_dir * turn_radius
+		# Angular step from arc length; clamp to remaining error AND to the
+		# configured body turn speed so the unit can't out-spin its authored
+		# rotation limit on tight curves.
+		var arc_step: float = forward_step / turn_radius
+		var limit_step: float = turn_speed * get_process_delta_time() if turn_speed > 0.0 else arc_step
+		var step_size: float = minf(absf(angle_err), minf(arc_step, limit_step))
+		var d_angle: float = step_size * signf(angle_err)
+		position = pivot + (position - pivot).rotated(d_angle)
+		facing_angle = wrapf(facing_angle + d_angle, -PI, PI)
+		return
+
+	# turn_radius == 0: pivot in place until aligned, then drive.
+	facing_angle = _rotate_toward(facing_angle, desired_face, turn_speed * get_process_delta_time())
+	var err_after: float = absf(wrapf(desired_face - facing_angle, -PI, PI))
+	if err_after < deg_to_rad(10.0):
+		var fwd: Vector2 = Vector2.RIGHT.rotated(facing_angle)
+		if dist_to_waypoint > 0.0 and forward_step >= dist_to_waypoint:
+			position = waypoint
+			path_index += 1
+		else:
+			position += fwd * forward_step
+
+
+## Returns the world position of the nearest opposing unit (or Ferox building
+## for player units) within `detection_range`, or null if nothing is visible.
+## Used to keep heads tracking threats even when no attack is active.
+func _find_nearest_hostile_pos() -> Variant:
+	if data == null or unit_manager == null:
+		return null
+	var scan_r: float = data.detection_range if data.detection_range > 0.0 else data.attack_range * 4.0
+	if scan_r <= 0.0:
+		return null
+	var best_dist_sq: float = scan_r * scan_r
+	var best_pos: Variant = null
+
+	# Look at opposing units
+	var all_units: Array = unit_manager.enemies if "enemies" in unit_manager else []
+	for u in all_units:
+		if not is_instance_valid(u) or u.is_dead:
+			continue
+		if u.team == team:
+			continue
+		var d: float = position.distance_squared_to(u.position)
+		if d < best_dist_sq:
+			best_dist_sq = d
+			best_pos = u.position
+
+	# Buildings are intentionally skipped from the idle scan — iterating all
+	# placed_buildings every frame per unit is too expensive. Units already
+	# acquire building targets through the normal targeting pipeline
+	# (target_building), which the first branch of _tick_aim_angle handles.
+	return best_pos
 
 
 ## Ticks water submersion effects for ground / crawler units.
@@ -134,7 +348,7 @@ func _tick_water(delta: float) -> void:
 	if ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING:
 		_water_time = 0.0
 		return
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	var terrain = _terrain_ref()
 	if terrain == null:
 		return
 	var grid_pos: Vector2i = main.world_to_grid(position)
@@ -300,10 +514,19 @@ func _follow_path(delta: float) -> void:
 	if data:
 		var ml_f: int = data.movement_layer
 		if ml_f == UnitData.MovementLayer.GROUND or ml_f == UnitData.MovementLayer.CRAWLER:
-			var terrain_f = get_node_or_null("/root/Main/TerrainSystem")
+			var terrain_f = _terrain_ref()
 			if terrain_f and terrain_f.get_water_depth_at(main.world_to_grid(position)) > 0:
 				speed_mult = 0.5
 	var step = move_speed * speed_mult * delta
+
+	# --- Tank-style steering -----------------------------------------------
+	# Moves the tank along its current facing; when the desired direction
+	# diverges from that facing, the motion arcs around a pivot point
+	# perpendicular to the chassis (turn_radius) instead of pivoting in place.
+	if data and data.tank_steering:
+		_tank_steer_step(direction.angle(), step, target_pos, distance)
+		return
+	# -----------------------------------------------------------------------
 
 	if step >= distance:
 		position = target_pos
@@ -340,7 +563,7 @@ func _try_attack(delta: float) -> void:
 	# attack_range > 0 in the .tres means it shoots projectiles
 	if data and data.attack_range > 0:
 		# RANGED ATTACK: Fire a projectile via CombatSystem
-		var combat = get_node_or_null("/root/Main/CombatSystem")
+		var combat = _combat_sys_ref()
 		if combat:
 			var proj_speed = 300.0
 			var proj_color = unit_color.lightened(0.3)
@@ -420,7 +643,7 @@ func _try_player_combat(_delta: float) -> void:
 ## Looks up the pre-computed target from the TargetingWorker (via CombatSystem).
 ## Falls back to inline scan if no threaded result is available.
 func _find_player_target() -> void:
-	var combat = get_node_or_null("/root/Main/CombatSystem")
+	var combat = _combat_sys_ref()
 	if combat and combat.unit_target_results.has(get_instance_id()):
 		var result: Dictionary = combat.unit_target_results[get_instance_id()]
 		if result["target_type"] == "enemy":
@@ -469,7 +692,7 @@ func _find_player_target() -> void:
 
 ## Fire a projectile at the targeted enemy unit.
 func _attack_enemy_unit() -> void:
-	var combat = get_node_or_null("/root/Main/CombatSystem")
+	var combat = _combat_sys_ref()
 	if combat:
 		var proj_speed := 300.0
 		var proj_color: Color = unit_color.lightened(0.3)
@@ -488,7 +711,7 @@ func _attack_enemy_unit() -> void:
 
 ## Fire a projectile at the targeted FEROX building.
 func _attack_ferox_building() -> void:
-	var combat = get_node_or_null("/root/Main/CombatSystem")
+	var combat = _combat_sys_ref()
 	if combat:
 		var proj_speed := 300.0
 		var proj_color: Color = unit_color.lightened(0.3)
@@ -730,21 +953,67 @@ func _draw() -> void:
 	if is_dead:
 		return
 
-	# Draw shape based on .tres data
-	var shape = data.shape if data else UnitData.UnitShape.CIRCLE
-	match shape:
-		UnitData.UnitShape.CIRCLE:
-			_draw_circle_shape()
-		UnitData.UnitShape.DIAMOND:
-			_draw_diamond_shape()
-		UnitData.UnitShape.TRIANGLE:
-			_draw_triangle_shape()
-		UnitData.UnitShape.HEXAGON:
-			_draw_hexagon_shape()
+	# Textured rendering (turret-style: base + rotating head) takes precedence
+	# over the primitive-shape fallbacks whenever the .tres supplies sprites.
+	var drew_textured: bool = false
+	if data and (data.base_sprite != null or data.head_sprite != null):
+		_draw_textured_unit()
+		drew_textured = true
+
+	if not drew_textured:
+		var shape = data.shape if data else UnitData.UnitShape.CIRCLE
+		match shape:
+			UnitData.UnitShape.CIRCLE:
+				_draw_circle_shape()
+			UnitData.UnitShape.DIAMOND:
+				_draw_diamond_shape()
+			UnitData.UnitShape.TRIANGLE:
+				_draw_triangle_shape()
+			UnitData.UnitShape.HEXAGON:
+				_draw_hexagon_shape()
 
 	_draw_rebuild_progress()
 	_draw_health_bar()
 	_draw_selection_ring()
+
+
+## Renders the unit as a stacked base + rotating head, mirroring the
+## turret_head_sprite pattern (source textures face UP, so +PI/2 is added
+## to convert the aim angle into a texture angle). Tinted by water state.
+func _draw_textured_unit() -> void:
+	var tint: Color = _get_display_color()
+	# Preserve alpha but otherwise render the textures at full brightness
+	# unless the unit is drowning (then lerp toward blue like the shapes do).
+	var base_tint: Color = Color(1, 1, 1, tint.a)
+	if _water_time > 0.0:
+		base_tint = tint
+	var scale_f: float = data.sprite_scale if data and data.sprite_scale > 0.0 else 1.0
+
+	if data.base_sprite:
+		var b_size: Vector2 = data.base_sprite.get_size() * scale_f
+		# Base rotates to face the unit's current movement direction (the
+		# shardling-style chassis rotation). Source art faces UP, so the
+		# usual +PI/2 offset converts facing_angle into a texture angle.
+		draw_set_transform(Vector2.ZERO, facing_angle + PI / 2.0)
+		draw_texture_rect(
+			data.base_sprite,
+			Rect2(-b_size * 0.5, b_size),
+			false,
+			base_tint
+		)
+		draw_set_transform(Vector2.ZERO, 0.0)
+
+	if data.head_sprite:
+		var h_size: Vector2 = data.head_sprite.get_size() * scale_f
+		var h_angle: float = aim_angle + PI / 2.0
+		draw_set_transform(Vector2.ZERO, h_angle)
+		draw_texture_rect(
+			data.head_sprite,
+			Rect2(-h_size * 0.5, h_size),
+			false,
+			base_tint
+		)
+		draw_set_transform(Vector2.ZERO, 0.0)
 
 
 ## Returns the current body color, blended toward deep blue based on how long

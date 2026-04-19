@@ -12,6 +12,5 @@ color = Color(1.0, 0.85, 0.2, 1)
 max_health = 400.0
 build_cost = {}
 build_time = 0.5
-rotational_power_gen = 100.0
 electrical_power_gen = 100.0
 tags = PackedStringArray("power", "debug")

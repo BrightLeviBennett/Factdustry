@@ -1,24 +1,30 @@
-[gd_resource type="Resource" script_class="UnitData" format=3]
+[gd_resource type="Resource" script_class="UnitData" format=3 uid="uid://cjy8bf1kfqsq0"]
 
 [ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://djo87anas2eg4" path="res://textures/units/hoverboard/HoverboardComplete.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://blfcddpmq711i" path="res://textures/units/hoverboard/HoverboardBase.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://bv26ww7ia2mgs" path="res://textures/units/hoverboard/HoverboardHead.png" id="4"]
 
 [resource]
 script = ExtResource("1")
 id = &"hoverboard"
 display_name = "Hoverboard"
 description = "Light hover transport. Fast reconnaissance."
+icon = ExtResource("2")
 team = 0
 category = 2
 color = Color(0.3, 0.6, 0.8, 1)
 visual_size = 13.0
-max_health = 40.0
-move_speed = 140.0
-attack_damage = 5.0
-attack_speed = 1.0
-attack_range = 48.0
-armor = 9.0
+sprite_scale = 0.3
+base_sprite = ExtResource("3")
+head_sprite = ExtResource("4")
 movement_layer = 2
-detection_range = 500.0
+move_speed = 2.188
+max_health = 40.0
+armor = 9.0
+attack_damage = 5.0
+attack_range = 48.0
+immunities = PackedStringArray()
 spawn_count = 1
 threat_value = 3.0
 build_cost = {

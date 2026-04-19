@@ -57,6 +57,11 @@ var linked_pairs: Array = []
 ## Dirty flag — rebuild networks next frame instead of immediately.
 var _networks_dirty := true
 
+## Cable node connections discovered during the last network rebuild.
+## Array of [Vector2i, Vector2i] pairs (cable_pos, target_pos).
+## Used by BuildingSystem to draw connection lines.
+var cable_connections: Array = []
+
 
 func _ready() -> void:
 	await get_tree().process_frame
@@ -164,6 +169,10 @@ func _rebuild_rotational_networks() -> void:
 		var data = Registry.get_block(main.placed_buildings[grid_pos])
 		if data == null or not data.is_rotational_power_block():
 			continue
+		# Inactive (under-construction / deconstructing / derelict) rotational
+		# blocks don't transmit — skip them so they can't bridge a network.
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
 
 		# Flood-fill to discover this network
 		var network_cells: Array[Vector2i] = []
@@ -183,6 +192,8 @@ func _rebuild_rotational_networks() -> void:
 					continue
 				var n_data = Registry.get_block(main.placed_buildings[neighbor])
 				if n_data == null or not n_data.is_rotational_power_block():
+					continue
+				if main.has_method("is_building_inactive") and main.is_building_inactive(neighbor):
 					continue
 
 				# Check directional connectivity: both sides must have a port
@@ -207,6 +218,8 @@ func _rebuild_rotational_networks() -> void:
 					continue
 				var p_data = Registry.get_block(main.placed_buildings[partner])
 				if p_data == null or not p_data.is_rotational_power_block():
+					continue
+				if main.has_method("is_building_inactive") and main.is_building_inactive(partner):
 					continue
 
 				visited[partner] = true
@@ -237,64 +250,111 @@ func _rebuild_rotational_networks() -> void:
 func _rebuild_electrical_networks() -> void:
 	elec_networks.clear()
 	elec_cell_to_net.clear()
+	cable_connections.clear()
 
-	var visited := {}
-
+	# --- Phase 1: collect every electrical cell and cache its BlockData ---
+	# Inactive cells (under construction, deconstructing, derelict) are
+	# excluded entirely so they don't bridge power through themselves. A
+	# half-built cable node must not transmit, and a pending consumer must
+	# not appear in any network as powered. _networks_dirty is flipped when
+	# a build completes or a decon is queued so the network rebuilds at
+	# those transitions.
+	var elec_cells: Array[Vector2i] = []
+	var cell_data: Dictionary = {}  # Vector2i -> BlockData
 	for grid_pos in main.placed_buildings:
-		if visited.has(grid_pos):
-			continue
 		var data = Registry.get_block(main.placed_buildings[grid_pos])
 		if data == null or not data.is_electrical_power_block():
 			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
+		elec_cells.append(grid_pos)
+		cell_data[grid_pos] = data
 
+	# --- Phase 2: build an undirected adjacency map ---
+	# Bugfix: the old single-pass BFS skipped already-visited cells when a
+	# later cable reached into an earlier network, so two halves linked by
+	# a cable could stay in separate networks (visible line, no power flow).
+	# Building the full edge set up front sidesteps that by deferring
+	# component labeling to a dedicated flood fill below.
+	var adjacency: Dictionary = {}  # Vector2i -> Array[Vector2i]
+	for cell in elec_cells:
+		adjacency[cell] = []
+
+	var _link_edge := func(a: Vector2i, b: Vector2i) -> void:
+		if not adjacency.has(a) or not adjacency.has(b):
+			return
+		if a not in adjacency[b]:
+			adjacency[b].append(a)
+		if b not in adjacency[a]:
+			adjacency[a].append(b)
+
+	for pos in elec_cells:
+		var pos_data: BlockData = cell_data[pos]
+		var is_cable: bool = pos_data.tags.has("cable_node")
+		var cable_range: int = 0
+		if is_cable:
+			cable_range = 10 if String(pos_data.id).begins_with("cable_tower") else 5
+
+		for dir_idx in range(4):
+			if is_cable and cable_range > 0:
+				# Straight-line scan — connect to the nearest electrical block.
+				# cable_range is the number of EMPTY tiles the cable can bridge,
+				# so the reachable distance is cable_range + 1 tiles.
+				for dist in range(1, cable_range + 2):
+					var scan: Vector2i = pos + DIR_VECTORS[dir_idx] * dist
+					if not main.placed_buildings.has(scan):
+						continue
+					if not cell_data.has(scan):
+						continue  # Non-electrical building — keep scanning
+					_link_edge.call(pos, scan)
+					cable_connections.append([pos, scan])
+					break
+			else:
+				var neighbor: Vector2i = pos + DIR_VECTORS[dir_idx]
+				if cell_data.has(neighbor):
+					_link_edge.call(pos, neighbor)
+
+		# Linked partners (overhead belts etc.) always bridge networks.
+		for pair in linked_pairs:
+			var partner: Vector2i
+			if pair[0] == pos:
+				partner = pair[1]
+			elif pair[1] == pos:
+				partner = pair[0]
+			else:
+				continue
+			if cell_data.has(partner):
+				_link_edge.call(pos, partner)
+
+	# --- Phase 3: flood fill connected components ---
+	var visited: Dictionary = {}
+	for start_pos in elec_cells:
+		if visited.has(start_pos):
+			continue
 		var network_cells: Array[Vector2i] = []
-		var queue: Array[Vector2i] = [grid_pos]
-		visited[grid_pos] = true
-
+		var queue: Array[Vector2i] = [start_pos]
+		visited[start_pos] = true
 		while queue.size() > 0:
 			var pos: Vector2i = queue.pop_front()
 			network_cells.append(pos)
-
-			for dir_idx in range(4):
-				var neighbor: Vector2i = pos + DIR_VECTORS[dir_idx]
-				if visited.has(neighbor):
+			for adj in adjacency[pos]:
+				if visited.has(adj):
 					continue
-				if not main.placed_buildings.has(neighbor):
-					continue
-				var n_data = Registry.get_block(main.placed_buildings[neighbor])
-				if n_data == null or not n_data.is_electrical_power_block():
-					continue
-				# Electrical blocks connect all 4 directions (for now)
-				visited[neighbor] = true
-				queue.append(neighbor)
-
-			# Check linked partners for electrical too
-			for pair in linked_pairs:
-				var partner: Vector2i = Vector2i(-1, -1)
-				if pair[0] == pos:
-					partner = pair[1]
-				elif pair[1] == pos:
-					partner = pair[0]
-				else:
-					continue
-
-				if visited.has(partner):
-					continue
-				if not main.placed_buildings.has(partner):
-					continue
-				var p_data = Registry.get_block(main.placed_buildings[partner])
-				if p_data == null or not p_data.is_electrical_power_block():
-					continue
-				visited[partner] = true
-				queue.append(partner)
+				visited[adj] = true
+				queue.append(adj)
 
 		var total_gen := 0.0
 		var total_use := 0.0
 		for cell in network_cells:
-			var d = Registry.get_block(main.placed_buildings[cell])
-			if d:
-				total_gen += d.electrical_power_gen
-				total_use += d.electrical_power_use
+			# Under-construction / deconstructing / derelict blocks don't
+			# generate OR consume power. This keeps a partially-built
+			# generator from feeding the grid early, and prevents a half-built
+			# consumer from dragging the grid into brown-out while pending.
+			if main.has_method("is_building_inactive") and main.is_building_inactive(cell):
+				continue
+			var d: BlockData = cell_data[cell]
+			total_gen += d.electrical_power_gen
+			total_use += d.electrical_power_use
 
 		var net_idx := elec_networks.size()
 		elec_networks.append({

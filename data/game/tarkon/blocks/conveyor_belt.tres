@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dwcclqq5r72oa"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://bgv3nor1j2t3c" path="res://textures/blocks/item transportation/Belt/Belt.png" id="1_u6qtk"]
+[ext_resource type="Texture2D" uid="uid://dtisb2mnwxdi8" path="res://textures/blocks/item transportation/Belt/Belt.png" id="1_u6qtk"]
 
 [resource]
 script = ExtResource("1")
@@ -10,6 +10,7 @@ display_name = "Conveyor Belt"
 description = "Moves items between buildings. The backbone of logistics."
 icon = ExtResource("1_u6qtk")
 color = Color(0.9, 0.85, 0.3, 1)
+top_sprite = ExtResource("1_u6qtk")
 max_health = 120.0
 build_cost = {
 "copper": 5

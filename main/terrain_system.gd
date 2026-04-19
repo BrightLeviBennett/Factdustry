@@ -19,6 +19,34 @@ signal walls_changed
 
 @onready var main: Node2D = get_node("/root/Main")
 
+# Cached sibling references. SectorScript is created lazily by Main._ready
+# after Registry essentials load, so these may still be null at our _ready().
+# Use _sector_script_ref() etc. to fetch-on-first-use.
+var _sector_script: Node
+var _building_sys: Node
+var _unit_mgr: Node
+
+
+## Lazy accessor — populates _sector_script the first time it's available.
+## Needed because Main creates SectorScript after its own Registry await,
+## which may happen after TerrainSystem._ready has already run.
+func _sector_script_ref() -> Node:
+	if _sector_script == null:
+		_sector_script = get_node_or_null("/root/Main/SectorScript")
+	return _sector_script
+
+
+func _building_sys_ref() -> Node:
+	if _building_sys == null:
+		_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	return _building_sys
+
+
+func _unit_mgr_ref() -> Node:
+	if _unit_mgr == null:
+		_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	return _unit_mgr
+
 # --- STATE ---
 ## Floor layer: Vector2i → StringName tile ID
 var floor_tiles := {}
@@ -54,18 +82,167 @@ const HIDDEN_FADE_TILES := 2
 ## Pre-baked per-corner darkness for each floor tile. Rebuilt when _floor_edge_dirty.
 var _fade_darkness: Dictionary = {}  # Vector2i -> [tl, tr, br, bl]
 
+## Prebuilt mesh that batches every faded floor quad. Rebuilt alongside
+## _fade_darkness whenever _floor_edge_dirty flips, so the per-frame cost is
+## a single draw_mesh call instead of one draw_polygon per faded tile.
+var _fade_mesh: ArrayMesh = null
+
 # --- WATER RENDERING ---
 ## Sand texture drawn under water at shallow/medium depths.
 var _sand_texture: Texture2D = null
 
+# --- VENT PARTICLES ---
+## Live steam-puff particles emitted from vent tiles.
+## Each entry: { "pos": Vector2, "vel": Vector2, "age": float,
+##               "life": float, "radius": float }
+var _vent_particles: Array = []
+## Per-vent-origin emission timer: Vector2i -> seconds until next puff.
+var _vent_emit_timers: Dictionary = {}
+## Average seconds between emissions per vent. Tuned with VENT_PARTICLE_LIFE
+## so each vent continually has several sprites in flight, forming a
+## continuous stream rather than discrete puffs.
+const VENT_EMIT_INTERVAL := 0.22
+## How many sprites spawn per emission.
+const VENT_PARTICLES_PER_PUFF := 1
+## Lifetime of a particle in seconds. Longer = taller stream tail.
+const VENT_PARTICLE_LIFE := 1.8
+## Starting upward speed in pixels per second.
+const VENT_PARTICLE_SPEED := 22.0
+## Starting half-size in pixels (sprite renders at 2× this).
+const VENT_PARTICLE_RADIUS := 44.0
+## Modulate color for the steam sprite. Slight yellow/tan so the puff reads
+## as hot vent gas rather than plain white steam (same trick the tech-tree
+## checkmark uses — draw_texture's modulate tints the whole texture).
+const VENT_PARTICLE_COLOR := Color(1.0, 0.95, 0.75, 0.75)
+## Steam sprite rendered for each particle.
+var _vent_steam_tex: Texture2D = null
+
 func _ready() -> void:
 	_sand_texture = load("res://textures/terrain/Sand.png") if ResourceLoader.exists("res://textures/terrain/Sand.png") else null
+	_vent_steam_tex = load("res://textures/terrain/VentSteam.png") if ResourceLoader.exists("res://textures/terrain/VentSteam.png") else null
+	# Spawn the overlay node that redraws vent puffs on top of the building
+	# layer. Rendering from TerrainSystem itself would place them under every
+	# building because TerrainSystem draws before BuildingSystem.
+	var overlay_script: Script = load("res://main/vent_particle_overlay.gd")
+	if overlay_script:
+		var overlay := Node2D.new()
+		overlay.set_script(overlay_script)
+		overlay.name = "VentParticleOverlay"
+		overlay.terrain = self
+		# z_index sandwich: buildings sit at 0, steam at 1 (just above),
+		# and units/bullets/drone get bumped to 2 below so they draw over
+		# the steam. This keeps smoke floating above the vent/turbine
+		# without hiding flying units or projectiles.
+		overlay.z_index = 1
+		overlay.z_as_relative = false
+		add_child(overlay)
 	await get_tree().process_frame
+	_sector_script = get_node_or_null("/root/Main/SectorScript")
+	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	# Promote the "things that should draw over steam" layers now that the
+	# scene is up. Safe if any of these are missing.
+	for node_path in ["/root/Main/UnitManager", "/root/Main/CombatSystem", "/root/Main/PlayerDrone"]:
+		var n = get_node_or_null(node_path)
+		if n is CanvasItem:
+			(n as CanvasItem).z_index = 2
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	# Always redraw so wall parallax updates with camera movement
+	_tick_vent_particles(delta)
 	queue_redraw()
+
+
+## Spawns steam puffs from vent origins and advances existing particles.
+## Mindustry-style: each vent periodically emits a small cluster of rising,
+## slightly-spreading particles that fade out over their lifetime.
+func _tick_vent_particles(delta: float) -> void:
+	# --- Spawn: walk vent origins and drop a puff when their timer expires.
+	# Vent floor tiles are 3x3; `floor_tiles` is keyed by the origin cell.
+	# Emission is suppressed if the vent is covered by a non-vent-powered
+	# block (the vent is plugged). Vent turbines don't suppress — the steam
+	# reads as venting through the turbine.
+	var world_paused: bool = "world_paused" in main and main.world_paused
+	if not world_paused:
+		for origin in floor_tiles:
+			if floor_tiles[origin] != &"vent":
+				continue
+			if not _vent_can_emit(origin):
+				# Reset the timer so the puff doesn't instantly fire the
+				# moment the covering block is removed.
+				_vent_emit_timers[origin] = VENT_EMIT_INTERVAL * randf_range(0.5, 1.0)
+				continue
+			var timer: float = _vent_emit_timers.get(origin, randf() * VENT_EMIT_INTERVAL)
+			timer -= delta
+			if timer <= 0.0:
+				_spawn_vent_puff(origin)
+				# Small jitter so the stream feels natural without gaps.
+				timer = VENT_EMIT_INTERVAL * randf_range(0.85, 1.15)
+			_vent_emit_timers[origin] = timer
+
+	# --- Update live particles. Paused world = freeze every sprite exactly
+	# where it is (no aging, rotation, or motion) and resume on unpause.
+	if world_paused:
+		return
+	var i := _vent_particles.size() - 1
+	while i >= 0:
+		var p: Dictionary = _vent_particles[i]
+		p["age"] += delta
+		# Rotation decays as the particle ages: full spin early in life,
+		# easing toward zero as it dissipates. (1 - t)² gives a steeper
+		# falloff than a linear ramp so late-life sprites look settled.
+		var spin_t: float = clampf(p["age"] / p["life"], 0.0, 1.0)
+		var spin_scale: float = (1.0 - spin_t) * (1.0 - spin_t)
+		p["angle"] = wrapf(float(p.get("angle", 0.0)) + float(p.get("spin", 0.0)) * spin_scale * delta, -PI, PI)
+		if p["age"] >= p["life"]:
+			_vent_particles.remove_at(i)
+		else:
+			# Slight drag so puffs decelerate as they dissipate.
+			p["vel"] *= 1.0 - minf(delta * 0.6, 1.0)
+			p["pos"] += p["vel"] * delta
+		i -= 1
+
+
+## Returns true if the given vent origin should currently be emitting steam.
+## Open vents emit. Vents with a vent-powered block (turbine) on top still
+## emit — the puff reads as escaping through the turbine. Vents with any
+## other building on top are considered plugged and emit nothing.
+func _vent_can_emit(origin: Vector2i) -> bool:
+	if not main.placed_buildings.has(origin):
+		return true
+	var block_id: StringName = main.placed_buildings[origin]
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return true
+	return data.tags.has("vent_powered")
+
+
+func _spawn_vent_puff(origin: Vector2i) -> void:
+	var gs: float = float(main.GRID_SIZE)
+	# Vent is a 3x3 multi-tile whose `origin` IS the center cell (the 3x3
+	# footprint spans origin + (-1..1, -1..1)). Emit from the middle of that
+	# cell, i.e. origin + (0.5, 0.5) tiles.
+	var center: Vector2 = Vector2(
+		(float(origin.x) + 0.5) * gs,
+		(float(origin.y) + 0.5) * gs
+	)
+	for _n in range(VENT_PARTICLES_PER_PUFF):
+		_vent_particles.append({
+			# Every sprite sits dead-center on the vent — no jitter.
+			"pos": center,
+			"vel": Vector2.ZERO,
+			"age": 0.0,
+			"life": VENT_PARTICLE_LIFE * randf_range(0.9, 1.1),
+			"radius": VENT_PARTICLE_RADIUS * randf_range(0.9, 1.1),
+			# Random rotation + a small angular drift per sprite breaks the
+			# "same shape stacked" look — overlapping sprites read as turbulent
+			# gas instead of concentric copies.
+			"angle": randf() * TAU,
+			"spin": randf_range(-0.8, 0.8),
+			# Slight non-uniform scale so not every particle is a perfect circle.
+			"aspect": Vector2(randf_range(0.85, 1.15), randf_range(0.85, 1.15)),
+		})
 
 
 func _input(event: InputEvent) -> void:
@@ -118,7 +295,7 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 		wall_tiles[grid_pos] = tile_id
 		if data.destructible:
 			tile_health[grid_pos] = data.max_health
-		var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+		var unit_mgr = _unit_mgr_ref()
 		if data.blocks_pathfinding:
 			if unit_mgr and unit_mgr.astar:
 				unit_mgr.astar.set_point_solid(grid_pos, true)
@@ -155,7 +332,7 @@ func remove_tile(grid_pos: Vector2i) -> void:
 		# Also remove any ore that was on this wall
 		ore_tiles.erase(grid_pos)
 		if old_data and old_data.is_wall():
-			var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+			var unit_mgr = _unit_mgr_ref()
 			if not main.placed_buildings.has(grid_pos):
 				if unit_mgr and unit_mgr.astar:
 					unit_mgr.astar.set_point_solid(grid_pos, false)
@@ -412,7 +589,7 @@ func _rebuild_water_depth() -> void:
 func _rebuild_floor_edge_cache() -> void:
 	_floor_edge_dirty = false
 	_floor_edge_distance.clear()
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	var sector_script = _sector_script_ref()
 	# Seed: visible floor tiles adjacent to void or hidden tiles.
 	# Walls only block the fade if they have floor behind them (interior walls).
 	# Edge walls (walls with void on at least one side) let the fade through.
@@ -423,13 +600,19 @@ func _rebuild_floor_edge_cache() -> void:
 		for offset in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
 			var nb = grid_pos + offset
 			var nb_is_void: bool = not floor_tiles.has(nb) and not wall_tiles.has(nb)
-			# A wall neighbor lets the fade through if the wall itself borders
-			# void on any side (it's an edge wall, not an interior wall).
+			# A wall neighbor lets the fade through if the wall borders void OR
+			# a hidden tile on any side. Interior walls with visible floor on
+			# all sides still block the fade.
 			var nb_is_edge_wall := false
 			if wall_tiles.has(nb) and not floor_tiles.has(nb):
 				for wo in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
 					var wnb = nb + wo
+					# Void side
 					if not floor_tiles.has(wnb) and not wall_tiles.has(wnb):
+						nb_is_edge_wall = true
+						break
+					# Hidden side (hidden floor or hidden wall)
+					if sector_script and sector_script.is_tile_hidden(wnb):
 						nb_is_edge_wall = true
 						break
 			var nb_is_hidden: bool = sector_script != null and floor_tiles.has(nb) and not wall_tiles.has(nb) and sector_script.is_tile_hidden(nb)
@@ -491,11 +674,59 @@ func _rebuild_floor_edge_cache() -> void:
 		if cd[0] > 0.0 or cd[1] > 0.0 or cd[2] > 0.0 or cd[3] > 0.0:
 			_fade_darkness[grid_pos] = cd
 
+	# Rebuild the batched fade mesh so each frame only costs one draw call.
+	_rebuild_fade_mesh()
+
+
+## Builds a single ArrayMesh that covers every faded floor tile with a
+## per-corner gradient quad. Called whenever _fade_darkness is regenerated.
+func _rebuild_fade_mesh() -> void:
+	_fade_mesh = null
+	if _fade_darkness.is_empty():
+		return
+	var gs := float(main.GRID_SIZE)
+	var count: int = _fade_darkness.size()
+	var verts: PackedVector3Array = PackedVector3Array()
+	verts.resize(count * 4)
+	var cols: PackedColorArray = PackedColorArray()
+	cols.resize(count * 4)
+	var idxs: PackedInt32Array = PackedInt32Array()
+	idxs.resize(count * 6)
+	var vi: int = 0
+	var ii: int = 0
+	for grid_pos in _fade_darkness:
+		var cd: Array = _fade_darkness[grid_pos]
+		var wx: float = float(grid_pos.x) * gs
+		var wy: float = float(grid_pos.y) * gs
+		verts[vi + 0] = Vector3(wx, wy, 0.0)
+		verts[vi + 1] = Vector3(wx + gs, wy, 0.0)
+		verts[vi + 2] = Vector3(wx + gs, wy + gs, 0.0)
+		verts[vi + 3] = Vector3(wx, wy + gs, 0.0)
+		cols[vi + 0] = Color(0, 0, 0, cd[0])
+		cols[vi + 1] = Color(0, 0, 0, cd[1])
+		cols[vi + 2] = Color(0, 0, 0, cd[2])
+		cols[vi + 3] = Color(0, 0, 0, cd[3])
+		idxs[ii + 0] = vi + 0
+		idxs[ii + 1] = vi + 1
+		idxs[ii + 2] = vi + 2
+		idxs[ii + 3] = vi + 0
+		idxs[ii + 4] = vi + 2
+		idxs[ii + 5] = vi + 3
+		vi += 4
+		ii += 6
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_INDEX] = idxs
+	_fade_mesh = ArrayMesh.new()
+	_fade_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+
 
 ## Returns the fade alpha for a floor tile (1.0 = fully visible, 0.0 = fully dark).
 ## Floors within FLOOR_FADE_START tiles of void fade to black.
 func _get_floor_fade_alpha(grid_pos: Vector2i) -> float:
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	var sector_script = _sector_script_ref()
 	if sector_script and sector_script.is_tile_hidden(grid_pos):
 		return 0.0
 	if not _floor_edge_distance.has(grid_pos):
@@ -508,13 +739,14 @@ func _get_floor_fade_alpha(grid_pos: Vector2i) -> float:
 
 
 ## Returns the effective edge distance for a position (for per-corner interpolation).
-## Void/hidden tiles return 0 (edge). Wall tiles return FLOOR_FADE_START (bright, wall system handles fade).
+## Void/hidden tiles return 0 (edge). Walls contribute to fade if they border
+## void or hidden tiles themselves (edge walls); interior walls stay bright.
 func _get_floor_eff_dist(pos: Vector2i) -> float:
-	var ss = get_node_or_null("/root/Main/SectorScript")
+	var ss = _sector_script_ref()
 	if ss and ss.is_tile_hidden(pos):
 		# Hidden walls still count as walls for floor fade
 		if wall_tiles.has(pos):
-			return float(FLOOR_FADE_START)
+			return 0.0  # edge — let floor fade through
 		# Hidden floors only fade if directly adjacent to a visible floor (4-connected).
 		# Otherwise they're behind walls and shouldn't bleed darkness through diagonals.
 		if floor_tiles.has(pos):
@@ -528,7 +760,16 @@ func _get_floor_eff_dist(pos: Vector2i) -> float:
 				return float(FLOOR_FADE_START)
 		return 0.0
 	if wall_tiles.has(pos):
-		return float(FLOOR_FADE_START)  # Walls are bright — wall system handles its own fade
+		# Edge walls (bordering void or hidden) are treated as edges so the
+		# floor fade bleeds through them. Interior walls with visible floor
+		# on every side stay bright and don't affect adjacent fade.
+		for offset in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
+			var wnb = pos + offset
+			if not floor_tiles.has(wnb) and not wall_tiles.has(wnb):
+				return 0.0  # borders void
+			if ss and ss.is_tile_hidden(wnb):
+				return 0.0  # borders hidden
+		return float(FLOOR_FADE_START)  # interior wall — wall system handles its own fade
 	if not floor_tiles.has(pos):
 		return 0.0  # Void = edge (darkest)
 	if not _floor_edge_distance.has(pos):
@@ -577,6 +818,45 @@ func _draw() -> void:
 		_draw_paint_preview()
 
 
+## Renders steam puffs onto the given canvas. Called by the overlay node so
+## the puffs sit above the building layer, yet a vent turbine placed on top
+## of the vent still shows the steam escaping from its top.
+func draw_vent_particles_to(canvas: CanvasItem) -> void:
+	if _vent_particles.is_empty() or canvas == null:
+		return
+	var ss := _sector_script_ref()
+	var gs: float = float(main.GRID_SIZE)
+	var tex: Texture2D = _vent_steam_tex
+	var native_size: Vector2 = tex.get_size() if tex else Vector2.ZERO
+	for p in _vent_particles:
+		var t: float = clampf(p["age"] / p["life"], 0.0, 1.0)
+		if ss:
+			var cell := Vector2i(int(p["pos"].x / gs), int(p["pos"].y / gs))
+			if ss.has_method("is_tile_hidden") and ss.is_tile_hidden(cell):
+				continue
+		# Ease in over the first ~20% of life so new sprites grow/fade in
+		# smoothly instead of popping in at full size and opacity. Ease out
+		# over the rest of the life with smoothstep for a soft dissipation.
+		var fade_in: float = smoothstep(0.0, 0.2, t)
+		var fade_out: float = 1.0 - smoothstep(0.35, 1.0, t)
+		var alpha: float = VENT_PARTICLE_COLOR.a * fade_in * fade_out
+		# Radius eases from ~0.55× to ~1.8× over life. Starting smaller gives
+		# the "building up" look instead of a sudden full-size appearance.
+		var radius: float = float(p["radius"]) * lerp(0.55, 1.8, smoothstep(0.0, 1.0, t))
+		var col := Color(VENT_PARTICLE_COLOR.r, VENT_PARTICLE_COLOR.g, VENT_PARTICLE_COLOR.b, alpha)
+		if tex and native_size.x > 0.0 and native_size.y > 0.0:
+			var aspect: Vector2 = p.get("aspect", Vector2.ONE)
+			var size: Vector2 = Vector2(radius * 2.0, radius * 2.0) * aspect
+			var angle: float = float(p.get("angle", 0.0))
+			# Draw rotated around the particle center so stacked sprites at
+			# different angles don't all share the same silhouette.
+			canvas.draw_set_transform(p["pos"], angle)
+			canvas.draw_texture_rect(tex, Rect2(-size * 0.5, size), false, col)
+			canvas.draw_set_transform(Vector2.ZERO, 0.0)
+		else:
+			canvas.draw_circle(p["pos"], radius, col)
+
+
 ## Returns the visible grid bounds based on the camera viewport.
 func _get_visible_bounds() -> Rect2i:
 	var camera = get_viewport().get_camera_2d()
@@ -597,72 +877,67 @@ func _get_visible_bounds() -> Rect2i:
 
 ## Draws all regular (1x1) floor tiles.
 func _draw_floor_tiles() -> void:
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	var sector_script = _sector_script_ref()
 	var bounds: Rect2i = _get_visible_bounds()
 	var fade_off: bool = "fade_enabled" in main and not main.fade_enabled
 	var size = float(main.GRID_SIZE)
 
-	for grid_pos in floor_tiles:
-		# Screen culling — skip tiles outside camera view
-		if grid_pos.x < bounds.position.x or grid_pos.x >= bounds.position.x + bounds.size.x:
-			continue
-		if grid_pos.y < bounds.position.y or grid_pos.y >= bounds.position.y + bounds.size.y:
-			continue
 
-		var tile_id = floor_tiles[grid_pos]
-		var data = Registry.get_tile(tile_id)
-		if data == null:
-			continue
-		if multi_tile_origins.has(grid_pos) and multi_tile_origins[grid_pos] == grid_pos:
-			continue
-		if data.is_wall():
-			continue
-		var is_hidden: bool = sector_script and sector_script.is_tile_hidden(grid_pos)
-		if is_hidden:
-			continue
+	# Iterate only the visible rectangle instead of the entire floor dict.
+	# On huge maps this is O(visible) rather than O(all_floor_tiles).
+	var bx0: int = bounds.position.x
+	var by0: int = bounds.position.y
+	var bx1: int = bx0 + bounds.size.x
+	var by1: int = by0 + bounds.size.y
+	for y in range(by0, by1):
+		for x in range(bx0, bx1):
+			var grid_pos: Vector2i = Vector2i(x, y)
+			if not floor_tiles.has(grid_pos):
+				continue
 
-		var world_pos = main.grid_to_world(grid_pos)
+			var tile_id = floor_tiles[grid_pos]
+			var data = Registry.get_tile(tile_id)
+			if data == null:
+				continue
+			if multi_tile_origins.has(grid_pos) and multi_tile_origins[grid_pos] == grid_pos:
+				continue
+			if data.is_wall():
+				continue
+			var is_hidden: bool = sector_script and sector_script.is_tile_hidden(grid_pos)
+			if is_hidden:
+				continue
 
-		# Water tiles: draw sand underneath then water on top with depth-based
-		# blend. Depth 1 = 50% sand / 50% water, depth 2 = 30% sand / 70% water,
-		# depth 3 = 100% water (no sand visible).
-		var depth: int = get_water_depth_at(grid_pos)
-		if depth > 0 and _sand_texture != null:
-			var rect := Rect2(world_pos, Vector2(size, size))
-			if depth <= 2:
-				var sand_alpha: float = 0.5 if depth == 1 else 0.3
-				draw_texture_rect(_sand_texture, rect, false, Color(1, 1, 1, sand_alpha * data.opacity))
-			# Water layer on top
-			var water_alpha: float
-			if depth == 1:
-				water_alpha = 0.5
-			elif depth == 2:
-				water_alpha = 0.7
+			var world_pos = main.grid_to_world(grid_pos)
+
+			# Water tiles: draw sand underneath then water on top with depth-based
+			# blend. Depth 1 = 50% sand / 50% water, depth 2 = 30% sand / 70% water,
+			# depth 3 = 100% water (no sand visible).
+			var depth: int = get_water_depth_at(grid_pos)
+			if depth > 0 and _sand_texture != null:
+				var rect := Rect2(world_pos, Vector2(size, size))
+				if depth <= 2:
+					var sand_alpha: float = 0.5 if depth == 1 else 0.3
+					draw_texture_rect(_sand_texture, rect, false, Color(1, 1, 1, sand_alpha * data.opacity))
+				# Water layer on top
+				var water_alpha: float
+				if depth == 1:
+					water_alpha = 0.5
+				elif depth == 2:
+					water_alpha = 0.7
+				else:
+					water_alpha = 1.0
+				_draw_tile_texture(data, world_pos, size, water_alpha * data.opacity)
 			else:
-				water_alpha = 1.0
-			_draw_tile_texture(data, world_pos, size, water_alpha * data.opacity)
-		else:
-			_draw_tile_texture(data, world_pos, size, data.opacity)
+				_draw_tile_texture(data, world_pos, size, data.opacity)
 
-		# Pre-baked fade overlay (skip if fade disabled or no darkness at this tile)
-		if fade_off:
-			continue
-		if not _fade_darkness.has(grid_pos):
-			continue
-		var cd: Array = _fade_darkness[grid_pos]
-		var pts: PackedVector2Array = [
-			world_pos,
-			world_pos + Vector2(size, 0),
-			world_pos + Vector2(size, size),
-			world_pos + Vector2(0, size),
-		]
-		var cols: PackedColorArray = [
-			Color(0, 0, 0, cd[0]),
-			Color(0, 0, 0, cd[1]),
-			Color(0, 0, 0, cd[2]),
-			Color(0, 0, 0, cd[3]),
-		]
-		draw_polygon(pts, cols)
+			# Fade overlay is now rendered in one batched draw_mesh after the
+			# loop (see below). No per-tile fade work here.
+
+	# Single draw call for all faded floor tiles, using a mesh rebuilt only
+	# when _floor_edge_dirty flips. GPU culls off-screen triangles for free.
+	if _fade_mesh and not fade_off:
+		draw_mesh(_fade_mesh, null)
+
 
 
 ## Draws 3x3 multi-tiles (Geyser, Vent).
@@ -670,7 +945,7 @@ func _draw_floor_tiles() -> void:
 ## so floor tiles underneath still show through.
 func _draw_multi_tiles() -> void:
 	var drawn_origins := {}
-	var _ss_multi = get_node_or_null("/root/Main/SectorScript")
+	var _ss_multi = _sector_script_ref()
 	var bounds: Rect2i = _get_visible_bounds()
 	# Expand bounds by multi-tile size (3) to catch origins just off screen
 	var mb: Rect2i = Rect2i(bounds.position - Vector2i(3, 3), bounds.size + Vector2i(6, 6))
@@ -731,7 +1006,7 @@ func _draw_multi_tiles() -> void:
 ## Draws all wall tiles. If a wall has render_tile_underneath = true,
 ## the floor tile at that position is drawn first, then the wall on top.
 func _draw_wall_tiles() -> void:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	var building_sys = _building_sys_ref()
 	var camera = get_viewport().get_camera_2d()
 	var cam_center = camera.get_screen_center_position() if camera else Vector2.ZERO
 
@@ -838,7 +1113,7 @@ func _draw_ore_tiles() -> void:
 
 		# Apply same parallax offset as the wall underneath
 		var offset = Vector2.ZERO
-		var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+		var building_sys = _building_sys_ref()
 		if building_sys and wall_tiles.has(grid_pos):
 			var wall_data = Registry.get_tile(wall_tiles[grid_pos])
 			if wall_data and wall_data.height > 0:

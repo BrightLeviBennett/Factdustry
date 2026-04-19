@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://brq0xaqflodki" path="res://textures/status effects/ElectricBurn.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"electric_burn"
+display_name = "Electric Burn"
+description = "Arcing current sears circuits. Short, intense damage over time."
+icon = ExtResource("2")
+duration = 3.0
+stackable = true
+max_stacks = 3
+refresh_on_reapply = true
+effect_type = 2
+tint_color = Color(0.6, 0.9, 1, 1)
+particle_color = Color(0.8, 1, 1, 1)
+tick_damage = 6.0
+tick_interval = 0.4
+tags = PackedStringArray("electric", "dot")

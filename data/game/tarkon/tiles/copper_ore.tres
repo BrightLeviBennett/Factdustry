@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dch07t516ixdw"]
 
 [ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://b8fp1ekbv4cfs" path="res://textures/terrain/CopperOre.png" id="1_damef"]
+[ext_resource type="Texture2D" uid="uid://wfcklftl8mkm" path="res://textures/terrain/CopperOre.png" id="1_damef"]
 
 [resource]
 script = ExtResource("1")

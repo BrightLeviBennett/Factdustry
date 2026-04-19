@@ -1,15 +1,20 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://k4sjngeq043k"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://k6vd13wtkqnj" path="res://textures/blocks/walls/CopperWall.png" id="1_38w01"]
 
 [resource]
 script = ExtResource("1")
 id = &"copper_wall"
 display_name = "Copper Wall"
 description = "A solid copper wall. Blocks enemies and projectiles."
+icon = ExtResource("1_38w01")
 category = 5
 color = Color(0.8, 0.5, 0.3, 1)
+top_sprite = ExtResource("1_38w01")
 max_health = 140.0
-build_cost = { "copper": 6 }
+build_cost = {
+"copper": 6
+}
 build_time = 0.5
 tags = PackedStringArray("wall", "defense")

@@ -1,0 +1,20 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bdqppfwa3ad4d" path="res://textures/status effects/EMP1.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"emp_1"
+display_name = "EMP (Light)"
+description = "Electronics sputter. Attack speed and movement reduced."
+icon = ExtResource("2")
+duration = 2.0
+stackable = false
+refresh_on_reapply = true
+effect_type = 1
+tint_color = Color(0.6, 0.7, 1, 1)
+particle_color = Color(0.7, 0.85, 1, 1)
+speed_modifier = 0.7
+attack_speed_modifier = 0.5
+tags = PackedStringArray("emp", "electric")

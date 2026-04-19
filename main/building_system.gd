@@ -28,6 +28,7 @@ const FACTION_FEROX := 1
 const FACTION_DERELICT := 2
 
 # --- PARALLAX SETTINGS ---
+var parallax_enabled := true
 @export var parallax_strength := 0.025
 @export var max_depth := 8.0
 @export var soft_cap_factor := 0.05
@@ -74,8 +75,61 @@ var _belt_textures := {}
 var _pipe_texture: Texture2D
 var _pump_texture: Texture2D
 
+# --- DRILL HEAD TEXTURES ---
+# Keyed by variant: "N" = both ores directly in front, "A" = both ores +1 ahead,
+# "R" = texture-left ore directly, texture-right ore +1 ahead,
+# "L" = texture-right ore directly, texture-left ore +1 ahead.
+# Texture default orientation: drill facing DOWN (heads extending south).
+var _drill_head_textures: Dictionary = {}
+
+# --- CRUSHER HEAD TEXTURE ---
+# Single gear-like sprite used for both heads on every "crusher_heads" block.
+# Two heads are drawn per crusher (one per front-edge cell), each spinning
+# around its own center at a different rate + phase offset so they look
+# mechanically independent. State is stateless — angles are derived from
+# Time.get_ticks_msec() and the block's grid position.
+var _crusher_head_texture: Texture2D
+const CRUSHER_HEAD_SPIN_A := 3.7   # radians/sec target (head 0)
+const CRUSHER_HEAD_SPIN_B := -4.2  # target: different speed AND direction (head 1)
+# How fast each head's angular velocity eases toward its target (rad/s²).
+# Smaller = more inertia / more noticeable spool-up + coast-down. Same rate is
+# used for both accelerating and decelerating so stopping mirrors starting.
+const CRUSHER_HEAD_ACCEL := 5.0
+# Per-crusher rotation state. Key = anchor grid_pos. Value:
+#   {"angle_a": float, "angle_b": float, "vel_a": float, "vel_b": float}
+# Updated in _process when the world is not paused.
+var _crusher_head_state: Dictionary = {}
+
+# --- CABLE WIRE TEXTURE ---
+var _wire_texture: Texture2D
+
 # --- CACHED REFERENCES ---
+# SectorScript is created by Main._ready AFTER its Registry await, which can
+# be after our own _ready runs. So these are cached *opportunistically* in
+# _ready but fall back to a live get_node_or_null on first miss.
 var _logistics: Node2D
+var _terrain: Node2D
+var _sector_script: Node
+var _power_sys: Node
+
+
+## Lazy accessors — populate the cache the first time the node exists.
+func _sector_script_ref() -> Node:
+	if _sector_script == null:
+		_sector_script = get_node_or_null("/root/Main/SectorScript")
+	return _sector_script
+
+
+func _terrain_ref() -> Node2D:
+	if _terrain == null:
+		_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	return _terrain
+
+
+func _power_sys_ref() -> Node:
+	if _power_sys == null:
+		_power_sys = get_node_or_null("/root/Main/PowerSystem")
+	return _power_sys
 
 # --- WORLD MENU STATE (sorter filter / constructor selection) ---
 var _world_menu_open := false
@@ -101,6 +155,10 @@ var _wall_floor_distance: Dictionary = {}  # Vector2i -> int
 ## Pre-computed per-corner darkness values: Vector2i -> [tl, tr, br, bl]
 ## Only populated for walls that have non-zero darkness (saves memory + draw time).
 var _cached_corner_darkness: Dictionary = {}  # Vector2i -> Array[float]
+## Prebuilt mesh batching every visible wall's fade quad. Rebuilt with the
+## wall cache, drawn in one draw_mesh call per frame with a parallax
+## transform applied at draw time.
+var _wall_fade_mesh: ArrayMesh = null
 ## Pre-computed effective distance for all relevant tiles (walls, floors, void neighbors).
 var _cached_eff_dist: Dictionary = {}  # Vector2i -> float
 ## Walls within this many tiles of the nearest floor are fully visible (no darkness)
@@ -150,6 +208,8 @@ const REBUILD_COLOR := Color(0.816, 0.808, 0.886, 0.4)  # #D0CEE2
 
 # --- PATHFIND DRAG STATE ---
 var _pathfind_mode := false
+## Bridge pairs that need auto-linking after placement: Array of [Vector2i, Vector2i]
+var _pathfind_bridge_pairs: Array = []
 var _pathfind_rotations: Dictionary = {}  # Vector2i -> int (per-cell rotation overrides)
 var _pathfind_bridge_cells: Dictionary = {}  # Vector2i -> StringName (bridge block_id)
 var _transport_astar: AStarGrid2D = null
@@ -171,17 +231,21 @@ var link_source := Vector2i(-1, -1)
 
 func _ready() -> void:
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	_load_belt_textures()
-	_load_pipe_texture()
+	# Kick off all texture loads on background threads so they can overlap
+	# with Registry essentials + main/sector initialization. They're resolved
+	# the first time _draw() runs (see _ensure_textures_loaded).
+	_queue_texture_loads()
 	main.building_placed.connect(_on_building_placed)
 	main.building_destroyed.connect(_on_building_destroyed)
-	# Cache reference to logistics system (available after first frame)
+	# Cache references to sibling systems (available after first frame)
 	await get_tree().process_frame
 	_logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	_terrain = get_node_or_null("/root/Main/TerrainSystem")
+	_sector_script = get_node_or_null("/root/Main/SectorScript")
+	_power_sys = get_node_or_null("/root/Main/PowerSystem")
 	# Connect terrain changes to invalidate wall cache
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
-	if terrain:
-		terrain.connect("walls_changed", _on_walls_changed)
+	if _terrain:
+		_terrain.connect("walls_changed", _on_walls_changed)
 
 
 func _on_walls_changed() -> void:
@@ -357,24 +421,393 @@ func _rebuild_wall_cache() -> void:
 			var bl: float = _corner_dark.call((d0 + d_s + d_w + d_sw) / 4.0)
 			_cached_corner_darkness[grid_pos] = [tl, tr, br, bl]
 
-
-## Loads the conveyor belt texture variants for auto-tiling.
-func _load_belt_textures() -> void:
-	var path := "res://textures/blocks/item transportation/Belt/"
-	_belt_textures = {
-		"straight": load(path + "Belt.png"),
-		"jr": load(path + "Belt-JR.png"),   # Left wall removed (input from left)
-		"jl": load(path + "Belt-JL.png"),   # Right wall removed (input from right)
-		"ja": load(path + "Belt-JA.png"),   # Both walls removed
-		"ca": load(path + "Belt-CA.png"),   # Corner variant A
-		"cb": load(path + "Belt-CB.png"),   # Corner variant B
-	}
+	# Rebuild the batched fade mesh so the per-frame cost is one draw_mesh.
+	_rebuild_wall_fade_mesh(terrain)
 
 
-## Loads the fluid conduit pipe and pump textures.
-func _load_pipe_texture() -> void:
-	_pipe_texture = load("res://textures/blocks/fluid transportation/FluidConduit.png")
-	_pump_texture = load("res://textures/blocks/fluid transportation/FluidPump.png")
+## Builds an ArrayMesh covering every visible wall with a per-corner gradient
+## quad at its grid position (no parallax baked in — that's applied at draw
+## time via a Transform2D so it still follows the camera).
+func _rebuild_wall_fade_mesh(terrain: Node) -> void:
+	_wall_fade_mesh = null
+	if _cached_corner_darkness.is_empty() or terrain == null:
+		return
+	var gs := float(main.GRID_SIZE)
+	var ss := _sector_script_ref()
+	# Local tile-data memo — few unique wall tile types, so this collapses the
+	# Registry.get_tile calls down to a handful.
+	var tile_cache: Dictionary = {}
+
+	var valid_positions: Array[Vector2i] = []
+	for grid_pos in _cached_corner_darkness:
+		if ss and ss.is_tile_hidden(grid_pos):
+			continue
+		if not terrain.wall_tiles.has(grid_pos):
+			continue
+		var wid: StringName = terrain.wall_tiles[grid_pos]
+		var tile_data: TerrainTileData
+		if tile_cache.has(wid):
+			tile_data = tile_cache[wid]
+		else:
+			tile_data = Registry.get_tile(wid)
+			tile_cache[wid] = tile_data
+		if tile_data == null or tile_data.height <= 0:
+			continue
+		valid_positions.append(grid_pos)
+
+	if valid_positions.is_empty():
+		return
+
+	var count: int = valid_positions.size()
+	var verts: PackedVector3Array = PackedVector3Array()
+	verts.resize(count * 4)
+	var cols: PackedColorArray = PackedColorArray()
+	cols.resize(count * 4)
+	var idxs: PackedInt32Array = PackedInt32Array()
+	idxs.resize(count * 6)
+	var vi: int = 0
+	var ii: int = 0
+	for grid_pos in valid_positions:
+		var cd: Array = _cached_corner_darkness[grid_pos]
+		var wx: float = float(grid_pos.x) * gs
+		var wy: float = float(grid_pos.y) * gs
+		verts[vi + 0] = Vector3(wx, wy, 0.0)
+		verts[vi + 1] = Vector3(wx + gs, wy, 0.0)
+		verts[vi + 2] = Vector3(wx + gs, wy + gs, 0.0)
+		verts[vi + 3] = Vector3(wx, wy + gs, 0.0)
+		cols[vi + 0] = Color(0, 0, 0, cd[0])
+		cols[vi + 1] = Color(0, 0, 0, cd[1])
+		cols[vi + 2] = Color(0, 0, 0, cd[2])
+		cols[vi + 3] = Color(0, 0, 0, cd[3])
+		idxs[ii + 0] = vi + 0
+		idxs[ii + 1] = vi + 1
+		idxs[ii + 2] = vi + 2
+		idxs[ii + 3] = vi + 0
+		idxs[ii + 4] = vi + 2
+		idxs[ii + 5] = vi + 3
+		vi += 4
+		ii += 6
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_INDEX] = idxs
+	_wall_fade_mesh = ArrayMesh.new()
+	_wall_fade_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+
+
+# --- TEXTURE STREAMING ---
+# The 13 block textures below used to be sync load()s at _ready() (~50-100ms
+# serialized). Now every path is kicked off via load_threaded_request() in
+# parallel and resolved lazily on the first _draw().
+const _BELT_TEX_PATHS := {
+	"straight": "res://textures/blocks/item transportation/Belt/Belt.png",
+	"jr":       "res://textures/blocks/item transportation/Belt/Belt-JR.png",
+	"jl":       "res://textures/blocks/item transportation/Belt/Belt-JL.png",
+	"ja":       "res://textures/blocks/item transportation/Belt/Belt-JA.png",
+	"ca":       "res://textures/blocks/item transportation/Belt/Belt-CA.png",
+	"cb":       "res://textures/blocks/item transportation/Belt/Belt-CB.png",
+}
+const _DRILL_HEAD_TEX_PATHS := {
+	"N": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-N.png",
+	"R": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R.png",
+	"L": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-L.png",
+	"A": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-A.png",
+}
+const _PIPE_TEX_PATH := "res://textures/blocks/fluid transportation/FluidConduit.png"
+const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
+const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
+const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
+
+var _textures_ready: bool = false
+
+
+## Issues threaded-load requests for every texture we need. Non-blocking.
+func _queue_texture_loads() -> void:
+	for key in _BELT_TEX_PATHS:
+		ResourceLoader.load_threaded_request(_BELT_TEX_PATHS[key])
+	for key in _DRILL_HEAD_TEX_PATHS:
+		ResourceLoader.load_threaded_request(_DRILL_HEAD_TEX_PATHS[key])
+	ResourceLoader.load_threaded_request(_PIPE_TEX_PATH)
+	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
+	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
+	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
+
+
+## Blocks until all queued textures are resolved, then stashes them.
+## Called once before the first real draw — at that point the threaded
+## loads are typically already done so this is effectively free.
+func _ensure_textures_loaded() -> void:
+	if _textures_ready:
+		return
+	for key in _BELT_TEX_PATHS:
+		_belt_textures[key] = ResourceLoader.load_threaded_get(_BELT_TEX_PATHS[key])
+	for key in _DRILL_HEAD_TEX_PATHS:
+		_drill_head_textures[key] = ResourceLoader.load_threaded_get(_DRILL_HEAD_TEX_PATHS[key])
+	_pipe_texture = ResourceLoader.load_threaded_get(_PIPE_TEX_PATH)
+	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
+	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
+	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
+	_textures_ready = true
+
+
+## Returns the DrillHeads texture variant ("N", "R", "L", "A") to use
+## for a drill at grid_pos with the given rotation and grid_size.
+## Texture default is "drill facing down"; L/R are defined relative to the
+## texture's own left/right slots (which rotate together with the drill).
+##
+## The drill mines front-edge cells and the cells one tile beyond them.
+## "Directly in front" = ore sits on the front-edge cell itself.
+## "Not directly in front" = front-edge cell is empty but cell one tile ahead has ore.
+## If either head has no ore at all (invalid placement), fall back to "N".
+func _get_drill_head_variant(grid_pos: Vector2i, rotation: int, grid_size: Vector2i) -> String:
+	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	if terrain == null:
+		return "N"
+
+	var dir: Vector2i
+	match rotation:
+		0: dir = Vector2i(1, 0)
+		1: dir = Vector2i(0, 1)
+		2: dir = Vector2i(-1, 0)
+		3: dir = Vector2i(0, -1)
+		_: dir = Vector2i(1, 0)
+
+	var front_cells := _get_front_edge(grid_pos, grid_size, rotation)
+	if front_cells.size() < 2:
+		return "N"
+
+	# Map _get_front_edge's cells to the texture's left/right slots.
+	# _get_front_edge ordering + texture rotation of (rotation-1)*90° produces:
+	var tex_left_cell: Vector2i
+	var tex_right_cell: Vector2i
+	match rotation:
+		0:
+			tex_left_cell = front_cells[1]
+			tex_right_cell = front_cells[0]
+		1:
+			tex_left_cell = front_cells[0]
+			tex_right_cell = front_cells[1]
+		2:
+			tex_left_cell = front_cells[0]
+			tex_right_cell = front_cells[1]
+		3:
+			tex_left_cell = front_cells[1]
+			tex_right_cell = front_cells[0]
+		_:
+			tex_left_cell = front_cells[0]
+			tex_right_cell = front_cells[1]
+
+	# A head is "extended" only when ore is one tile PAST the front edge
+	# (i.e. not directly in front) — the head physically has to reach forward.
+	# If the front cell has ore directly, or has nothing at all, the head
+	# rests in its short/default position.
+	var left_extended := terrain.get_ore_at(tex_left_cell) == null \
+		and terrain.get_ore_at(tex_left_cell + dir) != null
+	var right_extended := terrain.get_ore_at(tex_right_cell) == null \
+		and terrain.get_ore_at(tex_right_cell + dir) != null
+
+	if not left_extended and not right_extended:
+		return "N"
+	if left_extended and not right_extended:
+		return "L"
+	if right_extended and not left_extended:
+		return "R"
+	return "A"
+
+
+## Draws the DrillHeads overlay texture in front of a drill.
+## The texture spans grid_size.x tiles wide (matching drill width) by 2 tiles
+## in the forward direction (covering the front edge + one tile ahead), rotated
+## so its default "facing down" orientation aligns with the drill's rotation.
+func _draw_drill_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
+		variant: String, block_id: StringName, tint: Color = Color.WHITE) -> void:
+	var texture: Texture2D = _drill_head_textures.get(variant)
+	if texture == null:
+		return
+
+	var gs := float(main.GRID_SIZE)
+	var world_pos: Vector2 = main.grid_to_world(grid_pos)
+	var offset: Vector2 = _get_top_offset(world_pos) * _get_height_scale(block_id)
+
+	# Drill body center in world space.
+	var body_center: Vector2 = world_pos + Vector2(
+		grid_size.x * gs / 2.0,
+		grid_size.y * gs / 2.0
+	) + offset
+
+	# Forward unit vector (in world space) for this rotation.
+	var fwd: Vector2
+	match rotation:
+		0: fwd = Vector2(1, 0)
+		1: fwd = Vector2(0, 1)
+		2: fwd = Vector2(-1, 0)
+		3: fwd = Vector2(0, -1)
+		_: fwd = Vector2(1, 0)
+
+	# Texture dimensions in texture-space: width = drill width (tiles),
+	# height = 2 tiles (front edge + one tile ahead).
+	var heads_depth := 2.0
+	var w: float = grid_size.x * gs
+	var h: float = heads_depth * gs
+
+	# Drill body half-extent along the forward direction.
+	var drill_half_fwd: float
+	if abs(fwd.x) > 0.5:
+		drill_half_fwd = grid_size.x * gs / 2.0
+	else:
+		drill_half_fwd = grid_size.y * gs / 2.0
+
+	# Position the heads-rect center: body center offset by
+	# (half drill depth + half heads depth) along forward.
+	var heads_center: Vector2 = body_center + fwd * (drill_half_fwd + h / 2.0)
+
+	# Texture default faces DOWN (rot=1). Extra rotation = (rotation - 1) * 90°.
+	var angle: float = (rotation - 1) * PI / 2.0
+
+	draw_set_transform(heads_center, angle)
+	draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+
+## Draws two gear-style crusher heads on a block tagged "crusher_heads".
+## One head is placed on the inner edge of each front-edge cell (the edge
+## touching the crusher body), with the texture centered on that edge — so
+## half the gear sits in the crusher and half pokes into the front cell.
+## When `spinning` is true the two heads rotate independently (different
+## rates + per-block phase offsets derived from grid_pos); when false they
+## stay at a fixed per-block orientation. The preview and any inactive
+## placed crusher pass spinning=false.
+func _draw_crusher_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
+		block_id: StringName, tint: Color = Color.WHITE,
+		spinning: bool = true) -> void:
+	if _crusher_head_texture == null:
+		return
+
+	var gs := float(main.GRID_SIZE)
+	var world_pos: Vector2 = main.grid_to_world(grid_pos)
+	var offset: Vector2 = _get_top_offset(world_pos) * _get_height_scale(block_id)
+
+	# Front-edge cells (one per head) — same mapping _get_front_edge produces.
+	var front_cells := _get_front_edge(grid_pos, grid_size, rotation)
+	if front_cells.size() < 2:
+		return
+
+	# Forward unit vector for the block. Used to shift each head back toward
+	# the crusher body by half a tile so the texture center lands on the
+	# inner edge of the front-cell (crusher side).
+	var fwd: Vector2
+	match rotation:
+		0: fwd = Vector2(1, 0)
+		1: fwd = Vector2(0, 1)
+		2: fwd = Vector2(-1, 0)
+		3: fwd = Vector2(0, -1)
+		_: fwd = Vector2(1, 0)
+
+	# Square sprite centered at the pivot. Drawn below native-size so the
+	# gears sit comfortably inside a single tile — tweak CRUSHER_HEAD_SCALE
+	# at the top of this script (or inline here) if you want them bigger.
+	const CRUSHER_HEAD_SCALE := 0.5
+	var tex_size: Vector2 = _crusher_head_texture.get_size() * CRUSHER_HEAD_SCALE
+	var tex_rect := Rect2(-tex_size * 0.5, tex_size)
+
+	# Per-block phase offsets — derived from grid_pos so neighboring crushers
+	# stay visually desynced. Used both for the spin animation and the
+	# resting angle when the crusher isn't running.
+	var seed_a: int = grid_pos.x * 73 + grid_pos.y * 31
+	var seed_b: int = grid_pos.x * 17 + grid_pos.y * 53
+	var phase_a: float = fposmod(float(seed_a), TAU)
+	var phase_b: float = fposmod(float(seed_b), TAU)
+
+	var angle_a: float = phase_a
+	var angle_b: float = phase_b
+	if spinning:
+		# Placed crushers read live inertial state maintained by _process.
+		# Initialize lazily at rest pose so the first draw works even if no
+		# tick has happened yet (the tick will start easing velocity up/down
+		# on subsequent frames).
+		if not _crusher_head_state.has(grid_pos):
+			_crusher_head_state[grid_pos] = {
+				"angle_a": phase_a, "angle_b": phase_b,
+				"vel_a": 0.0, "vel_b": 0.0,
+			}
+		var s: Dictionary = _crusher_head_state[grid_pos]
+		angle_a = float(s["angle_a"])
+		angle_b = float(s["angle_b"])
+	var angles: Array = [angle_a, angle_b]
+
+	for i in range(2):
+		var cell: Vector2i = front_cells[i]
+		var cell_center: Vector2 = main.grid_to_world(cell) + Vector2(gs * 0.5, gs * 0.5) + offset
+		# Shift back toward the crusher by half a tile → head sits on the
+		# shared edge between the crusher body and the front cell.
+		var head_pos: Vector2 = cell_center - fwd * (gs * 0.5)
+		draw_set_transform(head_pos, angles[i])
+		draw_texture_rect(_crusher_head_texture, tex_rect, false, tint)
+		draw_set_transform(Vector2.ZERO, 0.0)
+
+
+## Returns true if a placed crusher should currently be spinning — i.e. it's
+## finished construction, powered, not disabled by sector script, AND has at
+## least one output item it can still produce (storage slot available OR an
+## adjacent conveyor that can accept it). Matches the productivity checks
+## the LogisticsSystem drill loop uses.
+func _is_crusher_spinning(anchor: Vector2i, data: BlockData) -> bool:
+	if data == null:
+		return false
+	# Under-construction / deconstructing crushers don't spin.
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	# Sector-script-disabled blocks don't spin.
+	var ss = _sector_script_ref()
+	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
+		return false
+	# Not electrically powered → no spin.
+	if data.electrical_power_use > 0:
+		var ps = _power_sys_ref()
+		if ps == null or not ps.is_electrical_powered(anchor):
+			return false
+	# Storage full on every output → stall.
+	var logistics = _logistics
+	if logistics and logistics.has_method("_is_storage_full_for"):
+		var any_room := false
+		for raw_id in data.output_items:
+			var item_id: StringName = StringName(raw_id)
+			if not logistics._is_storage_full_for(anchor, data, item_id):
+				any_room = true
+				break
+		if not any_room and not data.output_items.is_empty():
+			return false
+	return true
+
+
+## Per-frame inertial tick for every crusher head in the world. For each
+## tracked anchor, eases its two head velocities toward their target spin
+## (or 0 when idle) at CRUSHER_HEAD_ACCEL rad/s², then integrates angle.
+## Also garbage-collects state for destroyed/untagged blocks.
+func _tick_crusher_head_states(delta: float) -> void:
+	if _crusher_head_state.is_empty():
+		return
+	var to_erase: Array[Vector2i] = []
+	for anchor in _crusher_head_state:
+		if not main.placed_buildings.has(anchor):
+			to_erase.append(anchor)
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
+		if data == null or not data.tags.has("crusher_heads"):
+			to_erase.append(anchor)
+			continue
+		var active := _is_crusher_spinning(anchor, data)
+		var target_a: float = CRUSHER_HEAD_SPIN_A if active else 0.0
+		var target_b: float = CRUSHER_HEAD_SPIN_B if active else 0.0
+		var s: Dictionary = _crusher_head_state[anchor]
+		var step: float = CRUSHER_HEAD_ACCEL * delta
+		s["vel_a"] = move_toward(float(s["vel_a"]), target_a, step)
+		s["vel_b"] = move_toward(float(s["vel_b"]), target_b, step)
+		s["angle_a"] = fposmod(float(s["angle_a"]) + float(s["vel_a"]) * delta, TAU)
+		s["angle_b"] = fposmod(float(s["angle_b"]) + float(s["vel_b"]) * delta, TAU)
+	for a in to_erase:
+		_crusher_head_state.erase(a)
 
 
 ## Handles Q or R key to rotate, L key to toggle linking mode.
@@ -472,21 +905,30 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
-	# Update build progress — only the first building in the queue gets progress
-	if "build_order" in main and not ("world_paused" in main and main.world_paused) and not ("build_paused" in main and main.build_paused) and not main.build_order.is_empty():
-		var anchor: Vector2i = main.build_order[0]
-		if main.building_build_progress.has(anchor):
-			main.building_build_progress[anchor] += _delta
-			var block_id = main.placed_buildings.get(anchor, &"")
-			var data = Registry.get_block(block_id)
-			if data and main.building_build_progress[anchor] >= data.build_time:
-				main.building_build_progress.erase(anchor)
-				main.build_order.remove_at(0)
-		else:
-			# Anchor no longer in progress dict (destroyed?) — remove from queue
-			main.build_order.remove_at(0)
+	# Pause-aware crusher-head inertial tick. While the world is paused the
+	# per-block velocity/angle both freeze in place; when unpaused they ease
+	# back in or out, giving each head a real spool-up/coast-down feel.
+	if not ("world_paused" in main and main.world_paused):
+		_tick_crusher_head_states(_delta)
 
-	# Process placement queue: place entries that are now in build range and world isn't paused
+	# --- Unified work queue: build + deconstruct, one at a time ---
+	# Walk the queue and tick the first entry that's currently within build
+	# range. Out-of-range entries are just skipped over (not removed) — they'll
+	# pick up again once the drone returns. This lets the drone move on to
+	# reachable work instead of stalling on a distant one. The _tickable_
+	# variant also respects pause flags so paused games don't advance progress
+	# (but the draw pass still highlights the frozen active anchor).
+	var anchor: Vector2i = _get_tickable_work_anchor()
+	if anchor != _NO_ACTIVE_WORK:
+		if main.building_build_progress.has(anchor):
+			_tick_progressive_build(anchor, _delta)
+		elif main.building_deconstruct_progress.has(anchor):
+			_tick_progressive_deconstruct(anchor, _delta)
+		else:
+			# Orphan entry (building destroyed externally) — remove
+			main.work_order.erase(anchor)
+
+	# Process placement queue: place entries that are now in build range
 	if not ("world_paused" in main and main.world_paused) and not _paused_queue.is_empty():
 		var remaining: Array = []
 		for entry in _paused_queue:
@@ -502,23 +944,12 @@ func _process(_delta: float) -> void:
 				remaining.append(entry)
 		_paused_queue = remaining
 
-	# Update deconstruct progress — only the first in queue gets ticked
-	if "deconstruct_order" in main and not ("world_paused" in main and main.world_paused) and not main.deconstruct_order.is_empty():
-		var anchor: Vector2i = main.deconstruct_order[0]
-		if main.building_deconstruct_progress.has(anchor):
-			var entry: Dictionary = main.building_deconstruct_progress[anchor]
-			entry["progress"] += _delta
-			if entry["progress"] >= entry["build_time"]:
-				main.building_deconstruct_progress.erase(anchor)
-				main.deconstruct_order.remove_at(0)
-				main.destroy_building(anchor)
-		else:
-			# Entry was removed externally (e.g., building already destroyed)
-			main.deconstruct_order.remove_at(0)
-
 	# Tick archive decoders
 	if not ("world_paused" in main and main.world_paused):
 		_tick_archive_decoders(_delta)
+
+	# --- The rest of _process (preview, drag, redraw) continues in the
+	# indented block below. The tick helper functions follow after _process ends. ---
 
 	# Always redraw for parallax (walls + void tiles shift with camera)
 	queue_redraw()
@@ -577,6 +1008,7 @@ func _process(_delta: float) -> void:
 			_pathfind_mode = false
 			_pathfind_rotations.clear()
 			_pathfind_bridge_cells.clear()
+			_pathfind_bridge_pairs.clear()
 			_transport_astar = null
 
 			var dx := preview_grid_pos.x - _drag_start.x
@@ -601,7 +1033,133 @@ func _process(_delta: float) -> void:
 			if _is_directional(main.selected_building) and _drag_cells.size() > 1:
 				_compute_path_rotations(_drag_cells)
 
+			# Straight-line drags of a transport block also auto-junction
+			# perpendicular crossings and auto-bridge parallel crossings so
+			# the user doesn't have to hand-place those pieces. Uses the
+			# same helper the Alt-pathfind branch uses.
+			if _is_transport_block(main.selected_building) and _drag_cells.size() > 1:
+				var tag2 := _get_transport_tag(main.selected_building)
+				_drag_cells = _apply_transport_crossings(_drag_cells, tag2)
+				if _is_directional(main.selected_building):
+					_compute_path_rotations(_drag_cells)
+
 	queue_redraw()
+
+
+## Progressive build tick: consumes resources toward the build cost proportional
+## to elapsed time. Pauses when no resources are available. Completes when all
+## resources are consumed AND progress >= build_time.
+func _tick_progressive_build(anchor: Vector2i, delta: float) -> void:
+	var block_id: StringName = main.placed_buildings.get(anchor, &"")
+	var data = Registry.get_block(block_id)
+	if data == null:
+		main.building_build_progress.erase(anchor)
+		main.building_resources_consumed.erase(anchor)
+		main.work_order.erase(anchor)
+		return
+
+	var consumed: Dictionary = main.building_resources_consumed.get(anchor, {})
+	var build_time: float = data.build_time if data.build_time > 0 else 1.0
+
+	# Advance progress
+	main.building_build_progress[anchor] += delta
+	var pct: float = clampf(main.building_build_progress[anchor] / build_time, 0.0, 1.0)
+
+	# Try to consume resources proportional to progress
+	var any_consumed := false
+	var all_fully_consumed := true
+	if main.require_resources and not data.build_cost.is_empty():
+		for item_id in data.build_cost:
+			var rk: StringName = main._resolve_resource_key(str(item_id))
+			var required: int = int(data.build_cost[item_id])
+			var target: int = ceili(pct * required)
+			var already: int = int(consumed.get(rk, 0))
+			var need: int = target - already
+			if need > 0:
+				var available: int = int(main.resources.get(rk, 0))
+				var take: int = mini(need, available)
+				if take > 0:
+					main.resources[rk] -= take
+					consumed[rk] = already + take
+					any_consumed = true
+				if consumed.get(rk, 0) < required:
+					all_fully_consumed = false
+			# already >= required is fine
+		main.building_resources_consumed[anchor] = consumed
+
+		# If nothing was consumed this tick AND not all consumed yet → stall progress
+		if not any_consumed and not all_fully_consumed:
+			# Rewind progress to match actual consumption
+			var min_pct: float = 1.0
+			for item_id in data.build_cost:
+				var rk: StringName = main._resolve_resource_key(str(item_id))
+				var required: int = int(data.build_cost[item_id])
+				if required > 0:
+					min_pct = minf(min_pct, float(consumed.get(rk, 0)) / float(required))
+			main.building_build_progress[anchor] = min_pct * build_time
+			return
+	else:
+		all_fully_consumed = true
+
+	if any_consumed:
+		main.resources_changed.emit(main.resources)
+
+	# Completion: all resources consumed and enough time elapsed
+	if all_fully_consumed and main.building_build_progress[anchor] >= build_time:
+		main.building_build_progress.erase(anchor)
+		main.building_resources_consumed.erase(anchor)
+		# erase by value, not index — the active anchor may not be at [0]
+		# if earlier entries were skipped for being out of build range.
+		main.work_order.erase(anchor)
+		# A newly-completed block flips from is_building_inactive=true to false,
+		# so any system caching its presence needs to refresh. Power network
+		# totals exclude inactive cells; flagging dirty lets it recompute on
+		# the next tick so the new block participates in power balance.
+		var ps := _power_sys_ref()
+		if ps and "_networks_dirty" in ps:
+			ps._networks_dirty = true
+
+
+## Progressive deconstruct tick: advances deconstruct progress and proportionally
+## refunds resources over the duration. When complete, destroys the building.
+func _tick_progressive_deconstruct(anchor: Vector2i, delta: float) -> void:
+	var entry: Dictionary = main.building_deconstruct_progress[anchor]
+	entry["progress"] += delta
+
+	# Proportionally refund resources
+	var build_time: float = float(entry.get("build_time", 1.0))
+	var pct: float = clampf(entry["progress"] / build_time, 0.0, 1.0)
+	var total_refund: Dictionary = entry.get("total_refund", {})
+	var refunded: Dictionary = main.building_resources_refunded.get(anchor, {})
+	var any_refunded := false
+	for rk in total_refund:
+		var total: int = int(total_refund[rk])
+		var target: int = floori(pct * total)
+		var already: int = int(refunded.get(rk, 0))
+		var give: int = target - already
+		if give > 0:
+			main.resources[rk] = main.resources.get(rk, 0) + give
+			refunded[rk] = already + give
+			any_refunded = true
+	main.building_resources_refunded[anchor] = refunded
+	if any_refunded:
+		main.resources_changed.emit(main.resources)
+
+	# Completion
+	if entry["progress"] >= build_time:
+		# Refund any remaining (rounding)
+		for rk in total_refund:
+			var total: int = int(total_refund[rk])
+			var already: int = int(refunded.get(rk, 0))
+			if already < total:
+				main.resources[rk] = main.resources.get(rk, 0) + (total - already)
+		main.building_deconstruct_progress.erase(anchor)
+		main.building_resources_refunded.erase(anchor)
+		# erase by value, not index — see _tick_progressive_build comment.
+		main.work_order.erase(anchor)
+		main.destroy_building(anchor)
+		main.resources_changed.emit(main.resources)
+
 
 ## Returns true if a block can be placed at the given grid position.
 ## Checks bounds, cell empty, drone range, and extractor/pump validity.
@@ -669,6 +1227,34 @@ func _is_in_build_range(grid_pos: Vector2i) -> bool:
 	return true
 
 
+## Returns the anchor of the work-order entry the drone should currently be
+## building/deconstructing — i.e. the first entry in main.work_order that is
+## still inside build range. Returns Vector2i(-9999,-9999) if nothing is in
+## range or the queue is empty. NOTE: this function intentionally does NOT
+## consider pause state, so the draw pass can keep rendering the active
+## block's progress indicator (the reveal line / decon sweep) frozen at its
+## current value while the game is paused. The pause guard lives in _process.
+const _NO_ACTIVE_WORK := Vector2i(-9999, -9999)
+func _get_active_work_anchor() -> Vector2i:
+	if not ("work_order" in main) or main.work_order.is_empty():
+		return _NO_ACTIVE_WORK
+	for a in main.work_order:
+		if _is_in_build_range(a):
+			return a
+	return _NO_ACTIVE_WORK
+
+
+## Like _get_active_work_anchor but also honors world/build pause flags,
+## returning _NO_ACTIVE_WORK when progress should not advance this frame.
+## Used by _process to decide whether to tick build/deconstruct progress.
+func _get_tickable_work_anchor() -> Vector2i:
+	if "world_paused" in main and main.world_paused:
+		return _NO_ACTIVE_WORK
+	if "build_paused" in main and main.build_paused:
+		return _NO_ACTIVE_WORK
+	return _get_active_work_anchor()
+
+
 ## Like _can_place_at but skips the drone build-range check and uses a
 ## specific rotation instead of main.placement_rotation. Used for the ghost
 ## queue — blocks placed outside range are validated the same way as regular
@@ -710,6 +1296,12 @@ func _can_place_ignoring_range(grid_pos: Vector2i, block_id: StringName, rotatio
 		if terrain:
 			var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
 			if terrain.floor_tiles.get(center, &"") != &"vent":
+				return false
+	# Geyser miner must be centered on a geyser tile
+	if data.tags.has("geyser_miner"):
+		if terrain:
+			var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+			if terrain.floor_tiles.get(center, &"") != &"geyser":
 				return false
 	return true
 
@@ -757,6 +1349,12 @@ func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 		if terrain:
 			var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
 			if terrain.floor_tiles.get(center, &"") != &"vent":
+				return false
+	# Geyser miner must be centered on a geyser tile
+	if data.tags.has("geyser_miner"):
+		if terrain:
+			var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+			if terrain.floor_tiles.get(center, &"") != &"geyser":
 				return false
 
 	return true
@@ -833,6 +1431,8 @@ func _is_facing_wall(grid_pos: Vector2i, rotation: int, block_id: StringName = &
 		3: dir = Vector2i(0, -1)
 		_: dir = Vector2i(1, 0)
 
+	# Wall miners accept a wall either directly on the front edge OR one tile
+	# further ahead, matching how drills check for ore.
 	var front_cells = _get_front_edge(grid_pos, data.grid_size, rotation)
 	for cell in front_cells:
 		if _is_mineable_wall(terrain, cell):
@@ -921,7 +1521,7 @@ func _unhandled_input(event: InputEvent) -> void:
 						var click_block_id = main.placed_buildings[click_pos]
 						var click_data = Registry.get_block(click_block_id)
 						var click_anchor: Vector2i = main.building_origins.get(click_pos, click_pos)
-						if click_data and (click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter")):
+						if click_data and (click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader")):
 							_open_world_menu("sorter", click_anchor)
 							get_viewport().set_input_as_handled()
 							return
@@ -952,9 +1552,8 @@ func _unhandled_input(event: InputEvent) -> void:
 						for cell in _drag_cells:
 							var cell_block: StringName = old_building
 							var cell_rot: int = _pathfind_rotations.get(cell, old_rot)
-							if _pathfind_mode:
-								if _pathfind_bridge_cells.has(cell):
-									cell_block = _pathfind_bridge_cells[cell]
+							if _pathfind_bridge_cells.has(cell):
+								cell_block = _pathfind_bridge_cells[cell]
 							if (main.is_cell_empty(cell) or main.placed_buildings.get(cell, &"") == cell_block) and not queued_positions.has(cell):
 								_paused_queue.append({
 									"grid_pos": cell,
@@ -968,9 +1567,8 @@ func _unhandled_input(event: InputEvent) -> void:
 						for cell in _drag_cells:
 							var cell_block: StringName = old_building
 							var cell_rot: int = _pathfind_rotations.get(cell, old_rot)
-							if _pathfind_mode:
-								if _pathfind_bridge_cells.has(cell):
-									cell_block = _pathfind_bridge_cells[cell]
+							if _pathfind_bridge_cells.has(cell):
+								cell_block = _pathfind_bridge_cells[cell]
 							if _is_in_build_range(cell):
 								# In range: place immediately
 								main.placement_rotation = cell_rot
@@ -985,11 +1583,34 @@ func _unhandled_input(event: InputEvent) -> void:
 								})
 						main.placement_rotation = old_rot
 						main.selected_building = old_building
+
+					# Auto-link bridge pairs that were placed by the pathfinder
+					if not _pathfind_bridge_pairs.is_empty():
+						var power_sys_link = get_node_or_null("/root/Main/PowerSystem")
+						if power_sys_link:
+							for pair in _pathfind_bridge_pairs:
+								var a: Vector2i = pair[0]
+								var b: Vector2i = pair[1]
+								# Only link if both bridges were actually placed
+								if main.placed_buildings.has(a) and main.placed_buildings.has(b):
+									var a_data = Registry.get_block(main.placed_buildings[a])
+									var b_data = Registry.get_block(main.placed_buildings[b])
+									if a_data and b_data and a_data.tags.has("bridge") and b_data.tags.has("bridge"):
+										# Remove existing links first (1:1)
+										var existing_a = power_sys_link.get_linked_partner(a)
+										if existing_a != null:
+											power_sys_link.unlink_blocks(a, existing_a)
+										var existing_b = power_sys_link.get_linked_partner(b)
+										if existing_b != null:
+											power_sys_link.unlink_blocks(b, existing_b)
+										power_sys_link.link_blocks(a, b)
+
 					_drag_placing = false
 					_drag_cells.clear()
 					_pathfind_mode = false
 					_pathfind_rotations.clear()
 					_pathfind_bridge_cells.clear()
+					_pathfind_bridge_pairs.clear()
 					_transport_astar = null
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			# Ctrl+right-click is unit control on macOS (ctrl+click = right-click)
@@ -1281,6 +1902,9 @@ func _draw_world_menu() -> void:
 
 
 func _draw() -> void:
+	# Resolve any still-pending threaded texture loads on the first paint.
+	if not _textures_ready:
+		_ensure_textures_loaded()
 	_draw_placed_buildings()
 	_draw_cranes()
 	_draw_paused_queue()
@@ -1335,6 +1959,8 @@ func _soft_cap_value(value: float) -> float:
 
 
 func _get_top_offset(_world_pos: Vector2) -> Vector2:
+	if not parallax_enabled:
+		return Vector2.ZERO
 	var camera = get_viewport().get_camera_2d()
 	if not camera:
 		return Vector2.ZERO
@@ -1359,6 +1985,132 @@ func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: floa
 	draw_set_transform(center, angle)
 	draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
 	draw_set_transform(Vector2.ZERO, 0.0)
+
+
+## Draws the unit being fabricated between a fabricator's base and top sprites.
+## Handles three visual phases (from factory_buffers state):
+##   - "processing": left-to-right construction reveal animation
+##   - "ejecting": unit slides from center toward the front edge
+##   - "holding":   unit sits at the front edge waiting to be output
+func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: Vector2, width: float, height: float, rot: int) -> void:
+	if _logistics == null or not _logistics.factory_buffers.has(grid_pos):
+		return
+	var state: Dictionary = _logistics.factory_buffers[grid_pos]
+	var phase: String = state.get("phase", "")
+	if phase != "processing" and phase != "ejecting" and phase != "holding":
+		return
+	var unit_data = Registry.get_unit(data.produced_unit)
+	if unit_data == null:
+		return
+	var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
+	var dir_vec: Vector2
+	match rot:
+		0: dir_vec = Vector2(1, 0)
+		1: dir_vec = Vector2(0, 1)
+		2: dir_vec = Vector2(-1, 0)
+		3: dir_vec = Vector2(0, -1)
+		_: dir_vec = Vector2(1, 0)
+
+	# Target render size: relative to the fabricator's own footprint so the
+	# held/ejecting unit never overflows the building. ~50% of the smaller
+	# side looks right for a 3x3 fabricator displaying a tank body.
+	var base_sz: float = minf(width, height) * 0.5
+
+	var unit_angle: float = rot * PI / 2.0  # 0=right, 1=down, 2=left, 3=up
+
+	# Position along the build/eject track
+	var front_dist: float = maxf(width, height) * 0.5 - base_sz * 0.25
+	var unit_pos: Vector2 = center
+	var alpha_mul: float = 1.0
+	var reveal_pct: float = 1.0
+
+	match phase:
+		"processing":
+			var bt: float = unit_data.build_time if unit_data.build_time > 0 else 1.0
+			var timer: float = float(state.get("timer", 0.0))
+			reveal_pct = clampf(1.0 - timer / bt, 0.0, 1.0)
+			alpha_mul = 0.4 + 0.6 * reveal_pct
+			unit_pos = center
+		"ejecting":
+			var ep: float = clampf(float(state.get("eject_progress", 0.0)), 0.0, 1.0)
+			unit_pos = center + dir_vec * (front_dist * ep)
+		"holding":
+			unit_pos = center + dir_vec * front_dist
+
+	# Draw layered (base + head) if the unit has them; else fall back to icon.
+	var drew_layered: bool = false
+	if unit_data.base_sprite != null or unit_data.head_sprite != null:
+		drew_layered = true
+		if unit_data.base_sprite:
+			var bt_size: Vector2 = _fit_texture_size(unit_data.base_sprite, base_sz)
+			draw_set_transform(unit_pos, 0.0)
+			draw_texture_rect(
+				unit_data.base_sprite,
+				Rect2(-bt_size * 0.5, bt_size),
+				false,
+				Color(1, 1, 1, alpha_mul)
+			)
+			draw_set_transform(Vector2.ZERO, 0.0)
+		if unit_data.head_sprite:
+			var h_size: Vector2 = _fit_texture_size(unit_data.head_sprite, base_sz)
+			draw_set_transform(unit_pos, unit_angle + PI / 2.0)
+			draw_texture_rect(
+				unit_data.head_sprite,
+				Rect2(-h_size * 0.5, h_size),
+				false,
+				Color(1, 1, 1, alpha_mul)
+			)
+			draw_set_transform(Vector2.ZERO, 0.0)
+	elif unit_data.icon != null:
+		var i_size: Vector2 = _fit_texture_size(unit_data.icon, base_sz)
+		draw_set_transform(unit_pos, unit_angle + PI / 2.0)
+		draw_texture_rect(
+			unit_data.icon,
+			Rect2(-i_size * 0.5, i_size),
+			false,
+			Color(1, 1, 1, alpha_mul)
+		)
+		draw_set_transform(Vector2.ZERO, 0.0)
+	else:
+		draw_rect(
+			Rect2(unit_pos - Vector2(base_sz, base_sz) * 0.5, Vector2(base_sz, base_sz)),
+			Color(0.6, 0.7, 0.9, 0.95 * alpha_mul),
+			true
+		)
+
+	# Construction reveal overlay (dark rectangle + progress line) drawn
+	# axis-aligned over the unit center during the processing phase.
+	if phase == "processing":
+		var rect_sz: float = base_sz
+		var rect_pos: Vector2 = center - Vector2(rect_sz * 0.5, rect_sz * 0.5)
+		var reveal_x: float = rect_sz * reveal_pct
+		draw_rect(
+			Rect2(rect_pos.x + reveal_x, rect_pos.y, rect_sz - reveal_x, rect_sz),
+			Color(0, 0, 0, 0.6),
+			true
+		)
+		if reveal_pct < 1.0:
+			draw_line(
+				Vector2(rect_pos.x + reveal_x, rect_pos.y),
+				Vector2(rect_pos.x + reveal_x, rect_pos.y + rect_sz),
+				Color(1.0, 0.9, 0.2, 0.9), 1.5
+			)
+	# Silence the unused-local warning from `drew_layered` while keeping the
+	# variable name around for readers.
+	if drew_layered:
+		pass
+
+
+## Returns a size vector that fits the texture into a box of side `target_px`,
+## preserving aspect ratio. Used so that source textures authored at arbitrary
+## resolutions all render at the same on-screen scale.
+func _fit_texture_size(tex: Texture2D, target_px: float) -> Vector2:
+	var native: Vector2 = tex.get_size()
+	if native.x <= 0.0 or native.y <= 0.0:
+		return Vector2(target_px, target_px)
+	var max_dim: float = maxf(native.x, native.y)
+	var s: float = target_px / max_dim
+	return native * s
 
 
 # Gets the color for a block from the Registry.
@@ -1399,7 +2151,12 @@ func _is_directional(block_id: StringName) -> bool:
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return false
-	return data.is_transport() or data.category == BlockData.BlockCategory.EXTRACTORS \
+	# Omnidirectional blocks accept/output on every side, so they never need
+	# a rotation. The tag wins over the EXTRACTORS-category default.
+	if data.tags.has("omnidirectional"):
+		return false
+	return (data.is_transport() and not data.tags.has("junction")) \
+		or data.category == BlockData.BlockCategory.EXTRACTORS \
 		or data.tags.has("shaft") \
 		or data.tags.has("constructor") or data.tags.has("deconstructor") \
 		or data.tags.has("payload_loader") or data.tags.has("freight_loader") \
@@ -1433,6 +2190,8 @@ func _get_transport_tag(block_id: StringName) -> String:
 
 
 ## Build a local AStarGrid2D for transport pathfinding (cardinal only).
+## Same-type transports get a weight penalty so the pathfinder prefers routing
+## around existing belts, but CAN cross them when no alternative exists.
 func _build_transport_astar(transport_tag: String) -> void:
 	_transport_astar = AStarGrid2D.new()
 	_transport_astar.region = Rect2i(0, 0, main.GRID_WIDTH, main.GRID_HEIGHT)
@@ -1444,22 +2203,42 @@ func _build_transport_astar(transport_tag: String) -> void:
 	for x in range(main.GRID_WIDTH):
 		for y in range(main.GRID_HEIGHT):
 			var pos := Vector2i(x, y)
-			var is_solid := false
 			# Terrain walls block transport
 			if terrain and terrain.has_wall(pos):
-				is_solid = true
-			# Existing buildings block (except same-type transports which can be bridged)
-			elif main.placed_buildings.has(pos):
+				_transport_astar.set_point_solid(pos, true)
+				continue
+			# Existing buildings
+			if main.placed_buildings.has(pos):
 				var existing_data = Registry.get_block(main.placed_buildings[pos])
 				if existing_data:
-					if not existing_data.tags.has(transport_tag):
-						is_solid = true
-					# Same-type transport: passable (bridge crossing)
-			if is_solid:
-				_transport_astar.set_point_solid(pos, true)
+					if existing_data.tags.has(transport_tag):
+						# Same-type transport: passable but expensive so path
+						# prefers going around. Weight = 20 discourages crossing
+						# but allows it when no empty route exists.
+						_transport_astar.set_point_weight_scale(pos, 20.0)
+					else:
+						# Non-transport building: impassable
+						_transport_astar.set_point_solid(pos, true)
 
 
-## Compute a pathfound transport route, detecting bridge crossings.
+## Find the junction block for a transport type by scanning the registry.
+var _junction_cache: Dictionary = {}  # transport_tag -> StringName
+func _find_junction_for_type(transport_tag: String) -> StringName:
+	if _junction_cache.has(transport_tag):
+		return _junction_cache[transport_tag]
+	for block_id in Registry.blocks:
+		var data = Registry.get_block(block_id)
+		if data and data.tags.has(transport_tag) and data.tags.has("junction"):
+			_junction_cache[transport_tag] = block_id
+			return block_id
+	_junction_cache[transport_tag] = &""
+	return &""
+
+
+## Compute a pathfound transport route, detecting bridge/junction crossings.
+## When the path crosses an existing belt:
+##   - Perpendicular crossing → replace the existing belt with a junction
+##   - Parallel or same-direction → insert bridge pair (before + after) and link them
 func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String) -> Array[Vector2i]:
 	_pathfind_bridge_cells.clear()
 	if _transport_astar == null:
@@ -1474,15 +2253,95 @@ func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String
 	if id_path.is_empty():
 		return []
 
-	var result: Array[Vector2i] = []
+	var raw: Array[Vector2i] = []
 	for p in id_path:
-		var gp := Vector2i(int(p.x), int(p.y))
-		result.append(gp)
-		# Check if this cell has an existing same-type transport (needs bridge)
+		raw.append(Vector2i(int(p.x), int(p.y)))
+
+	return _apply_transport_crossings(raw, transport_tag)
+
+
+## Walks a transport path (in order) and rewrites it so that any cell that
+## overlaps an existing same-type transport becomes a junction (perpendicular
+## crossing) or a bridge pair (same-axis crossing). The substitutions land
+## in `_pathfind_bridge_cells` / `_pathfind_bridge_pairs` so the commit loop
+## can pick them up. Callers are expected to have cleared those dicts first.
+func _apply_transport_crossings(raw: Array[Vector2i], transport_tag: String) -> Array[Vector2i]:
+	var bridge_id := _find_bridge_for_type(transport_tag)
+	var junction_id := _find_junction_for_type(transport_tag)
+
+	var result: Array[Vector2i] = []
+	var i := 0
+	while i < raw.size():
+		var gp: Vector2i = raw[i]
+
+		# If this cell overlaps an existing block, figure out how to bridge it.
 		if main.placed_buildings.has(gp):
-			var bridge_id := _find_bridge_for_type(transport_tag)
-			if bridge_id != &"":
-				_pathfind_bridge_cells[gp] = bridge_id
+			var existing_id: StringName = main.placed_buildings[gp]
+			var existing_data = Registry.get_block(existing_id)
+			var same_transport: bool = existing_data != null and existing_data.tags.has(transport_tag)
+
+			if same_transport:
+				var existing_rot: int = main.building_rotation.get(gp, 0)
+				var path_rot: int = 0
+				if i > 0:
+					var delta: Vector2i = gp - raw[i - 1]
+					var idx: int = DIR_VECTORS.find(delta)
+					if idx >= 0:
+						path_rot = idx
+				elif i + 1 < raw.size():
+					# First cell: derive direction from the next step instead.
+					var delta_next: Vector2i = raw[i + 1] - gp
+					var idx_n: int = DIR_VECTORS.find(delta_next)
+					if idx_n >= 0:
+						path_rot = idx_n
+
+				# 0 = same direction (overlay no-op), 1/3 = perpendicular
+				# (junction), 2 = opposite axis (overlay, which re-places the
+				# belt with the new drag rotation — effectively flipping it).
+				var angle_diff: int = absi(path_rot - existing_rot) % 4
+				var is_perpendicular: bool = (angle_diff == 1 or angle_diff == 3)
+
+				if is_perpendicular and junction_id != &"":
+					# Perpendicular crossing: replace existing belt with a junction.
+					_pathfind_bridge_cells[gp] = junction_id
+					result.append(gp)
+				else:
+					# Same or opposite direction: let the new belt overlay the
+					# existing one. For opposite direction the drag rotation
+					# will flip it at place time.
+					result.append(gp)
+			elif bridge_id != &"":
+				# Non-transport obstacle (or a different transport type) in the
+				# drag path — bridge over it. The cell BEFORE becomes a bridge
+				# start, the cell AFTER becomes a bridge end, and the crossing
+				# cell(s) are skipped entirely.
+				if result.size() > 0:
+					_pathfind_bridge_cells[result[-1]] = bridge_id
+				# Skip consecutive occupied cells until we find an empty one
+				# (the bridge may need to span multiple obstacle tiles).
+				var bridge_end := i + 1
+				while bridge_end < raw.size() and main.placed_buildings.has(raw[bridge_end]):
+					var ed = Registry.get_block(main.placed_buildings.get(raw[bridge_end], &""))
+					# A same-tag transport is a valid landing cell, not an obstacle.
+					if ed != null and ed.tags.has(transport_tag):
+						break
+					bridge_end += 1
+				if bridge_end < raw.size():
+					_pathfind_bridge_cells[raw[bridge_end]] = bridge_id
+					if result.size() > 0:
+						_pathfind_bridge_pairs.append([result[-1], raw[bridge_end]])
+					i = bridge_end
+					result.append(raw[i])
+				else:
+					# No landing cell available — fall back to just skipping
+					# the obstacle cell; placement will fail there harmlessly.
+					pass
+			else:
+				# Obstacle but no bridge block defined — skip (placement fails).
+				pass
+		else:
+			result.append(gp)
+		i += 1
 
 	return result
 
@@ -1659,147 +2518,229 @@ func _get_belt_draw_info_with_preview(grid_pos: Vector2i,
 
 
 func _draw_placed_buildings() -> void:
-	var camera = get_viewport().get_camera_2d()
-	var cam_center = camera.get_screen_center_position() if camera else Vector2.ZERO
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	# --- Per-frame caches (hot state fetched once, not per-tile-per-pass) ---
+	var camera := get_viewport().get_camera_2d()
+	var cam_center: Vector2 = camera.get_screen_center_position() if camera else Vector2.ZERO
+	var terrain := _terrain_ref()
+	var ss := _sector_script_ref()
+	var power_sys := _power_sys_ref()
+	var fade_off: bool = "fade_enabled" in main and not main.fade_enabled
+	var has_build_progress: bool = "building_build_progress" in main and not main.building_build_progress.is_empty()
+	var has_decon: bool = "building_deconstruct_progress" in main and not main.building_deconstruct_progress.is_empty()
+	# The "active" anchor is the one we're actually ticking this frame — which
+	# may not be work_order[0] if the head is out of build range.
+	var active_work_anchor: Vector2i = _get_active_work_anchor()
+	var has_active_work: bool = active_work_anchor != _NO_ACTIVE_WORK
 
 	# Rebuild wall cache if dirty
 	if _walls_dirty:
 		_rebuild_wall_cache()
 
 	# Viewport culling: compute visible grid range with margin for parallax
-	var viewport_size = get_viewport_rect().size
-	var cam_zoom = camera.zoom if camera else Vector2.ONE
-	var half_view = viewport_size / (2.0 * cam_zoom)
-	var margin_px = max_depth + float(main.GRID_SIZE)
-	var view_min = cam_center - half_view - Vector2(margin_px, margin_px)
-	var view_max = cam_center + half_view + Vector2(margin_px, margin_px)
-	var grid_min = main.world_to_grid(view_min) - Vector2i(1, 1)
-	var grid_max = main.world_to_grid(view_max) + Vector2i(1, 1)
+	var viewport_size := get_viewport_rect().size
+	var cam_zoom: Vector2 = camera.zoom if camera else Vector2.ONE
+	var half_view := viewport_size / (2.0 * cam_zoom)
+	var margin_px: float = max_depth + float(main.GRID_SIZE)
+	var view_min := cam_center - half_view - Vector2(margin_px, margin_px)
+	var view_max := cam_center + half_view + Vector2(margin_px, margin_px)
+	var grid_min: Vector2i = main.world_to_grid(view_min) - Vector2i(1, 1)
+	var grid_max: Vector2i = main.world_to_grid(view_max) + Vector2i(1, 1)
 
-	# Collect visible building anchors and walls into a unified list
+	# Build one culled list for buildings + walls, tracking wall-ness in parallel.
 	var all_positions: Array[Vector2i] = []
-	var _wall_set := _cached_wall_set
+	var is_wall_of: Array[bool] = []
+	var wall_set: Dictionary = _cached_wall_set
+	var any_non_lumina := false
 
 	for grid_pos in main.placed_buildings:
-		if main.is_building_anchor(grid_pos):
-			if grid_pos.x >= grid_min.x and grid_pos.x <= grid_max.x and grid_pos.y >= grid_min.y and grid_pos.y <= grid_max.y:
-				all_positions.append(grid_pos)
+		if grid_pos.x < grid_min.x or grid_pos.x > grid_max.x:
+			continue
+		if grid_pos.y < grid_min.y or grid_pos.y > grid_max.y:
+			continue
+		if not main.is_building_anchor(grid_pos):
+			continue
+		all_positions.append(grid_pos)
+		is_wall_of.append(false)
+		if not any_non_lumina and main.get_building_faction(grid_pos) != FACTION_LUMINA:
+			any_non_lumina = true
 
-	for grid_pos in _wall_set:
-		if grid_pos.x >= grid_min.x and grid_pos.x <= grid_max.x and grid_pos.y >= grid_min.y and grid_pos.y <= grid_max.y:
-			all_positions.append(grid_pos)
-
-	# Sort so further ones draw first (painter's algorithm)
-	all_positions.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		var world_a = main.grid_to_world(a) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-		var world_b = main.grid_to_world(b) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-		var dist_a = world_a.distance_squared_to(cam_center)
-		var dist_b = world_b.distance_squared_to(cam_center)
-		return dist_a > dist_b
-	)
+	for grid_pos in wall_set:
+		if grid_pos.x < grid_min.x or grid_pos.x > grid_max.x:
+			continue
+		if grid_pos.y < grid_min.y or grid_pos.y > grid_max.y:
+			continue
+		all_positions.append(grid_pos)
+		is_wall_of.append(true)
 
 	var gs := float(main.GRID_SIZE)
+	var half_gs: float = gs * 0.5
+
+	# Pre-compute sort distances so sort_custom becomes a pure float compare.
+	var n: int = all_positions.size()
+	var dists: PackedFloat32Array = PackedFloat32Array()
+	dists.resize(n)
+	for i in range(n):
+		var gp: Vector2i = all_positions[i]
+		var cx: float = float(gp.x) * gs + half_gs
+		var cy: float = float(gp.y) * gs + half_gs
+		var dx: float = cx - cam_center.x
+		var dy: float = cy - cam_center.y
+		dists[i] = dx * dx + dy * dy
+
+	# Sort an index permutation (keeps the parallel is_wall_of array aligned).
+	var order: Array = []
+	order.resize(n)
+	for i in range(n):
+		order[i] = i
+	order.sort_custom(func(a: int, b: int) -> bool:
+		return dists[a] > dists[b])
+
+	# Parallax offset — _get_top_offset ignores world_pos (leading underscore),
+	# so it's a single pair of values per frame. Compute once.
+	var parallax_off := _get_top_offset(Vector2.ZERO)
+	var parallax_off_transport: Vector2 = parallax_off * 0.5
+
+	# Per-call memo caches.
+	var wall_tile_cache: Dictionary = {}
+	var ore_tile_cache: Dictionary = {}
+	var block_data_cache: Dictionary = {}
+	var block_transport_cache: Dictionary = {}
+	var block_size_cache: Dictionary = {}
+
+
+	var _get_wall_tile := func(tid: StringName) -> TerrainTileData:
+		if wall_tile_cache.has(tid):
+			return wall_tile_cache[tid]
+		var td: TerrainTileData = Registry.get_tile(tid)
+		wall_tile_cache[tid] = td
+		return td
+
+	var _get_ore_tile := func(tid: StringName) -> TerrainTileData:
+		if ore_tile_cache.has(tid):
+			return ore_tile_cache[tid]
+		var td: TerrainTileData = Registry.get_tile(tid)
+		ore_tile_cache[tid] = td
+		return td
+
+	var _get_block := func(bid: StringName) -> BlockData:
+		if block_data_cache.has(bid):
+			return block_data_cache[bid]
+		var bd: BlockData = Registry.get_block(bid)
+		block_data_cache[bid] = bd
+		return bd
+
+	var _offset_for := func(bid: StringName) -> Vector2:
+		if block_transport_cache.has(bid):
+			return parallax_off_transport if block_transport_cache[bid] else parallax_off
+		var bd = _get_block.call(bid)
+		var is_t: bool = bd != null and bd.is_transport()
+		block_transport_cache[bid] = is_t
+		return parallax_off_transport if is_t else parallax_off
+
+	var _size_for := func(bid: StringName) -> Vector2i:
+		if block_size_cache.has(bid):
+			return block_size_cache[bid]
+		var bd = _get_block.call(bid)
+		var sz: Vector2i = bd.grid_size if bd else Vector2i.ONE
+		block_size_cache[bid] = sz
+		return sz
 
 	# --- PASS 1: Draw ALL sides ---
-	for grid_pos in all_positions:
-		var world_pos = main.grid_to_world(grid_pos)
-		var margin := 0
+	for idx in order:
+		var grid_pos: Vector2i = all_positions[idx]
+		var is_wall: bool = is_wall_of[idx]
+		var world_pos: Vector2 = main.grid_to_world(grid_pos)
 		var offset: Vector2
 		var side_color: Color
 		var side_color_darker: Color
 		var width: float
 		var height: float
 
-		if _wall_set.has(grid_pos):
+		if is_wall:
 			if terrain == null:
 				continue
-			var _ss_side = get_node_or_null("/root/Main/SectorScript")
-			if _ss_side and _ss_side.is_tile_hidden(grid_pos):
-				continue
-			var fade_alpha := _get_wall_fade_alpha(grid_pos)
-			if not terrain.wall_tiles.has(grid_pos):
-				continue
-			var tile_data = Registry.get_tile(terrain.wall_tiles[grid_pos])
-			if tile_data == null or tile_data.height <= 0:
-				continue
-			offset = _get_top_offset(world_pos)
-			side_color = tile_data.get_side_color()
-			side_color_darker = tile_data.get_side_color_dark()
-			# Darken sides based on distance from floor (blend toward black)
-			var darkness := 1.0 - fade_alpha
-			side_color = side_color.lerp(Color.BLACK, darkness)
-			side_color_darker = side_color_darker.lerp(Color.BLACK, darkness)
-			width = float(main.GRID_SIZE) - margin * 2
-			height = width
-		else:
-			# Skip buildings in hidden areas
-			var ss = get_node_or_null("/root/Main/SectorScript")
 			if ss and ss.is_tile_hidden(grid_pos):
 				continue
-			var block_id = main.placed_buildings[grid_pos]
-			var block_size = _get_block_grid_size(block_id)
-			var side_colors = _get_side_colors(block_id)
-			offset = _get_top_offset(world_pos) * _get_height_scale(block_id)
+			if not terrain.wall_tiles.has(grid_pos):
+				continue
+			var tile_data: TerrainTileData = _get_wall_tile.call(terrain.wall_tiles[grid_pos])
+			if tile_data == null or tile_data.height <= 0:
+				continue
+			var fade_alpha := _get_wall_fade_alpha(grid_pos)
+			offset = parallax_off
+			side_color = tile_data.get_side_color()
+			side_color_darker = tile_data.get_side_color_dark()
+			var darkness: float = 1.0 - fade_alpha
+			side_color = side_color.lerp(Color.BLACK, darkness)
+			side_color_darker = side_color_darker.lerp(Color.BLACK, darkness)
+			width = gs
+			height = gs
+		else:
+			if ss and ss.is_tile_hidden(grid_pos):
+				continue
+			var block_id: StringName = main.placed_buildings[grid_pos]
+			var block_size: Vector2i = _size_for.call(block_id)
+			var side_colors := _get_side_colors(block_id)
+			offset = _offset_for.call(block_id)
 			side_color = side_colors[0]
 			side_color_darker = side_colors[1]
-			width = float(main.GRID_SIZE) * block_size.x - margin * 2
-			height = float(main.GRID_SIZE) * block_size.y - margin * 2
+			width = gs * block_size.x
+			height = gs * block_size.y
 
-		var b_tl = world_pos + Vector2(margin, margin)
-		var b_tr = world_pos + Vector2(margin + width, margin)
-		var b_br = world_pos + Vector2(margin + width, margin + height)
-		var b_bl = world_pos + Vector2(margin, margin + height)
-		var t_tl = b_tl + offset
-		var t_tr = b_tr + offset
-		var t_br = b_br + offset
-		var t_bl = b_bl + offset
+		var b_tl: Vector2 = world_pos
+		var b_tr: Vector2 = world_pos + Vector2(width, 0)
+		var b_br: Vector2 = world_pos + Vector2(width, height)
+		var b_bl: Vector2 = world_pos + Vector2(0, height)
+		var t_tl: Vector2 = b_tl + offset
+		var t_tr: Vector2 = b_tr + offset
+		var t_br: Vector2 = b_br + offset
+		var t_bl: Vector2 = b_bl + offset
 
 		if abs(offset.x) > 0.5 or abs(offset.y) > 0.5:
-			# Walls occlude sides where adjacent wall/building exists
-			var is_wall := _wall_set.has(grid_pos)
 			var draw_south := true
 			var draw_north := true
 			var draw_east := true
 			var draw_west := true
 			if is_wall:
-				draw_south = not (_wall_set.has(grid_pos + Vector2i(0, 1)) or main.placed_buildings.has(grid_pos + Vector2i(0, 1)))
-				draw_north = not (_wall_set.has(grid_pos + Vector2i(0, -1)) or main.placed_buildings.has(grid_pos + Vector2i(0, -1)))
-				draw_east = not (_wall_set.has(grid_pos + Vector2i(1, 0)) or main.placed_buildings.has(grid_pos + Vector2i(1, 0)))
-				draw_west = not (_wall_set.has(grid_pos + Vector2i(-1, 0)) or main.placed_buildings.has(grid_pos + Vector2i(-1, 0)))
+				draw_south = not (wall_set.has(grid_pos + Vector2i(0, 1)) or main.placed_buildings.has(grid_pos + Vector2i(0, 1)))
+				draw_north = not (wall_set.has(grid_pos + Vector2i(0, -1)) or main.placed_buildings.has(grid_pos + Vector2i(0, -1)))
+				draw_east = not (wall_set.has(grid_pos + Vector2i(1, 0)) or main.placed_buildings.has(grid_pos + Vector2i(1, 0)))
+				draw_west = not (wall_set.has(grid_pos + Vector2i(-1, 0)) or main.placed_buildings.has(grid_pos + Vector2i(-1, 0)))
 
-			if offset.y < 0 and draw_south:
+			# Degenerate-polygon guard: each side's thickness comes from one axis
+			# of the parallax offset. If that axis is near zero the polygon
+			# collapses to a line and draw_polygon fails triangulation. Require
+			# the relevant axis to have non-trivial magnitude.
+			const SIDE_MIN := 0.5
+			if offset.y < -SIDE_MIN and draw_south:
 				draw_polygon([b_bl, b_br, t_br, t_bl], [side_color, side_color, side_color, side_color])
-			if offset.y > 0 and draw_north:
+			if offset.y > SIDE_MIN and draw_north:
 				draw_polygon([b_tl, b_tr, t_tr, t_tl], [side_color, side_color, side_color, side_color])
-			if offset.x < 0 and draw_east:
+			if offset.x < -SIDE_MIN and draw_east:
 				draw_polygon([b_tr, b_br, t_br, t_tr], [side_color_darker, side_color_darker, side_color_darker, side_color_darker])
-			if offset.x > 0 and draw_west:
+			if offset.x > SIDE_MIN and draw_west:
 				draw_polygon([b_tl, b_bl, t_bl, t_tl], [side_color_darker, side_color_darker, side_color_darker, side_color_darker])
 
 	# --- PASS 2: Draw ALL top faces ---
-	for grid_pos in all_positions:
-		var world_pos = main.grid_to_world(grid_pos)
-		var margin := 0
+	for idx in order:
+		var grid_pos: Vector2i = all_positions[idx]
+		var is_wall: bool = is_wall_of[idx]
+		var world_pos: Vector2 = main.grid_to_world(grid_pos)
 
 		# Wall tile top face
-		if _wall_set.has(grid_pos):
+		if is_wall:
 			if terrain == null:
 				continue
-			# Skip hidden walls entirely — visible wall gradients handle the transition
-			var _ss_wall = get_node_or_null("/root/Main/SectorScript")
-			if _ss_wall and _ss_wall.is_tile_hidden(grid_pos):
+			if ss and ss.is_tile_hidden(grid_pos):
 				continue
-			var top_size = float(main.GRID_SIZE) - margin * 2
 			if not terrain.wall_tiles.has(grid_pos):
 				continue
-			var tile_data = Registry.get_tile(terrain.wall_tiles[grid_pos])
+			var tile_data: TerrainTileData = _get_wall_tile.call(terrain.wall_tiles[grid_pos])
 			if tile_data == null:
 				continue
-			var w_offset = _get_top_offset(world_pos) if tile_data.height > 0 else Vector2.ZERO
-			var w_top_pos = world_pos + Vector2(margin, margin) + w_offset
-			var top_rect = Rect2(w_top_pos, Vector2(top_size, top_size))
-			# Draw texture/color at full opacity
+			var w_offset: Vector2 = parallax_off if tile_data.height > 0 else Vector2.ZERO
+			var w_top_pos: Vector2 = world_pos + w_offset
+			var top_rect := Rect2(w_top_pos, Vector2(gs, gs))
 			if tile_data.icon:
 				draw_texture_rect(tile_data.icon, top_rect, false)
 			else:
@@ -1808,97 +2749,77 @@ func _draw_placed_buildings() -> void:
 				draw_rect(top_rect, tile_data.border_color, false, 1.0)
 			# Ore overlay
 			if terrain.ore_tiles.has(grid_pos):
-				var ore_data = Registry.get_tile(terrain.ore_tiles[grid_pos])
+				var ore_data: TerrainTileData = _get_ore_tile.call(terrain.ore_tiles[grid_pos])
 				if ore_data:
 					if ore_data.icon:
 						draw_texture_rect(ore_data.icon, top_rect, false, Color(1, 1, 1, ore_data.opacity))
 					else:
-						var ore_color = ore_data.color
+						var ore_color: Color = ore_data.color
 						ore_color.a = ore_data.opacity
 						draw_rect(top_rect, ore_color, true)
-			# Black fade overlay — uses pre-computed corner darkness (cached)
-			var _fade_off: bool = "fade_enabled" in main and not main.fade_enabled
-			var cd = _cached_corner_darkness.get(grid_pos)
-			if cd != null and not _fade_off:
-				var pts: PackedVector2Array = [
-					w_top_pos,
-					w_top_pos + Vector2(top_size, 0),
-					w_top_pos + Vector2(top_size, top_size),
-					w_top_pos + Vector2(0, top_size),
-				]
-				var cols: PackedColorArray = [
-					Color(0, 0, 0, cd[0]),
-					Color(0, 0, 0, cd[1]),
-					Color(0, 0, 0, cd[2]),
-					Color(0, 0, 0, cd[3]),
-				]
-				draw_polygon(pts, cols)
+			# Wall fade overlay is batched into _wall_fade_mesh and drawn once
+			# after pass 2 (see below) — no per-tile work here.
 			# Health bar
 			if tile_data.destructible and terrain.tile_health.has(grid_pos):
-				var pct = terrain.tile_health[grid_pos] / tile_data.max_health
+				var pct: float = terrain.tile_health[grid_pos] / tile_data.max_health
 				if pct < 1.0:
 					var bar_w := 40.0
 					var bar_h := 4.0
-					var bar_pos = w_top_pos + Vector2((main.GRID_SIZE - bar_w) / 2.0, -8.0)
+					var bar_pos: Vector2 = w_top_pos + Vector2((gs - bar_w) / 2.0, -8.0)
 					draw_rect(Rect2(bar_pos, Vector2(bar_w, bar_h)), Color(0.2, 0, 0, 0.8), true)
 					draw_rect(Rect2(bar_pos, Vector2(bar_w * pct, bar_h)), Color(1.0 - pct, pct, 0), true)
 			continue
 
-		# Skip buildings in hidden areas
-		var sector_script_draw = get_node_or_null("/root/Main/SectorScript")
-		if sector_script_draw and sector_script_draw.is_tile_hidden(grid_pos):
+		# --- Building top face ---
+		if ss and ss.is_tile_hidden(grid_pos):
 			continue
 
-		var block_id = main.placed_buildings[grid_pos]
-		var block_size = _get_block_grid_size(block_id)
-		var offset = _get_top_offset(world_pos) * _get_height_scale(block_id)
-
-		var width: float = float(main.GRID_SIZE) * block_size.x - margin * 2
-		var height: float = float(main.GRID_SIZE) * block_size.y - margin * 2
-		var top_pos = (world_pos + Vector2(margin, margin) + offset)
-
-		var data = Registry.get_block(block_id)
+		var block_id: StringName = main.placed_buildings[grid_pos]
+		var block_size: Vector2i = _size_for.call(block_id)
+		var offset: Vector2 = _offset_for.call(block_id)
+		var width: float = gs * block_size.x
+		var height: float = gs * block_size.y
+		var top_pos: Vector2 = world_pos + offset
+		var data: BlockData = _get_block.call(block_id)
 
 		# Conveyor belts use auto-tiled textures based on neighbors
 		if block_id == &"conveyor_belt" and not _belt_textures.is_empty():
-			var info = _get_belt_draw_info(grid_pos)
+			var info: Dictionary = _get_belt_draw_info(grid_pos)
 			var texture: Texture2D = info["texture"]
 			var angle: float = info["angle"]
 			if texture:
-				var center = top_pos + Vector2(width / 2.0, height / 2.0)
+				var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 				draw_set_transform(center, angle)
 				draw_texture_rect(texture, Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height)), false)
 				draw_set_transform(Vector2.ZERO, 0.0)
 			else:
-				var color = _get_block_color(block_id)
+				var color := _get_block_color(block_id)
 				draw_rect(Rect2(top_pos, Vector2(width, height)), color, true)
 				draw_rect(Rect2(top_pos, Vector2(width, height)), color.lightened(0.3), false, 2.0)
 
-		# Fluid pumps: draw with pump texture (check before pipes since pumps also have transports_fluid)
+		# Fluid pumps: draw with pump texture (before pipes; pumps also transport_fluid)
 		elif data and data.tags.has("pump") and _pump_texture:
 			var rot: int = main.building_rotation.get(grid_pos, 0)
 			var angle: float = rot * PI / 2.0 + PI / 2.0
-			var center = top_pos + Vector2(width / 2.0, height / 2.0)
+			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 			draw_set_transform(center, angle)
 			draw_texture_rect(_pump_texture, Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height)), false)
 			draw_set_transform(Vector2.ZERO, 0.0)
 
-		# Fluid pipes: draw colored fill rectangle UNDER the pipe texture
+		# Fluid pipes: colored fill rectangle UNDER the pipe texture
 		elif data and data.transports_fluid and _pipe_texture:
-			# Draw fluid fill first (colored rect with opacity based on fill level)
 			if _logistics and _logistics.pipe_contents.has(grid_pos):
-				var pipe = _logistics.pipe_contents[grid_pos]
+				var pipe: Dictionary = _logistics.pipe_contents[grid_pos]
 				var fluid = Registry.get_fluid(pipe["fluid_id"])
 				if fluid:
-					var fill_pct := clampf(pipe["amount"] / fluid.units_per_segment, 0.0, 1.0)
+					var fill_pct: float = clampf(pipe["amount"] / fluid.units_per_segment, 0.0, 1.0)
 					var fill_color: Color = Color(fluid.color)
 					fill_color.a = fill_pct * fluid.opacity
 					draw_rect(Rect2(top_pos, Vector2(width, height)), fill_color, true)
 
-			# Draw pipe texture on top
 			var rot: int = main.building_rotation.get(grid_pos, 0)
 			var angle: float = rot * PI / 2.0 + PI / 2.0
-			var center = top_pos + Vector2(width / 2.0, height / 2.0)
+			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 			draw_set_transform(center, angle)
 			draw_texture_rect(_pipe_texture, Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height)), false)
 			draw_set_transform(Vector2.ZERO, 0.0)
@@ -1907,24 +2828,32 @@ func _draw_placed_buildings() -> void:
 			var top_rect := Rect2(top_pos, Vector2(width, height))
 			var is_dir: bool = _is_directional(block_id)
 			var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
-			# Faction-layered rendering (cores): base sprite + faction overlay
-			if data and data.base_sprite:
+			# Unit fabricator layered rendering: base + unit-in-construction + top
+			if data and data.produced_unit != &"" and data.base_sprite and data.top_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_fabricator_unit_layer(grid_pos, data, top_pos, width, height, rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
+			# Faction-layered rendering (cores): base sprite + faction overlay
+			elif data and data.base_sprite:
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				var overlay_scale := 0.7
+				var ow: float = width * overlay_scale
+				var oh: float = height * overlay_scale
+				var overlay_pos: Vector2 = top_pos + Vector2((width - ow) / 2.0, (height - oh) / 2.0)
 				var faction: int = main.get_building_faction(grid_pos)
 				if faction == FACTION_FEROX and data.ferox_overlay:
-					_draw_block_texture(data.ferox_overlay, top_pos, width, height, rot)
+					_draw_block_texture(data.ferox_overlay, overlay_pos, ow, oh, rot)
 				elif faction == FACTION_DERELICT and data.derelict_overlay:
-					_draw_block_texture(data.derelict_overlay, top_pos, width, height, rot)
+					_draw_block_texture(data.derelict_overlay, overlay_pos, ow, oh, rot)
 				elif data.lumina_overlay:
-					_draw_block_texture(data.lumina_overlay, top_pos, width, height, rot)
+					_draw_block_texture(data.lumina_overlay, overlay_pos, ow, oh, rot)
 			# Regular icon texture
 			elif data and data.icon:
-				# Shafts: rotate texture +90° (visual only)
 				var draw_rot: int = (rot + 1) % 4 if data.tags.has("shaft") else rot
 				_draw_block_texture(data.icon, top_pos, width, height, draw_rot)
 			# Fallback: colored rectangle
 			else:
-				var color = _get_block_color(block_id)
+				var color := _get_block_color(block_id)
 				draw_rect(top_rect, color, true)
 				draw_rect(top_rect, color.lightened(0.3), false, 2.0)
 
@@ -1935,199 +2864,212 @@ func _draw_placed_buildings() -> void:
 				var filter_item = Registry.get_item(filter_id)
 				if filter_item:
 					var ind_size := 16.0
-					var ind_pos = top_pos + Vector2((width - ind_size) / 2.0, (height - ind_size) / 2.0)
+					var ind_pos: Vector2 = top_pos + Vector2((width - ind_size) / 2.0, (height - ind_size) / 2.0)
 					draw_rect(Rect2(ind_pos, Vector2(ind_size, ind_size)), filter_item.color, true)
 					draw_rect(Rect2(ind_pos, Vector2(ind_size, ind_size)), filter_item.color.lightened(0.3), false, 1.0)
 
-	# --- PASS 2.25: Build animation overlay (left-to-right reveal) ---
-	var _ss_build = get_node_or_null("/root/Main/SectorScript")
-	var has_build_progress: bool = "building_build_progress" in main
-	for grid_pos in all_positions:
-		if _wall_set.has(grid_pos):
-			continue
-		if _ss_build and _ss_build.is_tile_hidden(grid_pos):
-			continue
-		if not has_build_progress or not main.building_build_progress.has(grid_pos):
-			continue
-		var build_pct: float = main.get_build_progress_pct(grid_pos)
-		if build_pct >= 1.0:
-			continue
-		var b_block_id = main.placed_buildings[grid_pos]
-		var b_block_size = _get_block_grid_size(b_block_id)
-		var b_world_pos = main.grid_to_world(grid_pos)
-		var b_offset = _get_top_offset(b_world_pos) * _get_height_scale(b_block_id)
-		var b_margin := 0
-		var b_width: float = float(main.GRID_SIZE) * b_block_size.x - b_margin * 2
-		var b_height: float = float(main.GRID_SIZE) * b_block_size.y - b_margin * 2
-		var b_top_pos = b_world_pos + Vector2(b_margin, b_margin) + b_offset
+	# --- PASS 2.05: Batched wall fade (one draw_mesh instead of one draw_polygon per wall) ---
+	# The mesh was built at grid positions without parallax; apply it now so
+	# the fade still follows the camera like the wall tops do.
+	if _wall_fade_mesh and not fade_off:
+		draw_mesh(_wall_fade_mesh, null, Transform2D(0.0, parallax_off))
 
-		# Check if this is the currently-building entry or just queued
-		var is_active_build: bool = "build_order" in main and not main.build_order.is_empty() and main.build_order[0] == grid_pos
-		if is_active_build:
-			# Active build: left-to-right reveal animation
-			var reveal_x: float = b_width * build_pct
-			# Dark overlay on the not-yet-built portion (right side)
-			var unbuilt_rect = Rect2(
-				b_top_pos.x + reveal_x, b_top_pos.y,
-				b_width - reveal_x, b_height
-			)
-			draw_rect(unbuilt_rect, Color(0, 0, 0, 0.65), true)
-			# Yellow construction line at the reveal front
-			var line_x: float = b_top_pos.x + reveal_x
-			draw_line(
-				Vector2(line_x, b_top_pos.y),
-				Vector2(line_x, b_top_pos.y + b_height),
-				Color(1.0, 0.9, 0.2, 0.9), 2.0
-			)
-		else:
-			# Queued but not yet building: dim overlay with dotted outline
-			draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0, 0, 0, 0.55), true)
-			draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0.5, 0.5, 0.5, 0.4), false, 1.0)
+	# --- PASS 2.1: Extractor heads overlay (drill + crusher) ---
+	# Both drill heads and crusher heads extend forward into cells that often
+	# contain ore walls. Drawing them in a dedicated pass after pass 2
+	# guarantees they sit on top of any wall whose top face was drawn later
+	# due to painter's order.
+	for idx in order:
+		if is_wall_of[idx]:
+			continue
+		var grid_pos: Vector2i = all_positions[idx]
+		if ss and ss.is_tile_hidden(grid_pos):
+			continue
+		var block_id: StringName = main.placed_buildings[grid_pos]
+		var data: BlockData = _get_block.call(block_id)
+		if data == null:
+			continue
+		var is_dir: bool = _is_directional(block_id)
+		var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
+		if data.tags.has("drill_heads"):
+			var dh_variant: String = _get_drill_head_variant(grid_pos, rot, data.grid_size)
+			_draw_drill_heads(grid_pos, rot, data.grid_size, dh_variant, block_id)
+		if data.tags.has("crusher_heads"):
+			# Placed crushers always render from live state; the per-frame
+			# tick (_tick_crusher_head_states) is what decides whether the
+			# heads are spinning up, holding speed, or coasting to a stop.
+			_draw_crusher_heads(grid_pos, rot, data.grid_size, block_id, Color.WHITE, true)
+
+	# --- PASS 2.25: Build animation overlay (left-to-right reveal) ---
+	if has_build_progress:
+		for idx in order:
+			if is_wall_of[idx]:
+				continue
+			var grid_pos: Vector2i = all_positions[idx]
+			if ss and ss.is_tile_hidden(grid_pos):
+				continue
+			if not main.building_build_progress.has(grid_pos):
+				continue
+			var build_pct: float = main.get_build_progress_pct(grid_pos)
+			if build_pct >= 1.0:
+				continue
+			var b_block_id: StringName = main.placed_buildings[grid_pos]
+			var b_block_size: Vector2i = _size_for.call(b_block_id)
+			var b_world_pos: Vector2 = main.grid_to_world(grid_pos)
+			var b_offset: Vector2 = _offset_for.call(b_block_id)
+			var b_width: float = gs * b_block_size.x
+			var b_height: float = gs * b_block_size.y
+			var b_top_pos: Vector2 = b_world_pos + b_offset
+
+			var is_active_build: bool = has_active_work and active_work_anchor == grid_pos
+			if is_active_build:
+				var reveal_x: float = b_width * build_pct
+				var unbuilt_rect := Rect2(
+					b_top_pos.x + reveal_x, b_top_pos.y,
+					b_width - reveal_x, b_height
+				)
+				draw_rect(unbuilt_rect, Color(0, 0, 0, 0.65), true)
+				var line_x: float = b_top_pos.x + reveal_x
+				draw_line(
+					Vector2(line_x, b_top_pos.y),
+					Vector2(line_x, b_top_pos.y + b_height),
+					Color(1.0, 0.9, 0.2, 0.9), 2.0
+				)
+			else:
+				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0, 0, 0, 0.55), true)
+				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0.5, 0.5, 0.5, 0.4), false, 1.0)
 
 	# --- PASS 2.3: Deconstruct animation overlay (right-to-left, red line) ---
-	var _has_decon: bool = "building_deconstruct_progress" in main
-	for grid_pos in all_positions:
-		if _wall_set.has(grid_pos):
-			continue
-		if not _has_decon or not main.building_deconstruct_progress.has(grid_pos):
-			continue
-		var d_entry: Dictionary = main.building_deconstruct_progress[grid_pos]
-		var d_block_id: StringName = d_entry["block_id"]
-		var d_block_size = _get_block_grid_size(d_block_id)
-		var d_world_pos = main.grid_to_world(grid_pos)
-		var d_offset = _get_top_offset(d_world_pos) * _get_height_scale(d_block_id)
-		var d_width: float = float(main.GRID_SIZE) * d_block_size.x
-		var d_height: float = float(main.GRID_SIZE) * d_block_size.y
-		var d_top_pos = d_world_pos + d_offset
+	if has_decon:
+		for idx in order:
+			if is_wall_of[idx]:
+				continue
+			var grid_pos: Vector2i = all_positions[idx]
+			if not main.building_deconstruct_progress.has(grid_pos):
+				continue
+			var d_entry: Dictionary = main.building_deconstruct_progress[grid_pos]
+			var d_block_id: StringName = d_entry["block_id"]
+			var d_block_size: Vector2i = _size_for.call(d_block_id)
+			var d_world_pos: Vector2 = main.grid_to_world(grid_pos)
+			var d_offset: Vector2 = _offset_for.call(d_block_id)
+			var d_width: float = gs * d_block_size.x
+			var d_height: float = gs * d_block_size.y
+			var d_top_pos: Vector2 = d_world_pos + d_offset
 
-		var is_active_decon: bool = "deconstruct_order" in main and not main.deconstruct_order.is_empty() and main.deconstruct_order[0] == grid_pos
-		if is_active_decon:
-			var d_pct: float = clampf(d_entry["progress"] / d_entry["build_time"], 0.0, 1.0)
-			# Right-to-left: the deconstructed portion grows from the right
-			var decon_x: float = d_width * (1.0 - d_pct)
-			# Dark overlay on the deconstructed portion (right side)
-			var decon_rect = Rect2(
-				d_top_pos.x + decon_x, d_top_pos.y,
-				d_width - decon_x, d_height
-			)
-			draw_rect(decon_rect, Color(0, 0, 0, 0.65), true)
-			# Red deconstruction line at the front
-			var line_x: float = d_top_pos.x + decon_x
-			draw_line(
-				Vector2(line_x, d_top_pos.y),
-				Vector2(line_x, d_top_pos.y + d_height),
-				Color(0.9, 0.2, 0.2, 0.9), 2.0
-			)
-		else:
-			# Queued for deconstruction: dim red overlay
-			draw_rect(Rect2(d_top_pos, Vector2(d_width, d_height)), Color(0.3, 0, 0, 0.4), true)
-			draw_rect(Rect2(d_top_pos, Vector2(d_width, d_height)), Color(0.9, 0.2, 0.2, 0.4), false, 1.0)
+			var is_active_decon: bool = has_active_work and active_work_anchor == grid_pos
+			if is_active_decon:
+				var d_pct: float = clampf(d_entry["progress"] / d_entry["build_time"], 0.0, 1.0)
+				var max_pct: float = float(d_entry.get("max_build_pct", 1.0))
+				var line_pct: float = max_pct * (1.0 - d_pct)
+				var line_x: float = d_top_pos.x + d_width * line_pct
+				if line_pct < max_pct:
+					var dark_left: float = line_x
+					var dark_right: float = d_top_pos.x + d_width * max_pct
+					draw_rect(Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height), Color(0, 0, 0, 0.65), true)
+				if max_pct < 1.0:
+					var never_left: float = d_top_pos.x + d_width * max_pct
+					draw_rect(Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height), Color(0, 0, 0, 0.65), true)
+				draw_line(
+					Vector2(line_x, d_top_pos.y),
+					Vector2(line_x, d_top_pos.y + d_height),
+					Color(0.9, 0.2, 0.2, 0.9), 2.0
+				)
+			else:
+				draw_rect(Rect2(d_top_pos, Vector2(d_width, d_height)), Color(0.3, 0, 0, 0.4), true)
+				draw_rect(Rect2(d_top_pos, Vector2(d_width, d_height)), Color(0.9, 0.2, 0.2, 0.4), false, 1.0)
 
 	# --- PASS 2.5: Faction tint on enemy buildings ---
-	var _ss = get_node_or_null("/root/Main/SectorScript")
-	for grid_pos in all_positions:
-		if _wall_set.has(grid_pos):
-			continue
-		if _ss and _ss.is_tile_hidden(grid_pos):
-			continue
-		var bfaction: int = main.get_building_faction(grid_pos)
-		if bfaction == FACTION_LUMINA:
-			continue
-		var block_size_f = _get_block_grid_size(main.placed_buildings[grid_pos])
-		var world_pos_f = main.grid_to_world(grid_pos)
-		var offset_f = _get_top_offset(world_pos_f) * _get_height_scale(main.placed_buildings[grid_pos])
-		var margin_f := -1.0
-		var width_f: float = float(main.GRID_SIZE) * block_size_f.x - margin_f * 2
-		var height_f: float = float(main.GRID_SIZE) * block_size_f.y - margin_f * 2
-		var top_pos_f = world_pos_f + Vector2(margin_f, margin_f) + offset_f
-		if bfaction == FACTION_DERELICT:
-			# Gray/purple tint for derelict
-			draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(0.5, 0.5, 0.6, 0.2), true)
-			draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(0.6, 0.6, 0.7, 0.4), false, 2.0)
-		else:
-			# Red tint for FEROX
-			draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(1.0, 0.2, 0.2, 0.18), true)
-			draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(1.0, 0.3, 0.3, 0.45), false, 2.0)
+	if any_non_lumina:
+		for idx in order:
+			if is_wall_of[idx]:
+				continue
+			var grid_pos: Vector2i = all_positions[idx]
+			if ss and ss.is_tile_hidden(grid_pos):
+				continue
+			var bfaction: int = main.get_building_faction(grid_pos)
+			if bfaction == FACTION_LUMINA:
+				continue
+			var f_block_id: StringName = main.placed_buildings[grid_pos]
+			var block_size_f: Vector2i = _size_for.call(f_block_id)
+			var world_pos_f: Vector2 = main.grid_to_world(grid_pos)
+			var offset_f: Vector2 = _offset_for.call(f_block_id)
+			var margin_f := -1.0
+			var width_f: float = gs * block_size_f.x - margin_f * 2
+			var height_f: float = gs * block_size_f.y - margin_f * 2
+			var top_pos_f: Vector2 = world_pos_f + Vector2(margin_f, margin_f) + offset_f
+			if bfaction == FACTION_DERELICT:
+				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(0.5, 0.5, 0.6, 0.2), true)
+				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(0.6, 0.6, 0.7, 0.4), false, 2.0)
+			else:
+				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(1.0, 0.2, 0.2, 0.18), true)
+				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(1.0, 0.3, 0.3, 0.45), false, 2.0)
 
 	# --- PASS 3: Draw direction arrows on directional buildings ---
-	for grid_pos in all_positions:
-		if _wall_set.has(grid_pos):
+	for idx in order:
+		if is_wall_of[idx]:
 			continue
-		if _ss and _ss.is_tile_hidden(grid_pos):
+		var grid_pos: Vector2i = all_positions[idx]
+		if ss and ss.is_tile_hidden(grid_pos):
 			continue
-		var block_id = main.placed_buildings[grid_pos]
+		var block_id: StringName = main.placed_buildings[grid_pos]
 		if not _is_directional(block_id):
 			continue
 
-		var rotation = main.building_rotation.get(grid_pos, 0)
-		var block_size = _get_block_grid_size(block_id)
-		var world_pos = main.grid_to_world(grid_pos)
-		var offset = _get_top_offset(world_pos) * _get_height_scale(block_id)
-		# Center the arrow in the middle of the full building
-		var center = world_pos + Vector2(
-			main.GRID_SIZE * block_size.x / 2.0,
-			main.GRID_SIZE * block_size.y / 2.0
+		var rotation: int = main.building_rotation.get(grid_pos, 0)
+		var block_size: Vector2i = _size_for.call(block_id)
+		var world_pos: Vector2 = main.grid_to_world(grid_pos)
+		var offset: Vector2 = _offset_for.call(block_id)
+		var center: Vector2 = world_pos + Vector2(
+			gs * block_size.x / 2.0,
+			gs * block_size.y / 2.0
 		) + offset
 
 		_draw_direction_arrow(center, rotation, Color(1, 1, 1, 0.6))
 
 	# --- PASS 4: Draw health bars on damaged buildings ---
-	for grid_pos in all_positions:
-		if _wall_set.has(grid_pos):
+	for idx in order:
+		if is_wall_of[idx]:
 			continue
-		if _ss and _ss.is_tile_hidden(grid_pos):
+		var grid_pos: Vector2i = all_positions[idx]
+		if ss and ss.is_tile_hidden(grid_pos):
 			continue
-		var health_pct = main.get_building_health_pct(grid_pos)
+		var health_pct: float = main.get_building_health_pct(grid_pos)
 		if health_pct < 1.0:
-			var block_id = main.placed_buildings[grid_pos]
-			var block_size = _get_block_grid_size(block_id)
-			var world_pos = main.grid_to_world(grid_pos)
-			var offset = _get_top_offset(world_pos) * _get_height_scale(block_id)
-			# Center the health bar over the full building
-			var bar_center_x = world_pos.x + main.GRID_SIZE * block_size.x / 2.0
+			var block_id: StringName = main.placed_buildings[grid_pos]
+			var block_size: Vector2i = _size_for.call(block_id)
+			var world_pos: Vector2 = main.grid_to_world(grid_pos)
+			var offset: Vector2 = _offset_for.call(block_id)
+			var bar_center_x: float = world_pos.x + gs * block_size.x / 2.0
 			_draw_building_health_bar(
 				Vector2(bar_center_x, world_pos.y) + offset,
 				health_pct,
-				main.GRID_SIZE * block_size.x
+				gs * block_size.x
 			)
 
 	# --- PASS 5: Draw "no power" indicator on unpowered buildings ---
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
 	if power_sys:
-		for grid_pos in all_positions:
-			if _wall_set.has(grid_pos):
+		for idx in order:
+			if is_wall_of[idx]:
 				continue
-			if _ss and _ss.is_tile_hidden(grid_pos):
+			var grid_pos: Vector2i = all_positions[idx]
+			if ss and ss.is_tile_hidden(grid_pos):
 				continue
-			var block_id = main.placed_buildings[grid_pos]
-			var data = Registry.get_block(block_id)
-			if data == null:
+			var block_id: StringName = main.placed_buildings[grid_pos]
+			var data: BlockData = _get_block.call(block_id)
+			if data == null or data.electrical_power_use <= 0:
 				continue
-			# Only show indicator on buildings that need rotational or electrical power
-			var needs_rot: bool = data.rotational_power_use > 0
-			var needs_elec: bool = data.electrical_power_use > 0
-			if not needs_rot and not needs_elec:
+			if power_sys.is_electrical_powered(grid_pos):
 				continue
-			var is_powered := true
-			if needs_rot and not power_sys.is_rotational_powered(grid_pos):
-				is_powered = false
-			if needs_elec and not power_sys.is_electrical_powered(grid_pos):
-				is_powered = false
-			if is_powered:
-				continue
-			# Draw red "no power" overlay
-			var block_size = _get_block_grid_size(block_id)
-			var world_pos = main.grid_to_world(grid_pos)
-			var offset = _get_top_offset(world_pos) * _get_height_scale(block_id)
+			var block_size: Vector2i = _size_for.call(block_id)
+			var world_pos: Vector2 = main.grid_to_world(grid_pos)
+			var offset: Vector2 = _offset_for.call(block_id)
 			var margin := -1.0
-			var width: float = float(main.GRID_SIZE) * block_size.x - margin * 2
-			var height: float = float(main.GRID_SIZE) * block_size.y - margin * 2
-			var top_pos = world_pos + Vector2(margin, margin) + offset
-			# Semi-transparent red tint
+			var width: float = gs * block_size.x - margin * 2
+			var height: float = gs * block_size.y - margin * 2
+			var top_pos: Vector2 = world_pos + Vector2(margin, margin) + offset
 			draw_rect(Rect2(top_pos, Vector2(width, height)),
 				Color(1.0, 0.0, 0.0, 0.25), true)
-			# Draw a small lightning bolt / "no power" icon
-			var center = top_pos + Vector2(width / 2.0, height / 2.0)
+			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 			_draw_no_power_icon(center)
 
 
@@ -2253,6 +3195,13 @@ func _draw_paused_queue() -> void:
 					var center = world_pos + Vector2(w / 2.0, h / 2.0) + offset
 					_draw_direction_arrow(center, rotation, Color(1, 1, 1, 0.5))
 
+		# Drill heads overlay for queued drill ghosts.
+		if data.tags.has("drill_heads"):
+			var dh_variant: String = _get_drill_head_variant(grid_pos, rotation, data.grid_size)
+			_draw_drill_heads(grid_pos, rotation, data.grid_size, dh_variant, block_id, Color(1, 1, 1, 0.45))
+		if data.tags.has("crusher_heads"):
+			_draw_crusher_heads(grid_pos, rotation, data.grid_size, block_id, Color(1, 1, 1, 0.45), false)
+
 		# Yellow outline for all queued blocks
 		draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
 
@@ -2269,7 +3218,6 @@ func _draw_preview() -> void:
 	# --- Drag-placing: draw a ghost at every cell in the line ---
 	if _drag_placing and not _drag_cells.is_empty():
 		var base_color = _get_block_color(main.selected_building)
-		var valid_count := 0  # tracks how many valid cells so far for affordability
 		var is_belt: bool = main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()
 
 		# Build preview context for accurate belt textures
@@ -2284,11 +3232,7 @@ func _draw_preview() -> void:
 
 		for cell in _drag_cells:
 			var cell_valid := _can_place_at(cell, main.selected_building)
-			var cell_affordable := _can_afford_n(main.selected_building, valid_count + 1)
-			var cell_ok := cell_valid and cell_affordable
-
-			if cell_ok:
-				valid_count += 1
+			var cell_ok := cell_valid  # No affordability gate — progressive consumption
 
 			var cell_world: Vector2 = main.grid_to_world(cell)
 			var cell_offset := _get_top_offset(cell_world) * _get_height_scale(main.selected_building)
@@ -2336,13 +3280,28 @@ func _draw_preview() -> void:
 				) + cell_offset
 				var arrow_color = Color(1, 1, 1, 0.8) if cell_ok else Color(1, 0.3, 0.3, 0.6)
 				_draw_direction_arrow(center, cell_rot, arrow_color)
+
+			# Drill heads preview: falls back to "N" when placement is invalid.
+			if data and data.tags.has("drill_heads"):
+				var dh_rot: int = preview_rots.get(cell, main.placement_rotation)
+				var dh_variant: String = "N"
+				if cell_ok:
+					dh_variant = _get_drill_head_variant(cell, dh_rot, data.grid_size)
+				var dh_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				_draw_drill_heads(cell, dh_rot, data.grid_size, dh_variant, main.selected_building, dh_tint)
+			if data and data.tags.has("crusher_heads"):
+				var ch_rot: int = preview_rots.get(cell, main.placement_rotation)
+				var ch_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				_draw_crusher_heads(cell, ch_rot, data.grid_size, main.selected_building, ch_tint, false)
 		return
 
 	# --- Not dragging: single-cell hover preview ---
 	var world_pos = main.grid_to_world(preview_grid_pos)
 	var offset = _get_top_offset(world_pos) * _get_height_scale(main.selected_building)
 	var color = _get_block_color(main.selected_building)
-	var cell_ok: bool = can_place and main.can_afford(main.selected_building)
+	# With progressive resource consumption, placement is valid even without
+	# enough resources — the ghost is placed and builds as resources arrive.
+	var cell_ok: bool = can_place
 
 	var width: float = float(main.GRID_SIZE) * grid_w
 	var height: float = float(main.GRID_SIZE) * grid_h
@@ -2390,6 +3349,92 @@ func _draw_preview() -> void:
 		) + offset
 		var arrow_color = Color(1, 1, 1, 0.8) if can_place else Color(1, 0.3, 0.3, 0.6)
 		_draw_direction_arrow(center, main.placement_rotation, arrow_color)
+
+	# Drill heads preview: falls back to "N" when placement is invalid.
+	if data and data.tags.has("drill_heads"):
+		var dh_variant: String = "N"
+		if can_place:
+			dh_variant = _get_drill_head_variant(preview_grid_pos, main.placement_rotation, data.grid_size)
+		var dh_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		_draw_drill_heads(preview_grid_pos, main.placement_rotation, data.grid_size, dh_variant, main.selected_building, dh_tint)
+	if data and data.tags.has("crusher_heads"):
+		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		_draw_crusher_heads(preview_grid_pos, main.placement_rotation, data.grid_size, main.selected_building, ch_tint, false)
+
+	# Cable-node range preview: dashed yellow line extending ±range tiles in each
+	# cardinal direction, plus a yellow outline on the nearest connectable block
+	# the cable would actually wire up to.
+	if data and data.tags.has("cable_node"):
+		var cable_range: int = 10 if String(data.id).begins_with("cable_tower") else 5
+		_draw_cable_range_preview(preview_grid_pos, data.grid_size, cable_range)
+
+
+## Draws the yellow dashed range indicator and connectable-block outlines for
+## a cable node at grid_pos. Skips the cable node's own cells when scanning so
+## the preview doesn't self-highlight.
+func _draw_cable_range_preview(origin: Vector2i, grid_size: Vector2i, cable_range: int) -> void:
+	if cable_range <= 0:
+		return
+	var gs := float(main.GRID_SIZE)
+	var parallax_off := _get_top_offset(Vector2.ZERO)
+	var dash_color := Color(1.0, 0.9, 0.2, 0.85)
+	var outline_color := Color(1.0, 0.9, 0.2, 1.0)
+
+	var half_w: float = grid_size.x * gs / 2.0
+	var half_h: float = grid_size.y * gs / 2.0
+	var center: Vector2 = Vector2(origin) * gs + Vector2(half_w, half_h) + parallax_off
+
+	# Set of cells occupied by the cable block itself — skip these when scanning.
+	var self_cells: Dictionary = {}
+	for dx in range(grid_size.x):
+		for dy in range(grid_size.y):
+			self_cells[origin + Vector2i(dx, dy)] = true
+
+	# How much of each tile the dash fills (rest is gap). 1 dash per tile.
+	var dash_frac := 0.55
+
+	for dir_idx in range(4):
+		var dir_v: Vector2i = DIR_VECTORS[dir_idx]
+		var dir_vf: Vector2 = Vector2(dir_v)
+		var edge_dist: float = half_w if absi(dir_v.x) > 0 else half_h
+
+		# Scan first to find the connectable block (if any). The line must stop
+		# at the tile BEFORE that block — cables don't transmit past their first
+		# connection in a given direction.
+		# cable_range is the number of EMPTY tiles the cable can bridge, so the
+		# reachable distance is cable_range + 1 tiles. Default dash count also
+		# reflects that so an unblocked line fills the full reachable extent.
+		var line_tiles: int = cable_range
+		var hit_anchor: Vector2i = Vector2i(0, 0)
+		var hit_found: bool = false
+		for dist in range(1, cable_range + 2):
+			var scan_tile: Vector2i = origin + dir_v * dist
+			if self_cells.has(scan_tile):
+				continue
+			if not main.placed_buildings.has(scan_tile):
+				continue
+			var s_data = Registry.get_block(main.placed_buildings[scan_tile])
+			if s_data == null or not s_data.is_electrical_power_block():
+				continue
+			hit_anchor = main.building_origins.get(scan_tile, scan_tile)
+			hit_found = true
+			line_tiles = dist - 1  # stop before the block's tile
+			break
+
+		# Draw one dash per tile, up to line_tiles tiles along this direction.
+		for i in range(line_tiles):
+			var tile_start_dist: float = edge_dist + i * gs
+			var s: Vector2 = center + dir_vf * tile_start_dist
+			var e: Vector2 = center + dir_vf * (tile_start_dist + gs * dash_frac)
+			draw_line(s, e, dash_color, 2.0)
+
+		# Yellow outline around the connectable block.
+		if hit_found:
+			var anchor_data = Registry.get_block(main.placed_buildings.get(hit_anchor, &""))
+			if anchor_data:
+				var anchor_world: Vector2 = Vector2(hit_anchor) * gs + parallax_off
+				var anchor_size: Vector2 = Vector2(anchor_data.grid_size) * gs
+				draw_rect(Rect2(anchor_world, anchor_size), outline_color, false, 2.0)
 
 
 ## Draws the red demolish rectangle while the player is drag-selecting.
@@ -2485,9 +3530,22 @@ func _demolish_rect(from: Vector2i, to: Vector2i) -> void:
 
 
 func _on_building_placed(_block_id: StringName, _grid_pos: Vector2i) -> void:
-	_walls_dirty = true
-	# Initialize crane state when a crane is placed
 	var data = Registry.get_block(_block_id)
+	# Only dirty the wall cache when the placement actually overlaps a wall
+	# tile (which hides the wall underneath). Buildings on open floor don't
+	# change wall visibility, so skip the BFS rebuild.
+	var terrain_ref = _terrain_ref()
+	if terrain_ref and data:
+		var sx: int = data.grid_size.x
+		var sy: int = data.grid_size.y
+		for dx in range(sx):
+			for dy in range(sy):
+				if terrain_ref.wall_tiles.has(_grid_pos + Vector2i(dx, dy)):
+					_walls_dirty = true
+					break
+			if _walls_dirty:
+				break
+	# Initialize crane state when a crane is placed
 	if data and data.tags.has("crane"):
 		crane_states[_grid_pos] = {
 			"arm_angle": -PI / 2.0,
@@ -2509,7 +3567,12 @@ func _on_building_placed(_block_id: StringName, _grid_pos: Vector2i) -> void:
 
 
 func _on_building_destroyed(_grid_pos: Vector2i) -> void:
-	_walls_dirty = true
+	# Same logic as placement: only dirty walls if the destroyed building was
+	# sitting on one (its anchor cell overlaps a wall tile). Non-wall
+	# destructions don't affect the wall render cache.
+	var terrain_ref = _terrain_ref()
+	if terrain_ref and terrain_ref.wall_tiles.has(_grid_pos):
+		_walls_dirty = true
 	crane_states.erase(_grid_pos)
 	archive_holdings.erase(_grid_pos)
 	archive_decoder_state.erase(_grid_pos)
@@ -2556,6 +3619,51 @@ func _draw_links() -> void:
 		_draw_dashed_line(world_a, world_b, link_color, 2.0, 8.0)
 		draw_circle(world_a, 4.0, link_color)
 		draw_circle(world_b, 4.0, link_color)
+
+	# Draw cable node connections using copper wire texture (tiled, pixel-perfect)
+	# Lines go from/to the exact tile each connection touches, not the block center
+	var cable_tint := Color(1.0, 1.0, 1.0, 1.0)
+	var wire_scale := 1.0  # Scale down the wire width (1.0 = native texture size)
+	var half_tile := Vector2(gs / 2.0, gs / 2.0)
+	if power_sys and "cable_connections" in power_sys and _wire_texture:
+		var tex_w: float = 15#_wire_texture.get_width()   # 15 — wire thickness
+		var tex_h: float = _wire_texture.get_height()  # 100 — wire length per tile
+		var draw_w: float = tex_w * wire_scale  # Scaled wire thickness
+		for pair in power_sys.cable_connections:
+			var ca: Vector2i = pair[0]
+			var cb: Vector2i = pair[1]
+			if not main.placed_buildings.has(ca) or not main.placed_buildings.has(cb):
+				continue
+			if _ss_link and (_ss_link.is_tile_hidden(ca) or _ss_link.is_tile_hidden(cb)):
+				continue
+			var wa: Vector2 = main.grid_to_world(ca) + half_tile + _get_top_offset(main.grid_to_world(ca))
+			var wb: Vector2 = main.grid_to_world(cb) + half_tile + _get_top_offset(main.grid_to_world(cb))
+			var dir: Vector2 = wb - wa
+			var full_len: float = dir.length()
+			if full_len < 0.01:
+				continue
+			# Pull both endpoints to the edge of their tiles
+			var norm: Vector2 = dir / full_len
+			wa += norm * (gs / 2.0)
+			wb -= norm * (gs / 2.0)
+			dir = wb - wa
+			var length: float = dir.length()
+			if length < 0.01:
+				continue
+			var forward: Vector2 = dir / length
+			var angle: float = forward.angle() - PI / 2.0
+			var hw: float = draw_w / 2.0
+			var segments: int = ceili(length / tex_h)
+			for i in range(segments):
+				var t0: float = i * tex_h
+				var this_len: float = minf(tex_h, length - t0)
+				var center: Vector2 = wa + forward * (t0 + this_len / 2.0)
+				draw_set_transform(center, angle)
+				# Source rect: full width, cropped height for last segment
+				var src := Rect2(0, 0, tex_w, this_len)
+				# Dest rect: texture Y runs along the wire, texture X is thickness
+				draw_texture_rect_region(_wire_texture, Rect2(-hw, -this_len / 2.0, draw_w, this_len), src, cable_tint)
+				draw_set_transform(Vector2.ZERO, 0.0)
 
 	# Draw linking-mode highlights
 	if not linking_mode:
@@ -2837,19 +3945,19 @@ func _draw_schematic_placement() -> void:
 		var h: float = gs * data.grid_size.y
 		var top_pos: Vector2 = world_pos + offset
 
-		# Check if placeable
-		var can_place: bool = true
+		# Check if placeable (local var; don't shadow the class-level `can_place`).
+		var slot_ok: bool = true
 		var terrain = get_node_or_null("/root/Main/TerrainSystem")
 		for dx in range(data.grid_size.x):
 			for dy in range(data.grid_size.y):
 				var cp: Vector2i = grid_pos + Vector2i(dx, dy)
 				if not main.is_within_bounds(cp) or not main.is_cell_empty(cp):
-					can_place = false
+					slot_ok = false
 				elif terrain and terrain.has_wall(cp):
-					can_place = false
+					slot_ok = false
 
 		var color: Color = _get_block_color(block_id)
-		if can_place:
+		if slot_ok:
 			color.a = 0.4
 			draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
 			draw_rect(Rect2(top_pos, Vector2(w, h)), Color(0.3, 1.0, 0.3, 0.6), false, 1.5)
@@ -2951,7 +4059,7 @@ func _draw_cranes() -> void:
 		var seg1_end: Vector2 = base + arm_dir * seg1_len
 		var seg2_end: Vector2 = seg1_end + arm_dir * seg2_len
 		var seg3_end: Vector2 = seg2_end + arm_dir * seg3_len
-		var arm_end: Vector2 = seg3_end
+		var _arm_end: Vector2 = seg3_end
 
 		# --- Grabber position: slides along the arm to reach the mouse ---
 		# The grabber can travel anywhere from the base to arm_end
@@ -3076,7 +4184,6 @@ func _tick_archive_decoders(delta: float) -> void:
 		# 2. Find a touching, powered archive scanner whose front faces an archive
 		var scanner_pos: Vector2i = Vector2i(-9999, -9999)
 		var archive_id: StringName = &""
-		var archive_pos: Vector2i = Vector2i(-9999, -9999)
 		var found := false
 		for dir_idx in range(4):
 			var n: Vector2i = anchor + DIR_VECTORS[dir_idx]
@@ -3107,7 +4214,6 @@ func _tick_archive_decoders(delta: float) -> void:
 					continue
 				scanner_pos = n_anchor
 				archive_id = aid
-				archive_pos = a_anchor
 				found = true
 				break
 			if found:

@@ -210,10 +210,13 @@ func _start_threaded_loads(groups: Array) -> void:
 
 
 ## Polls pending threaded loads and registers completed resources.
+## Uses in-place two-pointer compaction — no per-frame allocation.
 func _poll_threaded_loads() -> void:
-	var still_pending: Array = []
 	var essentials_remaining := false
-	for entry in _pending_loads:
+	var write_idx := 0
+	var n: int = _pending_loads.size()
+	for read_idx in range(n):
+		var entry: Dictionary = _pending_loads[read_idx]
 		var status: int = ResourceLoader.load_threaded_get_status(entry["path"])
 		if status == ResourceLoader.THREAD_LOAD_LOADED:
 			var resource = ResourceLoader.load_threaded_get(entry["path"])
@@ -222,14 +225,17 @@ func _poll_threaded_loads() -> void:
 				entry["list"].append(resource)
 			_loaded_count += 1
 		elif status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
-			still_pending.append(entry)
+			if write_idx != read_idx:
+				_pending_loads[write_idx] = entry
+			write_idx += 1
 			if entry["essential"]:
 				essentials_remaining = true
 		else:
 			# THREAD_LOAD_FAILED or THREAD_LOAD_INVALID_RESOURCE — skip
 			_loaded_count += 1
 
-	_pending_loads = still_pending
+	if write_idx != n:
+		_pending_loads.resize(write_idx)
 	load_progress = float(_loaded_count) / float(maxi(_total_load_count, 1))
 
 	# Mark essentials loaded once all essential entries are done
@@ -418,7 +424,7 @@ func get_buffs() -> Array[StatusEffectData]:
 
 ## Formats a number for display. Amounts >= 1000 become "X.Xk".
 ## Examples: 500 → "500", 1500 → "1.5k", 10203 → "10.2k", 999999 → "999.9k"
-static func format_amount(amount: int) -> String:
+func format_amount(amount: int) -> String:
 	if amount < 1000:
 		return str(amount)
 	var thousands := amount / 1000.0

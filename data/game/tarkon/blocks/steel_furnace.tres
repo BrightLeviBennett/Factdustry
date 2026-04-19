@@ -1,20 +1,32 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://ch35fdcgqsc7t"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" path="res://textures/blocks/factories/SteelFurnace.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://b8po1rs11gygn" path="res://textures/blocks/factories/SteelFurnace.png" id="2"]
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"steel_furnace"
 display_name = "Steel Furnace"
-description = "Smelts iron and carbon into high-grade steel."
+description = "Smelts iron into steel. Accepts iron from any side and outputs steel from any side. Requires electrical power."
+icon = ExtResource("2")
 category = 2
 color = Color(0.8, 0.4, 0.2, 1)
+grid_size = Vector2i(3, 3)
 max_health = 340.0
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
 build_time = 3.0
+input_items = {
+"mat_iron": 2
+}
+output_items = {
+"mat_steel": 1
+}
+production_time = 4.0
 requires_power = true
 power_consumption = 4.0
-production_time = 3.0
-tags = PackedStringArray("production", "processing")
+electrical_power_use = 15.0
+max_stored_items = 30
+tags = PackedStringArray("production", "processing", "omnidirectional")

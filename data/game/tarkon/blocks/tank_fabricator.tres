@@ -1,24 +1,38 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://kqojtivydkld"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" path="res://textures/blocks/units/TankFabricator.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://da68y1jtmigfu" path="res://textures/blocks/units/TankFabricator/TankFabricatorComplete.png" id="2_mqosj"]
+[ext_resource type="Texture2D" uid="uid://dettnjreehev0" path="res://textures/blocks/units/TankFabricator/TankFabricatorBase.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4"]
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"tank_fabricator"
 display_name = "Tank Fabricator"
 description = "Primary unit production facility. Builds ground vehicles."
+icon = ExtResource("2_mqosj")
 category = 6
 color = Color(0.5, 0.6, 0.7, 1)
+top_sprite = ExtResource("4")
+base_sprite = ExtResource("3")
 grid_size = Vector2i(3, 3)
 max_health = 200.0
-build_cost = { "copper": 20 }
+build_cost = {
+"copper": 20
+}
 build_time = 4.0
-input_items = { "mat_copper": 20 }
-max_stored_items = 40
+input_items = {
+"mat_copper": 20
+}
 requires_power = true
 power_consumption = 4.0
-side_inputs = { 0: &"mat_copper", 1: &"mat_copper", 2: &"mat_copper", 3: &"mat_copper" }
+electrical_power_use = 20.0
+side_inputs = {
+0: &"mat_copper",
+1: &"mat_copper",
+2: &"mat_copper",
+3: &"mat_copper"
+}
+max_stored_items = 40
 tags = PackedStringArray("fabricator", "units")
 produced_unit = &"ant"

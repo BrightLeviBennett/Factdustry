@@ -3,121 +3,119 @@ class_name UnitData
 extends Resource
 
 # ============================================================
-# UNIT_DATA.GD - Defines what a "Unit" is
-# ============================================================
-# Both enemy AND player units use this same data format.
-# The "team" property determines which side they're on.
-# Each .tres file becomes one unit type.
+# UNIT_DATA.GD — Data definition for a unit type.
+# Used for both enemy and player units; `team` picks the side.
 # ============================================================
 
-# --- IDENTITY ---
-## Unique ID used in code (e.g., "basic_cell", "phage")
+enum Team { PLAYER, ENEMY, NEUTRAL }
+enum UnitCategory { MELEE, RANGED, TANK, SWARM, FLYING, SUPPORT, BUILDER, BOSS }
+enum UnitShape { CIRCLE, DIAMOND, TRIANGLE, HEXAGON }
+enum MovementLayer {
+	GROUND,   ## Normal pathfinding, blocked by all buildings + terrain walls
+	CRAWLER,  ## Ignores buildings; blocked only by terrain wall segments >= 4 cells
+	HOVER,    ## Ignores all terrain, direct movement
+	FLYING,   ## Ignores all terrain, direct movement (highest layer)
+}
+enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
+
+
+@export_group("Identity")
+## Unique ID used in code (e.g. "basic_cell", "phage").
 @export var id: StringName = &""
-## Display name
 @export var display_name: String = ""
-## Description
 @export_multiline var description: String = ""
-## Icon texture
 @export var icon: Texture2D
-
-# --- TEAM ---
-enum Team {
-	PLAYER,    # Friendly units
-	ENEMY,     # Hostile units
-	NEUTRAL,   # Environmental/passive
-}
 @export var team: Team = Team.ENEMY
-
-# --- CATEGORIZATION ---
-enum UnitCategory {
-	MELEE,      # Gets close and attacks
-	RANGED,     # Shoots from a distance
-	TANK,       # High HP, slow, draws aggro
-	SWARM,      # Weak individually, spawns in groups
-	FLYING,     # Ignores walls/pathfinding
-	SUPPORT,    # Heals/buffs other units
-	BUILDER,    # Player's building drone
-	BOSS,       # Powerful, unique abilities
-}
 @export var category: UnitCategory = UnitCategory.MELEE
 
-# --- APPEARANCE ---
-## Body color
+
+@export_group("Appearance")
 @export var color: Color = Color.RED
-## Visual size in pixels (radius)
+## Fallback shape radius (pixels) when no base/head sprite is set.
 @export var visual_size: float = 8.0
-## Shape for drawing (circle, diamond, triangle, hexagon)
-enum UnitShape { CIRCLE, DIAMOND, TRIANGLE, HEXAGON }
+## Multiplier on the sprite's native pixel size. 1.0 = pixel-perfect.
+@export var sprite_scale: float = 1.0
+## Primitive shape used when textures aren't set.
 @export var shape: UnitShape = UnitShape.CIRCLE
+@export_subgroup("Sprites")
+## Chassis/body — rotates with movement direction.
+@export var base_sprite: Texture2D
+## Rotating head — aims at target. Source art should face UP.
+@export var head_sprite: Texture2D
+@export_subgroup("Rotation")
+## Radians/sec the head can swing (crane-style constant rate).
+@export var head_turn_speed: float = 3.0
+## Radians/sec the chassis rotates to face travel direction.
+@export var body_turn_speed: float = 2.0
 
-# --- MOVEMENT LAYER ---
-## Determines how this unit interacts with terrain and other units.
-enum MovementLayer {
-	GROUND,    ## Normal pathfinding, blocked by all buildings + terrain walls
-	CRAWLER,   ## Ignores buildings; blocked only by terrain wall segments >= 4 cells
-	HOVER,     ## Ignores all terrain, direct movement
-	FLYING,    ## Ignores all terrain, direct movement (highest layer)
-}
+
+@export_group("Movement")
 @export var movement_layer: MovementLayer = MovementLayer.GROUND
+## Tiles/sec (converted to px/sec at load time).
+@export var move_speed: float = 1.25
+@export_subgroup("Tank Steering")
+## Must turn before moving, producing arcing trajectories.
+@export var tank_steering: bool = false
+## Turn radius in pixels. >0 arcs around a pivot; 0 pivots in place.
+@export var turn_radius: float = 0.0
 
-# --- STATS ---
+
+@export_group("Stats")
 @export var max_health: float = 50.0
-@export var health_regen: float = 0.0        # HP/sec
-@export var move_speed: float = 80.0         # Pixels/sec
-@export var armor: float = 0.0              # Flat damage reduction
+## HP regenerated per second.
+@export var health_regen: float = 0.0
+## Flat damage reduction.
+@export var armor: float = 0.0
 
-# --- COMBAT ---
+
+@export_group("Combat")
 @export var attack_damage: float = 10.0
-@export var attack_speed: float = 1.0        # Seconds between attacks
-@export var attack_range: float = 32.0       # Pixels (melee ~32, ranged ~200+)
+## Seconds between attacks.
+@export var attack_speed: float = 1.0
+## Attack range in pixels (melee ~32, ranged ~200+).
+@export var attack_range: float = 32.0
 @export var is_aoe: bool = false
 @export var aoe_radius: float = 0.0
 
-# --- AI BEHAVIOR ---
-## DEPRECATED: Use movement_layer instead. Kept for .tres backward compatibility.
+
+@export_group("AI")
+## Range (px) to spot enemies/buildings.
+@export var detection_range: float = 500.0
+@export var target_priority: TargetPriority = TargetPriority.NEAREST
+## DEPRECATED: Use movement_layer instead. Kept for .tres back-compat.
 @export var can_fly: bool = false:
 	get:
 		return movement_layer == MovementLayer.FLYING
 	set(value):
 		if value:
 			movement_layer = MovementLayer.FLYING
-## How far this unit can "see" enemies/buildings to target (in pixels)
-@export var detection_range: float = 500.0
-## Priority target: what this unit prefers to attack
-enum TargetPriority {
-	NEAREST,         # Attacks whatever is closest
-	BUILDINGS,       # Prefers buildings over units
-	UNITS,           # Prefers units over buildings
-	WEAKEST,         # Attacks lowest HP target
-	PLAYER_DRONE,    # Bee-lines for the player
-}
-@export var target_priority: TargetPriority = TargetPriority.NEAREST
 
-# --- DROPS ---
-## Dictionary of item_id -> amount dropped on death.
-## Example: {"plasmids": 1}
+
+@export_group("Drops")
+## item_id -> amount dropped on death.
 @export var drops: Dictionary = {}
-## Chance (0.0-1.0) to drop items on death
+## Chance (0.0-1.0) to drop on death.
 @export var drop_chance: float = 1.0
 
-# --- STATUS EFFECTS ---
-## Status effect applied on hit (reference a StatusEffectData .tres)
+
+@export_group("Status Effects")
+## StatusEffectData applied on hit.
 @export var on_hit_effect: Resource
-## Status effects this unit is immune to (array of effect IDs)
+## Effect IDs this unit is immune to.
 @export var immunities: PackedStringArray = []
 
-# --- SPAWNING ---
-## For enemy units: how many spawn per wave from a nest
+
+@export_group("Spawning")
+## Enemies per wave from a nest.
 @export var spawn_count: int = 3
-## Score/difficulty value — used for wave scaling
+## Difficulty value used for wave scaling.
 @export var threat_value: float = 1.0
 
-# --- PRODUCTION ---
-## Time in seconds for a fabricator to build this unit
+
+@export_group("Production")
+## Seconds a fabricator takes to build this unit.
 @export var build_time: float = 5.0
-## Items a fabricator must consume to produce this unit.
-## Keys are short item ids (e.g. "copper", "silicon") matching BlockData.build_cost.
-## Example: { "copper": 100, "silicon": 40 }
+## item_id -> amount a fabricator consumes to produce this unit.
 @export var build_cost: Dictionary = {}
 
 

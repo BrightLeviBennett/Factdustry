@@ -17,19 +17,47 @@ var target_zoom := 1.0
 ## Set to null to return to normal following.
 var focus_override: Variant = null  # Vector2 or null
 
+# Cached sibling references (populated in _ready after one process frame).
+var _main: Node
+var _unit_mgr: Node
+var _drone: Node2D
+
+
+
+func _main_ref() -> Node:
+	if _main == null:
+		_main = get_node_or_null("/root/Main")
+	return _main
+
+func _unit_mgr_ref() -> Node:
+	if _unit_mgr == null:
+		_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	return _unit_mgr
+
+func _drone_ref() -> Node2D:
+	if _drone == null:
+		_drone = get_node_or_null("/root/Main/PlayerDrone")
+	return _drone
+
 
 func _ready() -> void:
 	make_current()
 	target_zoom = zoom.x
+	await get_tree().process_frame
+	_main = get_node_or_null("/root/Main")
+	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	_drone = get_node_or_null("/root/Main/PlayerDrone")
 
 
 ## Throttle trackpad rotation to avoid spinning too fast
 var _pan_rotate_accum := 0.0
-const PAN_ROTATE_THRESHOLD := 1.5
+## How much trackpad scroll delta is needed to trigger one rotation step.
+## Lower = more sensitive. Adjustable via settings.
+var pan_rotate_threshold := 1.5
 
 
 func _input(event: InputEvent) -> void:
-	var main_node = get_node_or_null("/root/Main")
+	var main_node = _main_ref()
 	# Don't handle zoom/rotate when any blocking UI is open
 	if main_node and main_node.is_ui_blocking():
 		return
@@ -57,10 +85,10 @@ func _input(event: InputEvent) -> void:
 		if has_block_selected:
 			# Accumulate scroll delta and rotate when threshold is reached
 			_pan_rotate_accum += event.delta.y
-			if _pan_rotate_accum <= -PAN_ROTATE_THRESHOLD:
+			if _pan_rotate_accum <= -pan_rotate_threshold:
 				_rotate_selected_block(1)  # Scroll up = clockwise
 				_pan_rotate_accum = 0.0
-			elif _pan_rotate_accum >= PAN_ROTATE_THRESHOLD:
+			elif _pan_rotate_accum >= pan_rotate_threshold:
 				_rotate_selected_block(-1)  # Scroll down = counter-clockwise
 				_pan_rotate_accum = 0.0
 		else:
@@ -79,7 +107,7 @@ func _input(event: InputEvent) -> void:
 
 
 func _rotate_selected_block(direction: int) -> void:
-	var main_node = get_node_or_null("/root/Main")
+	var main_node = _main_ref()
 	if not main_node:
 		return
 	if direction > 0:
@@ -89,8 +117,8 @@ func _rotate_selected_block(direction: int) -> void:
 
 
 func _process(delta: float) -> void:
-	var main_node = get_node_or_null("/root/Main")
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var main_node = _main_ref()
+	var unit_mgr = _unit_mgr_ref()
 	var is_paused: bool = main_node.world_paused if main_node else false
 
 	# When paused: free camera pan with WASD, nothing follows
@@ -123,7 +151,7 @@ func _process(delta: float) -> void:
 				has_target = true
 
 		if not has_target:
-			var drone = get_node_or_null("/root/Main/PlayerDrone")
+			var drone = _drone_ref()
 			if drone:
 				follow_target = drone.position
 				has_target = true

@@ -43,7 +43,7 @@ enum Faction { LUMINA, FEROX, DERELICT }
 # --- STATE ---
 # Now a StringName block ID (e.g. &"drill") or empty &"" for nothing.
 var selected_building: StringName = &""
-var require_resources := false
+var require_resources := true
 var require_research := true
 var enemies_attack := false
 
@@ -83,22 +83,93 @@ var building_factions := {}
 ## Buildings not in this dict are fully built.
 var building_build_progress := {}
 
-## FIFO build order — only the first entry gets progress each frame.
-## Array of Vector2i (anchor positions in placement order).
+## FIFO build order — DEPRECATED, kept for save compat. Use work_order instead.
 var build_order: Array[Vector2i] = []
 
 ## Set by SaveManager when drone position is restored from a save.
 var _drone_position_restored := false
 
-## When true, construction is paused (no build progress ticks).
+## When true, construction/deconstruction is paused (no progress ticks).
 var build_paused := false
 
 ## Tracks buildings being deconstructed (reverse build animation).
 ## Key = Vector2i (anchor), Value = Dictionary {"block_id": StringName, "progress": float, "build_time": float, "rotation": int}
 var building_deconstruct_progress := {}
 
-## FIFO deconstruct order — only the first entry gets progress each frame.
+## FIFO deconstruct order — DEPRECATED, kept for save compat. Use work_order instead.
 var deconstruct_order: Array[Vector2i] = []
+
+## Unified FIFO work queue — interleaves build and deconstruct operations.
+## Only the first entry gets progress each frame. Entries are anchors (Vector2i).
+## Check building_build_progress / building_deconstruct_progress to determine
+## whether a given anchor is a build or a deconstruct.
+var work_order: Array[Vector2i] = []
+
+## Tracks how much of each resource has been consumed so far for a building
+## under construction. Key = Vector2i (anchor), Value = { StringName: int }.
+var building_resources_consumed := {}
+
+## Tracks how much of each resource has been refunded so far for a building
+## being deconstructed. Key = Vector2i (anchor), Value = { StringName: int }.
+var building_resources_refunded := {}
+
+# --- CACHED CHILD NODE REFERENCES ---
+# Populated by _refresh_child_cache() at the end of _ready(), but because
+# SectorScript / HUD / TechTreeUI are added dynamically at various points,
+# every read goes through a `_x_ref()` lazy accessor below that auto-populates
+# the first time the child actually exists.
+var _hud: Node
+var _tech_ui: Node
+var _db_ui: Node
+var _drone: Node2D
+var _unit_mgr: Node
+var _terrain: Node2D
+var _building_sys: Node
+var _logistics: Node2D
+var _combat_sys: Node
+var _power_sys: Node
+
+
+func _hud_ref() -> Node:
+	if _hud == null:
+		_hud = get_node_or_null("HUD")
+	return _hud
+func _tech_ui_ref() -> Node:
+	if _tech_ui == null:
+		_tech_ui = get_node_or_null("TechTreeUI")
+	return _tech_ui
+func _db_ui_ref() -> Node:
+	if _db_ui == null:
+		_db_ui = get_node_or_null("DatabaseUI")
+	return _db_ui
+func _drone_ref() -> Node2D:
+	if _drone == null:
+		_drone = get_node_or_null("PlayerDrone")
+	return _drone
+func _unit_mgr_ref() -> Node:
+	if _unit_mgr == null:
+		_unit_mgr = get_node_or_null("UnitManager")
+	return _unit_mgr
+func _terrain_ref() -> Node2D:
+	if _terrain == null:
+		_terrain = get_node_or_null("TerrainSystem")
+	return _terrain
+func _building_sys_ref() -> Node:
+	if _building_sys == null:
+		_building_sys = get_node_or_null("BuildingSystem")
+	return _building_sys
+func _logistics_ref() -> Node2D:
+	if _logistics == null:
+		_logistics = get_node_or_null("LogisticsSystem")
+	return _logistics
+func _combat_sys_ref() -> Node:
+	if _combat_sys == null:
+		_combat_sys = get_node_or_null("CombatSystem")
+	return _combat_sys
+func _power_sys_ref() -> Node:
+	if _power_sys == null:
+		_power_sys = get_node_or_null("PowerSystem")
+	return _power_sys
 
 
 ## Returns true if a blocking UI is open (pause menu, tech tree, database, loss screen).
@@ -106,16 +177,15 @@ var deconstruct_order: Array[Vector2i] = []
 func is_ui_blocking() -> bool:
 	if sector_lost:
 		return true
-	var hud_node = get_node_or_null("HUD")
-	if hud_node and hud_node.escape_menu_open:
+	var hud := _hud_ref()
+	if hud and hud.escape_menu_open:
 		return true
-	var tech_ui = get_node_or_null("TechTreeUI")
+	var tech_ui := _tech_ui_ref()
 	if tech_ui and tech_ui.is_open:
 		return true
-	var db_ui = get_node_or_null("DatabaseUI")
+	var db_ui := _db_ui_ref()
 	if db_ui and db_ui.is_open:
 		return true
-	var hud = get_node_or_null("HUD")
 	if hud and hud.settings_ui and hud.settings_ui.is_open:
 		return true
 	return false
@@ -142,18 +212,22 @@ var core_position := Vector2i(48, 48)
 var world_paused := false
 
 # --- SIGNALS ---
+# Several of these are emitted from sibling systems (LogisticsSystem,
+# PlayerDrone, BuildingSystem, SectorScript) which call main.<signal>.emit(...).
+# GDScript's "unused_signal" warning only inspects the declaring class, so we
+# suppress it here since the cross-module emits are legitimate.
 signal resources_changed(resources: Dictionary)
-signal ferox_resources_changed(ferox_resources: Dictionary)
+@warning_ignore("unused_signal") signal ferox_resources_changed(ferox_resources: Dictionary)
 signal building_selected(block_id: StringName)
 signal building_placed(block_id: StringName, grid_pos: Vector2i)
 signal building_destroyed(grid_pos: Vector2i)
-signal item_mined(item_id: StringName)
-signal item_absorbed_in_core(item_id: StringName)
-signal core_unit_item_mined(item_id: StringName)
-signal item_produced(item_id: StringName)
+@warning_ignore("unused_signal") signal item_mined(item_id: StringName)
+@warning_ignore("unused_signal") signal item_absorbed_in_core(item_id: StringName)
+@warning_ignore("unused_signal") signal core_unit_item_mined(item_id: StringName)
+@warning_ignore("unused_signal") signal item_produced(item_id: StringName)
 signal sector_launched(sector_id: StringName)
-signal sector_captured(sector_id: StringName)
-signal archive_decoded(archive_id: StringName)
+@warning_ignore("unused_signal") signal sector_captured(sector_id: StringName)
+@warning_ignore("unused_signal") signal archive_decoded(archive_id: StringName)
 
 
 func _notification(what: int) -> void:
@@ -171,9 +245,11 @@ func _ready() -> void:
 	# Allow Main to process input even while paused (for space to unpause)
 	process_mode = Node.PROCESS_MODE_ALWAYS
 
-	# Wait for Registry essentials to finish loading
-	if not Registry.essentials_loaded:
-		await Registry.all_resources_loaded
+	# Wait for Registry ESSENTIALS (items, blocks, units, fluids, tiles) only.
+	# Non-essential groups (status_effects, sectors, planets) keep loading in the
+	# background after the sector is already playable.
+	while not Registry.essentials_loaded:
+		await get_tree().process_frame
 	await get_tree().process_frame
 
 	# Create SectorScript node for walkthrough/tutorial step execution
@@ -206,7 +282,7 @@ func _ready() -> void:
 	print("Main._ready: Core placed at %s" % core_position)
 
 	# Move drone to core spawn — but only if the sector save didn't restore a position
-	var drone = get_node_or_null("PlayerDrone")
+	var drone = _drone_ref()
 	if drone and drone.has_method("_move_to_core"):
 		if not _drone_position_restored:
 			drone._move_to_core()
@@ -230,6 +306,24 @@ func _ready() -> void:
 		SaveManager.sector_resources[sid] = resources.duplicate()
 		SaveManager.save_campaign()
 		sector_launched.emit(sid)
+
+	_refresh_child_cache()
+
+
+## Populates the _hud / _tech_ui / etc. cache. Call after the main scene tree
+## has its expected children (typically at the end of _ready).
+func _refresh_child_cache() -> void:
+	_hud = get_node_or_null("HUD")
+	_tech_ui = get_node_or_null("TechTreeUI")
+	_db_ui = get_node_or_null("DatabaseUI")
+	_drone = get_node_or_null("PlayerDrone")
+	_unit_mgr = get_node_or_null("UnitManager")
+	_terrain = get_node_or_null("TerrainSystem")
+	_building_sys = get_node_or_null("BuildingSystem")
+	_logistics = get_node_or_null("LogisticsSystem")
+	_combat_sys = get_node_or_null("CombatSystem")
+	_power_sys = get_node_or_null("PowerSystem")
+
 
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause_world"):
@@ -268,13 +362,29 @@ func select_building(block_id: StringName) -> void:
 
 
 # Checks if the player can afford a block using its .tres data.
+## Resolves a build_cost key (like "copper") to the matching resources key
+## (like "mat_copper"). Tries the raw key first, then prepends "mat_".
+func _resolve_resource_key(cost_key: String) -> StringName:
+	var sn := StringName(cost_key)
+	if resources.has(sn):
+		return sn
+	var mat_sn := StringName("mat_" + cost_key)
+	if resources.has(mat_sn):
+		return mat_sn
+	return sn  # Fallback — will miss, but at least doesn't crash
+
+
 func can_afford(block_id: StringName) -> bool:
 	if not require_resources:
 		return true
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return false
-	return data.can_afford(resources)
+	for item_id in data.build_cost:
+		var rk := _resolve_resource_key(str(item_id))
+		if not resources.has(rk) or resources[rk] < int(data.build_cost[item_id]):
+			return false
+	return true
 
 
 func is_cell_empty(grid_pos: Vector2i) -> bool:
@@ -323,7 +433,7 @@ func get_unit_cap_per_type() -> int:
 
 ## Returns the count of player units of a specific type currently alive.
 func get_player_unit_count(unit_id: StringName) -> int:
-	var unit_mgr = get_node_or_null("UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	if not unit_mgr:
 		return 0
 	var count := 0
@@ -389,8 +499,12 @@ func is_building_constructing(grid_pos: Vector2i) -> bool:
 	return building_build_progress.has(anchor)
 
 
-## Returns true if the building should not function (under construction or derelict).
-## Transport blocks (conveyors, pipes) are functional even while under construction.
+## Returns true if the building should not function (under construction,
+## being deconstructed, or derelict). **Every** block type is inactive while
+## its construction progress is advancing — including transport (conveyors,
+## pipes). Items already on a half-built belt just sit there until the belt
+## finishes; new items can't be pushed in. Systems that tick block behavior
+## MUST consult this before doing any work on the cell.
 func is_building_inactive(grid_pos: Vector2i) -> bool:
 	if get_building_faction(grid_pos) == Faction.DERELICT:
 		return true
@@ -399,11 +513,6 @@ func is_building_inactive(grid_pos: Vector2i) -> bool:
 	if building_deconstruct_progress.has(anchor_check):
 		return true
 	if is_building_constructing(grid_pos):
-		# Transport blocks work while building (pipes/conveyors need to flow)
-		var block_id = placed_buildings.get(grid_pos, &"")
-		var data = Registry.get_block(block_id)
-		if data and data.is_transport():
-			return false
 		return true
 	return false
 
@@ -486,16 +595,13 @@ func _get_swap_group(data: BlockData) -> StringName:
 ## cell, clearing any logistics/power state the old block had and then placing
 ## the new one with the new block's build_time. Used by the belt/shaft swap
 ## feature in try_place_building.
-func _swap_building_in_place(grid_pos: Vector2i, old_data: BlockData, new_data: BlockData) -> bool:
+func _swap_building_in_place(grid_pos: Vector2i, _old_data: BlockData, new_data: BlockData) -> bool:
 	# Destroy the existing block first — this fires building_destroyed so every
 	# system clears its per-anchor state (conveyor_items, sorter_filters,
 	# factory_buffers, power networks, etc.) and refunds nothing.
 	destroy_building(grid_pos)
 
-	# Deduct the new block's cost.
-	if require_resources:
-		for item_id in new_data.build_cost:
-			resources[item_id] -= new_data.build_cost[item_id]
+	# No immediate cost deduction — progressive consumption during build.
 
 	# Place the new block at the same cell, rotation = placement_rotation.
 	placed_buildings[grid_pos] = new_data.id
@@ -504,10 +610,11 @@ func _swap_building_in_place(grid_pos: Vector2i, old_data: BlockData, new_data: 
 	building_origins[grid_pos] = grid_pos
 	building_factions[grid_pos] = Faction.LUMINA
 
-	# Start build animation (takes the new block's full build_time).
+	# Start build with progressive resource consumption.
 	if new_data.build_time > 0:
 		building_build_progress[grid_pos] = 0.0
-		build_order.append(grid_pos)
+		building_resources_consumed[grid_pos] = {}
+		work_order.append(grid_pos)
 
 	resources_changed.emit(resources)
 	building_placed.emit(new_data.id, grid_pos)
@@ -548,14 +655,10 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 				if new_group != &"" and new_group == old_group:
 					# Only LUMINA can swap its own blocks.
 					if get_building_faction(grid_pos) == Faction.LUMINA:
-						if can_afford(selected_building):
-							return _swap_building_in_place(grid_pos, existing_data, data)
-
-	if not can_afford(selected_building):
-		return false
+						return _swap_building_in_place(grid_pos, existing_data, data)
 
 	# Check all tiles the building occupies (for multi-tile buildings)
-	var terrain = get_node_or_null("TerrainSystem")
+	var terrain = _terrain_ref()
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var check_pos = grid_pos + Vector2i(x, y)
@@ -583,31 +686,36 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 				return false
 
 	# Extractors must face ore — or, for wall miners, a blackstone wall.
+	# Geyser miners must be on a geyser (not face ore).
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
-		var building_sys = get_node_or_null("BuildingSystem")
-		if building_sys:
-			if data.tags.has("wall_miner"):
-				if not building_sys._is_facing_wall(grid_pos, placement_rotation, selected_building):
+		if data.tags.has("geyser_miner"):
+			if terrain:
+				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+				if terrain.floor_tiles.get(center, &"") != &"geyser":
 					return false
-			else:
-				if not building_sys._is_facing_ore(grid_pos, placement_rotation):
-					return false
+		else:
+			var building_sys = _building_sys_ref()
+			if building_sys:
+				if data.tags.has("wall_miner"):
+					if not building_sys._is_facing_wall(grid_pos, placement_rotation, selected_building):
+						return false
+				else:
+					if not building_sys._is_facing_ore(grid_pos, placement_rotation):
+						return false
 
 	# Pumps must be on liquid
 	if data.tags.has("pump"):
-		var building_sys = get_node_or_null("BuildingSystem")
+		var building_sys = _building_sys_ref()
 		if building_sys and not building_sys._is_on_liquid(grid_pos):
 			return false
 
 	# Check if within drone build range
-	var drone = get_node_or_null("PlayerDrone")
+	var drone = _drone_ref()
 	if drone and not drone.is_in_build_range(grid_pos):
 		return false
 
-	# Deduct costs
-	if require_resources:
-		for item_id in data.build_cost:
-			resources[item_id] -= data.build_cost[item_id]
+	# No immediate cost deduction — resources are consumed progressively
+	# during construction by the build tick in building_system._process.
 
 	# Place all tiles
 	for x in range(data.grid_size.x):
@@ -619,10 +727,12 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 			building_origins[tile_pos] = grid_pos
 			building_factions[tile_pos] = Faction.LUMINA
 
-	# Start build animation (only if build_time > 0)
+	# Start build with progressive resource consumption.
+	# build_time 0 → instant (no queue entry needed).
 	if data.build_time > 0:
 		building_build_progress[grid_pos] = 0.0
-		build_order.append(grid_pos)
+		building_resources_consumed[grid_pos] = {}
+		work_order.append(grid_pos)
 
 	resources_changed.emit(resources)
 	building_placed.emit(selected_building, grid_pos)
@@ -637,7 +747,7 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 		return false
 
 	# Validate all tiles
-	var terrain = get_node_or_null("TerrainSystem")
+	var terrain = _terrain_ref()
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var check_pos = grid_pos + Vector2i(x, y)
@@ -651,7 +761,8 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 		if not can_afford(block_id):
 			return false
 		for item_id in data.build_cost:
-			resources[item_id] -= data.build_cost[item_id]
+			var rk := _resolve_resource_key(str(item_id))
+			resources[rk] -= int(data.build_cost[item_id])
 
 	# Place all tiles
 	for x in range(data.grid_size.x):
@@ -682,7 +793,8 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 		destroy_building(grid_pos)
 
 
-# Removes a building and refunds its build cost to the player's resources.
+# Queues a building for deconstruction. Resources are refunded progressively
+# during the deconstruct tick, not instantly.
 func destroy_building_with_refund(grid_pos: Vector2i) -> void:
 	if not placed_buildings.has(grid_pos):
 		return
@@ -695,25 +807,73 @@ func destroy_building_with_refund(grid_pos: Vector2i) -> void:
 	# If already deconstructing, skip
 	if building_deconstruct_progress.has(anchor):
 		return
-	# Start deconstruct animation (reverse of build)
-	var build_time: float = data.build_time if data else 1.0
-	if build_time <= 0:
-		build_time = 0.5  # Minimum deconstruct time for visual feedback
+	# How much was actually paid so far — this is what gets refunded.
+	var total_to_refund := {}
+	var starting_progress: float = 0.0
+
+	if building_build_progress.has(anchor):
+		# Partially built — reverse from where construction got to.
+		total_to_refund = building_resources_consumed.get(anchor, {}).duplicate()
+		# Deconstruct starts at the current build progress and counts down to 0.
+		var build_time_full: float = data.build_time if data else 1.0
+		if build_time_full <= 0:
+			build_time_full = 1.0
+		starting_progress = clampf(building_build_progress[anchor], 0.0, build_time_full)
+		# Clean up the build entry — it's now a deconstruct.
+		building_build_progress.erase(anchor)
+		building_resources_consumed.erase(anchor)
+		var wi := work_order.find(anchor)
+		if wi >= 0:
+			work_order.remove_at(wi)
+	else:
+		# Fully built — refund full build cost over the full build_time.
+		if data:
+			for item_id in data.build_cost:
+				var rk := _resolve_resource_key(str(item_id))
+				total_to_refund[rk] = int(data.build_cost[item_id])
+
+	# Deconstruct duration = how far the build got (partially built) or
+	# full build_time (fully built). Minimum 0.5s for visual feedback.
+	var build_time_full: float = data.build_time if data else 1.0
+	if build_time_full <= 0:
+		build_time_full = 1.0
+	var decon_time: float
+	var max_build_pct: float  # How far the build got (0-1); 1.0 = fully built
+	if starting_progress > 0.0:
+		decon_time = maxf(starting_progress, 0.5)
+		max_build_pct = clampf(starting_progress / build_time_full, 0.0, 1.0)
+	else:
+		decon_time = build_time_full
+		if decon_time <= 0:
+			decon_time = 0.5
+		max_build_pct = 1.0
+
 	building_deconstruct_progress[anchor] = {
 		"block_id": block_id,
 		"progress": 0.0,
-		"build_time": build_time,
+		"build_time": decon_time,
 		"rotation": building_rotation.get(grid_pos, 0),
+		"total_refund": total_to_refund,
+		"max_build_pct": max_build_pct,  # For the visual: line starts here and goes back to 0
 	}
-	deconstruct_order.append(anchor)
-	# Refund resources immediately
-	if data:
-		for item_id in data.build_cost:
-			if resources.has(item_id):
-				resources[item_id] += data.build_cost[item_id]
-			else:
-				resources[item_id] = data.build_cost[item_id]
-	resources_changed.emit(resources)
+	building_resources_refunded[anchor] = {}
+	# Deconstruct is more urgent than queued builds — insert at the front
+	# of the work queue (after any currently-active item at index 0, unless
+	# this anchor WAS the active item, in which case it takes slot 0).
+	if work_order.is_empty() or work_order[0] == anchor:
+		if not work_order.is_empty():
+			work_order.remove_at(0)
+		work_order.insert(0, anchor)
+	else:
+		work_order.insert(1, anchor)
+
+	# Block has just flipped from active → inactive (is_building_inactive
+	# returns true whenever a decon entry exists). Invalidate the power
+	# network so its contribution is removed from the balance on the next
+	# tick, matching the signal-less construction-completion path.
+	var ps := _power_sys_ref()
+	if ps and "_networks_dirty" in ps:
+		ps._networks_dirty = true
 
 
 ## Alias for destroy_building_with_refund — starts deconstruct animation with refund.
@@ -742,7 +902,7 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 	# Capture stored items/fluids from logistics
 	var stored_items := {}
 	var stored_fluids := {}
-	var logistics = get_node_or_null("LogisticsSystem")
+	var logistics = _logistics_ref()
 	if logistics and logistics.block_storage.has(anchor):
 		var storage = logistics.block_storage[anchor]
 		stored_items = storage.get("items", {}).duplicate()
@@ -810,23 +970,29 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 		building_origins.erase(anchor)
 		building_factions.erase(anchor)
 
-	# Clean up build progress
+	# Clean up build/deconstruct progress and unified work queue
 	building_build_progress.erase(anchor)
+	building_deconstruct_progress.erase(anchor)
+	building_resources_consumed.erase(anchor)
+	building_resources_refunded.erase(anchor)
+	var work_idx: int = work_order.find(anchor)
+	if work_idx >= 0:
+		work_order.remove_at(work_idx)
+	# Legacy compat
 	var order_idx: int = build_order.find(anchor)
 	if order_idx >= 0:
 		build_order.remove_at(order_idx)
-	building_deconstruct_progress.erase(anchor)
 	var decon_idx: int = deconstruct_order.find(anchor)
 	if decon_idx >= 0:
 		deconstruct_order.remove_at(decon_idx)
 
 	# Clean up turret angles (combat system)
-	var combat = get_node_or_null("CombatSystem")
+	var combat = _combat_sys_ref()
 	if combat and "turret_angles" in combat:
 		combat.turret_angles.erase(anchor)
 
 	# Clean up links (power system)
-	var power_sys = get_node_or_null("PowerSystem")
+	var power_sys = _power_sys_ref()
 	if power_sys and "linked_pairs" in power_sys:
 		var to_remove := []
 		for i in range(power_sys.linked_pairs.size()):
@@ -837,7 +1003,7 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 			power_sys.linked_pairs.remove_at(to_remove[i])
 
 	# Clean up crane states (building system)
-	var building_sys = get_node_or_null("BuildingSystem")
+	var building_sys = _building_sys_ref()
 	if building_sys and "crane_states" in building_sys:
 		building_sys.crane_states.erase(anchor)
 	if building_sys and "archive_holdings" in building_sys:
@@ -877,7 +1043,7 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 		return false
 
 	# Check all tiles are available
-	var terrain = get_node_or_null("TerrainSystem")
+	var terrain = _terrain_ref()
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var check_pos = grid_pos + Vector2i(x, y)
@@ -888,7 +1054,7 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 
 	# Extractor placement checks
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
-		var building_sys = get_node_or_null("BuildingSystem")
+		var building_sys = _building_sys_ref()
 		if building_sys:
 			var pay_rot := int(payload.get("rotation", 0))
 			if data.tags.has("wall_miner"):
@@ -919,7 +1085,7 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 			building_factions[tile_pos] = faction
 
 	# Restore stored items/fluids
-	var logistics = get_node_or_null("LogisticsSystem")
+	var logistics = _logistics_ref()
 	if logistics:
 		var stored_items: Dictionary = payload.get("stored_items", {})
 		var stored_fluids: Dictionary = payload.get("stored_fluids", {})
@@ -1016,11 +1182,17 @@ func destroy_building(grid_pos: Vector2i) -> void:
 		_check_player_cores_remaining()
 
 	building_build_progress.erase(anchor)
+	building_deconstruct_progress.erase(anchor)
+	building_resources_consumed.erase(anchor)
+	building_resources_refunded.erase(anchor)
+	var work_idx2: int = work_order.find(anchor)
+	if work_idx2 >= 0:
+		work_order.remove_at(work_idx2)
 	var order_idx: int = build_order.find(anchor)
 	if order_idx >= 0:
 		build_order.remove_at(order_idx)
 
-	var unit_mgr = get_node_or_null("UnitManager")
+	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr:
 		unit_mgr.on_building_destroyed(grid_pos)
 
@@ -1040,7 +1212,7 @@ func _remove_multi_tile_building(grid_pos: Vector2i, block_id: StringName, data:
 				building_rotation.erase(check_pos)
 				building_origins.erase(check_pos)
 				building_factions.erase(check_pos)
-				var unit_mgr = get_node_or_null("UnitManager")
+				var unit_mgr = _unit_mgr_ref()
 				if unit_mgr:
 					unit_mgr.on_building_destroyed(check_pos)
 
@@ -1147,7 +1319,7 @@ func _check_player_cores_remaining() -> void:
 	if not sector_lost:
 		sector_lost = true
 		world_paused = true
-		var hud_node = get_node_or_null("HUD")
+		var hud_node = _hud_ref()
 		if hud_node and hud_node.has_method("show_sector_loss"):
 			hud_node.show_sector_loss()
 

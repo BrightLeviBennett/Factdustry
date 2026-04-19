@@ -273,19 +273,19 @@ func _build_tile(entry: Resource, cat_key: String) -> Dictionary:
 	panel.add_theme_stylebox_override("panel", normal_style)
 
 	# Icon
-	var icon_rect = TextureRect.new()
-	icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	icon_rect.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
-	icon_rect.custom_minimum_size = Vector2(TILE_SIZE - 8, TILE_SIZE - 8)
-	if entry.icon:
-		icon_rect.texture = entry.icon
-	else:
-		icon_rect.texture = _fallback_icon
-	icon_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	panel.add_child(icon_rect)
+	if !is_locked:
+		var icon_rect = TextureRect.new()
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+		icon_rect.custom_minimum_size = Vector2(TILE_SIZE - 8, TILE_SIZE - 8)
+		if entry.icon:
+			icon_rect.texture = entry.icon
+		else:
+			icon_rect.texture = _fallback_icon
+		icon_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		panel.add_child(icon_rect)
 
 	if is_locked:
-		icon_rect.modulate = Color(0.3, 0.3, 0.3, 0.6)
 		# Lock overlay
 		var lock_label = Label.new()
 		lock_label.text = "🔒"
@@ -428,9 +428,6 @@ func _show_detail(entry: Resource, cat_key: String) -> void:
 		"tiles":
 			_show_tile_details(entry as TerrainTileData)
 
-	_add_tech_tree_status(entry)
-
-
 func _close_detail() -> void:
 	_detail_open = false
 	_detail_overlay.visible = false
@@ -478,56 +475,6 @@ func _get_tech_id_for_entry(entry: Resource) -> StringName:
 	return &""
 
 
-func _add_tech_tree_status(entry: Resource) -> void:
-	var tech_id = _get_tech_id_for_entry(entry)
-	if tech_id == &"":
-		return
-
-	_add_separator()
-	_add_section("Tech Tree")
-
-	var state = TechTree.get_state(tech_id)
-	var node_data = TechTree.get_node_data(tech_id)
-
-	match state:
-		TechTree.NodeState.LOCKED:
-			_add_text("🔒 LOCKED — Research parents first", Color(0.85, 0.2, 0.2), 13)
-			if node_data and not node_data["parents"].is_empty():
-				_add_text("Requires:", dim_text_color, 12)
-				for pid in node_data["parents"]:
-					var pd = TechTree.get_node_data(pid)
-					var pn = pd["name"] if pd else str(pid)
-					if TechTree.is_researched(pid):
-						_add_text("  ✔ " + pn, Color(0.3, 0.8, 0.3), 12)
-					else:
-						_add_text("  ✘ " + pn, Color(0.85, 0.2, 0.2), 12)
-
-		TechTree.NodeState.UNLOCKED:
-			var progress = TechTree.get_progress(tech_id)
-			_add_text("🔓 UNLOCKED — %d%% researched" % int(progress * 100), Color(0.55, 0.58, 0.62), 13)
-			var cost = node_data["research_cost"]
-			if not cost.is_empty():
-				_add_text("Research cost:", dim_text_color, 12)
-				for item_id in cost:
-					var req = cost[item_id]
-					var spt = TechTree.get_spent(tech_id, item_id)
-					var item_data = Registry.get_item_or_fluid(item_id)
-					var iname = item_data.display_name if item_data else str(item_id)
-					var col = Color(0.3, 0.9, 0.3) if spt >= req else Color(0.9, 0.5, 0.3)
-					_add_stat("  " + iname, "%d / %d" % [spt, req], col)
-
-		TechTree.NodeState.RESEARCHED:
-			_add_text("✔ RESEARCHED", Color(0.95, 0.82, 0.2), 13)
-
-	var children = TechTree.get_tech_children(tech_id)
-	if not children.is_empty():
-		_add_text("Unlocks:", dim_text_color, 12)
-		for cid in children:
-			var cd = TechTree.get_node_data(cid)
-			if cd:
-				_add_text("  → " + cd["name"], Color(0.6, 0.7, 0.8), 12)
-
-
 # =========================
 # DETAIL PANEL RENDERING
 # =========================
@@ -565,25 +512,17 @@ func _show_item_details(item: ItemData) -> void:
 
 func _show_block_details(block: BlockData) -> void:
 	_add_section("General")
-	_add_stat("Category", _block_category_name(block.category), text_color)
-	_add_stat("Grid Size", "%dx%d" % [block.grid_size.x, block.grid_size.y], text_color)
-
-	_add_separator()
-	_add_section("Health")
+	_add_stat("Size", "%dx%d" % [block.grid_size.x, block.grid_size.y], text_color)
+	
 	_add_stat("Max HP", str(block.max_health), Color(0.4, 1.0, 0.4))
 	if block.health_regen > 0:
 		_add_stat("Regen", "%s HP/sec" % str(block.health_regen), Color(0.4, 1.0, 0.4))
-
-	_add_separator()
-	_add_section("Build Cost")
-	if block.build_cost.size() == 0:
-		_add_text("Free", accent_color, 13)
-	else:
-		for item_id in block.build_cost:
-			var item = Registry.get_item_or_fluid(item_id)
-			var item_name = item.display_name if item else str(item_id)
-			var item_color = item.color if item else text_color
-			_add_stat(item_name, str(block.build_cost[item_id]), item_color)
+		
+	for item_id in block.build_cost:
+		var item = Registry.get_item_or_fluid(item_id)
+		var item_name = item.display_name if item else str(item_id)
+		var item_color = item.color if item else text_color
+		_add_stat(item_name, str(block.build_cost[item_id]), item_color)
 
 	if block.is_producer():
 		_add_separator()
@@ -630,11 +569,7 @@ func _show_block_details(block: BlockData) -> void:
 	if block.requires_power:
 		_add_separator()
 		_add_section("Power")
-		_add_stat("Consumption", "%s ATP/sec" % str(block.power_consumption), Color(1.0, 1.0, 0.3))
-
-	if block.tags.size() > 0:
-		_add_separator()
-		_add_stat("Tags", ", ".join(block.tags), dim_text_color)
+		_add_stat("Consumption", "%s Power/sec" % str(block.power_consumption), Color(1.0, 1.0, 0.3))
 
 
 func _show_unit_details(unit: UnitData) -> void:
@@ -646,7 +581,8 @@ func _show_unit_details(unit: UnitData) -> void:
 	_add_separator()
 	_add_section("Stats")
 	_add_stat_bar("Health", unit.max_health, 200.0, Color(0.4, 1.0, 0.4))
-	_add_stat_bar("Speed", unit.move_speed, 300.0, Color(0.4, 0.7, 1.0))
+	# move_speed is stored in tiles/sec; max ~3 t/s covers every unit.
+	_add_stat_bar("Speed", unit.move_speed, 3.0, Color(0.4, 0.7, 1.0))
 	_add_stat_bar("Damage", unit.attack_damage, 50.0, Color(1.0, 0.4, 0.4))
 	if unit.armor > 0:
 		_add_stat("Armor", str(unit.armor), Color(0.7, 0.7, 0.8))

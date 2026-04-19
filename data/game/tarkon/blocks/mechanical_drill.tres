@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://nbujjub08o3i"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://d2xipb5hhir11" path="res://textures/blocks/resource extractors/MechanicalDrill.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://dmovjrssoulrd" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrill.png" id="2"]
 
 [resource]
 script = ExtResource("1")
@@ -22,5 +22,5 @@ output_items = {
 "ore": 4
 }
 production_time = 2.0
-rotational_power_use = 10.0
-tags = PackedStringArray("mining", "extractor")
+electrical_power_use = 10.0
+tags = PackedStringArray("mining", "extractor", "drill_heads")

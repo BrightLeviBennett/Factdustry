@@ -1,19 +1,17 @@
 [gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://dyunpvwb7a8ar"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://caxbt2i2r1x58" path="res://textures/sectors/Starting_Grounds.png" id="1_dqnol"]
+[ext_resource type="Texture2D" uid="uid://dc2dx2x1ghf23" path="res://textures/sectors/StartingGrounds.png" id="1_1ocg3"]
 
 [resource]
 script = ExtResource("1")
 id = &"starting_grounds"
 display_name = "Starting Grounds"
 description = "A sector with minimal enemy presense, perfect for begining the journey of conquering Tarkon."
-icon = ExtResource("1_dqnol")
+icon = ExtResource("1_1ocg3")
 planet_id = &"Tarkon"
 available_resources = PackedStringArray("")
-waves = null
 wave_units_data = PackedStringArray()
-survive_waves = 0
 unlocks = PackedStringArray("crevice")
 required_sectors = PackedStringArray()
 map_path = "res://data/game/tarkon/maps/SG.sector.json"
