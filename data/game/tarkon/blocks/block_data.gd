@@ -90,8 +90,6 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 
 
 @export_group("Power")
-@export var rotational_power_gen: float = 0.0
-@export var rotational_power_use: float = 0.0
 @export var electrical_power_gen: float = 0.0
 @export var electrical_power_use: float = 0.0
 
@@ -159,11 +157,6 @@ func is_transport() -> bool:
 
 func is_producer() -> bool:
 	return output_items.size() > 0
-
-
-func is_rotational_power_block() -> bool:
-	return rotational_power_gen > 0 or rotational_power_use > 0 \
-		or tags.has("shaft") or tags.has("gearbox") or tags.has("linkable")
 
 
 func is_electrical_power_block() -> bool:

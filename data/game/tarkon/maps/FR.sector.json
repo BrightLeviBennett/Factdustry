@@ -357,36 +357,16 @@
 		"192,76": 1,
 		"192,77": 1,
 		"192,78": 1,
-		"66,139": 0,
-		"66,140": 0,
-		"66,141": 0,
-		"67,139": 0,
-		"67,140": 0,
-		"67,141": 0,
-		"68,139": 0,
-		"68,140": 0,
-		"68,141": 0,
-		"68,143": 0,
 		"69,128": 0,
 		"69,129": 0,
 		"69,130": 0,
-		"69,139": 0,
-		"69,140": 0,
-		"69,141": 0,
 		"70,124": 0,
 		"70,128": 0,
 		"70,129": 0,
 		"70,130": 0,
-		"70,139": 0,
-		"70,140": 0,
-		"70,141": 0,
 		"71,128": 0,
 		"71,129": 0,
 		"71,130": 0,
-		"71,139": 0,
-		"71,140": 0,
-		"71,141": 0,
-		"73,143": 0,
 		"74,124": 0,
 		"78,123": 0,
 		"78,124": 0,
@@ -858,36 +838,16 @@
 		"192,76": 160.0,
 		"192,77": 160.0,
 		"192,78": 160.0,
-		"66,139": 240.0,
-		"66,140": 240.0,
-		"66,141": 240.0,
-		"67,139": 240.0,
-		"67,140": 240.0,
-		"67,141": 240.0,
-		"68,139": 240.0,
-		"68,140": 240.0,
-		"68,141": 240.0,
-		"68,143": 560.0,
 		"69,128": 240.0,
 		"69,129": 240.0,
 		"69,130": 240.0,
-		"69,139": 340.0,
-		"69,140": 340.0,
-		"69,141": 340.0,
 		"70,124": 560.0,
 		"70,128": 240.0,
 		"70,129": 240.0,
 		"70,130": 240.0,
-		"70,139": 340.0,
-		"70,140": 340.0,
-		"70,141": 340.0,
 		"71,128": 240.0,
 		"71,129": 240.0,
 		"71,130": 240.0,
-		"71,139": 340.0,
-		"71,140": 340.0,
-		"71,141": 340.0,
-		"73,143": 560.0,
 		"74,124": 560.0,
 		"78,123": 240.0,
 		"78,124": 240.0,
@@ -1365,36 +1325,16 @@
 		"192,76": 0,
 		"192,77": 0,
 		"192,78": 0,
-		"66,139": 0,
-		"66,140": 0,
-		"66,141": 0,
-		"67,139": 0,
-		"67,140": 0,
-		"67,141": 0,
-		"68,139": 0,
-		"68,140": 0,
-		"68,141": 0,
-		"68,143": 0,
 		"69,128": 0,
 		"69,129": 0,
 		"69,130": 0,
-		"69,139": 0,
-		"69,140": 0,
-		"69,141": 0,
 		"70,124": 0,
 		"70,128": 0,
 		"70,129": 0,
 		"70,130": 0,
-		"70,139": 0,
-		"70,140": 0,
-		"70,141": 0,
 		"71,128": 0,
 		"71,129": 0,
 		"71,130": 0,
-		"71,139": 0,
-		"71,140": 0,
-		"71,141": 0,
-		"73,143": 0,
 		"74,124": 0,
 		"78,123": 3,
 		"78,124": 3,
@@ -1866,36 +1806,16 @@
 		"192,76": "mechanical_drill",
 		"192,77": "mechanical_drill",
 		"192,78": "mechanical_drill",
-		"66,139": "mineral_extractor",
-		"66,140": "mineral_extractor",
-		"66,141": "mineral_extractor",
-		"67,139": "mineral_extractor",
-		"67,140": "mineral_extractor",
-		"67,141": "mineral_extractor",
-		"68,139": "mineral_extractor",
-		"68,140": "mineral_extractor",
-		"68,141": "mineral_extractor",
-		"68,143": "cable_node",
 		"69,128": "vent_turbine",
 		"69,129": "vent_turbine",
 		"69,130": "vent_turbine",
-		"69,139": "steel_furnace",
-		"69,140": "steel_furnace",
-		"69,141": "steel_furnace",
 		"70,124": "cable_node",
 		"70,128": "vent_turbine",
 		"70,129": "vent_turbine",
 		"70,130": "vent_turbine",
-		"70,139": "steel_furnace",
-		"70,140": "steel_furnace",
-		"70,141": "steel_furnace",
 		"71,128": "vent_turbine",
 		"71,129": "vent_turbine",
 		"71,130": "vent_turbine",
-		"71,139": "steel_furnace",
-		"71,140": "steel_furnace",
-		"71,141": "steel_furnace",
-		"73,143": "cable_node",
 		"74,124": "cable_node",
 		"78,123": "wall_crusher",
 		"78,124": "wall_crusher",
@@ -2039,7 +1959,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1776522529.33837
+		"timestamp": 1776707136.26536
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -15142,6 +15062,10 @@
 
 	},
 	"ore_tiles": {
+		"111,157": "copper_ore",
+		"112,156": "copper_ore",
+		"113,156": "copper_ore",
+		"114,156": "copper_ore",
 		"142,77": "graphite_ore",
 		"143,78": "graphite_ore",
 		"143,79": "graphite_ore",
@@ -15194,7 +15118,7 @@
 		{
 			"actions": [
 				{
-					"from": "119,200",
+					"from": "130,200",
 					"include_floors": true,
 					"to": "200,40",
 					"type": "hide_region"
@@ -15204,6 +15128,10 @@
 					"text": "(-white)This sector has an abundance of geysers making it perfect for Steel production. ",
 					"to": "93,139",
 					"type": "draw_text"
+				},
+				{
+					"pos": "171,80",
+					"type": "disable_block"
 				}
 			],
 			"conditions": [
@@ -15215,7 +15143,7 @@
 			"name": "Explain",
 			"on_exit": [
 				{
-					"type": "clear_boxes"
+					"type": "clear_texts"
 				}
 			]
 		},
@@ -15305,8 +15233,8 @@
 			"actions": [
 				{
 					"from": "84,138",
-					"text": "(-white)Research and place the Unit Refabricator to upgrade tier 1 units to tier 2.\n(-white)You will need to suply it with the required resources associated with each unit, viewable in the core database",
-					"to": "94,138",
+					"text": "(-white)Research and place the Unit Refabricator to upgrade tier 1 units to tier 2.\n(-white)You will need to suply it with the required resources associated with each unit, viewable in the core database.",
+					"to": "95,138",
 					"type": "draw_text"
 				}
 			],
@@ -15314,6 +15242,14 @@
 				{
 					"block_id": "unit_refabricator",
 					"type": "placed"
+				},
+				{
+					"block_id": "tank_fabricator",
+					"type": "placed"
+				},
+				{
+					"type": "units_produced",
+					"unit_id": "beattle"
 				}
 			],
 			"name": "Research Unit",
@@ -15326,21 +15262,112 @@
 		{
 			"actions": [
 				{
-					"from": "0,0",
-					"text": "(-white",
-					"to": "0,0",
+					"from": "107,135",
+					"text": "(-white)You will need to resarch the [image]Single Barrel and [imageLarge ]Steel Wall then build a defense with them to better attack the enemy's stronger units.(make sure to supply them with resources)",
+					"to": "119,135",
+					"type": "draw_text"
+				},
+				{
+					"color": "black",
+					"from": "120,149",
+					"to": "121,136",
+					"type": "draw_box"
+				},
+				{
+					"color": "red",
+					"from": "119,137",
+					"to": "119,137",
+					"type": "draw_box"
+				},
+				{
+					"color": "red",
+					"from": "119,143",
+					"to": "119,143",
+					"type": "draw_box"
+				},
+				{
+					"color": "red",
+					"from": "119,149",
+					"to": "119,149",
+					"type": "draw_box"
+				}
+			],
+			"conditions": [
+				{
+					"amount": 3.0,
+					"block_id": "double_barrel",
+					"type": "placed"
+				},
+				{
+					"amount": 6.0,
+					"block_id": "steel_wall",
+					"type": "placed"
+				}
+			],
+			"name": "Turrets",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
+		},
+		{
+			"actions": [
+				{
+					"count": 3.0,
+					"faction": "ferox",
+					"pos": "129,142",
+					"type": "spawn_unit",
+					"unit_id": "beattle"
+				}
+			],
+			"conditions": [
+				{
+					"amount": 3.0,
+					"type": "units_destroyed",
+					"unit_id": "beattle"
+				}
+			],
+			"name": "Spawn units",
+			"on_exit": [
+				{
+					"from": "130,200",
+					"to": "200,40",
+					"type": "reveal_region"
+				},
+				{
+					"pos": "171,80",
+					"type": "enable_block"
+				}
+			]
+		},
+		{
+			"actions": [
+				{
+					"from": "114,135",
+					"text": "(-white)Now command your units and destroy the enemy core.",
+					"to": "119,135",
 					"type": "draw_text"
 				}
 			],
 			"conditions": [
 				{
-					"amount": 3,
-					"block_id": "double_barrel",
-					"type": "placed"
+					"block_id": "core_shard",
+					"type": "ferox_blocks_destroyed"
 				}
 			],
-			"name": "Turrets",
-			"on_exit": []
+			"name": "Capture",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
+				{
+					"type": "capture_sector"
+				}
+			]
 		}
 	],
 	"sector_name": "FR",
@@ -16045,6 +16072,7 @@
 		"118,130": "grassy_wall",
 		"118,131": "grassy_wall",
 		"118,132": "grassy_wall",
+		"118,133": "grassy_wall",
 		"118,152": "grassy_wall",
 		"118,153": "grassy_wall",
 		"118,154": "grassy_wall",
@@ -16097,7 +16125,6 @@
 		"119,131": "grassy_wall",
 		"119,132": "grassy_wall",
 		"119,133": "grassy_wall",
-		"119,150": "grassy_wall",
 		"119,151": "grassy_wall",
 		"119,152": "grassy_wall",
 		"119,153": "grassy_wall",
@@ -16144,6 +16171,7 @@
 		"120,132": "grassy_wall",
 		"120,133": "grassy_wall",
 		"120,134": "grassy_wall",
+		"120,150": "grassy_wall",
 		"120,151": "grassy_wall",
 		"120,152": "grassy_wall",
 		"120,153": "grassy_wall",
@@ -16184,11 +16212,15 @@
 		"121,132": "grassy_wall",
 		"121,133": "grassy_wall",
 		"121,134": "grassy_wall",
-		"121,135": "grassy_wall",
+		"121,150": "grassy_wall",
+		"121,151": "grassy_wall",
 		"121,152": "grassy_wall",
 		"121,153": "grassy_wall",
 		"121,154": "grassy_wall",
 		"121,155": "grassy_wall",
+		"121,156": "grassy_wall",
+		"121,157": "grassy_wall",
+		"121,158": "grassy_wall",
 		"121,169": "grassy_wall",
 		"121,170": "grassy_wall",
 		"121,171": "grassy_wall",
@@ -16216,6 +16248,14 @@
 		"122,131": "grassy_wall",
 		"122,132": "grassy_wall",
 		"122,133": "grassy_wall",
+		"122,134": "grassy_wall",
+		"122,151": "grassy_wall",
+		"122,152": "grassy_wall",
+		"122,153": "grassy_wall",
+		"122,154": "grassy_wall",
+		"122,155": "grassy_wall",
+		"122,156": "grassy_wall",
+		"122,157": "grassy_wall",
 		"122,170": "grassy_wall",
 		"122,171": "grassy_wall",
 		"122,172": "grassy_wall",
@@ -16234,6 +16274,11 @@
 		"123,115": "grassy_wall",
 		"123,116": "grassy_wall",
 		"123,117": "grassy_wall",
+		"123,129": "grassy_wall",
+		"123,130": "grassy_wall",
+		"123,131": "grassy_wall",
+		"123,132": "grassy_wall",
+		"123,133": "grassy_wall",
 		"123,170": "grassy_wall",
 		"123,171": "grassy_wall",
 		"123,172": "grassy_wall",

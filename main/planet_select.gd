@@ -106,6 +106,17 @@ var planets_container: Node3D
 var hud: CanvasLayer
 var info_panel: PanelContainer
 var launch_btn: Button
+
+## Full-screen resource-requirement overlay shown when the player tries to
+## launch into a sector they haven't played yet (or one whose core has been
+## destroyed). Built lazily the first time it's needed.
+var launch_overlay: ColorRect
+var launch_overlay_panel: PanelContainer
+var launch_overlay_title: Label
+var launch_overlay_requirements: VBoxContainer
+var launch_overlay_confirm: Button
+var launch_overlay_cancel: Button
+var launch_overlay_sector: Resource = null
 var back_btn: Button
 var sector_name_label: Label
 var sector_desc_label: Label
@@ -1308,11 +1319,8 @@ func _update_info_panel() -> void:
 	_clear_stats()
 
 	if sector.available_resources.size() > 0:
-		var res_names: PackedStringArray = []
-		for item_id in sector.available_resources:
-			var item = Registry.get_item_or_fluid(StringName(item_id))
-			res_names.append(item.display_name if item else str(item_id))
-		_add_stat("Resources", ", ".join(res_names))
+		# Icons instead of names — names on hover via tooltip.
+		_add_stat_icons("Resources", sector.available_resources)
 
 	if sector.waves > 0:
 		_add_stat("Waves", str(sector.waves))
@@ -1327,8 +1335,45 @@ func _update_info_panel() -> void:
 	# Only show launch for unlocked/researched sectors
 	if selected_sector != null and not TechTree.is_locked(selected_sector.id):
 		launch_btn.visible = true
+		match _launch_state(selected_sector):
+			"LAUNCH", "LAUNCH_FREE":
+				launch_btn.text = "▶ LAUNCH"
+			"CONTINUE":
+				launch_btn.text = "▶ CONTINUE"
+			"PLAY":
+				launch_btn.text = "▶ PLAY"
 	else:
 		launch_btn.visible = false
+
+
+## Returns the semantic state of the launch button for a given sector:
+##   "LAUNCH_FREE" — starting_grounds, no autosave yet. First launch is
+##                   always free; subsequent launches fall through to the
+##                   usual CONTINUE/PLAY rules.
+##   "LAUNCH"      — any other sector with no autosave (fresh / abandoned /
+##                   core destroyed). Shows the resource requirement overlay.
+##   "CONTINUE"    — has autosave and either not yet captured OR still the
+##                   active sector (you were just playing it).
+##   "PLAY"        — has autosave, captured, and not the active sector
+##                   (revisit).
+func _launch_state(sector) -> String:
+	if sector == null:
+		return "LAUNCH"
+	var save_path: String = SaveManager.SAVE_DIR + str(sector.id) + ".sector.json"
+	var has_save: bool = FileAccess.file_exists(save_path)
+	if not has_save:
+		# First-ever launch: starting_grounds is free; anything else needs
+		# the resource stockpile from the sector you're launching from.
+		if StringName(sector.id) == &"starting_grounds":
+			return "LAUNCH_FREE"
+		return "LAUNCH"
+	var captured: bool = TechTree.is_sector_captured(sector.id)
+	var is_active: bool = SaveManager.active_sector_id == sector.id
+	if is_active:
+		return "CONTINUE"
+	if not captured:
+		return "CONTINUE"
+	return "PLAY"
 
 
 func _clear_stats() -> void:
@@ -1354,6 +1399,34 @@ func _add_stat_colored(l: String, v: String, vc: Color) -> void:
 	hbox.add_child(val)
 	sector_stats_container.add_child(hbox)
 
+
+## Stat row whose value is a sequence of item icons instead of a comma-
+## separated name list. Used for "Resources" so the sector card reads at a
+## glance — hovering an icon still surfaces the item's display name.
+func _add_stat_icons(l: String, item_ids: Array) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	var lbl = Label.new()
+	lbl.text = l + (":" if l != "" else "")
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", Color(0.45, 0.6, 0.45))
+	lbl.custom_minimum_size.x = 90
+	hbox.add_child(lbl)
+	var icons_row = HBoxContainer.new()
+	icons_row.add_theme_constant_override("separation", 4)
+	for item_id in item_ids:
+		var item = Registry.get_item_or_fluid(StringName(item_id))
+		var icon_rect = TextureRect.new()
+		icon_rect.custom_minimum_size = Vector2(20, 20)
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		if item and item.icon:
+			icon_rect.texture = item.icon
+		icon_rect.tooltip_text = item.display_name if item else str(item_id)
+		icons_row.add_child(icon_rect)
+	hbox.add_child(icons_row)
+	sector_stats_container.add_child(hbox)
+
 func _make_tab_style(c: Color) -> StyleBoxFlat:
 	var s = StyleBoxFlat.new()
 	s.bg_color = c
@@ -1372,19 +1445,242 @@ func _make_tab_style(c: Color) -> StyleBoxFlat:
 func _on_launch_pressed() -> void:
 	if not selected_sector:
 		return
+	# LAUNCH state gates on resources from the source sector; everything
+	# else (CONTINUE / PLAY / starting_grounds) skips the overlay and loads
+	# straight into the sector.
+	if _launch_state(selected_sector) == "LAUNCH":
+		_open_launch_overlay(selected_sector)
+		return
+	_do_launch(selected_sector)
 
-	SaveManager.pending_sector_id = selected_sector.id
 
-	# Check for an existing save for this sector first
-	var autosave_path: String = SaveManager.SAVE_DIR + str(selected_sector.id) + ".sector.json"
+## Actually changes scene into the selected sector, handling autosave vs
+## fresh-map loading. Extracted so the launch overlay can call it after the
+## player confirms the resource cost.
+func _do_launch(sector) -> void:
+	SaveManager.pending_sector_id = sector.id
+	var autosave_path: String = SaveManager.SAVE_DIR + str(sector.id) + ".sector.json"
 	if FileAccess.file_exists(autosave_path):
 		SaveManager.pending_map_path = autosave_path
-	elif selected_sector.map_path != "":
-		SaveManager.pending_map_path = selected_sector.map_path
+	elif sector.map_path != "":
+		SaveManager.pending_map_path = sector.map_path
 	else:
 		SaveManager.pending_map_path = ""
-
 	get_tree().change_scene_to_file(GAME_SCENE_PATH)
+
+
+# =========================
+# LAUNCH RESOURCE OVERLAY
+# =========================
+
+## Hardcoded cost to bootstrap a new sector. Pulled from core_shard's
+## build_cost so designers can tweak it in one place.
+func _get_launch_cost() -> Dictionary:
+	var core_data = Registry.get_block(&"core_shard")
+	if core_data == null:
+		return {}
+	return core_data.build_cost
+
+
+## Returns the per-sector resource storage we should charge for a launch.
+## Keyed by the "mat_*" runtime id the rest of the game uses.
+func _get_source_resources() -> Dictionary:
+	var src_id: StringName = SaveManager.active_sector_id
+	if src_id == &"" or src_id == &"_default":
+		return {}
+	if not SaveManager.sector_resources.has(src_id):
+		return {}
+	return SaveManager.sector_resources[src_id]
+
+
+## Converts a short build-cost key ("copper") to the runtime item key
+## ("mat_copper"), which is what per-sector resource dicts are keyed by.
+func _resolve_cost_key(short_id: String) -> StringName:
+	if short_id.begins_with("mat_"):
+		return StringName(short_id)
+	return StringName("mat_" + short_id)
+
+
+func _build_launch_overlay() -> void:
+	if launch_overlay != null:
+		return
+	# Full-screen dim background blocks clicks to the planet behind it.
+	launch_overlay = ColorRect.new()
+	launch_overlay.color = Color(0, 0, 0, 0.6)
+	launch_overlay.anchor_left = 0.0
+	launch_overlay.anchor_top = 0.0
+	launch_overlay.anchor_right = 1.0
+	launch_overlay.anchor_bottom = 1.0
+	launch_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	launch_overlay.visible = false
+	launch_overlay.gui_input.connect(_on_launch_overlay_bg_input)
+	hud.add_child(launch_overlay)
+
+	launch_overlay_panel = PanelContainer.new()
+	launch_overlay_panel.anchor_left = 0.5
+	launch_overlay_panel.anchor_right = 0.5
+	launch_overlay_panel.anchor_top = 0.5
+	launch_overlay_panel.anchor_bottom = 0.5
+	launch_overlay_panel.offset_left = -220
+	launch_overlay_panel.offset_right = 220
+	launch_overlay_panel.offset_top = -160
+	launch_overlay_panel.offset_bottom = 160
+	var panel_style := StyleBoxFlat.new()
+	panel_style.bg_color = Color(0.04, 0.06, 0.04, 0.97)
+	panel_style.border_color = Color(0.2, 0.4, 0.22, 0.8)
+	panel_style.set_border_width_all(2)
+	panel_style.set_corner_radius_all(10)
+	panel_style.content_margin_left = 18
+	panel_style.content_margin_right = 18
+	panel_style.content_margin_top = 14
+	panel_style.content_margin_bottom = 14
+	launch_overlay_panel.add_theme_stylebox_override("panel", panel_style)
+	launch_overlay.add_child(launch_overlay_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	launch_overlay_panel.add_child(vbox)
+
+	launch_overlay_title = Label.new()
+	launch_overlay_title.add_theme_font_size_override("font_size", 18)
+	launch_overlay_title.add_theme_color_override("font_color", Color(0.8, 1.0, 0.8))
+	vbox.add_child(launch_overlay_title)
+
+	var req_label := Label.new()
+	req_label.text = "Requires:"
+	req_label.add_theme_font_size_override("font_size", 13)
+	req_label.add_theme_color_override("font_color", Color(0.55, 0.7, 0.55))
+	vbox.add_child(req_label)
+
+	launch_overlay_requirements = VBoxContainer.new()
+	launch_overlay_requirements.add_theme_constant_override("separation", 4)
+	vbox.add_child(launch_overlay_requirements)
+
+	var spacer := Control.new()
+	spacer.custom_minimum_size = Vector2(0, 8)
+	vbox.add_child(spacer)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 10)
+	btn_row.alignment = BoxContainer.ALIGNMENT_END
+	vbox.add_child(btn_row)
+
+	launch_overlay_cancel = Button.new()
+	launch_overlay_cancel.text = "Cancel"
+	launch_overlay_cancel.custom_minimum_size = Vector2(100, 32)
+	launch_overlay_cancel.pressed.connect(_close_launch_overlay)
+	btn_row.add_child(launch_overlay_cancel)
+
+	launch_overlay_confirm = Button.new()
+	launch_overlay_confirm.text = "▶ LAUNCH"
+	launch_overlay_confirm.custom_minimum_size = Vector2(120, 32)
+	launch_overlay_confirm.add_theme_color_override("font_color", Color(0.8, 1.0, 0.8))
+	launch_overlay_confirm.pressed.connect(_on_launch_confirm)
+	btn_row.add_child(launch_overlay_confirm)
+
+
+func _open_launch_overlay(sector) -> void:
+	_build_launch_overlay()
+	launch_overlay_sector = sector
+	launch_overlay_title.text = "Launch to %s" % sector.display_name
+	_refresh_launch_overlay_requirements()
+	launch_overlay.visible = true
+
+
+func _close_launch_overlay() -> void:
+	if launch_overlay:
+		launch_overlay.visible = false
+	launch_overlay_sector = null
+
+
+func _on_launch_overlay_bg_input(event: InputEvent) -> void:
+	# Clicking the dark backdrop (outside the panel) dismisses the overlay.
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		_close_launch_overlay()
+
+
+## Rebuilds the requirement list: one row per item with "have / needed"
+## and a colour that flips red when the source sector is short.
+func _refresh_launch_overlay_requirements() -> void:
+	for c in launch_overlay_requirements.get_children():
+		c.queue_free()
+	var cost: Dictionary = _get_launch_cost()
+	var src: Dictionary = _get_source_resources()
+	var all_met: bool = true
+	for short_id in cost:
+		var need: int = int(cost[short_id])
+		var key: StringName = _resolve_cost_key(str(short_id))
+		var have: int = int(src.get(key, 0))
+		if have < need:
+			all_met = false
+		var item_data = Registry.get_item_or_fluid(key)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		row.alignment = BoxContainer.ALIGNMENT_BEGIN
+		# Item icon — replaces the text name. Tooltip keeps the display name
+		# discoverable for anyone who can't recognise the sprite.
+		var icon_rect := TextureRect.new()
+		icon_rect.custom_minimum_size = Vector2(24, 24)
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		if item_data and item_data.icon:
+			icon_rect.texture = item_data.icon
+		if item_data:
+			icon_rect.tooltip_text = item_data.display_name
+		else:
+			icon_rect.tooltip_text = str(short_id).capitalize()
+		row.add_child(icon_rect)
+		var val := Label.new()
+		val.text = "%d / %d" % [have, need]
+		val.add_theme_font_size_override("font_size", 13)
+		val.add_theme_color_override("font_color",
+			Color(0.6, 0.95, 0.6) if have >= need else Color(0.95, 0.45, 0.45))
+		row.add_child(val)
+		launch_overlay_requirements.add_child(row)
+	# When the source sector can't cover the cost, the confirm button is
+	# disabled and tinted so it's clear the launch isn't possible yet.
+	launch_overlay_confirm.disabled = not all_met
+	launch_overlay_confirm.modulate = Color(1, 1, 1, 1) if all_met else Color(0.7, 0.7, 0.7, 0.8)
+
+
+func _on_launch_confirm() -> void:
+	if launch_overlay_sector == null:
+		_close_launch_overlay()
+		return
+	var cost: Dictionary = _get_launch_cost()
+	var src_id: StringName = SaveManager.active_sector_id
+	if src_id == &"" or src_id == &"_default":
+		# No source sector to pay from — refuse (starting_grounds goes
+		# through LAUNCH_FREE, so this only happens for a bad state).
+		_refresh_launch_overlay_requirements()
+		return
+	# Make sure SaveManager's stored source-sector resources match the
+	# latest snapshot, then operate on an explicit copy so the write-back
+	# is unambiguous regardless of GDScript reference semantics.
+	if SaveManager.has_method("sync_active_sector_resources"):
+		SaveManager.sync_active_sector_resources()
+	var src: Dictionary = {}
+	if SaveManager.sector_resources.has(src_id):
+		src = SaveManager.sector_resources[src_id].duplicate()
+	# Verify once more (prevents double-click races / stale state).
+	for short_id in cost:
+		var need: int = int(cost[short_id])
+		var key: StringName = _resolve_cost_key(str(short_id))
+		if int(src.get(key, 0)) < need:
+			_refresh_launch_overlay_requirements()
+			return
+	# Deduct from the source sector's pool and persist it back to the
+	# SaveManager. This is the sector the player is "launching from", so
+	# the resources leave that sector's stockpile for good.
+	for short_id in cost:
+		var need2: int = int(cost[short_id])
+		var key2: StringName = _resolve_cost_key(str(short_id))
+		src[key2] = int(src.get(key2, 0)) - need2
+	SaveManager.sector_resources[src_id] = src
+	SaveManager.save_campaign()
+	var sector = launch_overlay_sector
+	_close_launch_overlay()
+	_do_launch(sector)
 
 
 # =========================

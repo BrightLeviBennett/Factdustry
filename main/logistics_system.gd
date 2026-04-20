@@ -352,13 +352,18 @@ func _update_drills(delta: float) -> void:
 					hit_count += 1
 		var efficiency: float = float(hit_count) / float(front_count) if front_count > 0 else 1.0
 
-		# Check rotational power requirement
+		# Electrical power: scale production speed by the network's
+		# efficiency. Over-drawn networks slow all consumers proportionally
+		# (Mindustry-style) instead of hard-stopping at gen < use.
+		var power_eff: float = 1.0
 		if data.electrical_power_use > 0:
 			var power_sys = _power_sys_ref()
-			if power_sys and not power_sys.is_electrical_powered(origin):
-				continue  # Not enough rotational power — skip
+			if power_sys:
+				power_eff = power_sys.get_electrical_efficiency(origin)
+			if power_eff <= 0.0:
+				continue  # No generation at all — idle this tick.
 
-		drill_timers[origin] -= delta * efficiency
+		drill_timers[origin] -= delta * efficiency * power_eff
 		if drill_timers[origin] > 0:
 			continue
 
@@ -3563,18 +3568,15 @@ func _update_factories(delta: float) -> void:
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
 			continue
 
-		# Skip factories that need electrical power but aren't powered.
+		# Electrical power: efficiency scales the processing timer below
+		# instead of gating the factory on/off. A fully-brownout'd network
+		# (no generators at all) still skips this tick so nothing progresses.
 		var power_sys_f = _power_sys_ref()
-		if data.electrical_power_use > 0 and power_sys_f:
-			if not power_sys_f.is_electrical_powered(origin):
-				continue
-
 		var is_unit_fabricator: bool = data.produced_unit != &""
-
-		# Unit fabricators ALWAYS require electrical power to produce, even if
-		# their .tres doesn't explicitly set electrical_power_use.
-		if is_unit_fabricator and power_sys_f:
-			if not power_sys_f.is_electrical_powered(origin):
+		var factory_power_eff: float = 1.0
+		if power_sys_f and (data.electrical_power_use > 0 or is_unit_fabricator):
+			factory_power_eff = power_sys_f.get_electrical_efficiency(origin)
+			if factory_power_eff <= 0.0:
 				continue
 
 		# Initialize state if needed
@@ -3620,7 +3622,7 @@ func _update_factories(delta: float) -> void:
 						state["timer"] = data.production_time
 
 			"processing":
-				state["timer"] -= delta
+				state["timer"] -= delta * factory_power_eff
 				if state["timer"] <= 0:
 					if is_unit_fabricator:
 						# Enter the ejection animation phase. Actual placement/
@@ -3657,10 +3659,11 @@ func _update_factories(delta: float) -> void:
 
 			"ejecting":
 				# Animate the finished unit from the fabricator center toward
-				# the front edge. When it arrives, try to place it in the
-				# world or push it onto a payload conveyor.
+				# the front edge. Eject speed also scales with power so the
+				# unit doesn't slide out of a brownout'd fabricator at full
+				# speed while production was throttled.
 				var eject_speed: float = 1.6
-				state["eject_progress"] = minf(1.0, float(state.get("eject_progress", 0.0)) + delta * eject_speed)
+				state["eject_progress"] = minf(1.0, float(state.get("eject_progress", 0.0)) + delta * eject_speed * factory_power_eff)
 				if state["eject_progress"] >= 1.0:
 					var payload_data := {
 						"type": "unit",

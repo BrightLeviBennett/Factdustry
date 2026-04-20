@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://telh7k4yttk1"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -7,13 +7,11 @@ script = ExtResource("1")
 id = &"unloader"
 display_name = "Unloader"
 description = "Rapidly pulls items from an adjacent building's storage and places them onto a conveyor. Click to set an item filter."
-category = 7
+tags = PackedStringArray("unloader", "transport")
 color = Color(0.5, 0.5, 0.6, 1)
-max_health = 100.0
 build_cost = {
 "copper": 15,
 "silicon": 10
 }
 build_time = 1.0
 transport_speed = 8.0
-tags = PackedStringArray("unloader", "transport")

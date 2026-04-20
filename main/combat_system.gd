@@ -272,8 +272,17 @@ func _update_turrets(delta: float) -> void:
 		if not turret_angles.has(grid_pos):
 			turret_angles[grid_pos] = 0.0
 
-		# Count down
-		turret_cooldowns[grid_pos] -= delta
+		# Electrical power: scale the cooldown countdown by network
+		# efficiency, so an over-drawn grid fires slower rather than not
+		# at all. Fully brownout'd turrets (efficiency == 0) freeze.
+		var turret_power_eff: float = 1.0
+		if data.electrical_power_use > 0:
+			var power_sys_t = get_node_or_null("/root/Main/PowerSystem")
+			if power_sys_t:
+				turret_power_eff = power_sys_t.get_electrical_efficiency(grid_pos)
+		turret_cooldowns[grid_pos] -= delta * turret_power_eff
+		if turret_power_eff <= 0.0:
+			continue
 
 		# Use pre-computed target from worker thread
 		if not _turret_targets.has(grid_pos):

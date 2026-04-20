@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"power_source"
 display_name = "Power Source"
-description = "Debug block. Outputs 100 rotational power and 100 electrical power to any adjacent block."
+description = "Debug block. Outputs 100 electrical power to any adjacent block."
 category = 3
 color = Color(1.0, 0.85, 0.2, 1)
 max_health = 400.0

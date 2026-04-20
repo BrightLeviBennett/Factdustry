@@ -8,6 +8,7 @@ id = &"combustion_reactor"
 display_name = "Combustion Reactor"
 description = "Combusts coal to produce power. More efficient if provided water or a combustable gas."
 category = 3
+tags = PackedStringArray("power")
 color = Color(0.9, 0.5, 0.2, 1)
 max_health = 160.0
 build_cost = {
@@ -17,4 +18,3 @@ build_time = 1.5
 output_items = {
 "power": 10
 }
-tags = PackedStringArray("power")

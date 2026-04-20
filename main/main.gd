@@ -105,6 +105,41 @@ var deconstruct_order: Array[Vector2i] = []
 ## whether a given anchor is a build or a deconstruct.
 var work_order: Array[Vector2i] = []
 
+## Pending same-group replacements (belt → junction, pipe → fluid bridge, …).
+## Key = Vector2i (the cell), Value = { "new_block_id", "new_rotation" }.
+## The original block stays in placed_buildings and keeps functioning until
+## the drone begins work on this cell, at which point the real swap happens.
+## Lets drag-placed auto-junctions keep the underlying belt flowing during
+## the build.
+var pending_swaps := {}
+
+## Paused work anchors. A paused entry stays in work_order at its current
+## position but is skipped when picking the next tickable work item, so its
+## progress freezes in place.
+##
+## Values distinguish two kinds of pause:
+##   • `true`    — explicit user pause (click on actively-working block).
+##                 Only clears when the user clicks the block again.
+##   • Vector2i  — auto-pause triggered by promoting a different anchor to
+##                 the front of the queue. Clears automatically when that
+##                 promoting anchor finishes, so work resumes where the
+##                 player left off before the detour.
+var work_paused: Dictionary = {}
+
+
+## Clears any entries in `work_paused` whose auto-resume trigger is the
+## given anchor. Call this whenever an anchor is removed from work_order
+## (build complete, deconstruct complete, or cancelled) so anything that
+## was waiting on it can resume.
+func resume_auto_paused_by(anchor: Vector2i) -> void:
+	var to_erase: Array = []
+	for paused in work_paused:
+		var v = work_paused[paused]
+		if v is Vector2i and v == anchor:
+			to_erase.append(paused)
+	for p in to_erase:
+		work_paused.erase(p)
+
 ## Tracks how much of each resource has been consumed so far for a building
 ## under construction. Key = Vector2i (anchor), Value = { StringName: int }.
 var building_resources_consumed := {}
@@ -555,7 +590,7 @@ func place_building_with_faction(grid_pos: Vector2i, block_id: StringName, rotat
 ##   &"conduit"     — fluid conduits and their variants
 ##   &"payload"     — payload transport parts
 ##   &"freight"     — freight transport parts
-##   &"shaft_power" — shaft, gearbox, overhead belt (rotational power line)
+##   &"shaft_power" — shaft, gearbox, overhead belt (legacy power-line group)
 func _get_swap_group(data: BlockData) -> StringName:
 	if data == null:
 		return &""
@@ -585,7 +620,8 @@ func _get_swap_group(data: BlockData) -> StringName:
 			or id_str == "freight_junction" or id_str == "freight_bridge" \
 			or id_str == "freight_loader" or id_str == "freight_unloader":
 		return &"freight"
-	# Rotational power line
+	# Legacy shaft/gearbox/overhead-belt group — kept so any existing
+	# placements with these block ids still swap among themselves.
 	if id_str == "shaft" or id_str == "gearbox" or id_str == "overhead_belt":
 		return &"shaft_power"
 	return &""
@@ -596,6 +632,51 @@ func _get_swap_group(data: BlockData) -> StringName:
 ## the new one with the new block's build_time. Used by the belt/shaft swap
 ## feature in try_place_building.
 func _swap_building_in_place(grid_pos: Vector2i, _old_data: BlockData, new_data: BlockData) -> bool:
+	# Defer the swap: leave the existing block in placed_buildings so it keeps
+	# functioning (belts keep moving items, drills keep producing, etc.) while
+	# the drone walks over to do the work. The real destroy + re-place happens
+	# in execute_pending_swap() when BuildingSystem begins ticking this anchor.
+	if new_data.build_time > 0:
+		# Replace any previous pending swap on the same cell (e.g. the player
+		# dragged over it twice with different block selections).
+		pending_swaps[grid_pos] = {
+			"new_block_id": new_data.id,
+			"new_rotation": placement_rotation,
+		}
+		if not work_order.has(grid_pos):
+			work_order.append(grid_pos)
+		# Signal so HUD / save layers can refresh queued-work readouts.
+		building_placed.emit(new_data.id, grid_pos)
+		return true
+	# Zero-build-time swaps commit immediately (no drone work to schedule).
+	return _execute_swap_now(grid_pos, new_data.id, placement_rotation)
+
+
+## Executes a deferred same-group swap: destroys the old block (firing all
+## the normal building_destroyed cleanup) and places the new one with build
+## progress starting at 0, so the usual progressive-build flow picks up.
+## Called by BuildingSystem when the drone arrives at a pending_swaps cell.
+func execute_pending_swap(grid_pos: Vector2i) -> bool:
+	if not pending_swaps.has(grid_pos):
+		return false
+	var entry: Dictionary = pending_swaps[grid_pos]
+	pending_swaps.erase(grid_pos)
+	var new_id: StringName = StringName(entry.get("new_block_id", &""))
+	var new_rot: int = int(entry.get("new_rotation", 0))
+	if new_id == &"":
+		return false
+	var new_data = Registry.get_block(new_id)
+	if new_data == null:
+		return false
+	return _execute_swap_now(grid_pos, new_id, new_rot)
+
+
+## Immediate swap: destroys the old block and places the new one at the same
+## cell. Build progress starts at 0 (the drone will tick it up as usual).
+func _execute_swap_now(grid_pos: Vector2i, new_id: StringName, new_rot: int) -> bool:
+	var new_data = Registry.get_block(new_id)
+	if new_data == null:
+		return false
 	# Destroy the existing block first — this fires building_destroyed so every
 	# system clears its per-anchor state (conveyor_items, sorter_filters,
 	# factory_buffers, power networks, etc.) and refunds nothing.
@@ -603,10 +684,10 @@ func _swap_building_in_place(grid_pos: Vector2i, _old_data: BlockData, new_data:
 
 	# No immediate cost deduction — progressive consumption during build.
 
-	# Place the new block at the same cell, rotation = placement_rotation.
-	placed_buildings[grid_pos] = new_data.id
+	# Place the new block at the same cell, rotation = new_rot.
+	placed_buildings[grid_pos] = new_id
 	building_health[grid_pos] = new_data.max_health
-	building_rotation[grid_pos] = placement_rotation
+	building_rotation[grid_pos] = new_rot
 	building_origins[grid_pos] = grid_pos
 	building_factions[grid_pos] = Faction.LUMINA
 
@@ -614,10 +695,11 @@ func _swap_building_in_place(grid_pos: Vector2i, _old_data: BlockData, new_data:
 	if new_data.build_time > 0:
 		building_build_progress[grid_pos] = 0.0
 		building_resources_consumed[grid_pos] = {}
-		work_order.append(grid_pos)
+		if not work_order.has(grid_pos):
+			work_order.append(grid_pos)
 
 	resources_changed.emit(resources)
-	building_placed.emit(new_data.id, grid_pos)
+	building_placed.emit(new_id, grid_pos)
 	return true
 
 
@@ -1185,12 +1267,17 @@ func destroy_building(grid_pos: Vector2i) -> void:
 	building_deconstruct_progress.erase(anchor)
 	building_resources_consumed.erase(anchor)
 	building_resources_refunded.erase(anchor)
+	pending_swaps.erase(anchor)
 	var work_idx2: int = work_order.find(anchor)
 	if work_idx2 >= 0:
 		work_order.remove_at(work_idx2)
 	var order_idx: int = build_order.find(anchor)
 	if order_idx >= 0:
 		build_order.remove_at(order_idx)
+	# Clean up pause bookkeeping so nothing is left stranded-paused by
+	# a destroyed trigger, and any explicit pause on this anchor is gone.
+	resume_auto_paused_by(anchor)
+	work_paused.erase(anchor)
 
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr:

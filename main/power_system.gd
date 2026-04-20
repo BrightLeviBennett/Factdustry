@@ -1,25 +1,23 @@
 extends Node2D
 
 # ============================================================
-# POWER_SYSTEM.GD - Rotational & Electrical Power Networks
+# POWER_SYSTEM.GD - Electrical Power Networks
 # ============================================================
-# Manages two independent power network types:
-#   1. ROTATIONAL: Transmitted via shafts (axial) and gearboxes
-#      (3-way split). Vent turbines generate when on vent tiles.
-#   2. ELECTRICAL: Framework for future use.
+# Manages electrical power networks.
 #
 # NETWORK RULES:
-#   - Two adjacent cells are connected if BOTH have a port facing
-#     each other. Shafts only connect along their axis (front/back).
-#     Gearboxes connect all 4 directions. Generators and consumers
-#     connect all 4 directions.
-#   - Networks are rebuilt whenever a building is placed or destroyed.
-#   - A network is "powered" if total_gen >= total_use.
-#
-# LINKED BLOCKS (Overhead Belts):
-#   - Blocks tagged "linkable" can be linked to each other.
-#   - Linked pairs share their power network — power flows through
-#     the link as if the two blocks were adjacent.
+#   - Adjacent electrical blocks auto-connect on all 4 sides.
+#   - Cable nodes / cable towers bridge over empty tiles up to their
+#     configured range, connecting to the first electrical block along
+#     each cardinal scanline.
+#   - Linked pairs ("linkable" blocks like overhead belts) act as if
+#     adjacent so they stitch two clusters into one network.
+#   - Each network stores an efficiency = clamp(gen / max(use, eps), 0, 1).
+#     Mindustry-style: when gen >= use every consumer runs at 100%; when
+#     gen < use every consumer time-dilates uniformly to (gen / use), so
+#     overdrawing just slows production instead of hard-stopping it.
+#   - Blocks tagged "vent_powered" only produce their electrical_power_gen
+#     when sitting on a vent floor tile.
 #
 # SCENE TREE: Place AFTER BuildingSystem.
 #   Main
@@ -41,13 +39,11 @@ const DIR_VECTORS := [
 ]
 
 # --- NETWORK STATE ---
-## Array of network dicts: { "cells": Array[Vector2i], "gen": float, "use": float, "powered": bool }
-var rot_networks: Array = []
-## Maps each cell → its rotational network index for O(1) lookup.
-var rot_cell_to_net: Dictionary = {}
-
-## Same for electrical networks.
+## Array of network dicts:
+## { "cells": Array[Vector2i], "gen": float, "use": float,
+##   "powered": bool, "efficiency": float }
 var elec_networks: Array = []
+## Maps each cell → its electrical network index for O(1) lookup.
 var elec_cell_to_net: Dictionary = {}
 
 ## Linked block pairs: Array of [Vector2i, Vector2i] pairs.
@@ -72,24 +68,13 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	if _networks_dirty:
-		_rebuild_all_networks()
+		_rebuild_electrical_networks()
 		_networks_dirty = false
 
 
 # =========================
 # PUBLIC API
 # =========================
-
-## Returns true if the building at grid_pos is in a rotational network
-## with enough generation to cover all consumption.
-func is_rotational_powered(grid_pos: Vector2i) -> bool:
-	if not rot_cell_to_net.has(grid_pos):
-		return false
-	var net_idx: int = rot_cell_to_net[grid_pos]
-	if net_idx < 0 or net_idx >= rot_networks.size():
-		return false
-	return rot_networks[net_idx]["powered"]
-
 
 ## Returns true if the building at grid_pos is in an electrical network
 ## with enough generation to cover all consumption.
@@ -102,16 +87,31 @@ func is_electrical_powered(grid_pos: Vector2i) -> bool:
 	return elec_networks[net_idx]["powered"]
 
 
-## Returns debug info about the network at grid_pos.
-func get_rotational_network_info(grid_pos: Vector2i) -> Dictionary:
-	if not rot_cell_to_net.has(grid_pos):
-		return {"gen": 0.0, "use": 0.0, "powered": false, "cells": 0}
-	var net_idx: int = rot_cell_to_net[grid_pos]
-	var net = rot_networks[net_idx]
+## Efficiency (0..1) of the electrical network this cell belongs to. Callers
+## that need to time-dilate production (drills, factories, turrets) multiply
+## their delta by this value: 1.0 = full speed, 0.5 = half speed, 0.0 = idle.
+## Blocks outside any electrical network return 1.0 so unaffected logic
+## (e.g. blocks with electrical_power_use == 0) is never slowed.
+func get_electrical_efficiency(grid_pos: Vector2i) -> float:
+	if not elec_cell_to_net.has(grid_pos):
+		return 1.0
+	var net_idx: int = elec_cell_to_net[grid_pos]
+	if net_idx < 0 or net_idx >= elec_networks.size():
+		return 1.0
+	return float(elec_networks[net_idx].get("efficiency", 1.0))
+
+
+## Debug/HUD info about the network this cell belongs to.
+func get_electrical_network_info(grid_pos: Vector2i) -> Dictionary:
+	if not elec_cell_to_net.has(grid_pos):
+		return {"gen": 0.0, "use": 0.0, "powered": false, "efficiency": 1.0, "cells": 0}
+	var net_idx: int = elec_cell_to_net[grid_pos]
+	var net = elec_networks[net_idx]
 	return {
 		"gen": net["gen"],
 		"use": net["use"],
 		"powered": net["powered"],
+		"efficiency": float(net.get("efficiency", 1.0)),
 		"cells": net["cells"].size(),
 	}
 
@@ -151,101 +151,6 @@ func get_linked_partner(grid_pos: Vector2i) -> Variant:
 # =========================
 # NETWORK REBUILDING
 # =========================
-
-func _rebuild_all_networks() -> void:
-	_rebuild_rotational_networks()
-	_rebuild_electrical_networks()
-
-
-func _rebuild_rotational_networks() -> void:
-	rot_networks.clear()
-	rot_cell_to_net.clear()
-
-	var visited := {}
-
-	for grid_pos in main.placed_buildings:
-		if visited.has(grid_pos):
-			continue
-		var data = Registry.get_block(main.placed_buildings[grid_pos])
-		if data == null or not data.is_rotational_power_block():
-			continue
-		# Inactive (under-construction / deconstructing / derelict) rotational
-		# blocks don't transmit — skip them so they can't bridge a network.
-		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
-			continue
-
-		# Flood-fill to discover this network
-		var network_cells: Array[Vector2i] = []
-		var queue: Array[Vector2i] = [grid_pos]
-		visited[grid_pos] = true
-
-		while queue.size() > 0:
-			var pos: Vector2i = queue.pop_front()
-			network_cells.append(pos)
-
-			# Check 4 cardinal neighbors
-			for dir_idx in range(4):
-				var neighbor: Vector2i = pos + DIR_VECTORS[dir_idx]
-				if visited.has(neighbor):
-					continue
-				if not main.placed_buildings.has(neighbor):
-					continue
-				var n_data = Registry.get_block(main.placed_buildings[neighbor])
-				if n_data == null or not n_data.is_rotational_power_block():
-					continue
-				if main.has_method("is_building_inactive") and main.is_building_inactive(neighbor):
-					continue
-
-				# Check directional connectivity: both sides must have a port
-				var opposite_dir := (dir_idx + 2) % 4
-				if _has_rot_port(pos, dir_idx) and _has_rot_port(neighbor, opposite_dir):
-					visited[neighbor] = true
-					queue.append(neighbor)
-
-			# Check linked partners
-			for pair in linked_pairs:
-				var partner: Vector2i = Vector2i(-1, -1)
-				if pair[0] == pos:
-					partner = pair[1]
-				elif pair[1] == pos:
-					partner = pair[0]
-				else:
-					continue
-
-				if visited.has(partner):
-					continue
-				if not main.placed_buildings.has(partner):
-					continue
-				var p_data = Registry.get_block(main.placed_buildings[partner])
-				if p_data == null or not p_data.is_rotational_power_block():
-					continue
-				if main.has_method("is_building_inactive") and main.is_building_inactive(partner):
-					continue
-
-				visited[partner] = true
-				queue.append(partner)
-
-		# Calculate power balance for this network
-		var total_gen := 0.0
-		var total_use := 0.0
-		for cell in network_cells:
-			if main.has_method("is_building_inactive") and main.is_building_inactive(cell):
-				continue
-			var d = Registry.get_block(main.placed_buildings[cell])
-			if d:
-				total_gen += _get_effective_rot_gen(cell, d)
-				total_use += d.rotational_power_use
-
-		var net_idx := rot_networks.size()
-		rot_networks.append({
-			"cells": network_cells,
-			"gen": total_gen,
-			"use": total_use,
-			"powered": total_gen >= total_use,
-		})
-		for cell in network_cells:
-			rot_cell_to_net[cell] = net_idx
-
 
 func _rebuild_electrical_networks() -> void:
 	elec_networks.clear()
@@ -345,15 +250,19 @@ func _rebuild_electrical_networks() -> void:
 
 		var total_gen := 0.0
 		var total_use := 0.0
+		var counted_anchors: Dictionary = {}
 		for cell in network_cells:
-			# Under-construction / deconstructing / derelict blocks don't
-			# generate OR consume power. This keeps a partially-built
-			# generator from feeding the grid early, and prevents a half-built
-			# consumer from dragging the grid into brown-out while pending.
 			if main.has_method("is_building_inactive") and main.is_building_inactive(cell):
 				continue
+			# Multi-tile buildings register every cell of their footprint in
+			# placed_buildings, so a 3x3 vent turbine would otherwise add its
+			# gen 9 times. Dedupe by anchor so each building contributes once.
+			var anchor_cell: Vector2i = main.building_origins.get(cell, cell)
+			if counted_anchors.has(anchor_cell):
+				continue
+			counted_anchors[anchor_cell] = true
 			var d: BlockData = cell_data[cell]
-			total_gen += d.electrical_power_gen
+			total_gen += _get_effective_elec_gen(cell, d)
 			total_use += d.electrical_power_use
 
 		var net_idx := elec_networks.size()
@@ -362,63 +271,31 @@ func _rebuild_electrical_networks() -> void:
 			"gen": total_gen,
 			"use": total_use,
 			"powered": total_gen >= total_use,
+			"efficiency": _compute_efficiency(total_gen, total_use),
 		})
 		for cell in network_cells:
 			elec_cell_to_net[cell] = net_idx
 
 
-# =========================
-# CONNECTION LOGIC
-# =========================
-
-## Returns true if the block at `pos` has a rotational power port
-## facing the given direction index (0=right, 1=down, 2=left, 3=up).
-func _has_rot_port(pos: Vector2i, dir_idx: int) -> bool:
-	if not main.placed_buildings.has(pos):
-		return false
-	var data = Registry.get_block(main.placed_buildings[pos])
-	if data == null:
-		return false
-
-	var rot: int = main.building_rotation.get(pos, 0)
-
-	# Shafts only transmit along their rotation axis (front and back).
-	# rotation 0/2 = horizontal axis → ports on right (0) and left (2)
-	# rotation 1/3 = vertical axis   → ports on down (1) and up (3)
-	if data.tags.has("shaft"):
-		var axis_horizontal: bool = (rot % 2) == 0
-		if axis_horizontal:
-			return dir_idx == 0 or dir_idx == 2
-		else:
-			return dir_idx == 1 or dir_idx == 3
-
-	# Gearboxes connect all 4 directions (input from back, output to front+sides)
-	if data.tags.has("gearbox"):
-		return true  # All 4 directions
-
-	# Linkable blocks (overhead belts) connect all 4 directions locally
-	if data.tags.has("linkable"):
-		return true
-
-	# Generators and consumers connect all 4 directions
-	if data.rotational_power_gen > 0 or data.rotational_power_use > 0:
-		return true
-
-	return false
+## Network efficiency in [0, 1]. When gen ≥ use the network runs at 100%;
+## when demand exceeds supply every consumer is time-dilated uniformly to
+## gen/use. Networks with no consumers return 1.0 so a standalone generator
+## doesn't report 0% efficiency.
+func _compute_efficiency(gen: float, use: float) -> float:
+	if use <= 0.0:
+		return 1.0
+	return clampf(gen / use, 0.0, 1.0)
 
 
-## Returns the effective rotational power generation for a block,
-## accounting for terrain conditions (e.g., vent_powered blocks on vents).
-func _get_effective_rot_gen(grid_pos: Vector2i, data: BlockData) -> float:
-	if data.rotational_power_gen <= 0:
+## Returns the effective electrical generation for a block, accounting for
+## terrain conditions: vent_powered blocks only generate when sitting on a
+## vent floor tile.
+func _get_effective_elec_gen(grid_pos: Vector2i, data: BlockData) -> float:
+	if data.electrical_power_gen <= 0.0:
 		return 0.0
-
-	# Blocks tagged "vent_powered" only generate when on a vent tile
-	if data.tags.has("vent_powered"):
-		if not _is_on_vent(grid_pos):
-			return 0.0
-
-	return data.rotational_power_gen
+	if data.tags.has("vent_powered") and not _is_on_vent(grid_pos):
+		return 0.0
+	return data.electrical_power_gen
 
 
 ## Returns true if the given grid position is on a vent tile.

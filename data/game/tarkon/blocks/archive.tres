@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://tjiec1nvsbsn"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -8,8 +8,7 @@ id = &"archive"
 display_name = "Archive"
 description = "An ancient buried data archive. Place an Archive Scanner facing it and an adjacent Archive Decoder (both powered) to recover its contents. Click on a placed archive to choose which archive it holds (debug)."
 category = 0
-color = Color(0.55, 0.35, 0.85, 1)
-max_health = 600.0
-build_cost = {}
-build_time = 0.0
 tags = PackedStringArray("archive", "non_placeable")
+color = Color(0.55, 0.35, 0.85, 1)
+grid_size = Vector2i(4, 4)
+max_health = 600.0

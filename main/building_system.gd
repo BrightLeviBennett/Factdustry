@@ -762,10 +762,11 @@ func _is_crusher_spinning(anchor: Vector2i, data: BlockData) -> bool:
 	var ss = _sector_script_ref()
 	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
 		return false
-	# Not electrically powered → no spin.
+	# No electrical power at all → no spin. Efficiency > 0 keeps the spin
+	# running (just visually implied to be slower isn't worth the extra math).
 	if data.electrical_power_use > 0:
 		var ps = _power_sys_ref()
-		if ps == null or not ps.is_electrical_powered(anchor):
+		if ps == null or ps.get_electrical_efficiency(anchor) <= 0.0:
 			return false
 	# Storage full on every output → stall.
 	var logistics = _logistics
@@ -920,6 +921,11 @@ func _process(_delta: float) -> void:
 	# (but the draw pass still highlights the frozen active anchor).
 	var anchor: Vector2i = _get_tickable_work_anchor()
 	if anchor != _NO_ACTIVE_WORK:
+		# Deferred same-group swap (belt → junction, etc.): commit the swap
+		# now that the drone is actually here. Until this promotes, the old
+		# block at this cell is still live and functioning.
+		if "pending_swaps" in main and main.pending_swaps.has(anchor):
+			main.execute_pending_swap(anchor)
 		if main.building_build_progress.has(anchor):
 			_tick_progressive_build(anchor, _delta)
 		elif main.building_deconstruct_progress.has(anchor):
@@ -927,6 +933,10 @@ func _process(_delta: float) -> void:
 		else:
 			# Orphan entry (building destroyed externally) — remove
 			main.work_order.erase(anchor)
+			if main.has_method("resume_auto_paused_by"):
+				main.resume_auto_paused_by(anchor)
+			if "work_paused" in main:
+				main.work_paused.erase(anchor)
 
 	# Process placement queue: place entries that are now in build range
 	if not ("world_paused" in main and main.world_paused) and not _paused_queue.is_empty():
@@ -1056,6 +1066,10 @@ func _tick_progressive_build(anchor: Vector2i, delta: float) -> void:
 		main.building_build_progress.erase(anchor)
 		main.building_resources_consumed.erase(anchor)
 		main.work_order.erase(anchor)
+		if main.has_method("resume_auto_paused_by"):
+			main.resume_auto_paused_by(anchor)
+		if "work_paused" in main:
+			main.work_paused.erase(anchor)
 		return
 
 	var consumed: Dictionary = main.building_resources_consumed.get(anchor, {})
@@ -1111,6 +1125,12 @@ func _tick_progressive_build(anchor: Vector2i, delta: float) -> void:
 		# erase by value, not index — the active anchor may not be at [0]
 		# if earlier entries were skipped for being out of build range.
 		main.work_order.erase(anchor)
+		# Any queued work that was auto-paused waiting for THIS anchor to
+		# finish now resumes; explicit pauses on this anchor are cleared too.
+		if main.has_method("resume_auto_paused_by"):
+			main.resume_auto_paused_by(anchor)
+		if "work_paused" in main:
+			main.work_paused.erase(anchor)
 		# A newly-completed block flips from is_building_inactive=true to false,
 		# so any system caching its presence needs to refresh. Power network
 		# totals exclude inactive cells; flagging dirty lets it recompute on
@@ -1157,6 +1177,12 @@ func _tick_progressive_deconstruct(anchor: Vector2i, delta: float) -> void:
 		main.building_resources_refunded.erase(anchor)
 		# erase by value, not index — see _tick_progressive_build comment.
 		main.work_order.erase(anchor)
+		# Resume anything that was waiting on this decon to finish; clear
+		# any explicit pause on this anchor.
+		if main.has_method("resume_auto_paused_by"):
+			main.resume_auto_paused_by(anchor)
+		if "work_paused" in main:
+			main.work_paused.erase(anchor)
 		main.destroy_building(anchor)
 		main.resources_changed.emit(main.resources)
 
@@ -1238,7 +1264,10 @@ const _NO_ACTIVE_WORK := Vector2i(-9999, -9999)
 func _get_active_work_anchor() -> Vector2i:
 	if not ("work_order" in main) or main.work_order.is_empty():
 		return _NO_ACTIVE_WORK
+	var paused: Dictionary = main.work_paused if "work_paused" in main else {}
 	for a in main.work_order:
+		if paused.has(a):
+			continue
 		if _is_in_build_range(a):
 			return a
 	return _NO_ACTIVE_WORK
@@ -1495,6 +1524,58 @@ func _get_front_edge(origin: Vector2i, grid_size: Vector2i, rotation: int) -> Ar
 				cells.append(Vector2i(origin.x + x, origin.y - 1))
 	return cells
 
+## Handles left-click on a cell that has active/pending work attached
+## (build, deconstruct, or a deferred swap). Returns true when the click
+## was consumed and no further handling should happen.
+##
+## Rules:
+##   - Click the block currently being worked on: pause it in place.
+##   - Click a paused or queued-but-not-yet-active block: promote it to the
+##     front of work_order, unpause it, and pause whatever was active so it
+##     resumes automatically once the promoted block finishes.
+func _handle_work_click(click_pos: Vector2i) -> bool:
+	if not ("work_order" in main):
+		return false
+	var anchor: Vector2i = main.building_origins.get(click_pos, click_pos)
+	# If the cell is a deferred same-group swap the "real" anchor is just
+	# the cell itself (the old building still maps to its own origin).
+	if "pending_swaps" in main and main.pending_swaps.has(click_pos):
+		anchor = click_pos
+	var has_build: bool = "building_build_progress" in main and main.building_build_progress.has(anchor)
+	var has_decon: bool = "building_deconstruct_progress" in main and main.building_deconstruct_progress.has(anchor)
+	var has_pending_swap: bool = "pending_swaps" in main and main.pending_swaps.has(anchor)
+	var in_queue: bool = main.work_order.has(anchor)
+	if not (has_build or has_decon or has_pending_swap or in_queue):
+		return false
+
+	var active: Vector2i = _get_active_work_anchor()
+	var paused: Dictionary = main.work_paused if "work_paused" in main else {}
+
+	if anchor == active and not paused.has(anchor):
+		# Clicked the actively-working block → explicit pause.
+		main.work_paused[anchor] = true
+		queue_redraw()
+		return true
+
+	# Otherwise promote to front: unpause this one, auto-pause the
+	# previously-active anchor (it will resume when this finishes), and
+	# reorder so work picks up the new front on its next tick.
+	if in_queue:
+		var idx: int = main.work_order.find(anchor)
+		if idx > 0:
+			main.work_order.remove_at(idx)
+			main.work_order.insert(0, anchor)
+	else:
+		main.work_order.insert(0, anchor)
+	if main.work_paused.has(anchor):
+		main.work_paused.erase(anchor)
+	if active != _NO_ACTIVE_WORK and active != anchor:
+		# Store the promoting anchor as the auto-resume trigger.
+		main.work_paused[active] = anchor
+	queue_redraw()
+	return true
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
 		return
@@ -1514,9 +1595,13 @@ func _unhandled_input(event: InputEvent) -> void:
 							_close_world_menu()
 						get_viewport().set_input_as_handled()
 						return
-					# No building selected — check if clicking on a sorter or constructor
+					# No building selected — first check for work-queue interactions
+					# (pause/resume/promote), then fall through to block menus.
 					var mouse_world = get_global_mouse_position()
 					var click_pos = main.world_to_grid(mouse_world)
+					if _handle_work_click(click_pos):
+						get_viewport().set_input_as_handled()
+						return
 					if main.placed_buildings.has(click_pos):
 						var click_block_id = main.placed_buildings[click_pos]
 						var click_data = Registry.get_block(click_block_id)
@@ -2900,7 +2985,11 @@ func _draw_placed_buildings() -> void:
 			# heads are spinning up, holding speed, or coasting to a stop.
 			_draw_crusher_heads(grid_pos, rot, data.grid_size, block_id, Color.WHITE, true)
 
-	# --- PASS 2.25: Build animation overlay (left-to-right reveal) ---
+	# --- PASS 2.25: Build animation overlay ---
+	# Only the block currently being constructed gets the left-to-right
+	# reveal; every other pending block (whether in range or not) renders as
+	# a subtle ghost preview, matching the out-of-range queue style so the
+	# player reads the two states the same way.
 	if has_build_progress:
 		for idx in order:
 			if is_wall_of[idx]:
@@ -2936,8 +3025,50 @@ func _draw_placed_buildings() -> void:
 					Color(1.0, 0.9, 0.2, 0.9), 2.0
 				)
 			else:
-				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0, 0, 0, 0.55), true)
-				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0.5, 0.5, 0.5, 0.4), false, 1.0)
+				# Pending (scheduled, not yet building): subtle dim + a
+				# soft dashed-look outline. Visually in the same family
+				# as the out-of-range queued-ghost preview.
+				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0, 0, 0, 0.22), true)
+				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(1, 1, 1, 0.35), false, 1.0)
+
+	# --- PASS 2.27: Deferred same-group swap preview ---
+	# pending_swaps are junctions / bridges / etc. queued over an existing
+	# belt or pipe. The old block is still live (and being drawn at full
+	# opacity by pass 2), so we just overlay a translucent ghost of the
+	# incoming block so the player can see what's coming.
+	if "pending_swaps" in main and not main.pending_swaps.is_empty():
+		for grid_pos in main.pending_swaps:
+			if ss and ss.is_tile_hidden(grid_pos):
+				continue
+			var entry: Dictionary = main.pending_swaps[grid_pos]
+			var new_id: StringName = StringName(entry.get("new_block_id", &""))
+			var new_data = Registry.get_block(new_id)
+			if new_data == null:
+				continue
+			var new_rot: int = int(entry.get("new_rotation", 0))
+			var world_pos_s: Vector2 = main.grid_to_world(grid_pos)
+			var off_s: Vector2 = _get_top_offset(world_pos_s) * _get_height_scale(new_id)
+			var w_s: float = gs * new_data.grid_size.x
+			var h_s: float = gs * new_data.grid_size.y
+			var top_pos_s: Vector2 = world_pos_s + off_s
+			var tint_s := Color(1, 1, 1, 0.55)
+			if new_id == &"conveyor_belt" and not _belt_textures.is_empty():
+				var info_s: Dictionary = _get_belt_draw_info(grid_pos)
+				var texture_s: Texture2D = info_s["texture"]
+				var angle_s: float = info_s["angle"]
+				if texture_s:
+					var centre_s: Vector2 = top_pos_s + Vector2(w_s / 2.0, h_s / 2.0)
+					draw_set_transform(centre_s, angle_s)
+					draw_texture_rect(texture_s, Rect2(Vector2(-w_s / 2.0, -h_s / 2.0), Vector2(w_s, h_s)), false, tint_s)
+					draw_set_transform(Vector2.ZERO, 0.0)
+			elif new_data.icon:
+				var draw_rot: int = new_rot if _is_directional(new_id) else 0
+				_draw_block_texture(new_data.icon, top_pos_s, w_s, h_s, draw_rot, tint_s)
+			else:
+				var col_s: Color = _get_block_color(new_id)
+				col_s.a = 0.45
+				draw_rect(Rect2(top_pos_s, Vector2(w_s, h_s)), col_s, true)
+			draw_rect(Rect2(top_pos_s, Vector2(w_s, h_s)), Color(1, 1, 1, 0.35), false, 1.0)
 
 	# --- PASS 2.3: Deconstruct animation overlay (right-to-left, red line) ---
 	if has_decon:
@@ -3046,7 +3177,9 @@ func _draw_placed_buildings() -> void:
 				gs * block_size.x
 			)
 
-	# --- PASS 5: Draw "no power" indicator on unpowered buildings ---
+	# --- PASS 5: Draw the "no power at all" overlay for consumers on a
+	# network with zero generation. Network status is otherwise communicated
+	# via the hover tooltip; we don't clutter the map with a per-block bar.
 	if power_sys:
 		for idx in order:
 			if is_wall_of[idx]:
@@ -3058,7 +3191,8 @@ func _draw_placed_buildings() -> void:
 			var data: BlockData = _get_block.call(block_id)
 			if data == null or data.electrical_power_use <= 0:
 				continue
-			if power_sys.is_electrical_powered(grid_pos):
+			var info: Dictionary = power_sys.get_electrical_network_info(grid_pos)
+			if float(info.get("efficiency", 1.0)) > 0.0:
 				continue
 			var block_size: Vector2i = _size_for.call(block_id)
 			var world_pos: Vector2 = main.grid_to_world(grid_pos)

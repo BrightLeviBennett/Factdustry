@@ -7,12 +7,13 @@
 script = ExtResource("1")
 id = &"wall_crusher"
 display_name = "Wall Crusher"
-description = "Crushes solid rock walls into sand. Must face a blackstone wall. Requires rotational power."
+description = "Crushes solid rock walls into sand. Must face a blackstone wall. Requires electrical power."
 icon = ExtResource("1_uuuo3")
 category = 1
+tags = PackedStringArray("mining", "extractor", "wall_miner", "crusher_heads")
 color = Color(0.6, 0.6, 0.5, 1)
-top_sprite = ExtResource("1_uuuo3")
 grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("1_uuuo3")
 max_health = 240.0
 build_cost = {
 "copper": 100,
@@ -24,4 +25,3 @@ output_items = {
 }
 production_time = 2.0
 electrical_power_use = 10.0
-tags = PackedStringArray("mining", "extractor", "wall_miner", "crusher_heads")

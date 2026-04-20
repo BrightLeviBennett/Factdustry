@@ -278,6 +278,8 @@ func _register_unlock_rules() -> void:
 	# Iron is produced by the mineral extractor, not mined — unlock it as
 	# soon as the extractor emits its first unit.
 	_add_rule("item_produced", &"mat_iron", &"mat_iron")
+	# Steel is smelted from iron + graphite in the steel furnace.
+	_add_rule("item_produced", &"mat_steel", &"mat_steel")
 
 	# Campaign sector chain (shared with the save-migration pass in load_save_data).
 	var campaign_chain: Array[StringName] = CAMPAIGN_CHAIN
@@ -477,12 +479,13 @@ func _register_campaign() -> void:
 
 func _register_power() -> void:
 	_add(&"vent_turbine",         "Vent Turbine",         [&"core_shard"],              [&"mat_copper"], {&"mat_copper": 30}, Vector2(0, 1))
-	_add(&"solar_panel",          "Solar Panel",          [&"vent_turbine"],            [], {&"mat_copper": 50, &"mat_silicon": 20}, Vector2(-1, 2))
-	_add(&"solar_array",          "Solar Array",          [&"solar_panel"],             [], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(-1, 3))
+	_add(&"solar_panel",          "Solar Panel",          [&"vent_turbine"],            [&"Not unlockable in campaign"], {&"mat_copper": 50, &"mat_silicon": 20}, Vector2(-1, 2))
+	_add(&"solar_array",          "Solar Array",          [&"solar_panel"],             [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(-1, 3))
 	_add(&"cable_node",           "Cable Node",           [&"vent_turbine"],            [], {&"mat_copper": 80, &"mat_silicon": 30}, Vector2(0, 2))
 	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(0, 3))
 	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(0, 4))
 	_add(&"combustion_generator", "Combustion Generator", [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
+	_add(&"combustion_reactor",   "Combustion Reactor",   [&"combustion_generator"],    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
 
 func _register_belt_transport() -> void:
 	_add(&"conveyor_belt",       "Conveyor Belt",       [&"core_shard"],        [&"mat_copper"], {&"mat_copper": 20}, Vector2(5, 1))
@@ -531,7 +534,7 @@ func _register_mining() -> void:
 	_add(&"earthquake_harvester",  "Earthquake Harvester",  [&"impact_driller"],        [], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_steel": 40}, Vector2(25, -3))
 	_add(&"bauxite_grinder",       "Bauxite Grinder",       [&"bauxite_crusher"],       [], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_graphite": 30}, Vector2(24, -3))
 	_add(&"wall_grinder",          "Wall Grinder",          [&"wall_crusher"],          [&"mat_steel"], {&"mat_copper": 160, &"mat_steel": 50, &"mat_graphite": 30}, Vector2(23, -3))
-	_add(&"advanced_plasma_bore",  "Advanced Plasma Bore",  [&"plasma_bore"],           [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(22, -3))
+	_add(&"advanced_plasma_bore",  "Advanced Plasma Bore",  [&"plasma_bore"],           [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(22, -3))
 	_add(&"petroleum_drill",       "Petroleum Drill",       [&"mechanical_drill"],      [&"-L-dark_valley"], {&"mat_copper": 150, &"mat_graphite": 50, &"mat_steel": 25}, Vector2(21, -3))
 	_add(&"ground_harvester",      "Ground Harvester",      [&"ground_scraper"],        [], {&"mat_copper": 300, &"mat_silicon": 120, &"mat_steel": 80}, Vector2(26, -4))
 	_add(&"eruption_harvester",    "Eruption Harvester",    [&"earthquake_harvester"],  [], {&"mat_copper": 300, &"mat_silicon": 120, &"mat_steel": 80}, Vector2(25, -4))
@@ -573,16 +576,16 @@ func _register_production() -> void:
 	_add(&"graphite_electrolyzer",       "Graphite Electrolyzer",       [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_graphite": 30}, Vector2(-6, 2))
 	_add(&"circuit_printer",             "Circuit Printer",             [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_graphite": 25}, Vector2(-5, 2))
 	_add(&"water_filter",                "Water Filter",                [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(-4, 2))
-	_add(&"petroleum_refinery",          "Petroleum Refinery",          [&"steel_furnace"],                    [], {&"mat_copper": 250, &"mat_steel": 110, &"mat_silicon": 60}, Vector2(-7, 3))
-	_add(&"air_filter",                  "Air Filter",                  [&"graphite_electrolyzer"],            [], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_graphite": 40, &"mat_steel": 25}, Vector2(-6, 3))
+	_add(&"petroleum_refinery",          "Petroleum Refinery",          [&"steel_furnace"],                    [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 110, &"mat_silicon": 60}, Vector2(-7, 3))
+	_add(&"air_filter",                  "Air Filter",                  [&"graphite_electrolyzer"],            [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_graphite": 40, &"mat_steel": 25}, Vector2(-6, 3))
 
 func _register_turrets() -> void:
 	# Single Barrel branch
 	_add(&"single_barrel",   "Single Barrel",   [&"core_shard"],                       [], {&"mat_copper": 40}, Vector2(-11, 1))
 	_add(&"diffuse",         "Diffuse",         [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25}, Vector2(-11, 2))
 	_add(&"double_barrel",   "Double Barrel",   [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 90, &"mat_steel": 30}, Vector2(-10, 2))
-	_add(&"homing_diffuse",  "Homing Diffuse",  [&"diffuse"],                          [], {&"mat_copper": 150, &"mat_silicon": 60, &"mat_graphite": 25}, Vector2(-11, 3))
-	_add(&"quad_barrel",     "Quad Barrel",     [&"double_barrel"],                    [], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 30}, Vector2(-9, 2))
+	_add(&"homing_diffuse",  "Homing Diffuse",  [&"diffuse"],                          [&"Not unlockable in campaign"], {&"mat_copper": 150, &"mat_silicon": 60, &"mat_graphite": 25}, Vector2(-11, 3))
+	_add(&"quad_barrel",     "Quad Barrel",     [&"double_barrel"],                    [&"Not unlockable in campaign"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 30}, Vector2(-9, 2))
 	_add(&"shardstorm",      "Shardstorm",      [&"homing_diffuse", &"double_barrel"], [], {&"mat_copper": 250, &"mat_silicon": 100, &"mat_steel": 50}, Vector2(-10, 3))
 	_add(&"octo_barrel",     "Octo Barrel",     [&"quad_barrel"],                      [], {&"mat_copper": 280, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-9, 3))
 	_add(&"thunderburst",    "Thunderburst",    [&"shardstorm"],                       [], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 110}, Vector2(-10, 4))
@@ -690,12 +693,12 @@ func _register_walls() -> void:
 	_add(&"huge_copper_wall",    "Huge Copper Wall",    [&"large_copper_wall"],[&"Not unlockable in campaign"], {&"mat_copper": 65}, Vector2(-34, 1))
 	_add(&"giant_copper_wall",   "Giant Copper Wall",   [&"huge_copper_wall"], [], {&"mat_copper": 100}, Vector2(-35, 1))
 	# Steel tier
-	_add(&"steel_wall",          "Steel Wall",          [&"copper_wall"],        [], {&"mat_copper": 60, &"mat_steel": 45}, Vector2(-32, 2))
+	_add(&"steel_wall",          "Steel Wall",          [&"copper_wall"],      [&"mat_steel"], {&"mat_copper": 60, &"mat_steel": 45}, Vector2(-32, 2))
 	_add(&"large_steel_wall",    "Large Steel Wall",    [&"steel_wall"],       [], {&"mat_copper": 90, &"mat_steel": 67}, Vector2(-33, 2))
-	_add(&"huge_steel_wall",     "Huge Steel Wall",     [&"large_steel_wall"], [], {&"mat_copper": 135, &"mat_steel": 101}, Vector2(-34, 2))
+	_add(&"huge_steel_wall",     "Huge Steel Wall",     [&"large_steel_wall"], [&"Not unlockable in campaign"], {&"mat_copper": 135, &"mat_steel": 101}, Vector2(-34, 2))
 	_add(&"giant_steel_wall",    "Giant Steel Wall",    [&"huge_steel_wall"],  [], {&"mat_copper": 200, &"mat_steel": 150}, Vector2(-35, 2))
 	# Brass tier
-	_add(&"brass_wall",          "Brass Wall",          [&"steel_wall"],       [], {&"mat_copper": 80, &"mat_brass": 30, &"mat_steel": 20}, Vector2(-32, 3))
+	_add(&"brass_wall",          "Brass Wall",          [&"steel_wall"],       [&"Not unlockable in campaign"], {&"mat_copper": 80, &"mat_brass": 30, &"mat_steel": 20}, Vector2(-32, 3))
 	_add(&"large_brass_wall",    "Large Brass Wall",    [&"brass_wall"],       [], {&"mat_copper": 120, &"mat_brass": 45, &"mat_steel": 30}, Vector2(-33, 3))
 	_add(&"huge_brass_wall",     "Huge Brass Wall",     [&"large_brass_wall"], [], {&"mat_copper": 180, &"mat_brass": 68, &"mat_steel": 45}, Vector2(-34, 3))
 	_add(&"giant_brass_wall",    "Giant Brass Wall",    [&"huge_brass_wall"],  [], {&"mat_copper": 270, &"mat_brass": 100, &"mat_steel": 68}, Vector2(-35, 3))

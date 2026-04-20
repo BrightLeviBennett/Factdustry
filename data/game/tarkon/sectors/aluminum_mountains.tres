@@ -7,12 +7,12 @@
 script = ExtResource("1")
 id = &"aluminum_mountains"
 display_name = "Aluminum Mountains"
-description = "Due to the mountainous terrain of this sector, flying and cralwer units will be the only possible options. Aquire aluminum, and research how to refine it, and utilize it for upgrading your units and turrets."
+description = "Due to the mountainous terrain of this sector, crawler units will be the only possible option. Aquire aluminum, and research how to refine it, and utilize it for upgrading your units and turrets."
 icon = ExtResource("1_pmcym")
 planet_id = &"Tarkon"
 hex_q = 1
 hex_r = 2
-available_resources = PackedStringArray()
+available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_iron", "mat_bauxite")
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray("dark_valley")
 required_sectors = PackedStringArray("zinc_deposits")

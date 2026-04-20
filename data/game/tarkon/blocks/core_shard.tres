@@ -13,12 +13,17 @@ display_name = "Core: Shard"
 description = "The heart of your colony. Provides basic storage and power."
 icon = ExtResource("3_d1e5q")
 category = 0
+tags = PackedStringArray("core")
 color = Color(0.9, 0.75, 0.2, 1)
+grid_size = Vector2i(3, 3)
 base_sprite = ExtResource("3")
 lumina_overlay = ExtResource("4_dpqvi")
 ferox_overlay = ExtResource("2_4rvnv")
-grid_size = Vector2i(3, 3)
 max_health = 500.0
-tags = PackedStringArray("core")
+build_cost = {
+"copper": 1500,
+"graphite": 1500,
+"silicon": 500
+}
 unit_capacity = 15
 storage_capacity = 4000

@@ -732,8 +732,12 @@ func _add_misc_button(icon_text: String, tooltip: String, callback: Callable) ->
 
 func _on_tech_state_changed(_node_id: StringName, _new_state: int) -> void:
 	_refresh_block_menu()
-	# Show unlock notification only for auto-researched nodes (not manually clicked)
-	# Skip: hidden markers, event_only, core_shard, and anything researched while tech tree is open
+	# Show unlock notification only for auto-researched nodes (not manually clicked).
+	# Skip: the seed node core_shard, hidden dependency markers (-L-/-C-/-D-),
+	# and anything researched while the tech tree UI is open (manual clicks).
+	# Event-only nodes that ARE visible — materials and sector nodes — do
+	# trigger the popup so the player sees "Iron unlocked", "Crevice unlocked",
+	# etc. when the underlying event fires.
 	if _new_state == TechTree.NodeState.RESEARCHED:
 		if _node_id == &"core_shard":
 			return
@@ -741,7 +745,7 @@ func _on_tech_state_changed(_node_id: StringName, _new_state: int) -> void:
 		if tech_ui and tech_ui.is_open:
 			return  # Player is manually researching in the tech tree
 		var nd = TechTree.get_node_data(_node_id)
-		if nd and not nd.get("hidden", false) and not nd.get("event_only", false):
+		if nd and not nd.get("hidden", false):
 			_show_unlock_icon(_node_id)
 
 
@@ -959,6 +963,21 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 	var current_health: float = main.building_health.get(grid_pos, data.max_health)
 	_add_tooltip_health_bar(health_pct, current_health, data.max_health)
 
+	# --- Power Bar ---
+	# Network-level gen/use efficiency for every electrical block, shown
+	# directly under the health bar so you can see at a glance whether the
+	# grid this block is on is healthy, brownout'd, or fully starved.
+	if data.is_electrical_power_block():
+		var ps_tt = _power_sys_ref()
+		if ps_tt:
+			var info: Dictionary = ps_tt.get_electrical_network_info(origin)
+			if float(info.get("gen", 0.0)) > 0.0 or float(info.get("use", 0.0)) > 0.0:
+				_add_tooltip_power_bar(
+					float(info.get("efficiency", 1.0)),
+					float(info.get("gen", 0.0)),
+					float(info.get("use", 0.0))
+				)
+
 	# --- Unit Fabricator Input Progress + Unit Count ---
 	if data.produced_unit != &"":
 		if _logistics and _logistics.factory_buffers.has(origin):
@@ -1012,7 +1031,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		if _logistics:
 			front_cells = _logistics._get_front_edge(origin, data.grid_size, rot)
 		var front_count: int = front_cells.size()
-		var ore_count: int = 0
+		var hit_count: int = 0
 		var dir: Vector2i
 		match rot:
 			0: dir = Vector2i(1, 0)
@@ -1020,34 +1039,56 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			2: dir = Vector2i(-1, 0)
 			3: dir = Vector2i(0, -1)
 			_: dir = Vector2i(1, 0)
+		# Wall miners (wall crusher) mine blackstone walls, not ore tiles.
+		# Mirror _update_drills' hit-check so the tooltip matches actual
+		# production rather than always reporting 0%.
+		var is_wall_miner: bool = data.tags.has("wall_miner")
 		if terrain:
 			for cell in front_cells:
-				if terrain.get_ore_at(cell) != null:
-					ore_count += 1
-				elif terrain.get_ore_at(cell + dir) != null:
-					ore_count += 1
-		var efficiency: float = float(ore_count) / float(front_count) if front_count > 0 else 1.0
+				if is_wall_miner:
+					var c1_ok: bool = terrain.get_ore_at(cell) == null \
+						and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall"
+					var c2_ok: bool = terrain.get_ore_at(cell + dir) == null \
+						and StringName(terrain.wall_tiles.get(cell + dir, &"")) == &"blackstone_wall"
+					if c1_ok or c2_ok:
+						hit_count += 1
+				else:
+					if terrain.get_ore_at(cell) != null:
+						hit_count += 1
+					elif terrain.get_ore_at(cell + dir) != null:
+						hit_count += 1
+		var ore_eff: float = float(hit_count) / float(front_count) if front_count > 0 else 1.0
+		# Power efficiency multiplies ore efficiency so the displayed %/rate
+		# matches the actual production speed (network over-draw slows drills).
+		var pow_eff: float = 1.0
+		if data.electrical_power_use > 0:
+			var ps_eff = _power_sys_ref()
+			if ps_eff:
+				pow_eff = ps_eff.get_electrical_efficiency(origin)
+		var efficiency: float = ore_eff * pow_eff
 		var cycle = data.production_time if data.production_time > 0 else 2.0
 		var effective_cycle: float = cycle / efficiency if efficiency > 0 else 0.0
 		var rate: float = 1.0 / effective_cycle if effective_cycle > 0 else 0.0
-		var eff_pct: int = int(efficiency * 100)
-		var eff_color := Color(0.7, 0.9, 0.7) if eff_pct == 100 else Color(0.9, 0.7, 0.3)
+		var eff_pct: int = int(round(efficiency * 100))
+		var eff_color: Color
+		if eff_pct >= 100:
+			eff_color = Color(0.7, 0.9, 0.7)
+		elif eff_pct > 0:
+			eff_color = Color(0.9, 0.7, 0.3)
+		else:
+			eff_color = Color(0.9, 0.4, 0.4)
 		_add_tooltip_line("Efficiency: %d%% (%.2f/s)" % [eff_pct, rate], eff_color)
 	elif data.tags.has("pump"):
 		var cycle = data.production_time if data.production_time > 0 else 2.0
 		var rate: float = 1.0 / cycle
 		_add_tooltip_line("Efficiency: %.2f/s" % rate, Color(0.7, 0.9, 0.7))
 
-	# --- Power Status ---
-	var power_sys = _power_sys_ref()
-	if power_sys:
-		if data.electrical_power_use > 0:
-			var powered: bool = power_sys.is_electrical_powered(origin)
-			var color := Color(0.3, 0.9, 0.3) if powered else Color(0.9, 0.3, 0.3)
-			var status_text := "Power: ON" if powered else "Power: OFF"
-			_add_tooltip_line(status_text, color)
-		if data.electrical_power_gen > 0:
-			_add_tooltip_line("Generates: %.0f power" % data.electrical_power_gen, Color(0.5, 0.8, 1.0))
+	# --- Power gen generator note ---
+	# Consumer status is already shown via the power bar above. Pure
+	# generators get a short rating line so you can see their contribution
+	# without hovering the network tooltip math.
+	if data.electrical_power_gen > 0:
+		_add_tooltip_line("Generates: %.0f power" % data.electrical_power_gen, Color(0.5, 0.8, 1.0))
 
 	# --- Needed Resources (for factories/constructors/drills with pending inputs) ---
 	if _logistics:
@@ -1338,6 +1379,92 @@ func _add_tooltip_health_bar(pct: float, current: float, max_hp: float) -> void:
 	bar_container.add_child(hp_lbl)
 
 	tooltip_vbox.add_child(bar_container)
+
+
+## Adds a "Power" bar to the hover tooltip. The bar is centred: zero
+## (gen == use) sits in the middle. Positive net (surplus) fills to the
+## right in blue; negative net (overdraw) fills to the left in red.
+## Half-bar width = one full generator rating, so +gen fills to the right
+## edge and -gen fills to the left edge; more extreme values pin.
+## A network with zero generators paints the whole left half red.
+func _add_tooltip_power_bar(efficiency: float, gen: float, use: float) -> void:
+	var bar_container = HBoxContainer.new()
+	bar_container.add_theme_constant_override("separation", 6)
+	bar_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	const BAR_W: float = 180.0
+	const BAR_H: float = 10.0
+	var half_w: float = BAR_W * 0.5
+
+	var bar_bg = ColorRect.new()
+	bar_bg.custom_minimum_size = Vector2(BAR_W, BAR_H)
+	bar_bg.color = Color(0.05, 0.05, 0.12, 0.8)
+	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar_panel = Control.new()
+	bar_panel.custom_minimum_size = Vector2(BAR_W, BAR_H)
+	bar_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_panel.add_child(bar_bg)
+	bar_bg.position = Vector2.ZERO
+	bar_bg.size = Vector2(BAR_W, BAR_H)
+
+	# Net power = gen - use. Normalize by gen so one "unit" of deficit or
+	# surplus equals one full generator rating worth of travel on the bar.
+	var net_val: float = gen - use
+	var scale_ref: float = gen if gen > 0.0 else maxf(use, 1.0)
+	var frac: float = clampf(net_val / scale_ref, -1.0, 1.0)
+	var overdraw: bool = net_val < 0.0
+
+	var fill_color: Color
+	if overdraw:
+		fill_color = Color(0.95, 0.3, 0.2)
+	elif gen > 0.0 and use / gen >= 0.8:
+		# Close to capacity — warning yellow so you notice before brownout.
+		fill_color = Color(1.0, 0.85, 0.25)
+	else:
+		fill_color = Color(0.35, 0.7, 1.0)
+
+	# Centre tick so the zero point is visually anchored.
+	var centre_tick = ColorRect.new()
+	centre_tick.color = Color(0.85, 0.85, 0.95, 0.35)
+	centre_tick.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	centre_tick.position = Vector2(half_w - 0.5, 0.0)
+	centre_tick.size = Vector2(1.0, BAR_H)
+	bar_panel.add_child(centre_tick)
+
+	if frac != 0.0:
+		var bar_fill = ColorRect.new()
+		bar_fill.color = fill_color
+		bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var fill_len: float = half_w * absf(frac)
+		if frac > 0.0:
+			# Surplus: grow right from the midpoint.
+			bar_fill.position = Vector2(half_w, 0.0)
+		else:
+			# Deficit: grow left from the midpoint.
+			bar_fill.position = Vector2(half_w - fill_len, 0.0)
+		bar_fill.size = Vector2(fill_len, BAR_H)
+		bar_panel.add_child(bar_fill)
+
+	bar_container.add_child(bar_panel)
+
+	# Label format: "(gen - use) / gen" — the left number is the signed
+	# power remaining on the network (negative when overdrawn), the right
+	# number is the total generation capacity.
+	var power_lbl = Label.new()
+	var sign_prefix: String = "+" if net_val > 0.0 else ""
+	power_lbl.text = "%s%.0f / %.0f" % [sign_prefix, net_val, gen]
+	power_lbl.add_theme_font_size_override("font_size", 11)
+	var lbl_color: Color = Color(0.95, 0.55, 0.5) if overdraw else Color(0.7, 0.8, 1.0)
+	power_lbl.add_theme_color_override("font_color", lbl_color)
+	power_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_container.add_child(power_lbl)
+
+	tooltip_vbox.add_child(bar_container)
+	# efficiency is accepted for API symmetry with the in-world bar even
+	# though this tooltip derives the fill directly from gen/use. Silence
+	# an unused-arg warning without dropping it from the signature.
+	var _unused_eff: float = efficiency
 
 
 func _add_tooltip_progress_bar(current: int, max_val: int, label_text: String, bar_color: Color) -> void:
