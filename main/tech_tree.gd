@@ -479,9 +479,9 @@ func _register_campaign() -> void:
 
 func _register_power() -> void:
 	_add(&"vent_turbine",         "Vent Turbine",         [&"core_shard"],              [&"mat_copper"], {&"mat_copper": 30}, Vector2(0, 1))
+	_add(&"cable_node",           "Cable Node",           [&"vent_turbine"],            [], {&"mat_copper": 15}, Vector2(0, 2))
 	_add(&"solar_panel",          "Solar Panel",          [&"vent_turbine"],            [&"Not unlockable in campaign"], {&"mat_copper": 50, &"mat_silicon": 20}, Vector2(-1, 2))
 	_add(&"solar_array",          "Solar Array",          [&"solar_panel"],             [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(-1, 3))
-	_add(&"cable_node",           "Cable Node",           [&"vent_turbine"],            [], {&"mat_copper": 80, &"mat_silicon": 30}, Vector2(0, 2))
 	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(0, 3))
 	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(0, 4))
 	_add(&"combustion_generator", "Combustion Generator", [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
