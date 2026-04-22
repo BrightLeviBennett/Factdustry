@@ -115,128 +115,6 @@ func check_sector_status(sector_id: StringName) -> Dictionary:
 
 
 # =========================
-# SAVE: MAP ONLY (tiles)
-# =========================
-
-## Saves just the tile layout as a reusable map template.
-func save_map(map_name: String) -> bool:
-	var main = get_node_or_null("/root/Main")
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
-	if main == null or terrain == null:
-		push_warning("SaveManager: Can't find Main or TerrainSystem!")
-		return false
-
-	var data := {
-		"version": 2,
-		"type": "map",
-		"map_name": map_name,
-		"grid_width": main.GRID_WIDTH,
-		"grid_height": main.GRID_HEIGHT,
-		"floor_tiles": _serialize_tiles(terrain.floor_tiles),
-		"wall_tiles": _serialize_tiles(terrain.wall_tiles),
-		"ore_tiles": _serialize_tiles(terrain.ore_tiles),
-		"core_position": _vec2i_to_str(main.core_position),
-	}
-
-	return _write_json(SAVE_DIR + map_name + ".map.json", data)
-
-
-# =========================
-# LOAD: MAP FROM PATH
-# =========================
-
-## Loads a map from an arbitrary file path (e.g. res://data/game/tarkon/maps/SG.map.json).
-func load_map_from_path(path: String) -> bool:
-	var main = get_node_or_null("/root/Main")
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
-	if main == null or terrain == null:
-		push_warning("SaveManager: Can't find Main or TerrainSystem!")
-		return false
-
-	var data = _read_json(path)
-	if data == null:
-		return false
-
-	# Clear all layers
-	terrain.floor_tiles.clear()
-	terrain.wall_tiles.clear()
-	terrain.ore_tiles.clear()
-	terrain.tile_health.clear()
-	terrain.multi_tile_origins.clear()
-
-	# Restore map size if saved
-	if data.has("grid_width"):
-		main.GRID_WIDTH = int(data["grid_width"])
-	if data.has("grid_height"):
-		main.GRID_HEIGHT = int(data["grid_height"])
-
-	# Detect v2 by version key OR presence of floor_tiles key
-	var version = data.get("version", 1)
-	if version >= 2 or data.has("floor_tiles"):
-		_deserialize_layer(terrain.floor_tiles, data.get("floor_tiles", {}))
-		_deserialize_layer(terrain.wall_tiles, data.get("wall_tiles", {}))
-		_deserialize_layer(terrain.ore_tiles, data.get("ore_tiles", {}))
-		if data.has("core_position"):
-			main.core_position = _str_to_vec2i(data["core_position"])
-	else:
-		_deserialize_tiles_layered(terrain, data.get("tiles", {}))
-
-	_rebuild_multi_tile_origins(terrain)
-	terrain.walls_changed.emit()
-	terrain.queue_redraw()
-	var total: int = terrain.floor_tiles.size() + terrain.wall_tiles.size() + terrain.ore_tiles.size()
-	print("SaveManager: Map loaded from '%s' (%d tiles)" % [path, total])
-	return true
-
-
-# =========================
-# LOAD: MAP ONLY (tiles)
-# =========================
-
-## Loads a map template and places tiles. Clears existing tiles first.
-func load_map(map_name: String) -> bool:
-	var main = get_node_or_null("/root/Main")
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
-	if main == null or terrain == null:
-		push_warning("SaveManager: Can't find Main or TerrainSystem!")
-		return false
-
-	var data = _read_json(SAVE_DIR + map_name + ".map.json")
-	if data == null:
-		return false
-
-	if data.get("type") != "map":
-		push_warning("SaveManager: File is not a map template!")
-		return false
-
-	# Clear all layers
-	terrain.floor_tiles.clear()
-	terrain.wall_tiles.clear()
-	terrain.ore_tiles.clear()
-	terrain.tile_health.clear()
-	terrain.multi_tile_origins.clear()
-
-	var version = data.get("version", 1)
-	if version >= 2:
-		# v2: separate layers
-		_deserialize_layer(terrain.floor_tiles, data.get("floor_tiles", {}))
-		_deserialize_layer(terrain.wall_tiles, data.get("wall_tiles", {}))
-		_deserialize_layer(terrain.ore_tiles, data.get("ore_tiles", {}))
-		if data.has("core_position"):
-			main.core_position = _str_to_vec2i(data["core_position"])
-	else:
-		# v1 legacy: merged tiles, sort by category
-		_deserialize_tiles_layered(terrain, data.get("tiles", {}))
-
-	_rebuild_multi_tile_origins(terrain)
-	terrain.walls_changed.emit()
-	terrain.queue_redraw()
-	var total: int = terrain.floor_tiles.size() + terrain.wall_tiles.size() + terrain.ore_tiles.size()
-	print("SaveManager: Map '%s' loaded (%d tiles)" % [map_name, total])
-	return true
-
-
-# =========================
 # SAVE: FULL GAME STATE
 # =========================
 
@@ -387,11 +265,6 @@ func load_game(save_name: String) -> bool:
 # LIST SAVES
 # =========================
 
-## Returns an array of available map template names.
-func list_maps() -> PackedStringArray:
-	return _list_files(".map.json")
-
-
 ## Returns an array of available full save names.
 func list_saves() -> PackedStringArray:
 	return _list_files(".save.json")
@@ -422,15 +295,6 @@ func _list_files(suffix: String) -> PackedStringArray:
 # =========================
 # DELETE
 # =========================
-
-## Deletes a map template file.
-func delete_map(map_name: String) -> bool:
-	var path = SAVE_DIR + map_name + ".map.json"
-	if FileAccess.file_exists(path):
-		DirAccess.remove_absolute(path)
-		return true
-	return false
-
 
 ## Deletes a full save file.
 func delete_save(save_name: String) -> bool:

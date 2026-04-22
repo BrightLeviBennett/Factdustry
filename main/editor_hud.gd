@@ -161,7 +161,6 @@ func _create_toolbar() -> void:
 	hbox.add_child(map_name_input)
 
 	# Action buttons
-	_add_action_btn(hbox, "Save Map", _on_save_map)
 	_add_action_btn(hbox, "Save Sector", _on_save_sector)
 	_add_action_btn(hbox, "Load", _on_load)
 	_add_action_btn(hbox, "New", _on_new)
@@ -392,6 +391,7 @@ func _create_building_palette() -> void:
 
 	_add_faction_btn(faction_hbox, "Lumina", main.Faction.LUMINA, Color(0.3, 0.7, 1.0))
 	_add_faction_btn(faction_hbox, "Ferox", main.Faction.FEROX, Color(1.0, 0.3, 0.3))
+	_add_faction_btn(faction_hbox, "Derelict", main.Faction.DERELICT, Color(0.55, 0.55, 0.55))
 	_update_faction_highlight()
 
 	# Separator
@@ -484,21 +484,23 @@ func _select_faction(faction: int) -> void:
 func _update_faction_highlight() -> void:
 	for f in faction_buttons:
 		var btn: Button = faction_buttons[f]
+		var base_color: Color
+		match f:
+			main.Faction.LUMINA:  base_color = Color(0.3, 0.7, 1.0)
+			main.Faction.FEROX:   base_color = Color(1.0, 0.3, 0.3)
+			main.Faction.DERELICT: base_color = Color(0.55, 0.55, 0.55)
+			_:                    base_color = Color(0.7, 0.7, 0.7)
 		if f == main.selected_faction:
-			if f == main.Faction.LUMINA:
-				btn.add_theme_stylebox_override("normal", _panel_style(Color(0.2, 0.5, 0.8, 0.8)))
-			else:
-				btn.add_theme_stylebox_override("normal", _panel_style(Color(0.8, 0.2, 0.2, 0.8)))
+			btn.add_theme_stylebox_override("normal", _panel_style(base_color.darkened(0.35)))
 		else:
-			var c = Color(0.3, 0.7, 1.0) if f == main.Faction.LUMINA else Color(1.0, 0.3, 0.3)
 			var style = StyleBoxFlat.new()
-			style.bg_color = c.darkened(0.6)
+			style.bg_color = base_color.darkened(0.6)
 			style.set_corner_radius_all(4)
 			style.content_margin_left = 8
 			style.content_margin_right = 8
 			style.content_margin_top = 4
 			style.content_margin_bottom = 4
-			style.border_color = c.darkened(0.3)
+			style.border_color = base_color.darkened(0.3)
 			style.set_border_width_all(1)
 			btn.add_theme_stylebox_override("normal", style)
 
@@ -655,17 +657,6 @@ func _create_script_editor() -> void:
 # =========================
 # SAVE / LOAD / NEW / MENU
 # =========================
-
-func _on_save_map() -> void:
-	var save_name := map_name_input.text.strip_edges()
-	if save_name == "":
-		_show_status("Enter a name first!")
-		return
-	if SaveManager.save_map(save_name):
-		_show_status("Map '%s' saved!" % save_name)
-	else:
-		_show_status("Failed to save map!")
-
 
 func _on_save_sector() -> void:
 	var save_name := map_name_input.text.strip_edges()
@@ -857,37 +848,23 @@ func _refresh_load_list() -> void:
 	for child in load_list.get_children():
 		child.queue_free()
 
-	var maps := SaveManager.list_maps()
 	var sectors := SaveManager.list_sectors()
 
-	if maps.is_empty() and sectors.is_empty():
+	if sectors.is_empty():
 		var lbl = Label.new()
-		lbl.text = "No saved files"
+		lbl.text = "No saved sectors"
 		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		load_list.add_child(lbl)
 		return
 
-	# Show maps
-	if not maps.is_empty():
-		var header = Label.new()
-		header.text = "— Maps —"
-		header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		header.add_theme_color_override("font_color", Color(0.5, 0.7, 1.0))
-		load_list.add_child(header)
+	var header = Label.new()
+	header.text = "— Sectors —"
+	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	header.add_theme_color_override("font_color", Color(1.0, 0.7, 0.3))
+	load_list.add_child(header)
 
-		for map_name in maps:
-			_add_load_entry(map_name, "map")
-
-	# Show sectors
-	if not sectors.is_empty():
-		var header = Label.new()
-		header.text = "— Sectors —"
-		header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		header.add_theme_color_override("font_color", Color(1.0, 0.7, 0.3))
-		load_list.add_child(header)
-
-		for sector_name in sectors:
-			_add_load_entry(sector_name, "sector")
+	for sector_name in sectors:
+		_add_load_entry(sector_name, "sector")
 
 
 func _add_load_entry(entry_name: String, file_type: String) -> void:
@@ -907,23 +884,14 @@ func _add_load_entry(entry_name: String, file_type: String) -> void:
 	del_btn.text = "X"
 	del_btn.tooltip_text = "Delete"
 	del_btn.pressed.connect(func():
-		if captured_type == "map":
-			SaveManager.delete_map(captured_name)
-		else:
-			SaveManager.delete_sector(captured_name)
+		SaveManager.delete_sector(captured_name)
 		_refresh_load_list()
 	)
 	hbox.add_child(del_btn)
 
 
 func _load_entry(entry_name: String, file_type: String) -> void:
-	var success: bool
-	if file_type == "map":
-		# Clear buildings when loading a map-only file
-		main.clear_buildings()
-		success = SaveManager.load_map(entry_name)
-	else:
-		success = SaveManager.load_sector(entry_name)
+	var success: bool = SaveManager.load_sector(entry_name)
 
 	if success:
 		map_name_input.text = entry_name
@@ -989,41 +957,29 @@ func _create_faction_popup() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(title)
 
-	# Faction option buttons
+	# Faction option buttons — one per Faction enum value.
 	var faction_hbox = HBoxContainer.new()
 	faction_hbox.add_theme_constant_override("separation", 6)
 	vbox.add_child(faction_hbox)
 
-	var lumina_btn = Button.new()
-	lumina_btn.text = "Lumina"
-	lumina_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	lumina_btn.add_theme_stylebox_override("normal", _panel_style(Color(0.2, 0.5, 0.8, 0.8)))
-	faction_hbox.add_child(lumina_btn)
-
-	var ferox_btn = Button.new()
-	ferox_btn.text = "Ferox"
-	ferox_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var ferox_style = StyleBoxFlat.new()
-	ferox_style.bg_color = Color(0.8, 0.2, 0.2).darkened(0.3)
-	ferox_style.set_corner_radius_all(4)
-	ferox_style.content_margin_left = 8
-	ferox_style.content_margin_right = 8
-	ferox_style.content_margin_top = 4
-	ferox_style.content_margin_bottom = 4
-	ferox_style.border_color = Color(1.0, 0.3, 0.3).darkened(0.3)
-	ferox_style.set_border_width_all(1)
-	ferox_btn.add_theme_stylebox_override("normal", ferox_style)
-	faction_hbox.add_child(ferox_btn)
-
-	# Connect signals after both buttons exist so lambdas can capture both
-	lumina_btn.pressed.connect(func():
-		_convert_faction_choice = main.Faction.LUMINA
-		_update_convert_faction_highlight(lumina_btn, ferox_btn)
-	)
-	ferox_btn.pressed.connect(func():
-		_convert_faction_choice = main.Faction.FEROX
-		_update_convert_faction_highlight(lumina_btn, ferox_btn)
-	)
+	var convert_faction_buttons: Dictionary = {}
+	var faction_specs := [
+		{"id": main.Faction.LUMINA, "label": "Lumina", "color": Color(0.3, 0.7, 1.0)},
+		{"id": main.Faction.FEROX, "label": "Ferox", "color": Color(1.0, 0.3, 0.3)},
+		{"id": main.Faction.DERELICT, "label": "Derelict", "color": Color(0.55, 0.55, 0.55)},
+	]
+	for spec in faction_specs:
+		var btn := Button.new()
+		btn.text = spec["label"]
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		faction_hbox.add_child(btn)
+		convert_faction_buttons[spec["id"]] = {"btn": btn, "color": spec["color"]}
+		var captured_id: int = spec["id"]
+		btn.pressed.connect(func():
+			_convert_faction_choice = captured_id
+			_update_convert_faction_highlight(convert_faction_buttons)
+		)
+	_update_convert_faction_highlight(convert_faction_buttons)
 
 	# OK / Cancel buttons
 	var btn_hbox = HBoxContainer.new()
@@ -1046,31 +1002,27 @@ func _create_faction_popup() -> void:
 	btn_hbox.add_child(cancel_btn)
 
 
-func _update_convert_faction_highlight(lumina_btn: Button, ferox_btn: Button) -> void:
-	if _convert_faction_choice == main.Faction.LUMINA:
-		lumina_btn.add_theme_stylebox_override("normal", _panel_style(Color(0.2, 0.5, 0.8, 0.8)))
-		var style = StyleBoxFlat.new()
-		style.bg_color = Color(0.8, 0.2, 0.2).darkened(0.3)
-		style.set_corner_radius_all(4)
-		style.content_margin_left = 8
-		style.content_margin_right = 8
-		style.content_margin_top = 4
-		style.content_margin_bottom = 4
-		style.border_color = Color(1.0, 0.3, 0.3).darkened(0.3)
-		style.set_border_width_all(1)
-		ferox_btn.add_theme_stylebox_override("normal", style)
-	else:
-		ferox_btn.add_theme_stylebox_override("normal", _panel_style(Color(0.8, 0.2, 0.2, 0.8)))
-		var style = StyleBoxFlat.new()
-		style.bg_color = Color(0.2, 0.5, 0.8).darkened(0.3)
-		style.set_corner_radius_all(4)
-		style.content_margin_left = 8
-		style.content_margin_right = 8
-		style.content_margin_top = 4
-		style.content_margin_bottom = 4
-		style.border_color = Color(0.3, 0.7, 1.0).darkened(0.3)
-		style.set_border_width_all(1)
-		lumina_btn.add_theme_stylebox_override("normal", style)
+func _update_convert_faction_highlight(buttons: Dictionary) -> void:
+	# `buttons` maps Faction int → { "btn": Button, "color": Color }. The
+	# selected faction renders with its full colour panel; the others fade
+	# to a darkened, bordered style so the active choice stands out.
+	for fid in buttons:
+		var entry: Dictionary = buttons[fid]
+		var btn: Button = entry["btn"]
+		var c: Color = entry["color"]
+		if fid == _convert_faction_choice:
+			btn.add_theme_stylebox_override("normal", _panel_style(c.darkened(0.35)))
+		else:
+			var style = StyleBoxFlat.new()
+			style.bg_color = c.darkened(0.6)
+			style.set_corner_radius_all(4)
+			style.content_margin_left = 8
+			style.content_margin_right = 8
+			style.content_margin_top = 4
+			style.content_margin_bottom = 4
+			style.border_color = c.darkened(0.3)
+			style.set_border_width_all(1)
+			btn.add_theme_stylebox_override("normal", style)
 
 
 func _on_convert_faction() -> void:

@@ -302,11 +302,7 @@ func _ready() -> void:
 		var path := SaveManager.pending_map_path
 		SaveManager.pending_map_path = ""
 		print("Main._ready: Loading map from '%s'" % path)
-		var ok: bool
-		if path.ends_with(".sector.json"):
-			ok = SaveManager.load_sector_from_path(path)
-		else:
-			ok = SaveManager.load_map_from_path(path)
+		var ok: bool = SaveManager.load_sector_from_path(path)
 		print("Main._ready: load returned %s" % ok)
 		print("Main._ready: core_position is now %s" % core_position)
 	else:

@@ -62,6 +62,11 @@ var ore_tiles := {}
 
 var selected_tile: StringName = &""
 var paint_mode := false
+## Last grid cell touched by the mouse while holding a paint-button. Lets
+## _input interpolate a line between successive mouse-motion events so fast
+## drags don't skip cells. Reset to a sentinel (Vector2i.MIN) on press and
+## whenever a button is released.
+var _paint_last_cell: Vector2i = Vector2i(-2147483648, -2147483648)
 
 # --- FLOOR EDGE FADE ---
 ## Distance from each floor tile to the nearest non-floor edge (wall or void).
@@ -254,20 +259,77 @@ func _input(event: InputEvent) -> void:
 			var grid_pos = main.world_to_grid(get_global_mouse_position())
 			if not main.is_within_bounds(grid_pos):
 				return
+			# Start a fresh drag stroke from the clicked cell — rasterize
+			# from this position on subsequent motion events so a fast
+			# drag covers every cell between samples.
+			_paint_last_cell = grid_pos
 			if event.button_index == MOUSE_BUTTON_LEFT:
 				place_tile(grid_pos, selected_tile)
 			elif event.button_index == MOUSE_BUTTON_RIGHT:
 				remove_tile(grid_pos)
+		else:
+			# Button released → forget the last cell so the next stroke
+			# starts fresh instead of drawing a line from the previous
+			# click's endpoint to wherever the mouse ends up next.
+			_paint_last_cell = Vector2i(-2147483648, -2147483648)
 
 	elif event is InputEventMouseMotion:
-		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and selected_tile != &"":
-			var grid_pos = main.world_to_grid(get_global_mouse_position())
-			if main.is_within_bounds(grid_pos):
-				place_tile(grid_pos, selected_tile)
-		elif Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
-			var grid_pos = main.world_to_grid(get_global_mouse_position())
-			if main.is_within_bounds(grid_pos):
-				remove_tile(grid_pos)
+		var left_held: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		var right_held: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+		if not (left_held or right_held):
+			return
+		var grid_pos: Vector2i = main.world_to_grid(get_global_mouse_position())
+		# Walk every cell along the line from the last-painted cell to
+		# the current one so a fast drag doesn't leave gaps. If we have
+		# no prior cell (first motion after entering paint mode), fall
+		# back to painting just the current cell.
+		var cells: Array[Vector2i]
+		if _paint_last_cell != Vector2i(-2147483648, -2147483648):
+			cells = _line_cells(_paint_last_cell, grid_pos)
+		else:
+			cells = [grid_pos] as Array[Vector2i]
+		for cell in cells:
+			if not main.is_within_bounds(cell):
+				continue
+			if left_held and selected_tile != &"":
+				place_tile(cell, selected_tile)
+			elif right_held:
+				remove_tile(cell)
+		_paint_last_cell = grid_pos
+
+
+## Bresenham line rasterization between two grid cells. Returns every cell
+## the line passes through, EXCLUDING `from` (it was already painted on
+## the previous event) and INCLUDING `to`.
+func _line_cells(from: Vector2i, to: Vector2i) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if from == to:
+		result.append(to)
+		return result
+	var x0: int = from.x
+	var y0: int = from.y
+	var x1: int = to.x
+	var y1: int = to.y
+	var dx: int = absi(x1 - x0)
+	var dy: int = absi(y1 - y0)
+	var sx: int = 1 if x0 < x1 else -1
+	var sy: int = 1 if y0 < y1 else -1
+	var err: int = dx - dy
+	var cx: int = x0
+	var cy: int = y0
+	while true:
+		if cx != x0 or cy != y0:
+			result.append(Vector2i(cx, cy))
+		if cx == x1 and cy == y1:
+			break
+		var e2: int = err * 2
+		if e2 > -dy:
+			err -= dy
+			cx += sx
+		if e2 < dx:
+			err += dx
+			cy += sy
+	return result
 
 
 # =========================
@@ -524,65 +586,131 @@ func select_tile(tile_id: StringName) -> void:
 
 ## Rebuilds the auto-computed water depth map via BFS.
 ## Every water floor tile gets a depth of 1-3 based on its distance from the
-## nearest non-water floor tile (including void / wall edges).
-##   distance 1 from land → depth 1 (shallow)
-##   distance 2           → depth 2 (medium)
-##   distance 3+          → depth 3 (deep)
+## nearest actual land tile (non-water floor). Void tiles are ignored.
+##
+## Small islands in open water use a TIGHTER depth-tier gradient than large
+## continents: a tiny piece of land surrounded by deep ocean shouldn't push
+## a huge halo of shallow/medium water around it. The gradient is:
+##   - nearest land is a small island (<= SMALL_ISLAND_TILES tiles):
+##       dist 1-2 → shallow, dist 3-4 → medium, dist 5+ → deep
+##   - otherwise (mainland shoreline):
+##       dist 1-3 → shallow, dist 4-6 → medium, dist 7+ → deep
 func _rebuild_water_depth() -> void:
 	_water_depth_dirty = false
 	_water_depth_map.clear()
 
-	# 1. Identify all water cells and seed the BFS with non-water floor
-	#    cells that are adjacent to at least one water cell.
-	var water_cells := {}  # all floor cells that are water
+	const SMALL_ISLAND_TILES := 30
+
+	# 1. Identify water and land cells.
+	var water_cells := {}
+	var land_cells := {}
 	for pos in floor_tiles:
 		var td = Registry.get_tile(floor_tiles[pos])
 		if td and td.is_liquid and td.tags.has("water"):
 			water_cells[pos] = true
+		elif floor_tiles.has(pos):
+			# Any non-water floor tile counts as land for shoreline purposes.
+			land_cells[pos] = true
 
 	if water_cells.is_empty():
 		return
 
-	# BFS seed: every water cell that is adjacent to a non-water cell
-	# (non-water = no floor tile, or floor tile without "water" tag, or wall).
-	var dist: Dictionary = {}  # Vector2i → int distance from land
-	var queue: Array[Vector2i] = []
+	# 2. Flood-fill land into connected islands so we can tag each land
+	#    tile with the size of its landmass. This only walks land cells,
+	#    so a huge ocean with a single 3-tile island correctly reports
+	#    "island is tiny" rather than treating the whole map as one mass.
+	var island_id_of: Dictionary = {}  # Vector2i → int
+	var island_size: Dictionary = {}   # int → int (tile count)
+	var next_id := 0
 	var neighbors := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	for seed in land_cells:
+		if island_id_of.has(seed):
+			continue
+		var this_id := next_id
+		next_id += 1
+		var count := 0
+		var stack: Array[Vector2i] = [seed]
+		while not stack.is_empty():
+			var p: Vector2i = stack.pop_back()
+			if island_id_of.has(p):
+				continue
+			island_id_of[p] = this_id
+			count += 1
+			for nb in neighbors:
+				var ap: Vector2i = p + nb
+				if land_cells.has(ap) and not island_id_of.has(ap):
+					stack.append(ap)
+		island_size[this_id] = count
+
+	# 3. BFS seed: every water cell that borders land. Each seeded cell
+	#    remembers which island it was seeded from (used later to pick a
+	#    depth-tier gradient). Void tiles are ignored — a water body that
+	#    opens onto the void stays deep all the way to the edge.
+	var dist: Dictionary = {}        # Vector2i → int distance from land
+	var nearest_island: Dictionary = {}  # Vector2i → int island id
+	var queue: Array[Vector2i] = []
 
 	for pos in water_cells:
+		var min_iid := -1
+		var min_iid_size := 0
 		for nb in neighbors:
 			var adj: Vector2i = pos + nb
-			if not water_cells.has(adj):
-				# This water cell borders land/void → distance 1
-				if not dist.has(pos):
-					dist[pos] = 1
-					queue.append(pos)
-				break
+			if water_cells.has(adj):
+				continue
+			if not land_cells.has(adj):
+				continue  # void / wall
+			var iid: int = island_id_of[adj]
+			var isz: int = island_size[iid]
+			# Prefer the SMALLEST neighbouring island so a water tile
+			# sandwiched between a tiny isle and a big continent uses the
+			# isle's tight gradient (otherwise the continent dominates).
+			if min_iid == -1 or isz < min_iid_size:
+				min_iid = iid
+				min_iid_size = isz
+		if min_iid != -1:
+			dist[pos] = 1
+			nearest_island[pos] = min_iid
+			queue.append(pos)
 
-	# 2. BFS outward: each unvisited water neighbor gets distance + 1.
+	# 4. BFS outward. Propagating `nearest_island` alongside distance
+	#    keeps the "which shoreline owns this water cell" assignment
+	#    consistent even when two islands meet in the middle of a
+	#    channel (the closer island wins by BFS order).
 	var head := 0
 	while head < queue.size():
 		var pos: Vector2i = queue[head]
 		head += 1
 		var d: int = dist[pos]
+		var iid: int = nearest_island[pos]
 		for nb in neighbors:
 			var adj: Vector2i = pos + nb
 			if water_cells.has(adj) and not dist.has(adj):
 				dist[adj] = d + 1
+				nearest_island[adj] = iid
 				queue.append(adj)
 
-	# 3. Map distance to depth tiers and store.
-	#   dist 1-4  → depth 1 (shallow)
-	#   dist 5-8  → depth 2 (medium)
-	#   dist 9+   → depth 3 (deep)
+	# 5. Map distance → depth tier using the nearest island's size to
+	#    pick the gradient. Small islands use a 2-tile step so their
+	#    shallow halo only covers 1-2 tiles around them; mainland
+	#    coastline uses the wider 3-tile step.
 	for pos in dist:
 		var d: int = dist[pos]
-		if d <= 4:
-			_water_depth_map[pos] = 1
-		elif d <= 8:
-			_water_depth_map[pos] = 2
+		var iid_p: int = nearest_island.get(pos, -1)
+		var sz: int = island_size.get(iid_p, 0)
+		if sz > 0 and sz <= SMALL_ISLAND_TILES:
+			if d <= 2:
+				_water_depth_map[pos] = 1
+			elif d <= 4:
+				_water_depth_map[pos] = 2
+			else:
+				_water_depth_map[pos] = 3
 		else:
-			_water_depth_map[pos] = 3
+			if d <= 3:
+				_water_depth_map[pos] = 1
+			elif d <= 6:
+				_water_depth_map[pos] = 2
+			else:
+				_water_depth_map[pos] = 3
 
 
 ## Rebuild the floor-edge distance cache (BFS inward from edges).

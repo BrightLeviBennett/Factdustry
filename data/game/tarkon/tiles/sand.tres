@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dfsx2abjn3rq4"]
+
+[ext_resource type="Texture2D" uid="uid://ddsxf2xgs0rc8" path="res://textures/terrain/Sand.png" id="1_sand_tex"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_sand_scr"]
+
+[resource]
+script = ExtResource("2_sand_scr")
+id = &"sand"
+display_name = "Sand"
+icon = ExtResource("1_sand_tex")
+category = 0
+color = Color(0.87, 0.78, 0.55, 1)
+render_tile_underneath = false
+tags = PackedStringArray("sand")
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

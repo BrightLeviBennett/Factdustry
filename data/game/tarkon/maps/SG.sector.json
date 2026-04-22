@@ -751,7 +751,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1776554877.62433
+		"timestamp": 1776898749.47875
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -3203,6 +3203,10 @@
 		[
 			"80,25",
 			"80,23"
+		],
+		[
+			"82,25",
+			"82,23"
 		]
 	],
 	"loader_state": {
@@ -3245,17 +3249,57 @@
 
 	},
 	"player_units": [],
+	"refabricator_state": {
+
+	},
 	"resources": {
 
+	},
+	"script_runtime": {
+		"core_counts": {
+
+		},
+		"core_unit_mined_counts": {
+
+		},
+		"current_step": -1,
+		"deposited_baselines": {
+
+		},
+		"disabled_buildings": [],
+		"ferox_blocks_destroyed_counts": {
+
+		},
+		"hidden_tiles": [],
+		"mined_counts": {
+
+		},
+		"placed_baselines": {
+
+		},
+		"placed_counts": {
+
+		},
+		"produced_counts": {
+
+		},
+		"script_running": false,
+		"step_wait_timer": 0.0,
+		"units_destroyed_counts": {
+
+		},
+		"units_produced_counts": {
+
+		}
 	},
 	"script_steps": [
 		{
 			"actions": [
 				{
-					"from": "57,49",
+					"from": "53,48",
 					"id": "ET",
-					"text": "[res://textures/resources/copper.png](-orange)Copper (-white) is a important resorce on [res://textures/UI/Takon_preview.png](-green)Tarkon(-white). you'll need to mine it.",
-					"to": "63,49",
+					"text": "[res://textures/resources/copper.png](-orange)Copper (-white) is a important resorce on Tarkon. you'll need to mine it.",
+					"to": "57,48",
 					"type": "draw_text"
 				},
 				{
@@ -3330,7 +3374,7 @@
 					"from": "59,56",
 					"id": "VTT",
 					"text": "(-white)Researh the [res://textures/blocks/power/VentTurbine.png](-black)Vent Turbine(-white) and place it on a vent.",
-					"to": "65,56",
+					"to": "63,56",
 					"type": "draw_text"
 				}
 			],
@@ -3362,10 +3406,10 @@
 					"type": "draw_box"
 				},
 				{
-					"from": "58,51",
+					"from": "59,55",
 					"id": "pow2t",
 					"text": "(-white)Now resarch and place a [res://textures/blocks/power/CableNode.png](-orange)Cable Node(-white) to transmit power.",
-					"to": "63,51",
+					"to": "63,55",
 					"type": "draw_text"
 				}
 			],
@@ -3376,7 +3420,7 @@
 					"type": "placed"
 				}
 			],
-			"name": "Power2",
+			"name": "Power",
 			"on_exit": [
 				{
 					"id": "pow2b",
@@ -3398,10 +3442,10 @@
 					"type": "draw_box"
 				},
 				{
-					"from": "58,52",
+					"from": "58,51",
 					"id": "DT",
-					"text": "(-white)Research and place a [res://textures/blocks/resource extractors/MechanicalDrill.png](-brown)Mechanical Drill(-white) facing copper ore to automate the mining of copper.",
-					"to": "63,52",
+					"text": "(-white)Research and place a [res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrillComplete.png](-brown)Mechanical Drill(-white) facing copper ore to automate the mining of copper.",
+					"to": "63,51",
 					"type": "draw_text"
 				}
 			],
@@ -3567,7 +3611,7 @@
 					"from": "47,61",
 					"id": "GT",
 					"text": "[res://textures/resources/graphite.png](-black)Graphite(-white) is also an important resource. Set up power, drills and conveyors to mine it.",
-					"to": "51,61",
+					"to": "52,61",
 					"type": "draw_text"
 				}
 			],
@@ -3609,7 +3653,7 @@
 				{
 					"from": "44,61",
 					"id": "PBT1",
-					"text": "(-white)Research and place a [res://textures/blocks/resource extractors/WallCrusher/WallCrusher.png]Wall Crusher to grind sand from the walls.",
+					"text": "(-white)Research and place a [res://textures/blocks/resource extractors/WallCrusher/WallCrusherComplete.png]Wall Crusher to grind sand from the walls.",
 					"to": "48,61",
 					"type": "draw_text"
 				},
@@ -3617,7 +3661,7 @@
 					"from": "45,54",
 					"id": "PBT2",
 					"text": "(-white)Research and place a [res://textures/blocks/factories/SiliconMixer.png]Silicon Refinery.\n(-white)You'll need to provide it with graphite, sand and power.",
-					"to": "49,54",
+					"to": "51,54",
 					"type": "draw_text"
 				}
 			],
@@ -3658,7 +3702,7 @@
 				{
 					"from": "47,43",
 					"id": "TT",
-					"text": "(-white)Set up power, drills, and conveyors; then research and place 3 [res://textures/blocks/turrets/SingleBarrelBase.png] Single Barrel turrets to defend your base from enemies. \n(-white)You'll also need to research the [res://textures/blocks/item transportation/BeltRouter.jpeg]Belt Router to split resources on belts in multiple directions.",
+					"text": "(-white)Set up power, drills, and conveyors; then research and place 3 [res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png](-gray)Single Barrel (-white)turrets to defend your base from enemies. \n(-white)You'll also need to research the [res://textures/blocks/item transportation/BeltRouter.jpeg]Belt Router to split resources on belts in multiple directions.",
 					"to": "53,43",
 					"type": "draw_text"
 				},
@@ -3706,7 +3750,7 @@
 				{
 					"from": "48,43",
 					"id": "WT",
-					"text": "(-white)Now research and place 6 Large Copper Walls to protect your base from enemies.",
+					"text": "(-white)Now research and place 6 [res://textures/blocks/walls/LargeCopperWall.png]Large Copper Walls to protect your base from enemies.",
 					"to": "54,43",
 					"type": "draw_text"
 				},
@@ -3805,7 +3849,7 @@
 					"from": "35,55",
 					"id": "UPT",
 					"text": "(-white)Next, you'll need to produce your own units to attack the enemy base.\n(-white)Set up drills and conveyors and research the [res://textures/blocks/units/TankFabricator.png]Tank Fabricator. You'll need to supply resources to it to produce units.",
-					"to": "42,55",
+					"to": "42,56",
 					"type": "draw_text"
 				}
 			],
@@ -3828,7 +3872,7 @@
 				{
 					"from": "35,55",
 					"text": "(-white)Now command your units and destroy the enemy base. You may need to wait for more units to be produced",
-					"to": "41,55",
+					"to": "43,55",
 					"type": "draw_text"
 				}
 			],

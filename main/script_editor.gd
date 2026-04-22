@@ -18,6 +18,14 @@ var main: Node2D
 var script_steps: Array = []
 var selected_step_index: int = -1
 
+# --- PREVIEW STATE ---
+## When on, every `draw_box` / `draw_text` action across every step is
+## pushed into the live SectorScript's highlight/overlay dicts so the
+## map editor shows exactly what the scripted boxes and texts will look
+## like at runtime. Updates incrementally as you tweak any field value.
+var _preview_enabled: bool = false
+var _preview_btn: Button = null
+
 # --- UI REFERENCES ---
 var panel: PanelContainer
 var step_list: VBoxContainer
@@ -105,6 +113,14 @@ func show_panel() -> void:
 
 func hide_panel() -> void:
 	visible = false
+	# Clear any preview overlays so closing the editor doesn't leave
+	# scripted boxes/text floating over the runtime scene.
+	if _preview_enabled:
+		var sector = get_node_or_null("/root/Main/SectorScript")
+		if sector:
+			sector._highlight_boxes.clear()
+			sector._text_overlays.clear()
+			sector.queue_redraw()
 
 
 # =========================
@@ -128,13 +144,33 @@ func _create_panel() -> void:
 	root_vbox.add_theme_constant_override("separation", 4)
 	panel.add_child(root_vbox)
 
-	# Title
+	# Title row: label + preview toggle
+	var title_hbox = HBoxContainer.new()
+	title_hbox.add_theme_constant_override("separation", 6)
+	root_vbox.add_child(title_hbox)
+
 	var title = Label.new()
 	title.text = "Sector Script"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title.add_theme_font_size_override("font_size", 16)
 	title.add_theme_color_override("font_color", Color(1.0, 0.9, 0.5))
-	root_vbox.add_child(title)
+	title_hbox.add_child(title)
+
+	# Preview toggle: when enabled, every draw_box / draw_text action
+	# across every step is rendered live in the editor so the mapper can
+	# see sizes, positions, colours, and wording at a glance. Updates in
+	# real time (vec2i spinners, text field edits, etc.).
+	_preview_btn = Button.new()
+	_preview_btn.text = "Preview"
+	_preview_btn.tooltip_text = "Toggle live preview of draw_box / draw_text actions"
+	_preview_btn.toggle_mode = true
+	_preview_btn.add_theme_font_size_override("font_size", 12)
+	_preview_btn.toggled.connect(func(pressed: bool):
+		_preview_enabled = pressed
+		_refresh_preview()
+	)
+	title_hbox.add_child(_preview_btn)
 
 	var sep = HSeparator.new()
 	root_vbox.add_child(sep)
@@ -304,6 +340,11 @@ func _swap_steps(a: int, b: int) -> void:
 func _refresh_step_detail() -> void:
 	for child in step_detail.get_children():
 		child.queue_free()
+
+	# Any structural edit (adding/removing/reordering actions or changing
+	# an action's type) lands here, so refresh the live preview alongside
+	# the rebuilt UI so added draw_box/draw_text entries appear instantly.
+	_notify_change()
 
 	if selected_step_index < 0 or selected_step_index >= script_steps.size():
 		no_selection_label = Label.new()
@@ -610,7 +651,10 @@ func _add_string_field(parent: Control, data: Dictionary, key: String, label_tex
 	input.text = str(data.get(key, ""))
 	input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	input.add_theme_font_size_override("font_size", 11)
-	input.text_changed.connect(func(t: String): data[key] = t)
+	input.text_changed.connect(func(t: String):
+		data[key] = t
+		_notify_change()
+	)
 	hbox.add_child(input)
 
 
@@ -624,7 +668,10 @@ func _add_multiline_field(parent: Control, data: Dictionary, key: String, label_
 	text_edit.text = str(data.get(key, ""))
 	text_edit.custom_minimum_size.y = 60
 	text_edit.add_theme_font_size_override("font_size", 11)
-	text_edit.text_changed.connect(func(): data[key] = text_edit.text)
+	text_edit.text_changed.connect(func():
+		data[key] = text_edit.text
+		_notify_change()
+	)
 	parent.add_child(text_edit)
 
 
@@ -666,6 +713,7 @@ func _add_vec2i_fields(parent: Control, data: Dictionary, key: String, label_tex
 
 	var update_fn := func(_val: float = 0.0):
 		data[key] = "%d,%d" % [int(x_input.value), int(y_input.value)]
+		_notify_change()
 	x_input.value_changed.connect(update_fn)
 	y_input.value_changed.connect(update_fn)
 	# Set initial value
@@ -689,7 +737,10 @@ func _add_int_field(parent: Control, data: Dictionary, key: String, label_text: 
 	spin.value = int(data.get(key, default_val))
 	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spin.add_theme_font_size_override("font_size", 11)
-	spin.value_changed.connect(func(v: float): data[key] = int(v))
+	spin.value_changed.connect(func(v: float):
+		data[key] = int(v)
+		_notify_change()
+	)
 	hbox.add_child(spin)
 
 
@@ -711,7 +762,10 @@ func _add_float_field(parent: Control, data: Dictionary, key: String, label_text
 	spin.value = float(data.get(key, default_val))
 	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spin.add_theme_font_size_override("font_size", 11)
-	spin.value_changed.connect(func(v: float): data[key] = v)
+	spin.value_changed.connect(func(v: float):
+		data[key] = v
+		_notify_change()
+	)
 	hbox.add_child(spin)
 
 
@@ -737,7 +791,10 @@ func _add_color_dropdown(parent: Control, data: Dictionary) -> void:
 	if sel_idx < 0:
 		sel_idx = 0
 	option.selected = sel_idx
-	option.item_selected.connect(func(idx: int): data["color"] = color_names[idx])
+	option.item_selected.connect(func(idx: int):
+		data["color"] = color_names[idx]
+		_notify_change()
+	)
 	hbox.add_child(option)
 
 
@@ -770,7 +827,10 @@ func _add_item_dropdown(parent: Control, data: Dictionary) -> void:
 	if item_ids.size() > 0:
 		option.selected = sel_idx
 		data["item_id"] = item_ids[sel_idx]
-	option.item_selected.connect(func(idx: int): data["item_id"] = item_ids[idx])
+	option.item_selected.connect(func(idx: int):
+		data["item_id"] = item_ids[idx]
+		_notify_change()
+	)
 	hbox.add_child(option)
 
 
@@ -803,7 +863,10 @@ func _add_block_dropdown(parent: Control, data: Dictionary) -> void:
 	if block_ids.size() > 0:
 		option.selected = sel_idx
 		data["block_id"] = block_ids[sel_idx]
-	option.item_selected.connect(func(idx: int): data["block_id"] = block_ids[idx])
+	option.item_selected.connect(func(idx: int):
+		data["block_id"] = block_ids[idx]
+		_notify_change()
+	)
 	hbox.add_child(option)
 
 
@@ -836,7 +899,10 @@ func _add_unit_dropdown(parent: Control, data: Dictionary) -> void:
 	if unit_ids.size() > 0:
 		option.selected = sel_idx
 		data["unit_id"] = unit_ids[sel_idx]
-	option.item_selected.connect(func(idx: int): data["unit_id"] = unit_ids[idx])
+	option.item_selected.connect(func(idx: int):
+		data["unit_id"] = unit_ids[idx]
+		_notify_change()
+	)
 	hbox.add_child(option)
 
 
@@ -860,7 +926,10 @@ func _add_faction_dropdown(parent: Control, data: Dictionary) -> void:
 	var current: String = data.get("faction", "ferox")
 	option.selected = factions.find(current) if factions.has(current) else 1
 	data["faction"] = factions[option.selected]
-	option.item_selected.connect(func(idx: int): data["faction"] = factions[idx])
+	option.item_selected.connect(func(idx: int):
+		data["faction"] = factions[idx]
+		_notify_change()
+	)
 	hbox.add_child(option)
 
 
@@ -873,8 +942,97 @@ func _add_checkbox(parent: Control, data: Dictionary, key: String, label_text: S
 	check.text = label_text
 	check.add_theme_font_size_override("font_size", 11)
 	check.button_pressed = bool(data.get(key, false))
-	check.toggled.connect(func(pressed: bool): data[key] = pressed)
+	check.toggled.connect(func(pressed: bool):
+		data[key] = pressed
+		_notify_change()
+	)
 	hbox.add_child(check)
+
+
+# =========================
+# LIVE PREVIEW
+# =========================
+
+## Called by every field-edit callback so size/position/color/text tweaks
+## show up instantly in the editor. Cheap no-op when preview is off.
+func _notify_change() -> void:
+	if _preview_enabled:
+		_refresh_preview()
+
+
+## Walks every step's `actions` (and `on_exit`) looking for `draw_box` and
+## `draw_text` entries, and pushes them straight into SectorScript's
+## `_highlight_boxes` / `_text_overlays` dicts. When preview is disabled
+## the dicts are cleared instead. Uses the same vec/color parsing rules
+## as `sector_script._execute_action` so what you see here matches what
+## the script will actually draw at runtime.
+func _refresh_preview() -> void:
+	var sector = _get_or_create_sector_script()
+	if sector == null:
+		return
+	# Always start from a clean slate so removed actions vanish.
+	sector._highlight_boxes.clear()
+	sector._text_overlays.clear()
+	if _preview_enabled:
+		for step in script_steps:
+			_collect_draw_actions(step.get("actions", []), sector)
+			_collect_draw_actions(step.get("on_exit", []), sector)
+	sector.queue_redraw()
+
+
+## Returns the existing /root/Main/SectorScript node, or instantiates one
+## into the map editor's main scene. The map-editor scene doesn't ship a
+## SectorScript node (only the runtime scene does) so the script-editor
+## panel creates one lazily the first time it wants to show a preview.
+## SectorScript._ready already guards its signal hookups with has_signal,
+## so it boots cleanly against the map editor's trimmed signal set.
+func _get_or_create_sector_script() -> Node:
+	var main_node = get_node_or_null("/root/Main")
+	if main_node == null:
+		return null
+	var sector = main_node.get_node_or_null("SectorScript")
+	if sector != null:
+		return sector
+	sector = SectorScript.new()
+	sector.name = "SectorScript"
+	# SectorScript is a Node2D that draws in world space — add it under
+	# Main so `main.grid_to_world` / `GRID_SIZE` resolve the same way they
+	# do at runtime.
+	main_node.add_child(sector)
+	return sector
+
+
+func _collect_draw_actions(actions: Array, sector: Node) -> void:
+	for action in actions:
+		if not (action is Dictionary):
+			continue
+		var atype: String = String(action.get("type", ""))
+		match atype:
+			"draw_box":
+				var box_id: String = String(action.get("id", ""))
+				if box_id == "":
+					continue
+				var from_pos: Vector2i = _parse_vec2i(action.get("from", "0,0"))
+				var to_pos: Vector2i = _parse_vec2i(action.get("to", "0,0"))
+				var color_name: String = String(action.get("color", "yellow"))
+				var color: Color = BOX_COLORS.get(color_name, Color.YELLOW)
+				sector.draw_box(box_id, from_pos, to_pos, color)
+			"draw_text":
+				var text_id: String = String(action.get("id", ""))
+				if text_id == "":
+					continue
+				var from_pos: Vector2i = _parse_vec2i(action.get("from", "0,0"))
+				var to_pos: Vector2i = _parse_vec2i(action.get("to", "0,0"))
+				var text: String = String(action.get("text", ""))
+				sector.draw_text_overlay(text_id, from_pos, to_pos, text)
+
+
+func _parse_vec2i(raw: Variant) -> Vector2i:
+	var s: String = str(raw)
+	var parts = s.split(",")
+	if parts.size() < 2:
+		return Vector2i.ZERO
+	return Vector2i(int(parts[0].strip_edges()), int(parts[1].strip_edges()))
 
 
 # =========================

@@ -66,14 +66,23 @@ var _script_running := false
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
-	# Connect signals for tracking
+	# Connect signals for tracking. Some environments (the map editor)
+	# reuse SectorScript just for its rendering and don't emit the full
+	# set of gameplay signals, so guard each hookup with `has_signal`
+	# instead of assuming the main scene has every one.
 	if main:
-		main.item_mined.connect(_on_item_mined)
-		main.item_absorbed_in_core.connect(_on_item_absorbed_in_core)
-		main.item_produced.connect(_on_item_produced)
-		main.building_placed.connect(_on_building_placed)
-		main.building_destroyed.connect(_on_building_destroyed)
-		main.core_unit_item_mined.connect(_on_core_unit_item_mined)
+		if main.has_signal("item_mined"):
+			main.item_mined.connect(_on_item_mined)
+		if main.has_signal("item_absorbed_in_core"):
+			main.item_absorbed_in_core.connect(_on_item_absorbed_in_core)
+		if main.has_signal("item_produced"):
+			main.item_produced.connect(_on_item_produced)
+		if main.has_signal("building_placed"):
+			main.building_placed.connect(_on_building_placed)
+		if main.has_signal("building_destroyed"):
+			main.building_destroyed.connect(_on_building_destroyed)
+		if main.has_signal("core_unit_item_mined"):
+			main.core_unit_item_mined.connect(_on_core_unit_item_mined)
 
 
 func _process(delta: float) -> void:

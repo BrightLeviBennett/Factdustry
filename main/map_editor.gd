@@ -20,7 +20,7 @@ var GRID_WIDTH := 100
 var GRID_HEIGHT := 100
 
 # --- FACTIONS (must match main.gd) ---
-enum Faction { LUMINA, FEROX }
+enum Faction { LUMINA, FEROX, DERELICT }
 
 # --- BUILDING STATE ---
 # Full building state for the editor (same dicts as main.gd).
@@ -1110,10 +1110,10 @@ func _draw_building_preview() -> void:
 
 	var color: Color
 	if valid:
-		if selected_faction == Faction.FEROX:
-			color = Color(1.0, 0.3, 0.3, 0.35)
-		else:
-			color = Color(0.3, 0.7, 1.0, 0.35)
+		match selected_faction:
+			Faction.FEROX:    color = Color(1.0, 0.3, 0.3, 0.35)
+			Faction.DERELICT: color = Color(0.55, 0.55, 0.55, 0.35)
+			_:                color = Color(0.3, 0.7, 1.0, 0.35)
 	else:
 		color = Color(1.0, 0.0, 0.0, 0.25)
 
