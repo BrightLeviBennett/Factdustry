@@ -70,6 +70,10 @@ var _crane_e_held := false
 var _crane_q_held := false
 ## Attack cooldown for the controlled entity
 var _control_attack_timer := 0.0
+# Round-robin barrel index for manually-controlled multi-barrel turrets.
+# Keyed on the turret's grid anchor so switching between two controlled
+# turrets keeps their sequences independent.
+var _control_barrel_idx := {}
 ## Last world-space position of the controlled entity. Updated each tick so
 ## that if a controlled unit dies we still know where to respawn the drone.
 var _last_control_pos: Vector2 = Vector2.ZERO
@@ -906,11 +910,46 @@ func _update_controlled_turret(_delta: float) -> void:
 					return  # Out of ammo — can't fire even when manually controlled
 
 				_control_attack_timer = bdata.attack_speed * fire_reload_mult
+				# Match the auto-fire math in combat_system: derive barrel
+				# length from the head texture so bullets spawn at the
+				# visible muzzle, and offset perpendicular to the aim axis
+				# for multi-barrel turrets, round-robinning through heads
+				# on successive clicks. Keeps manual fire aligned with the
+				# alternating auto-fire cadence.
 				var barrel_length: float = main.GRID_SIZE * 0.4
-				var fire_pos: Vector2 = turret_world + Vector2.from_angle(target_angle) * barrel_length
-				var direction: Vector2 = (mouse_pos - fire_pos).normalized()
+				if bdata.turret_head_sprite:
+					var head_tex_size: Vector2 = bdata.turret_head_sprite.get_size() * 0.3
+					barrel_length = maxf(head_tex_size.y - 14.0, 0.0)
+				var bcount: int = maxi(bdata.barrel_count, 1)
+				var aim_dir_ctrl := Vector2.from_angle(target_angle)
+				var aim_perp_ctrl := Vector2(-aim_dir_ctrl.y, aim_dir_ctrl.x)
+				var lateral_ctrl: float = 0.0
+				if bcount > 1:
+					var idx: int = int(_control_barrel_idx.get(grid_pos, 0)) % bcount
+					lateral_ctrl = (float(idx) - (float(bcount) - 1.0) * 0.5) * bdata.barrel_spacing
+					# Flash the firing head and reset its per-barrel cooldown
+					# (if tracked) so the auto-fire branch stays in sync.
+					if combat.turret_barrel_fire_flash.has(grid_pos):
+						var bff: Array = combat.turret_barrel_fire_flash[grid_pos]
+						if idx < bff.size():
+							bff[idx] = 0.1
+					if combat.turret_barrel_cooldowns.has(grid_pos):
+						var bcd: Array = combat.turret_barrel_cooldowns[grid_pos]
+						if idx < bcd.size():
+							bcd[idx] = bdata.attack_speed * fire_reload_mult
+					_control_barrel_idx[grid_pos] = (idx + 1) % bcount
+				var fire_pos: Vector2 = turret_world + aim_dir_ctrl * barrel_length + aim_perp_ctrl * lateral_ctrl
 				var fire_range: float = bdata.attack_range * main.GRID_SIZE
-				var target_pos: Vector2 = fire_pos + direction * fire_range
+				# For multi-barrel turrets travel along the aim axis from
+				# the barrel muzzle so each bullet visibly exits its own
+				# barrel instead of snapping back toward the mouse. Single-
+				# barrel keeps the mouse-aim behaviour for pixel precision.
+				var shot_dir: Vector2
+				if bcount > 1:
+					shot_dir = aim_dir_ctrl
+				else:
+					shot_dir = (mouse_pos - fire_pos).normalized()
+				var target_pos: Vector2 = fire_pos + shot_dir * fire_range
 				combat._spawn_projectile(
 					fire_pos,
 					null,

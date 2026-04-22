@@ -13,4 +13,4 @@ max_health = 290.0
 build_cost = { "copper": 200, "silicon": 80 }
 build_time = 0.5
 transport_speed = 7.0
-tags = PackedStringArray("duct", "transport")
+tags = PackedStringArray("duct", "transport", "junction")

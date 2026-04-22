@@ -1,22 +1,39 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://7mvv8ij4n1hw"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://bdlfm56vnhsi" path="res://textures/blocks/turrets/DoubleBarrel/DoubleBarrel.png" id="2"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="2_ammo"]
+[ext_resource type="Texture2D" uid="uid://bdlfm56vnhsi" path="res://textures/blocks/turrets/DoubleBarrel/DoubleBarrel.png" id="3_icon"]
+[ext_resource type="Texture2D" uid="uid://12n0k6gpubv5" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="4_base"]
+[ext_resource type="Texture2D" uid="uid://by2pljep5kji" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="5_head"]
+
+[sub_resource type="Resource" id="Resource_db_ammo"]
+script = ExtResource("2_ammo")
+item_id = &"mat_copper"
+projectile_color = Color(0.7273866, 0.29406038, 0, 1)
+metadata/_custom_type_script = "uid://mlvivi0chx0p"
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"double_barrel"
 display_name = "Double Barrel"
-description = "Twin-barrel turret with double the firepower."
+description = "Twin-barrel turret: two heads fire in alternation for double sustained damage."
+icon = ExtResource("3_icon")
 category = 4
+tags = PackedStringArray("turret", "defense")
 color = Color(0.9, 0.3, 0.3, 1)
+base_sprite = ExtResource("4_base")
+turret_head_sprite = ExtResource("5_head")
+barrel_count = 2
+barrel_spacing = 32.0
 max_health = 260.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 3.0
 requires_power = true
 power_consumption = 3.0
 attack_damage = 25.0
-attack_speed = 1.5
+attack_speed = 0.5
 attack_range = 5.0
-tags = PackedStringArray("turret", "defense")
+ammo_types = Array[Resource]([SubResource("Resource_db_ammo")])

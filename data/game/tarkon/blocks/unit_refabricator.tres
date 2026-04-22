@@ -1,18 +1,31 @@
 [gd_resource type="Resource" script_class="BlockData" format=3]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://ciil5f23qi48x" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBase.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://bsuep8wcstqdq" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopBottom.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://c5ft8iul0ley1" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopLeft.png" id="4"]
+[ext_resource type="Texture2D" uid="uid://j8usst4fgubt" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopRight.png" id="5"]
 
 [resource]
 script = ExtResource("1")
 id = &"unit_refabricator"
 display_name = "Unit Refabricator"
-description = "Recycles and rebuilds damaged units."
+description = "Consumes a tier-1 unit and materials to produce its tier-2 successor. Accepts the unit as a payload on any side."
+icon = ExtResource("2")
 category = 6
 color = Color(0.6, 0.5, 0.7, 1)
+base_sprite = ExtResource("2")
+feed_overlay_back = ExtResource("3")
+feed_overlay_left = ExtResource("4")
+feed_overlay_right = ExtResource("5")
 grid_size = Vector2i(3, 3)
 max_health = 280.0
 build_cost = { "copper": 100, "silicon": 30 }
 build_time = 4.0
+input_items = { "mat_copper": 15, "mat_silicon": 10, "mat_steel": 5 }
+production_time = 6.0
+max_stored_items = 60
 requires_power = true
 power_consumption = 5.0
-tags = PackedStringArray("fabricator", "units")
+electrical_power_use = 25.0
+tags = PackedStringArray("fabricator", "units", "refabricator")

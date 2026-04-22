@@ -14,4 +14,4 @@ build_cost = { "copper": 100, "silicon": 30 }
 build_time = 0.5
 transport_speed = 5.0
 transports_fluid = true
-tags = PackedStringArray("fluid", "transport")
+tags = PackedStringArray("fluid", "transport", "junction")

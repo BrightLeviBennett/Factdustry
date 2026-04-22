@@ -1,6 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://tjiec1nvsbsn"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://v8msxo2in7nl" path="res://textures/blocks/cores/Archive.png" id="2_ws2dm"]
 
 [resource]
 script = ExtResource("1")
@@ -11,4 +12,8 @@ category = 0
 tags = PackedStringArray("archive", "non_placeable")
 color = Color(0.55, 0.35, 0.85, 1)
 grid_size = Vector2i(4, 4)
+top_sprite = ExtResource("2_ws2dm")
+barrel_count = null
+barrel_spacing = null
 max_health = 600.0
+refab_recipes = null

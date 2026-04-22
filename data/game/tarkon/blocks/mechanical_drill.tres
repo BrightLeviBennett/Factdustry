@@ -1,6 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://nbujjub08o3i"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cq0cdc0e6yl8b" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrillComplete.png" id="1_p4xnc"]
 [ext_resource type="Texture2D" uid="uid://dmovjrssoulrd" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrill.png" id="2"]
 
 [resource]
@@ -8,11 +9,12 @@ script = ExtResource("1")
 id = &"mechanical_drill"
 display_name = "Mechanical Drill"
 description = "Basic ore extractor. Mines resources from deposits."
-icon = ExtResource("2")
+icon = ExtResource("1_p4xnc")
 category = 1
+tags = PackedStringArray("mining", "extractor", "drill_heads")
 color = Color(0.6, 0.8, 0.4, 1)
-top_sprite = ExtResource("2")
 grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("2")
 max_health = 160.0
 build_cost = {
 "copper": 12
@@ -23,4 +25,3 @@ output_items = {
 }
 production_time = 2.0
 electrical_power_use = 10.0
-tags = PackedStringArray("mining", "extractor", "drill_heads")

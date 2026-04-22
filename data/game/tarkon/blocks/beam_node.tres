@@ -10,6 +10,7 @@ display_name = "Cable Node"
 description = "Transmits electrical power in a straight line (up/down/left/right) with a range of 5 tiles. Place between generators and consumers to extend your power network."
 icon = ExtResource("1_4uxnv")
 category = 3
+tags = PackedStringArray("power", "cable_node")
 color = Color(0.3, 0.7, 1, 1)
 top_sprite = ExtResource("1_4uxnv")
 max_health = 560.0
@@ -17,4 +18,3 @@ build_cost = {
 "copper": 15
 }
 build_time = 2.0
-tags = PackedStringArray("power", "cable_node")

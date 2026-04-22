@@ -60,6 +60,24 @@ func _ready() -> void:
 	else:
 		TechTree.tech_tree_ready.connect(_on_tech_tree_ready, CONNECT_ONE_SHOT)
 
+
+## Autoload-level close-request handler so pressing the X button works from
+## ANY scene (main menu, planet select, in-game). The project has
+## application/config/auto_accept_quit disabled so in-game saves fire before
+## quit — without this handler, closing the window from any non-Main scene
+## would silently do nothing, forcing the player to kill the process.
+## Main.gd additionally handles its own NOTIFICATION_WM_CLOSE_REQUEST for
+## save-on-close; both handlers ultimately call get_tree().quit().
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		# If an in-game sector is active, persist it before exiting.
+		if active_sector_id != &"" and active_sector_id != &"_default":
+			sync_active_sector_resources()
+			save_sector(active_sector_id)
+		save_campaign()
+		get_tree().quit()
+
+
 func _on_tech_tree_ready() -> void:
 	load_campaign()
 
@@ -535,11 +553,23 @@ func save_sector(sector_name: String) -> bool:
 			var inputs_dict := {}
 			for k in state["inputs"]:
 				inputs_dict[str(k)] = state["inputs"][k]
-			factory_buffers_save[_vec2i_to_str(origin)] = {
+			var save_entry := {
 				"inputs": inputs_dict,
 				"phase": state["phase"],
 				"timer": state["timer"],
 			}
+			# Persist ejection/holding bookkeeping so a unit fabricator
+			# that was mid-eject or waiting on a blocked output resumes
+			# cleanly after a reload instead of stalling with no payload.
+			if state.has("eject_progress"):
+				save_entry["eject_progress"] = state["eject_progress"]
+			if state.get("held_payload") != null:
+				var hp: Dictionary = state["held_payload"]
+				var hp_save := {}
+				for k in hp:
+					hp_save[str(k)] = hp[k]
+				save_entry["held_payload"] = hp_save
+			factory_buffers_save[_vec2i_to_str(origin)] = save_entry
 
 	# Save payload transport state
 	var payload_items_save := {}
@@ -547,6 +577,7 @@ func save_sector(sector_name: String) -> bool:
 	var deconstructor_state_save := {}
 	var loader_state_save := {}
 	var unloader_state_save := {}
+	var refabricator_state_save := {}
 	if logistics:
 		if "payload_items" in logistics:
 			for pos in logistics.payload_items:
@@ -565,6 +596,21 @@ func save_sector(sector_name: String) -> bool:
 					"payload_data": pd_save,
 					"progress": entry.get("progress", 0.0),
 					"entry_dir": entry.get("entry_dir", -1),
+				}
+		# Refabricator state: phase + in/out unit ids + processing timer.
+		# Without this the refab resets to idle on every reload, losing any
+		# unit that was mid-process, and a refab that was stuck in
+		# "outputting" (output blocked downstream) wouldn't be recoverable
+		# without re-feeding it from scratch.
+		if "refabricator_state" in logistics:
+			for pos in logistics.refabricator_state:
+				var rs: Dictionary = logistics.refabricator_state[pos]
+				refabricator_state_save[_vec2i_to_str(pos)] = {
+					"phase": String(rs.get("phase", "idle")),
+					"in_unit_id": String(rs.get("in_unit_id", &"")),
+					"out_unit_id": String(rs.get("out_unit_id", &"")),
+					"timer": float(rs.get("timer", 0.0)),
+					"selected_t2": String(rs.get("selected_t2", &"")),
 				}
 		if "constructor_state" in logistics:
 			for pos in logistics.constructor_state:
@@ -668,6 +714,7 @@ func save_sector(sector_name: String) -> bool:
 		"factory_buffers": factory_buffers_save,
 		"payload_items": payload_items_save,
 		"constructor_state": constructor_state_save,
+		"refabricator_state": refabricator_state_save,
 		"deconstructor_state": deconstructor_state_save,
 		"loader_state": loader_state_save,
 		"unloader_state": unloader_state_save,
@@ -909,12 +956,23 @@ func load_sector_from_path(path: String) -> bool:
 				var inputs_dict := {}
 				for k in saved.get("inputs", {}):
 					inputs_dict[StringName(k)] = int(saved["inputs"][k])
-				load_logistics.factory_buffers[origin] = {
+				var entry: Dictionary = {
 					"inputs": inputs_dict,
 					"phase": str(saved.get("phase", "collecting")),
 					"timer": float(saved.get("timer", 0.0)),
 					"pending_outputs": {},
 				}
+				if saved.has("eject_progress"):
+					entry["eject_progress"] = float(saved["eject_progress"])
+				if saved.has("held_payload") and saved["held_payload"] is Dictionary:
+					# held_payload uses plain string keys (see fabricator
+					# ejection code: {"type": "unit", "unit_id": ...}).
+					var hp_raw: Dictionary = saved["held_payload"]
+					var hp := {}
+					for k in hp_raw:
+						hp[str(k)] = hp_raw[k]
+					entry["held_payload"] = hp
+				load_logistics.factory_buffers[origin] = entry
 
 		# --- Restore payload transport state ---
 		if "payload_items" in load_logistics and data.has("payload_items") and data["payload_items"] is Dictionary:
@@ -936,6 +994,18 @@ func load_sector_from_path(path: String) -> bool:
 					"payload_data": pd,
 					"progress": float(saved.get("progress", 0.0)),
 					"entry_dir": int(saved.get("entry_dir", -1)),
+				}
+		if "refabricator_state" in load_logistics and data.has("refabricator_state") and data["refabricator_state"] is Dictionary:
+			load_logistics.refabricator_state.clear()
+			for key in data["refabricator_state"]:
+				var pos: Vector2i = _str_to_vec2i(key)
+				var saved = data["refabricator_state"][key]
+				load_logistics.refabricator_state[pos] = {
+					"phase": String(saved.get("phase", "idle")),
+					"in_unit_id": StringName(saved.get("in_unit_id", "")),
+					"out_unit_id": StringName(saved.get("out_unit_id", "")),
+					"timer": float(saved.get("timer", 0.0)),
+					"selected_t2": StringName(saved.get("selected_t2", "")),
 				}
 		if "constructor_state" in load_logistics and data.has("constructor_state") and data["constructor_state"] is Dictionary:
 			load_logistics.constructor_state.clear()

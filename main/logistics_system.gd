@@ -141,6 +141,17 @@ var constructor_state := {}
 #   "pending_items": Dictionary (item_id -> count remaining to output)
 var deconstructor_state := {}
 
+# --- REFABRICATOR STATE ---
+# Key = Vector2i (refabricator origin position)
+# Value = Dictionary:
+#   "phase": String ("idle" → "processing" → "outputting")
+#   "in_unit_id": StringName — tier-1 unit held (payload snatched from a
+#                 payload conveyor).
+#   "timer": float — processing countdown in seconds.
+#   "out_unit_id": StringName — tier-2 unit derived from in_unit_id,
+#                  held as a payload until output conveyor accepts it.
+var refabricator_state := {}
+
 # --- LOADER STATE ---
 # Key = Vector2i (loader origin position)
 # Value = Dictionary:
@@ -244,6 +255,7 @@ func _process(delta: float) -> void:
 	_update_payloads(delta)
 	_update_constructors(delta)
 	_update_deconstructors(delta)
+	_update_refabricators(delta)
 	_update_loaders(delta)
 	_update_unloaders(delta)
 	_update_mass_drivers(delta)
@@ -951,6 +963,14 @@ func _try_belt_side_dump(grid_pos: Vector2i, belt_rot: int, item_id: StringName)
 			continue
 		if _is_conveyor_cell(side_pos):
 			continue
+		# Don't side-dump into refabricators — they should only get items
+		# from belts that actually point at them, so a belt running
+		# alongside doesn't silently leak its contents into a neighbouring
+		# refab when its forward push stalls.
+		var nb_anchor: Vector2i = main.building_origins.get(side_pos, side_pos)
+		var nb_data = Registry.get_block(main.placed_buildings.get(nb_anchor, &""))
+		if nb_data and nb_data.tags.has("refabricator"):
+			continue
 		scored.append([_side_dump_free_space(side_pos, item_id), side_dir])
 	scored.sort_custom(func(a, b): return a[0] > b[0])
 
@@ -1435,6 +1455,16 @@ func _update_payloads(delta: float) -> void:
 					break
 			if transferred:
 				payload_items.erase(grid_pos)
+			elif payload_data.get("type", "") == "unit":
+				# End-of-line: no payload-handling block in front accepted
+				# the unit. If the front edge is clear or walkable (empty,
+				# grass, or a passable transport tile), spawn the unit into
+				# the world right off the conveyor. Another payload cell
+				# that couldn't accept right now (e.g. currently full) stays
+				# in the "hold" state — we don't dump units onto a
+				# downstream stuck conveyor.
+				if _try_spawn_unit_off_conveyor(grid_pos, conv_gs, rot, front_cells, payload_data):
+					payload_items.erase(grid_pos)
 
 	# --- PHASE 2: ADVANCE ---
 	for grid_pos in payload_items:
@@ -2217,48 +2247,62 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 	if data == null:
 		return
 
+	# `building_placed` also fires for in-place rotations of an existing
+	# block (same id, same position). In that case the logistics state
+	# tables are already populated with the player's work-in-progress
+	# (constructor's selected block, loader's target fill, held payloads,
+	# timers, etc.) and must be preserved — only initialise entries that
+	# don't already exist. `_on_building_destroyed` handles the opposite
+	# direction (full erase) when the block actually goes away.
+
 	# Pre-initialize the drill timer so it starts counting immediately
 	if data.tags.has("harvester"):
-		var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
-		drill_timers[grid_pos] = cycle_time
+		if not drill_timers.has(grid_pos):
+			var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
+			drill_timers[grid_pos] = cycle_time
 
 	# Pre-initialize the pump timer
 	if data.tags.has("pump"):
-		var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
-		pump_timers[grid_pos] = cycle_time
+		if not pump_timers.has(grid_pos):
+			var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
+			pump_timers[grid_pos] = cycle_time
 
 	# Pre-initialize constructor state
 	if data.tags.has("constructor"):
-		constructor_state[grid_pos] = {
-			"selected_block": &"",
-			"collected": {},
-			"phase": "waiting",
-			"timer": 0.0,
-		}
+		if not constructor_state.has(grid_pos):
+			constructor_state[grid_pos] = {
+				"selected_block": &"",
+				"collected": {},
+				"phase": "waiting",
+				"timer": 0.0,
+			}
 
 	# Pre-initialize deconstructor state
 	if data.tags.has("deconstructor"):
-		deconstructor_state[grid_pos] = {
-			"payload": null,
-			"phase": "idle",
-			"timer": 0.0,
-			"pending_items": {},
-		}
+		if not deconstructor_state.has(grid_pos):
+			deconstructor_state[grid_pos] = {
+				"payload": null,
+				"phase": "idle",
+				"timer": 0.0,
+				"pending_items": {},
+			}
 
 	# Pre-initialize loader state
 	if data.tags.has("payload_loader") or data.tags.has("freight_loader"):
-		loader_state[grid_pos] = {
-			"payload": null,
-			"phase": "idle",
-			"fill_target": {},
-		}
+		if not loader_state.has(grid_pos):
+			loader_state[grid_pos] = {
+				"payload": null,
+				"phase": "idle",
+				"fill_target": {},
+			}
 
 	# Pre-initialize unloader state
 	if data.tags.has("payload_unloader") or data.tags.has("freight_unloader"):
-		unloader_state[grid_pos] = {
-			"payload": null,
-			"phase": "idle",
-		}
+		if not unloader_state.has(grid_pos):
+			unloader_state[grid_pos] = {
+				"payload": null,
+				"phase": "idle",
+			}
 
 
 func _on_building_destroyed(grid_pos: Vector2i) -> void:
@@ -2276,6 +2320,7 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	payload_router_idx.erase(grid_pos)
 	constructor_state.erase(grid_pos)
 	deconstructor_state.erase(grid_pos)
+	refabricator_state.erase(grid_pos)
 	loader_state.erase(grid_pos)
 	unloader_state.erase(grid_pos)
 	mass_driver_state.erase(grid_pos)
@@ -2678,6 +2723,477 @@ func _get_all_perimeter_cells(origin: Vector2i, grid_size: Vector2i) -> Array[Ve
 # =========================
 
 ## Processes all loaders: accept storage payload → fill from conveyors → output.
+## Tier-upgrade lookup: finds the unit whose tech-tree parent list includes
+## the given tier-1 unit id. First hit that resolves to an actual UnitData
+## wins (guards against pointing at a building/material node that merely
+## happens to inherit from this unit). Result is cached.
+var _refab_tier_cache: Dictionary = {}  # StringName -> StringName
+func _get_tier2_unit(tier1_unit: StringName) -> StringName:
+	if tier1_unit == &"":
+		return &""
+	if _refab_tier_cache.has(tier1_unit):
+		return _refab_tier_cache[tier1_unit]
+	var result: StringName = &""
+	if TechTree.nodes.has(tier1_unit):
+		for node_id in TechTree.nodes:
+			var node = TechTree.nodes[node_id]
+			var parents: Array = node.get("parents", [])
+			if not parents.has(tier1_unit):
+				continue
+			if Registry.get_unit(node_id) != null:
+				result = node_id
+				break
+	_refab_tier_cache[tier1_unit] = result
+	return result
+
+
+## Runs refabricators: pulls a tier-1 unit payload from an adjacent
+## payload conveyor, waits for input_items to accumulate, then processes
+## and ejects a tier-2 unit payload. Items enter via the standard
+## factory_buffers pipeline (omnidirectional).
+func _update_refabricators(delta: float) -> void:
+	var processed := {}
+	var gs: float = main.GRID_SIZE
+
+	for grid_pos in main.placed_buildings:
+		var block_id = main.placed_buildings[grid_pos]
+		var data = Registry.get_block(block_id)
+		if data == null or not data.tags.has("refabricator"):
+			continue
+
+		var anchor = main.get_building_anchor(grid_pos)
+		var origin: Vector2i = anchor if anchor != null else grid_pos
+		if processed.has(origin):
+			continue
+		processed[origin] = true
+
+		# Skip disabled / under-construction buildings.
+		var sector_script = _sector_script_ref()
+		if sector_script and sector_script.is_building_disabled(origin):
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+
+		# Electrical efficiency throttles the *processing* timer only; the
+		# rest of the state machine (payload pickup, item buffering,
+		# output ejection) runs without power so an unpowered refabricator
+		# still accepts input and holds state until power returns.
+		var power_sys_r = _power_sys_ref()
+		var refab_eff: float = 1.0
+		if power_sys_r and data.electrical_power_use > 0:
+			refab_eff = power_sys_r.get_electrical_efficiency(origin)
+
+		# Lazy state init.
+		if not refabricator_state.has(origin):
+			refabricator_state[origin] = {
+				"phase": "idle",
+				"in_unit_id": &"",
+				"timer": 0.0,
+				"out_unit_id": &"",
+				"selected_t2": &"",
+			}
+		elif not refabricator_state[origin].has("selected_t2"):
+			# Back-compat for saves from before the selection menu existed.
+			refabricator_state[origin]["selected_t2"] = &""
+		# Factory buffer init — used to buffer item inputs that arrived via
+		# conveyor before the refabricator had a unit to upgrade.
+		if not factory_buffers.has(origin):
+			factory_buffers[origin] = {
+				"inputs": {},
+				"phase": "collecting",
+				"timer": 0.0,
+				"pending_outputs": {},
+			}
+
+		var state = refabricator_state[origin]
+		var item_buf: Dictionary = factory_buffers[origin]["inputs"]
+
+		var rot_r: int = main.building_rotation.get(origin, 0)
+		# Refabricators accept the input unit payload on any side — the
+		# block description promises as much and players routinely drop
+		# the tier-1 unit in from whatever side their factory happens to
+		# face. The front edge is still reserved for OUTPUT (where the
+		# tier-2 unit is pushed / spawned), but the tier-1 pickup scan
+		# covers the full ring so a conveyor feeding in from the "front"
+		# side of a newly-placed refab still works.
+		var input_cells: Array[Vector2i] = _get_full_ring(origin, data.grid_size)
+		var output_cells: Array[Vector2i] = _get_front_edge(origin, data.grid_size, rot_r)
+
+		match state["phase"]:
+			"idle":
+				# Without a tier-2 selection the refab is dormant — it
+				# won't accept units or buffer items. Prevents a fresh
+				# refab from silently eating the first ant that wanders
+				# by before the player configures it.
+				var selected_t2: StringName = StringName(state.get("selected_t2", &""))
+				if selected_t2 == &"":
+					continue
+				# Don't consume a tier-1 unit when the tier-2 slot is full
+				# for this faction — there'd be nowhere for the upgraded
+				# unit to spawn, and eating the tier-1 anyway would be a
+				# silent unit-count regression.
+				var refab_faction: int = main.get_building_faction(origin)
+				if refab_faction != main.Faction.FEROX:
+					if main.has_method("can_spawn_unit") and not main.can_spawn_unit(selected_t2):
+						continue
+				# Pull a unit payload from any adjacent payload conveyor.
+				# Only the tier-1 that upgrades to the selected tier-2 is
+				# accepted — other payloads stay on the belt so they can
+				# pass through to their intended refab.
+				for edge_pos in input_cells:
+					if _is_cross_faction(origin, edge_pos):
+						continue
+					var conv_anchor: Vector2i = main.building_origins.get(edge_pos, edge_pos)
+					if not payload_items.has(conv_anchor):
+						continue
+					if payload_items[conv_anchor]["progress"] < 1.0:
+						continue
+					var pd: Dictionary = payload_items[conv_anchor]["payload_data"]
+					if pd.get("type", "") != "unit":
+						continue
+					var uid := StringName(pd.get("unit_id", ""))
+					if uid == &"":
+						continue
+					# Only accept the tier-1 that upgrades to the refab's
+					# selected tier-2.
+					if _get_tier2_unit(uid) != selected_t2:
+						continue
+					state["in_unit_id"] = uid
+					payload_items.erase(conv_anchor)
+					# Check if items are already buffered — if so, start
+					# processing immediately; otherwise wait for them.
+					var recipe_idle: Dictionary = _refab_effective_recipe(data, selected_t2)
+					if _refab_has_all_inputs_dict(recipe_idle, item_buf):
+						_refab_consume_inputs_dict(recipe_idle, item_buf)
+						state["timer"] = data.production_time if data.production_time > 0 else 5.0
+						state["phase"] = "processing"
+					else:
+						state["phase"] = "collecting"
+					break
+
+			"collecting":
+				var selected_t2_c: StringName = StringName(state.get("selected_t2", &""))
+				var recipe_c: Dictionary = _refab_effective_recipe(data, selected_t2_c)
+				# We have a unit — wait for input_items to accumulate.
+				if _refab_has_all_inputs_dict(recipe_c, item_buf):
+					_refab_consume_inputs_dict(recipe_c, item_buf)
+					state["timer"] = data.production_time if data.production_time > 0 else 5.0
+					state["phase"] = "processing"
+
+			"processing":
+				state["timer"] -= delta * refab_eff
+				if state["timer"] <= 0.0:
+					# Prefer the explicit selection; fall back to the
+					# tech-tree lookup if the selection is somehow empty.
+					var t2_out: StringName = StringName(state.get("selected_t2", &""))
+					if t2_out == &"":
+						t2_out = _get_tier2_unit(state["in_unit_id"])
+					state["out_unit_id"] = t2_out
+					state["in_unit_id"] = &""
+					state["phase"] = "outputting"
+
+			"outputting":
+				var out_id: StringName = StringName(state.get("out_unit_id", &""))
+				# Recover from a half-loaded save / any state where we ended
+				# up in "outputting" with no out_unit_id: derive it from the
+				# in_unit_id (tier-1) → tier-2 mapping if possible, or bail
+				# back to idle. Mirrors the tank-fab held_payload rebuild
+				# so a refab doesn't sit here forever with nothing to eject.
+				if out_id == &"":
+					var in_id: StringName = StringName(state.get("in_unit_id", &""))
+					if in_id != &"":
+						out_id = _get_tier2_unit(in_id)
+						if out_id != &"":
+							state["out_unit_id"] = out_id
+							state["in_unit_id"] = &""
+				if out_id == &"":
+					state["phase"] = "idle"
+					continue
+				var payload := {"type": "unit", "unit_id": out_id}
+				var delivered := false
+				# 1) Payload conveyor on the front edge.
+				for out_pos in output_cells:
+					if _is_cross_faction(origin, out_pos):
+						continue
+					var entry_dir: int = (rot_r + 2) % 4
+					if _is_payload_cell(out_pos) and _try_push_payload(out_pos, payload, entry_dir):
+						delivered = true
+						break
+				# 2) Front-edge delivery (push to payload target / spawn on
+				#    ground if front is clear or passable).
+				if not delivered:
+					if _try_deliver_fabricated_unit(origin, data, payload):
+						delivered = true
+				# 3) Whole-perimeter ground spawn fallback.
+				if not delivered:
+					if _spawn_unit_on_free_perimeter(origin, data, out_id):
+						delivered = true
+				if delivered:
+					state["out_unit_id"] = &""
+					state["phase"] = "idle"
+				# Unused `gs` silencer (kept around for possible future
+				# world-coord math in this loop).
+				var _unused := gs
+
+
+## Drops a unit payload off the front edge of a payload conveyor when no
+## downstream payload-handling block will accept it. Every front cell has
+## to be either empty, walkable terrain, or a passable transport block —
+## if any is a non-passable building (including a payload target that's
+## currently full) the conveyor holds instead of unloading so we don't
+## silently lose payloads that would otherwise queue up. Returns true when
+## a spawn happened.
+func _try_spawn_unit_off_conveyor(conv_pos: Vector2i, conv_gs: Vector2i, rot: int, front_cells: Array[Vector2i], payload_data: Dictionary) -> bool:
+	var unit_id: StringName = StringName(payload_data.get("unit_id", ""))
+	if unit_id == &"":
+		return false
+	var unit_data = Registry.get_unit(unit_id)
+	if unit_data == null:
+		return false
+	var faction: int = main.get_building_faction(conv_pos)
+	if faction != main.Faction.FEROX:
+		if main.has_method("can_spawn_unit") and not main.can_spawn_unit(unit_id):
+			return false
+
+	# Hold if *any* block sits on the conveyor's front edge. Even walkable
+	# transport tiles (plain belts / ducts) count as obstruction here —
+	# the player deliberately laid a block against the belt, so dumping a
+	# unit on top of it isn't the behaviour they're expecting.
+	# Pathfinding-blocking terrain (walls) also forces a hold.
+	# `_payload_target_accepts_unit` already returned true / the refab
+	# would have pulled earlier, so when we get here the front is either
+	# empty grass or something the unit cannot stand on.
+	var ml: int = unit_data.movement_layer
+	var is_flying: bool = (ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING)
+	var terrain = _terrain_ref()
+	for cell in front_cells:
+		if main.placed_buildings.has(cell) and not is_flying:
+			return false
+		if not is_flying and terrain != null and terrain.wall_tiles.has(cell):
+			var tile_data = Registry.get_tile(terrain.wall_tiles[cell])
+			if tile_data and tile_data.blocks_pathfinding:
+				return false
+
+	# Front is clear — spawn one tile ahead of the conveyor's front edge,
+	# centred on the belt's axis so the unit appears where the payload
+	# would have been pushed. Using the conveyor's rotation (not a
+	# perimeter search) is what keeps the facing correct; the previous
+	# "free-cell scan" would happily pick a side cell and make the unit
+	# look like it came out of the wrong side of the belt.
+	var gs: int = main.GRID_SIZE
+	var anchor: Vector2i = main.building_origins.get(conv_pos, conv_pos)
+	var center := Vector2(
+		(anchor.x + conv_gs.x * 0.5) * gs,
+		(anchor.y + conv_gs.y * 0.5) * gs
+	)
+	var spawn_world: Vector2
+	match rot:
+		0: spawn_world = center + Vector2((conv_gs.x * 0.5 + 0.5) * gs, 0)
+		1: spawn_world = center + Vector2(0, (conv_gs.y * 0.5 + 0.5) * gs)
+		2: spawn_world = center + Vector2(-(conv_gs.x * 0.5 + 0.5) * gs, 0)
+		3: spawn_world = center + Vector2(0, -(conv_gs.y * 0.5 + 0.5) * gs)
+		_: spawn_world = center + Vector2((conv_gs.x * 0.5 + 0.5) * gs, 0)
+
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr == null:
+		return false
+	if faction == main.Faction.FEROX:
+		unit_mgr.spawn_enemy(spawn_world, unit_id)
+	else:
+		unit_mgr.spawn_player_unit(spawn_world, unit_id)
+		if "stats_units_produced" in main:
+			main.stats_units_produced += 1
+		var sector_script = _sector_script_ref()
+		if sector_script:
+			sector_script.on_unit_produced(unit_id)
+	return true
+
+
+## Spawns `unit_id` on the first open perimeter cell around the building
+## at `origin`. Used as a last-ditch fallback for refabricators whose
+## front edge is blocked. If every perimeter cell is blocked too, falls
+## back to spawning at the building's own centre so production never
+## permanently jams. Returns true when a spawn happened.
+func _spawn_unit_on_free_perimeter(origin: Vector2i, data: BlockData, unit_id: StringName) -> bool:
+	if unit_id == &"":
+		return false
+	var unit_data = Registry.get_unit(unit_id)
+	if unit_data == null:
+		return false
+	var faction: int = main.get_building_faction(origin)
+	if faction != main.Faction.FEROX:
+		if main.has_method("can_spawn_unit") and not main.can_spawn_unit(unit_id):
+			return false
+	var ml: int = unit_data.movement_layer
+	var is_flying: bool = (ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING)
+	var terrain = _terrain_ref()
+	var gs: int = main.GRID_SIZE
+
+	var spawn_world: Vector2 = Vector2.ZERO
+	var found_cell := false
+	var ring: Array[Vector2i] = _get_full_ring(origin, data.grid_size)
+	for cell in ring:
+		if _is_cross_faction(origin, cell):
+			continue
+		if main.placed_buildings.has(cell) and not is_flying:
+			var blocker = Registry.get_block(main.placed_buildings[cell])
+			var walkable: bool = blocker != null and blocker.is_transport() \
+				and not (blocker.tags.has("payload") or blocker.tags.has("freight"))
+			if not walkable:
+				continue
+		if not is_flying and terrain != null and terrain.wall_tiles.has(cell):
+			var tile_data = Registry.get_tile(terrain.wall_tiles[cell])
+			if tile_data and tile_data.blocks_pathfinding:
+				continue
+		spawn_world = Vector2(cell.x * gs + gs * 0.5, cell.y * gs + gs * 0.5)
+		found_cell = true
+		break
+
+	if not found_cell:
+		# Every perimeter cell is blocked. Spawn on the building's own
+		# centre so the unit isn't lost. The unit's own pathing will sort
+		# out where it goes from there (ground units can't physically be
+		# "inside" a building but the renderer and combat system treat
+		# units as free entities).
+		spawn_world = Vector2(
+			(origin.x + data.grid_size.x * 0.5) * gs,
+			(origin.y + data.grid_size.y * 0.5) * gs
+		)
+
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr == null:
+		return false
+	if faction == main.Faction.FEROX:
+		unit_mgr.spawn_enemy(spawn_world, unit_id)
+	else:
+		unit_mgr.spawn_player_unit(spawn_world, unit_id)
+		if "stats_units_produced" in main:
+			main.stats_units_produced += 1
+		var sector_script = _sector_script_ref()
+		if sector_script:
+			sector_script.on_unit_produced(unit_id)
+	return true
+
+
+## Tries to hand a tier-1 unit directly into a refabricator at `anchor`
+## without going through a payload conveyor. Used when a unit factory
+## sits flush against a refabricator. Returns true when accepted.
+## Rejects if the refabricator already holds a unit, or the input unit
+## has no tier-2 successor.
+func _try_feed_refabricator_direct(anchor: Vector2i, data: BlockData, unit_id: StringName) -> bool:
+	if unit_id == &"":
+		return false
+	if _get_tier2_unit(unit_id) == &"":
+		return false
+	# Inactive refabs (construction / decon / derelict) don't accept.
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+
+	# Init refabricator state if this is its first interaction.
+	if not refabricator_state.has(anchor):
+		refabricator_state[anchor] = {
+			"phase": "idle",
+			"in_unit_id": &"",
+			"timer": 0.0,
+			"out_unit_id": &"",
+			"selected_t2": &"",
+		}
+	elif not refabricator_state[anchor].has("selected_t2"):
+		refabricator_state[anchor]["selected_t2"] = &""
+	var state: Dictionary = refabricator_state[anchor]
+	if state["phase"] != "idle" or StringName(state.get("in_unit_id", &"")) != &"":
+		return false  # Busy
+	var selected_t2: StringName = StringName(state.get("selected_t2", &""))
+	# Refab with no selection won't accept anything (matches the idle-pull
+	# behaviour). Refab with a selection only accepts the tier-1 that
+	# upgrades to that tier-2.
+	if selected_t2 == &"":
+		return false
+	if _get_tier2_unit(unit_id) != selected_t2:
+		return false
+	# Don't accept if the tier-2 slot is already full — we'd consume the
+	# tier-1 with nowhere to put the upgraded unit.
+	var ref_faction: int = main.get_building_faction(anchor)
+	if ref_faction != main.Faction.FEROX:
+		if main.has_method("can_spawn_unit") and not main.can_spawn_unit(selected_t2):
+			return false
+
+	# Also ensure a factory_buffer exists for item storage.
+	if not factory_buffers.has(anchor):
+		factory_buffers[anchor] = {
+			"inputs": {},
+			"phase": "collecting",
+			"timer": 0.0,
+			"pending_outputs": {},
+		}
+	var buf: Dictionary = factory_buffers[anchor]["inputs"]
+
+	state["in_unit_id"] = unit_id
+	var recipe: Dictionary = _refab_effective_recipe(data, selected_t2)
+	if _refab_has_all_inputs_dict(recipe, buf):
+		_refab_consume_inputs_dict(recipe, buf)
+		state["timer"] = data.production_time if data.production_time > 0 else 5.0
+		state["phase"] = "processing"
+	else:
+		state["phase"] = "collecting"
+	return true
+
+
+## Returns true if the refabricator's factory_buffers inputs cover every
+## item in data.input_items. Handles "copper" → "mat_copper" normalisation.
+func _refab_has_all_inputs(data: BlockData, buf: Dictionary) -> bool:
+	return _refab_has_all_inputs_dict(_refab_effective_recipe(data, &""), buf)
+
+
+## Subtracts data.input_items from the buffer (call only when
+## _refab_has_all_inputs returned true).
+func _refab_consume_inputs(data: BlockData, buf: Dictionary) -> void:
+	_refab_consume_inputs_dict(_refab_effective_recipe(data, &""), buf)
+
+
+## Dict-based variants used by the refab state machine once it resolves
+## the per-tier-2 recipe. Accept any dict keyed either by short ids
+## ("copper") or full runtime ids ("mat_copper").
+func _refab_has_all_inputs_dict(recipe: Dictionary, buf: Dictionary) -> bool:
+	for raw_id in recipe:
+		var need: int = int(recipe[raw_id])
+		var k: StringName = _refab_input_key(raw_id)
+		if int(buf.get(k, 0)) < need:
+			return false
+	return true
+
+
+func _refab_consume_inputs_dict(recipe: Dictionary, buf: Dictionary) -> void:
+	for raw_id in recipe:
+		var need: int = int(recipe[raw_id])
+		var k: StringName = _refab_input_key(raw_id)
+		var have: int = int(buf.get(k, 0))
+		buf[k] = have - need
+		if buf[k] <= 0:
+			buf.erase(k)
+
+
+## Resolves the recipe (item -> amount) for a refab processing `t2_id`.
+## Checks `data.refab_recipes[t2_id]` first so authors can give specific
+## tier-2 units their own cost, and falls back to `data.input_items`
+## otherwise. Accepts an empty `t2_id` to get the generic fallback.
+func _refab_effective_recipe(data: BlockData, t2_id: StringName) -> Dictionary:
+	if t2_id != &"" and data.refab_recipes.has(t2_id):
+		var r = data.refab_recipes[t2_id]
+		if r is Dictionary and not r.is_empty():
+			return r
+	return data.input_items
+
+
+## Normalises a build-cost-style key ("copper") to the runtime item id
+## ("mat_copper") the factory buffer uses. Already-prefixed ids pass through.
+func _refab_input_key(raw_id) -> StringName:
+	var s := String(raw_id)
+	if s.begins_with("mat_"):
+		return StringName(s)
+	return StringName("mat_" + s)
+
+
 func _update_loaders(_delta: float) -> void:
 	var processed := {}
 
@@ -3388,12 +3904,25 @@ func _draw_payloads() -> void:
 			if unit_id != &"":
 				var unit_data = Registry.get_unit(unit_id)
 				if unit_data != null:
-					icon = unit_data.icon
-					if icon:
-						payload_pixel_w = icon.get_width()
-						payload_pixel_h = icon.get_height()
+					# Match the unit's on-screen world size: base_sprite/head_sprite
+					# scaled by sprite_scale, same as enemy_unit.gd renders them.
+					# Previously the icon texture was drawn at its raw pixel
+					# size, which on large icon art made payloads look huge.
+					var scale_f: float = unit_data.sprite_scale if unit_data.sprite_scale > 0.0 else 1.0
+					var world_tex: Texture2D = null
+					if unit_data.base_sprite != null:
+						world_tex = unit_data.base_sprite
+					elif unit_data.head_sprite != null:
+						world_tex = unit_data.head_sprite
+					if world_tex != null:
+						icon = world_tex
+						payload_pixel_w = world_tex.get_width() * scale_f
+						payload_pixel_h = world_tex.get_height() * scale_f
+					elif unit_data.icon != null:
+						icon = unit_data.icon
+						payload_pixel_w = unit_data.icon.get_width() * scale_f
+						payload_pixel_h = unit_data.icon.get_height() * scale_f
 					else:
-						# Use visual_size for shape-based units
 						var us: float = unit_data.visual_size if unit_data.visual_size > 0 else 8.0
 						payload_pixel_w = us * 2
 						payload_pixel_h = us * 2
@@ -3549,6 +4078,11 @@ func _update_factories(delta: float) -> void:
 		var data = Registry.get_block(block_id)
 		if data == null:
 			continue
+		# Refabricators run in their own update loop; the standard factory
+		# path would try to produce nothing (no produced_unit) or mishandle
+		# the payload-in requirement.
+		if data.tags.has("refabricator"):
+			continue
 		# Omnidirectional factories intentionally have empty side_inputs/side_outputs,
 		# so keep them in the loop — the processing logic handles them separately.
 		if data.side_inputs.is_empty() and data.side_outputs.is_empty() and data.produced_unit == &"" and not data.tags.has("omnidirectional"):
@@ -3595,9 +4129,13 @@ func _update_factories(delta: float) -> void:
 				# Don't start production if storage is full (skip for unit fabricators)
 				if not is_unit_fabricator and _is_storage_full(origin, data):
 					continue
-				# Don't start unit production if the unit isn't researched yet.
-				# Require-research respects the settings toggle (main.require_research).
-				if is_unit_fabricator and main.require_research and TechTree.nodes.has(data.produced_unit) and not TechTree.is_researched(data.produced_unit):
+				# Don't start unit production if the unit isn't researched
+				# yet. The require_research toggle only governs block
+				# placement — producing a unit you haven't unlocked would
+				# bypass the tech tree's intent regardless of that flag.
+				# Sandbox mode (TechTree.unlock_all) still short-circuits
+				# is_researched to true, so that mode keeps working.
+				if is_unit_fabricator and TechTree.nodes.has(data.produced_unit) and not TechTree.is_researched(data.produced_unit):
 					continue
 				# Don't start unit production if at unit cap for this type
 				if is_unit_fabricator and main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
@@ -3677,8 +4215,15 @@ func _update_factories(delta: float) -> void:
 						state["held_payload"] = payload_data
 
 			"holding":
-				# Keep retrying delivery until it succeeds.
+				# Keep retrying delivery until it succeeds. `held_payload`
+				# isn't persisted across save/load (see save_manager.gd),
+				# so reconstruct it from data.produced_unit when missing
+				# — otherwise a fabricator that was saved mid-hold would
+				# sit here forever with nothing to retry.
 				var held = state.get("held_payload", null)
+				if held == null and data.produced_unit != &"":
+					held = {"type": "unit", "unit_id": data.produced_unit}
+					state["held_payload"] = held
 				if held != null and _try_deliver_fabricated_unit(origin, data, held):
 					state.erase("held_payload")
 					state.erase("eject_progress")
@@ -3809,62 +4354,184 @@ func _conveyor_feeds_toward_building(conv_pos: Vector2i, origin: Vector2i, grid_
 
 
 ## Attempts to deliver a freshly-built unit out of a fabricator.
-## Tries (in priority order):
-##   1. Push the unit as a payload onto the front cell if it's a payload conveyor
-##      (or similar) that can currently accept it.
-##   2. Spawn the unit directly into the world if the front tile is valid for
-##      that unit's movement layer (i.e. not a wall for ground/crawler units,
-##      not occupied by a building for ground units).
-## Returns true if delivery succeeded; false means the caller should keep the
-## unit as a held payload and retry on the next tick.
+##
+## Rules (applied per front cell, summarised across the whole front edge):
+##   1. If any front cell is a payload-interacting block (payload/freight
+##      conveyor, mass driver, refabricator), try to hand the unit to it.
+##      If at least one accepts, delivery succeeds.
+##   2. If every payload target on the front is currently full/busy, the
+##      fabricator holds — we don't spawn on the ground next to a payload
+##      output that's supposed to carry this unit away.
+##   3. Otherwise, if every front cell is either empty, a walkable terrain
+##      tile, or a passable transport block (regular conveyor, duct), the
+##      unit spawns on the ground at the front edge.
+##   4. Otherwise (non-passable building or pathfinding-blocking wall on
+##      any front cell) the fabricator holds and retries next tick.
+##
+## Returns true when delivery succeeded. Callers that get false should
+## keep the unit as a held payload and retry.
 func _try_deliver_fabricated_unit(origin: Vector2i, data: BlockData, payload_data: Dictionary) -> bool:
+	# Resolve the unit this delivery is for. Unit fabricators set it via
+	# data.produced_unit; refabricators (and other wrappers) supply it in
+	# the payload dict — use whichever is populated.
+	var unit_id: StringName = data.produced_unit
+	if unit_id == &"":
+		unit_id = StringName(payload_data.get("unit_id", ""))
+	if unit_id == &"":
+		return false
+
 	# Unit cap (player only). Enemy fabricators don't respect this.
 	var faction: int = main.get_building_faction(origin)
 	if faction != main.Faction.FEROX:
-		if main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
+		if main.has_method("can_spawn_unit") and not main.can_spawn_unit(unit_id):
 			return false
 
 	var rot: int = main.building_rotation.get(origin, 0)
 	var front_cells: Array[Vector2i] = _get_front_edge(origin, data.grid_size, rot)
 	if front_cells.is_empty():
 		return false
-
-	# 1) Try to push as a payload onto an accepting front cell.
 	var entry_dir: int = (rot + 2) % 4
-	for cell in front_cells:
-		if _is_payload_cell(cell) and _try_push_payload(cell, payload_data, entry_dir):
-			return true
 
-	# 2) Try to spawn the unit directly in the world if the front is clear.
-	var unit_data = Registry.get_unit(data.produced_unit)
-	if unit_data == null:
+	# Rule 1 + 2: if any front cell is a payload target, the unit must
+	# enter *that* block — first cell that accepts wins. If none accept,
+	# hold instead of falling through to a ground spawn.
+	var has_payload_target := false
+	for cell in front_cells:
+		if _is_unit_payload_target(cell):
+			has_payload_target = true
+			if _try_deliver_to_payload_target(cell, payload_data, unit_id, entry_dir):
+				return true
+	if has_payload_target:
 		return false
 
+	# Rule 3 + 4: no payload targets on the front — either spawn on the
+	# ground or hold if there's a solid blocker.
+	var unit_data = Registry.get_unit(unit_id)
+	if unit_data == null:
+		return false
 	var ml: int = unit_data.movement_layer
 	var is_flying: bool = (ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING)
 
-	# A blocked-on-front fabricator should hold rather than spawn. For ground
-	# units all cells must be clear of buildings AND terrain walls. Flying/hover
-	# ignore walls. Crawlers ignore buildings but not large terrain walls;
-	# approximate with the same rule as ground for now.
 	var terrain = _terrain_ref()
 	for cell in front_cells:
 		if main.placed_buildings.has(cell) and not is_flying:
-			return false
+			# Passable transport blocks (plain belts, ducts) let the unit
+			# stand on the tile and walk off. Anything else (a factory, a
+			# turret, a wall-building) is a solid blocker.
+			var blocker = Registry.get_block(main.placed_buildings[cell])
+			var blocker_walkable: bool = blocker != null and blocker.is_transport() \
+				and not (blocker.tags.has("payload") or blocker.tags.has("freight"))
+			if not blocker_walkable:
+				return false
 		if not is_flying and terrain != null and terrain.wall_tiles.has(cell):
 			var tile_data = Registry.get_tile(terrain.wall_tiles[cell])
 			if tile_data and tile_data.blocks_pathfinding:
 				return false
 
-	_spawn_fabricated_unit(origin, data)
+	_spawn_unit_at_building_front(origin, data, unit_id)
 	return true
 
 
-## Spawns a unit in front of a fabricator building (centered on the facing side).
+## Variant of `_is_unit_payload_target` that returns true only when the
+## target would actually accept the given unit right now. A refabricator
+## configured for a different tier-2 (or not configured at all) reports
+## false so the payload flow doesn't dead-lock waiting on a target that
+## would never pull. Other payload targets (payload/freight conveyor,
+## mass driver) report true whenever they're present, even when full —
+## those are queue-pressure cases the caller handles separately.
+func _payload_target_accepts_unit(cell: Vector2i, unit_id: StringName) -> bool:
+	if not main.placed_buildings.has(cell):
+		return false
+	var anchor: Vector2i = main.building_origins.get(cell, cell)
+	var d = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if d == null:
+		return false
+	if d.tags.has("refabricator"):
+		if unit_id == &"":
+			return false
+		var rs: Dictionary = refabricator_state.get(anchor, {})
+		var sel: StringName = StringName(rs.get("selected_t2", &""))
+		if sel == &"":
+			return false
+		# Matching refab counts as an accepting target even when the
+		# tier-2 slot is currently full — the player often wants to
+		# queue tier-1s on the conveyor so upgrades resume the moment a
+		# tier-2 dies, rather than dumping the tier-1 on the ground.
+		# Cap-full is a "payload target IS in front but not ready right
+		# now" case, which should hold the belt.
+		return _get_tier2_unit(unit_id) == sel
+	return d.tags.has("payload") or d.tags.has("freight") or d.tags.has("mass_driver")
+
+
+## Returns true if the cell at `cell` contains a block that interacts with
+## unit payloads — payload/freight conveyor, mass driver, or refabricator.
+## Used by the fabricator ejection logic to decide whether to push the
+## produced unit into the block or spawn it on the ground.
+func _is_unit_payload_target(cell: Vector2i) -> bool:
+	if not main.placed_buildings.has(cell):
+		return false
+	var anchor: Vector2i = main.building_origins.get(cell, cell)
+	var d = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if d == null:
+		return false
+	return d.tags.has("payload") or d.tags.has("freight") \
+		or d.tags.has("refabricator") or d.tags.has("mass_driver")
+
+
+## Tries to deliver the produced unit to a payload-interacting block at
+## `cell`. Returns true if the block accepted it right now.
+##   - refabricator: direct-feed (bypasses payload conveyor routing)
+##   - payload / freight conveyor: standard payload push
+##   - mass driver: loaded straight into the driver's own state slot so
+##     its update loop sees it like a payload picked off an adjacent
+##     conveyor, then rotates and launches it
+func _try_deliver_to_payload_target(cell: Vector2i, payload_data: Dictionary, unit_id: StringName, entry_dir: int) -> bool:
+	var anchor: Vector2i = main.building_origins.get(cell, cell)
+	var d = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if d == null:
+		return false
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	if _is_cross_faction(anchor, cell):
+		return false
+
+	if d.tags.has("refabricator"):
+		return _try_feed_refabricator_direct(anchor, d, unit_id)
+
+	if _is_payload_cell(cell):
+		return _try_push_payload(cell, payload_data, entry_dir)
+
+	if d.tags.has("mass_driver"):
+		if not mass_driver_state.has(anchor):
+			mass_driver_state[anchor] = {
+				"payload": null, "head_angle": 0.0, "target_angle": 0.0,
+				"recoil": 0.0, "phase": "idle", "cooldown": 0.0, "input_pos": Vector2i.ZERO,
+			}
+		var md_state: Dictionary = mass_driver_state[anchor]
+		if md_state.get("payload") != null:
+			return false
+		md_state["payload"] = payload_data
+		return true
+
+	return false
+
+
+## Spawns the unit produced by this fabricator at the front of its footprint.
+## Wrapper kept for the base unit-fabricator path; reads produced_unit off
+## the BlockData.
 func _spawn_fabricated_unit(origin: Vector2i, data: BlockData) -> void:
-	var unit_data = Registry.get_unit(data.produced_unit)
+	_spawn_unit_at_building_front(origin, data, data.produced_unit)
+
+
+## Spawns `unit_id` at the front edge of the building at `origin`. Shared
+## by unit fabricators (produced_unit) and refabricators (tier-2 unit
+## derived from the input payload).
+func _spawn_unit_at_building_front(origin: Vector2i, data: BlockData, unit_id: StringName) -> void:
+	if unit_id == &"":
+		return
+	var unit_data = Registry.get_unit(unit_id)
 	if unit_data == null:
-		push_warning("LogisticsSystem: Unit '%s' not found for fabricator at %s" % [data.produced_unit, origin])
+		push_warning("LogisticsSystem: Unit '%s' not found for building at %s" % [unit_id, origin])
 		return
 
 	var rot: int = main.building_rotation.get(origin, 0)
@@ -3896,19 +4563,19 @@ func _spawn_fabricated_unit(origin: Vector2i, data: BlockData) -> void:
 	if unit_mgr:
 		var faction: int = main.get_building_faction(origin)
 		if faction == main.Faction.FEROX:
-			unit_mgr.spawn_enemy(spawn_world, data.produced_unit)
+			unit_mgr.spawn_enemy(spawn_world, unit_id)
 		else:
 			# Check unit cap before spawning player units
-			if main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
+			if main.has_method("can_spawn_unit") and not main.can_spawn_unit(unit_id):
 				return  # At capacity for this unit type
-			unit_mgr.spawn_player_unit(spawn_world, data.produced_unit)
+			unit_mgr.spawn_player_unit(spawn_world, unit_id)
 		# Notify sector script of unit production (Lumina only)
 		if faction != main.Faction.FEROX:
 			if "stats_units_produced" in main:
 				main.stats_units_produced += 1
 			var sector_script = _sector_script_ref()
 			if sector_script:
-				sector_script.on_unit_produced(data.produced_unit)
+				sector_script.on_unit_produced(unit_id)
 
 
 ## Tries to accept an item into a factory's input buffer.
@@ -3923,7 +4590,12 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	# Omnidirectional factories accept on every side and don't need side_inputs set.
 	# Unit fabricators also accept from any side — their inputs come from the
 	# produced unit's build_cost, not side_inputs.
-	var is_omni: bool = data.tags.has("omnidirectional")
+	# Refabricators accept on every side for the recipe items (same omni-buffer
+	# logic), BUT reject items arriving on the front edge — that edge is the
+	# output lane and belts running across it shouldn't get their contents
+	# silently absorbed. Without this guard a refabricator placed under a
+	# fabricator would eat the materials intended for the fabricator above it.
+	var is_omni: bool = data.tags.has("omnidirectional") or data.tags.has("refabricator")
 	var is_unit_fab_early: bool = data.produced_unit != &""
 	if not is_omni and not is_unit_fab_early and data.side_inputs.is_empty():
 		return false

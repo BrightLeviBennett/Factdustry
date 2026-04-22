@@ -1,18 +1,20 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://6a12f8asont8"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" path="res://textures/blocks/item transportation/BeltBridge.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://d0jycfw7dxjcr" path="res://textures/blocks/item transportation/BeltBridge.png" id="2"]
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"belt_bridge"
 display_name = "Belt Bridge"
 description = "Carries items over other belts or buildings."
-category = 8
+icon = ExtResource("2")
+tags = PackedStringArray("belt", "transport", "bridge", "linkable")
 color = Color(0.9, 0.85, 0.3, 1)
+top_sprite = ExtResource("2")
 max_health = 200.0
-build_cost = { "copper": 10 }
+build_cost = {
+"copper": 10
+}
 build_time = 0.8
 transport_speed = 4.0
-tags = PackedStringArray("belt", "transport", "bridge", "linkable")

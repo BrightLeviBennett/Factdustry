@@ -334,10 +334,10 @@ func _handle_mining(delta: float) -> void:
 		return
 
 	# Building/deconstructing fully CLEARS the mining target so the laser and
-	# the "move-away slowdown" both stop. Previously this was just `return`,
-	# which left mining_target set → laser kept rendering and movement kept
-	# the 50% penalty toward the ore while the drone was actually building.
-	if "work_order" in main and not main.work_order.is_empty() and not main.build_paused:
+	# the "move-away slowdown" both stop. Only pause mining when there's an
+	# in-range work item the drone could actually be building this frame —
+	# distant queued work no longer holds the drone off its ore.
+	if _has_in_range_work():
 		mining_target = null
 		mining_item_id = &""
 		return
@@ -502,11 +502,9 @@ func is_in_build_range(grid_pos: Vector2i) -> bool:
 ## queue. Used by _handle_movement to lock facing + apply the away-penalty.
 ## Returns null when no focus target exists.
 func _get_focus_world_pos() -> Variant:
-	# Currently-ticking work-queue entry takes priority over mining, because
-	# mining is force-cleared whenever work is active.
-	if "work_order" in main and not main.work_order.is_empty() and not main.build_paused:
-		# Find the first in-range anchor, matching the logic BuildingSystem
-		# uses to pick which entry to tick this frame.
+	# In-range work-queue entry takes priority over mining; distant queued
+	# work doesn't steal focus away (matches _handle_mining's behavior).
+	if _has_in_range_work():
 		for a in main.work_order:
 			if is_in_build_range(a):
 				var bid: StringName = main.placed_buildings.get(a, &"")
@@ -516,14 +514,31 @@ func _get_focus_world_pos() -> Variant:
 					float(sz.x) * main.GRID_SIZE * 0.5,
 					float(sz.y) * main.GRID_SIZE * 0.5
 				)
-		# No in-range work — drone is free to move normally (and won't be
-		# building this frame anyway).
-		return null
 	if mining_target != null:
 		return main.grid_to_world(mining_target) + Vector2(
 			main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5
 		)
 	return null
+
+
+## Returns true when work_order has at least one non-paused entry within the
+## drone's build range — i.e. the drone could start building this frame.
+## Used to gate mining/focus so queued but distant work doesn't interrupt
+## the drone from gathering resources.
+func _has_in_range_work() -> bool:
+	if not ("work_order" in main):
+		return false
+	if "build_paused" in main and main.build_paused:
+		return false
+	if main.work_order.is_empty():
+		return false
+	var paused: Dictionary = main.work_paused if "work_paused" in main else {}
+	for a in main.work_order:
+		if paused.has(a):
+			continue
+		if is_in_build_range(a):
+			return true
+	return false
 
 
 # --- DRAWING ---

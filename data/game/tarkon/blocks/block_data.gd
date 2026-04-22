@@ -32,6 +32,14 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var top_sprite: Texture2D
 ## Base sprite drawn first (for layered blocks like cores/fabricators).
 @export var base_sprite: Texture2D
+@export_subgroup("Refabricator Overlays")
+## Drawn on top of base_sprite when a payload conveyor sits on the
+## building's back side (opposite its front/output edge).
+@export var feed_overlay_back: Texture2D
+## Drawn when a payload conveyor sits on the building's left side.
+@export var feed_overlay_left: Texture2D
+## Drawn when a payload conveyor sits on the building's right side.
+@export var feed_overlay_right: Texture2D
 @export_subgroup("Faction Overlays")
 @export var lumina_overlay: Texture2D
 @export var ferox_overlay: Texture2D
@@ -39,6 +47,16 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export_subgroup("Turret")
 ## Rotating head drawn on top of the base, aimed at the target.
 @export var turret_head_sprite: Texture2D
+## How many heads (barrels) this turret has. Multi-barrel turrets fire
+## their barrels in sequence with staggered cooldowns so total rate
+## scales with count: two barrels → double fire rate alternating left/
+## right. 1 = normal single-barrel behaviour.
+@export var barrel_count: int = 1
+## Perpendicular spacing between adjacent barrels, in pixels. Each barrel
+## is offset from the turret's aim axis by `barrel_spacing` × (i − (N-1)/2)
+## so N=2 with spacing 10 gives barrels at ±5. Only used when
+## `barrel_count` > 1.
+@export var barrel_spacing: float = 10.0
 
 
 @export_group("Health")
@@ -113,6 +131,12 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var adjacency_bonus: float = 0.0
 ## Unit ID this fabricator produces. Empty = not a unit fabricator.
 @export var produced_unit: StringName = &""
+## Per-unit recipes for refabricators. Maps tier-2 unit id (StringName) to
+## a dictionary of item_id -> amount. If a refab's currently-selected
+## tier-2 unit has an entry here, that dict overrides `input_items` for
+## the duration of that recipe. Empty fallback = use `input_items` for
+## every unit, matching legacy behaviour.
+@export var refab_recipes: Dictionary = {}
 ## +N max of each unit type per copy of this core.
 @export var unit_capacity: int = 0
 ## +N max of each resource type per copy of this core.

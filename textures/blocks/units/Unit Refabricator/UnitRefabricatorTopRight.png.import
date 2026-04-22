@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cn4yr0uujbwpl"
-path="res://.godot/imported/SteelFurnace.png-a80facddc7d04ea57381d7ca591bcdfd.ctex"
+uid="uid://j8usst4fgubt"
+path="res://.godot/imported/UnitRefabricatorTopRight.png-19fdd7967255247a415e85ec2b538063.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/factories/SteelFurnace.png"
-dest_files=["res://.godot/imported/SteelFurnace.png-a80facddc7d04ea57381d7ca591bcdfd.ctex"]
+source_file="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopRight.png"
+dest_files=["res://.godot/imported/UnitRefabricatorTopRight.png-19fdd7967255247a415e85ec2b538063.ctex"]
 
 [params]
 

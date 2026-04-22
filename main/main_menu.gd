@@ -96,10 +96,14 @@ func _finish_loading() -> void:
 	if _loading_screen:
 		_loading_screen.queue_free()
 		_loading_screen = null
-	# Load saved keybindings
+	# Load saved keybindings and user settings (audio, graphics, game
+	# toggles). Settings are applied immediately where possible; entries
+	# that depend on the in-game scene graph (e.g. camera, BuildingSystem)
+	# stash in Engine metadata and get picked up by Main._ready.
 	var settings_script = load("res://main/settings_ui.gd")
 	if settings_script:
 		settings_script.load_keybindings()
+		settings_script.load_settings()
 	_load_textures()
 	_build_background()
 	_build_ui()

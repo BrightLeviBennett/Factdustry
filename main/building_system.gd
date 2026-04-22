@@ -1011,7 +1011,11 @@ func _process(_delta: float) -> void:
 			var tag := _get_transport_tag(main.selected_building)
 			if _transport_astar == null:
 				_build_transport_astar(tag)
-			_drag_cells = _compute_transport_path(_drag_start, preview_grid_pos, tag)
+			# When the drag starts on an existing belt, treat the drag as
+			# "extend this belt" rather than "cross it" — skip the auto
+			# junction/bridge substitution.
+			var skip_crossings: bool = _drag_starts_on_same_transport(_drag_start, tag)
+			_drag_cells = _compute_transport_path(_drag_start, preview_grid_pos, tag, skip_crossings)
 			_compute_path_rotations(_drag_cells)
 		else:
 			# --- Normal axis-locked line ---
@@ -1047,11 +1051,18 @@ func _process(_delta: float) -> void:
 			# perpendicular crossings and auto-bridge parallel crossings so
 			# the user doesn't have to hand-place those pieces. Uses the
 			# same helper the Alt-pathfind branch uses.
+			#
+			# IMPORTANT: skip the substitution when the drag STARTS on a
+			# same-type belt. Starting on a belt reads as "rotate this
+			# existing belt (and extend from it)", so we keep the raw line
+			# and let the overlay-rotation code (try_place_building's
+			# same-block rotation branch) handle direction changes.
 			if _is_transport_block(main.selected_building) and _drag_cells.size() > 1:
 				var tag2 := _get_transport_tag(main.selected_building)
-				_drag_cells = _apply_transport_crossings(_drag_cells, tag2)
-				if _is_directional(main.selected_building):
-					_compute_path_rotations(_drag_cells)
+				if not _drag_starts_on_same_transport(_drag_start, tag2):
+					_drag_cells = _apply_transport_crossings(_drag_cells, tag2)
+					if _is_directional(main.selected_building):
+						_compute_path_rotations(_drag_cells)
 
 	queue_redraw()
 
@@ -1557,6 +1568,14 @@ func _handle_work_click(click_pos: Vector2i) -> bool:
 		queue_redraw()
 		return true
 
+	# Click on a paused deconstruction → reverse direction. The block
+	# becomes a partial-build again at its current progress so the
+	# player can salvage a block they started tearing down by mistake.
+	if has_decon and paused.has(anchor):
+		if _reverse_decon_to_build(anchor):
+			queue_redraw()
+			return true
+
 	# Otherwise promote to front: unpause this one, auto-pause the
 	# previously-active anchor (it will resume when this finishes), and
 	# reorder so work picks up the new front on its next tick.
@@ -1573,6 +1592,52 @@ func _handle_work_click(click_pos: Vector2i) -> bool:
 		# Store the promoting anchor as the auto-resume trigger.
 		main.work_paused[active] = anchor
 	queue_redraw()
+	return true
+
+
+## Converts a paused deconstruct entry at `anchor` back into a partial
+## build at the same visible progress. Resources already refunded stay
+## refunded — the player has to pay them again to finish the build, but
+## the block isn't destroyed or re-queued from scratch.
+func _reverse_decon_to_build(anchor: Vector2i) -> bool:
+	if not ("building_deconstruct_progress" in main) or not main.building_deconstruct_progress.has(anchor):
+		return false
+	var entry: Dictionary = main.building_deconstruct_progress[anchor]
+	var block_id: StringName = entry["block_id"]
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return false
+
+	var d_pct: float = clampf(entry["progress"] / entry["build_time"], 0.0, 1.0)
+	var max_build_pct: float = float(entry.get("max_build_pct", 1.0))
+	var current_build_pct: float = clampf(max_build_pct * (1.0 - d_pct), 0.0, 1.0)
+
+	var full_time: float = data.build_time if data.build_time > 0 else 1.0
+	var new_progress: float = current_build_pct * full_time
+
+	var new_consumed := {}
+	for item_id in data.build_cost:
+		var rk: StringName = main._resolve_resource_key(str(item_id))
+		new_consumed[rk] = int(floor(float(data.build_cost[item_id]) * current_build_pct))
+
+	main.building_deconstruct_progress.erase(anchor)
+	if "building_resources_refunded" in main:
+		main.building_resources_refunded.erase(anchor)
+
+	main.building_build_progress[anchor] = new_progress
+	if "building_resources_consumed" in main:
+		main.building_resources_consumed[anchor] = new_consumed
+
+	if not main.work_order.has(anchor):
+		main.work_order.insert(0, anchor)
+	if "work_paused" in main and main.work_paused.has(anchor):
+		main.work_paused.erase(anchor)
+
+	# Rebuilding flips the power network state back; keep it in sync.
+	var ps := _power_sys_ref()
+	if ps and "_networks_dirty" in ps:
+		ps._networks_dirty = true
+
 	return true
 
 
@@ -1612,6 +1677,10 @@ func _unhandled_input(event: InputEvent) -> void:
 							return
 						elif click_data and click_data.tags.has("constructor"):
 							_open_world_menu("constructor", click_anchor)
+							get_viewport().set_input_as_handled()
+							return
+						elif click_data and click_data.tags.has("refabricator"):
+							_open_world_menu("refabricator", click_anchor)
 							get_viewport().set_input_as_handled()
 							return
 						elif click_data and click_data.id == &"archive":
@@ -1666,8 +1735,19 @@ func _unhandled_input(event: InputEvent) -> void:
 									"block_id": cell_block,
 									"rotation": cell_rot,
 								})
-						main.placement_rotation = old_rot
+						# Restore the selected block, but carry the drag's
+						# exit direction into placement_rotation so the next
+						# click continues that orientation. Gated on the
+						# drag actually moving and the block being
+						# directional — otherwise fall back to old rotation.
 						main.selected_building = old_building
+						var sticky_rot: int = old_rot
+						if _drag_cells.size() > 1 and _is_directional(old_building):
+							# Use the last cell's computed rotation as the
+							# authoritative drag-direction for future clicks.
+							var last_cell: Vector2i = _drag_cells[_drag_cells.size() - 1]
+							sticky_rot = _pathfind_rotations.get(last_cell, old_rot)
+						main.placement_rotation = sticky_rot
 
 					# Auto-link bridge pairs that were placed by the pathfinder
 					if not _pathfind_bridge_pairs.is_empty():
@@ -1761,7 +1841,12 @@ func _unhandled_input(event: InputEvent) -> void:
 										main.start_deconstruct(click_anchor)
 							else:
 								main.select_building(&"")
-					elif not ("world_paused" in main and main.world_paused):
+					else:
+						# Rect-demolish queues deconstructions for every
+						# Lumina building in the drag box. Safe to run
+						# while paused — start_deconstruct just registers
+						# the work entry; the drone won't actually pull
+						# them apart until the world resumes.
 						_demolish_rect(_demolish_start, _demolish_end)
 					queue_redraw()
 
@@ -1851,6 +1936,50 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 			var nd = TechTree.get_node_data(aid)
 			var aname: String = nd["name"] if nd else String(aid)
 			_world_menu_items.append({"id": aid, "icon": null, "name": aname})
+	elif type == "refabricator":
+		# First entry clears the selection (refab goes dormant).
+		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
+		# Collect only *tier-2* units — units whose tech-tree parent is
+		# itself a unit AND that parent has no unit-typed parents (i.e.
+		# the parent is tier-1). Tier-3+ units are upgrades for higher-
+		# tier refabricators and shouldn't clutter this menu.
+		# Unresearched units stay hidden regardless of the require_research
+		# placement toggle (that toggle governs block placement, not
+		# recipe discovery). TechTree.unlock_all → is_researched returns
+		# true, so sandbox mode still lists everything.
+		var is_unit_node := func(nid: StringName) -> bool:
+			return Registry.get_unit(nid) != null
+		var is_tier1_unit := func(nid: StringName) -> bool:
+			if not is_unit_node.call(nid):
+				return false
+			var pts: Array = TechTree.nodes.get(nid, {}).get("parents", [])
+			for pid in pts:
+				if is_unit_node.call(pid):
+					return false
+			return true
+		var seen := {}
+		for node_id in TechTree.nodes:
+			var unit_res = Registry.get_unit(node_id)
+			if unit_res == null:
+				continue
+			var parents: Array = TechTree.nodes[node_id].get("parents", [])
+			var has_t1_unit_parent := false
+			for parent_id in parents:
+				if is_tier1_unit.call(parent_id):
+					has_t1_unit_parent = true
+					break
+			if not has_t1_unit_parent:
+				continue
+			if not TechTree.is_researched(node_id):
+				continue
+			if seen.has(node_id):
+				continue
+			seen[node_id] = true
+			_world_menu_items.append({
+				"id": node_id,
+				"icon": unit_res.icon,
+				"name": unit_res.display_name,
+			})
 
 	_world_menu_open = true
 	queue_redraw()
@@ -1881,6 +2010,26 @@ func _apply_world_menu_selection(index: int) -> void:
 				_logistics.constructor_state[_world_menu_pos]["phase"] = "collecting"
 	elif _world_menu_type == "archive":
 		archive_holdings[_world_menu_pos] = selected_id
+	elif _world_menu_type == "refabricator":
+		if _logistics:
+			if not _logistics.refabricator_state.has(_world_menu_pos):
+				_logistics.refabricator_state[_world_menu_pos] = {
+					"phase": "idle",
+					"in_unit_id": &"",
+					"timer": 0.0,
+					"out_unit_id": &"",
+					"selected_t2": &"",
+				}
+			var rs: Dictionary = _logistics.refabricator_state[_world_menu_pos]
+			# Changing selection while mid-process would be confusing —
+			# clear out any work-in-progress so the new recipe starts
+			# fresh. Items already in the buffer stay (they transfer to
+			# the new recipe if keys overlap, otherwise accumulate).
+			rs["selected_t2"] = selected_id
+			rs["in_unit_id"] = &""
+			rs["out_unit_id"] = &""
+			rs["timer"] = 0.0
+			rs["phase"] = "idle"
 
 	_close_world_menu()
 
@@ -2072,6 +2221,126 @@ func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: floa
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Draws the refabricator: base sprite plus per-side "input" overlays that
+## light up when a payload conveyor is adjacent on that side of the
+## building. Each overlay texture rotates with the base.
+func _draw_refabricator(origin: Vector2i, data: BlockData, top_pos: Vector2, w: float, h: float, rot: int) -> void:
+	_draw_block_texture(data.base_sprite, top_pos, w, h, rot)
+	_draw_refabricator_unit_layer(origin, top_pos, w, h, rot)
+	var gsz: Vector2i = data.grid_size
+	var back_dir: int = (rot + 2) % 4
+	var left_dir: int = (rot + 3) % 4
+	var right_dir: int = (rot + 1) % 4
+	var back_fed: bool = _side_has_payload_conveyor(origin, gsz, back_dir)
+	var left_fed: bool = _side_has_payload_conveyor(origin, gsz, left_dir)
+	var right_fed: bool = _side_has_payload_conveyor(origin, gsz, right_dir)
+	# If no side has a payload conveyor yet, fall back to the TopBottom
+	# overlay as the default idle frame so the block still reads as a
+	# refabricator rather than a bare base sprite.
+	var any_fed: bool = back_fed or left_fed or right_fed
+	if not any_fed:
+		if data.feed_overlay_back:
+			_draw_block_texture(data.feed_overlay_back, top_pos, w, h, rot)
+	else:
+		if data.feed_overlay_back and back_fed:
+			_draw_block_texture(data.feed_overlay_back, top_pos, w, h, rot)
+		if data.feed_overlay_left and left_fed:
+			_draw_block_texture(data.feed_overlay_left, top_pos, w, h, rot)
+		if data.feed_overlay_right and right_fed:
+			_draw_block_texture(data.feed_overlay_right, top_pos, w, h, rot)
+
+
+## Draws the unit currently held inside a refabricator — the tier-1 input
+## during collecting/processing, or the tier-2 output while it waits to
+## eject. Mirrors the visual style of `_draw_fabricator_unit_layer` but
+## reads from `refabricator_state` instead of `factory_buffers`.
+func _draw_refabricator_unit_layer(origin: Vector2i, top_pos: Vector2, w: float, h: float, rot: int) -> void:
+	if _logistics == null or not _logistics.refabricator_state.has(origin):
+		return
+	var state: Dictionary = _logistics.refabricator_state[origin]
+	var phase: String = String(state.get("phase", ""))
+	var unit_id: StringName = &""
+	match phase:
+		"collecting", "processing":
+			unit_id = StringName(state.get("in_unit_id", &""))
+		"outputting":
+			unit_id = StringName(state.get("out_unit_id", &""))
+	if unit_id == &"":
+		return
+	var unit_data = Registry.get_unit(unit_id)
+	if unit_data == null:
+		return
+	var center: Vector2 = top_pos + Vector2(w / 2.0, h / 2.0)
+	var dir_vec: Vector2
+	match rot:
+		0: dir_vec = Vector2(1, 0)
+		1: dir_vec = Vector2(0, 1)
+		2: dir_vec = Vector2(-1, 0)
+		3: dir_vec = Vector2(0, -1)
+		_: dir_vec = Vector2(1, 0)
+	var base_sz: float = minf(w, h) * 0.5
+	var unit_angle: float = rot * PI / 2.0
+	var unit_pos: Vector2 = center
+	var alpha_mul: float = 1.0
+	if phase == "processing":
+		var timer: float = float(state.get("timer", 0.0))
+		var pt: float = 6.0
+		var block = Registry.get_block(main.placed_buildings.get(origin, &""))
+		if block != null and block.production_time > 0:
+			pt = block.production_time
+		var reveal_pct: float = clampf(1.0 - timer / pt, 0.0, 1.0)
+		alpha_mul = 0.4 + 0.6 * reveal_pct
+	elif phase == "outputting":
+		unit_pos = center + dir_vec * (maxf(w, h) * 0.5 - base_sz * 0.25)
+
+	if unit_data.base_sprite != null or unit_data.head_sprite != null:
+		if unit_data.base_sprite:
+			var bt_size: Vector2 = _fit_texture_size(unit_data.base_sprite, base_sz)
+			draw_set_transform(unit_pos, 0.0)
+			draw_texture_rect(unit_data.base_sprite, Rect2(-bt_size * 0.5, bt_size), false, Color(1, 1, 1, alpha_mul))
+			draw_set_transform(Vector2.ZERO, 0.0)
+		if unit_data.head_sprite:
+			var h_size: Vector2 = _fit_texture_size(unit_data.head_sprite, base_sz)
+			draw_set_transform(unit_pos, unit_angle + PI / 2.0)
+			draw_texture_rect(unit_data.head_sprite, Rect2(-h_size * 0.5, h_size), false, Color(1, 1, 1, alpha_mul))
+			draw_set_transform(Vector2.ZERO, 0.0)
+	elif unit_data.icon != null:
+		var i_size: Vector2 = _fit_texture_size(unit_data.icon, base_sz)
+		draw_set_transform(unit_pos, unit_angle + PI / 2.0)
+		draw_texture_rect(unit_data.icon, Rect2(-i_size * 0.5, i_size), false, Color(1, 1, 1, alpha_mul))
+		draw_set_transform(Vector2.ZERO, 0.0)
+
+
+## Returns true if any cell along the `dir` edge of the footprint at `origin`
+## contains a payload/freight conveyor. `dir` uses the building convention:
+## 0=east, 1=south, 2=west, 3=north.
+func _side_has_payload_conveyor(origin: Vector2i, gsz: Vector2i, dir: int) -> bool:
+	var cells: Array[Vector2i] = []
+	match dir:
+		0:
+			for y in range(gsz.y):
+				cells.append(Vector2i(origin.x + gsz.x, origin.y + y))
+		1:
+			for x in range(gsz.x):
+				cells.append(Vector2i(origin.x + x, origin.y + gsz.y))
+		2:
+			for y in range(gsz.y):
+				cells.append(Vector2i(origin.x - 1, origin.y + y))
+		3:
+			for x in range(gsz.x):
+				cells.append(Vector2i(origin.x + x, origin.y - 1))
+	for c in cells:
+		if not main.placed_buildings.has(c):
+			continue
+		var nb_anchor: Vector2i = main.building_origins.get(c, c)
+		var d = Registry.get_block(main.placed_buildings[nb_anchor])
+		if d == null:
+			continue
+		if (d.tags.has("payload") or d.tags.has("freight")) and d.transport_speed > 0:
+			return true
+	return false
+
+
 ## Draws the unit being fabricated between a fabricator's base and top sprites.
 ## Handles three visual phases (from factory_buffers state):
 ##   - "processing": left-to-right construction reveal animation
@@ -2247,6 +2516,7 @@ func _is_directional(block_id: StringName) -> bool:
 		or data.tags.has("payload_loader") or data.tags.has("freight_loader") \
 		or data.tags.has("payload_unloader") or data.tags.has("freight_unloader") \
 		or data.tags.has("archive_scanner") \
+		or data.tags.has("fabricator") \
 		or not data.side_inputs.is_empty() or not data.side_outputs.is_empty()
 
 
@@ -2324,7 +2594,9 @@ func _find_junction_for_type(transport_tag: String) -> StringName:
 ## When the path crosses an existing belt:
 ##   - Perpendicular crossing → replace the existing belt with a junction
 ##   - Parallel or same-direction → insert bridge pair (before + after) and link them
-func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String) -> Array[Vector2i]:
+## When `skip_crossings` is true the raw path is returned as-is; used when
+## the drag starts on an existing same-tag belt (treat as direction change).
+func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String, skip_crossings: bool = false) -> Array[Vector2i]:
 	_pathfind_bridge_cells.clear()
 	if _transport_astar == null:
 		_build_transport_astar(transport_tag)
@@ -2342,7 +2614,22 @@ func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String
 	for p in id_path:
 		raw.append(Vector2i(int(p.x), int(p.y)))
 
+	if skip_crossings:
+		return raw
 	return _apply_transport_crossings(raw, transport_tag)
+
+
+## Returns true when `start` is a cell already occupied by a same-type
+## transport. Drag-placing that starts from an existing belt is interpreted
+## as "rotate the belt at this cell and extend from it", NOT as "cross
+## the belt with junctions", so the auto-substitution is skipped.
+func _drag_starts_on_same_transport(start: Vector2i, transport_tag: String) -> bool:
+	if not main.placed_buildings.has(start):
+		return false
+	var existing = Registry.get_block(main.placed_buildings[start])
+	if existing == null:
+		return false
+	return existing.tags.has(transport_tag)
 
 
 ## Walks a transport path (in order) and rewrites it so that any cell that
@@ -2350,9 +2637,18 @@ func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String
 ## crossing) or a bridge pair (same-axis crossing). The substitutions land
 ## in `_pathfind_bridge_cells` / `_pathfind_bridge_pairs` so the commit loop
 ## can pick them up. Callers are expected to have cleared those dicts first.
+##
+## Junction / bridge substitutions are only used when the corresponding
+## block has been researched; if the player hasn't unlocked the junction
+## yet, a perpendicular crossing falls back to overlay (old belt stays).
+## Same for bridges — without the research we won't try to span obstacles.
 func _apply_transport_crossings(raw: Array[Vector2i], transport_tag: String) -> Array[Vector2i]:
 	var bridge_id := _find_bridge_for_type(transport_tag)
 	var junction_id := _find_junction_for_type(transport_tag)
+	if bridge_id != &"" and not TechTree.is_researched(bridge_id):
+		bridge_id = &""
+	if junction_id != &"" and not TechTree.is_researched(junction_id):
+		junction_id = &""
 
 	var result: Array[Vector2i] = []
 	var i := 0
@@ -2397,33 +2693,33 @@ func _apply_transport_crossings(raw: Array[Vector2i], transport_tag: String) -> 
 					result.append(gp)
 			elif bridge_id != &"":
 				# Non-transport obstacle (or a different transport type) in the
-				# drag path — bridge over it. The cell BEFORE becomes a bridge
-				# start, the cell AFTER becomes a bridge end, and the crossing
-				# cell(s) are skipped entirely.
-				if result.size() > 0:
-					_pathfind_bridge_cells[result[-1]] = bridge_id
-				# Skip consecutive occupied cells until we find an empty one
-				# (the bridge may need to span multiple obstacle tiles).
+				# drag path — bridge over it. We need BOTH a placeable start
+				# cell (must come before the obstacle, can't be another
+				# substitution) AND a placeable end cell past the obstacle.
+				# If either is missing, skip the obstacle silently instead of
+				# emitting a dangling bridge half.
+				var can_start: bool = result.size() > 0 \
+					and not _pathfind_bridge_cells.has(result[-1])
+				# Scan forward past any consecutive obstacles to find the
+				# first cell we could land the bridge on. A same-tag transport
+				# counts as a valid landing (we exit the obstacle span into
+				# existing belt).
 				var bridge_end := i + 1
 				while bridge_end < raw.size() and main.placed_buildings.has(raw[bridge_end]):
 					var ed = Registry.get_block(main.placed_buildings.get(raw[bridge_end], &""))
-					# A same-tag transport is a valid landing cell, not an obstacle.
 					if ed != null and ed.tags.has(transport_tag):
 						break
 					bridge_end += 1
-				if bridge_end < raw.size():
+				var can_end: bool = bridge_end < raw.size()
+				if can_start and can_end:
+					_pathfind_bridge_cells[result[-1]] = bridge_id
 					_pathfind_bridge_cells[raw[bridge_end]] = bridge_id
-					if result.size() > 0:
-						_pathfind_bridge_pairs.append([result[-1], raw[bridge_end]])
+					_pathfind_bridge_pairs.append([result[-1], raw[bridge_end]])
 					i = bridge_end
 					result.append(raw[i])
-				else:
-					# No landing cell available — fall back to just skipping
-					# the obstacle cell; placement will fail there harmlessly.
-					pass
-			else:
-				# Obstacle but no bridge block defined — skip (placement fails).
-				pass
+				# Otherwise: silently skip the obstacle cells. Placement at
+				# those cells would fail anyway; no dangling bridge stub.
+			# Different-tag transport with no bridge available: silently skip.
 		else:
 			result.append(gp)
 		i += 1
@@ -2441,6 +2737,15 @@ func _compute_path_rotations(path: Array[Vector2i]) -> void:
 			var idx: int = DIR_VECTORS.find(delta)
 			if idx >= 0:
 				rot = idx
+			else:
+				# Delta isn't a unit vector — happens when a bridge span is
+				# collapsed from raw path → result. Pick the dominant axis
+				# direction so the bridge start still faces toward its pair
+				# instead of defaulting to 0 (east).
+				if absi(delta.x) >= absi(delta.y):
+					rot = 0 if delta.x > 0 else 2
+				else:
+					rot = 1 if delta.y > 0 else 3
 		elif i > 0:
 			# Last cell: same rotation as previous
 			rot = _pathfind_rotations.get(path[i - 1], 0)
@@ -2918,6 +3223,10 @@ func _draw_placed_buildings() -> void:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
 				_draw_fabricator_unit_layer(grid_pos, data, top_pos, width, height, rot)
 				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
+			# Refabricator: base + per-side input overlays reflecting
+			# adjacent payload conveyors.
+			elif data and data.tags.has("refabricator") and data.base_sprite:
+				_draw_refabricator(grid_pos, data, top_pos, width, height, rot)
 			# Faction-layered rendering (cores): base sprite + faction overlay
 			elif data and data.base_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
@@ -2932,11 +3241,12 @@ func _draw_placed_buildings() -> void:
 					_draw_block_texture(data.derelict_overlay, overlay_pos, ow, oh, rot)
 				elif data.lumina_overlay:
 					_draw_block_texture(data.lumina_overlay, overlay_pos, ow, oh, rot)
-			# Regular icon texture
-			elif data and data.icon:
+			# Top sprite only (single-layer world texture)
+			elif data and data.top_sprite:
 				var draw_rot: int = (rot + 1) % 4 if data.tags.has("shaft") else rot
-				_draw_block_texture(data.icon, top_pos, width, height, draw_rot)
-			# Fallback: colored rectangle
+				_draw_block_texture(data.top_sprite, top_pos, width, height, draw_rot)
+			# Fallback: colored rectangle. data.icon is intentionally NOT
+			# used here — it's reserved for UI (HUD/tooltips) only.
 			else:
 				var color := _get_block_color(block_id)
 				draw_rect(top_rect, color, true)
@@ -3011,19 +3321,24 @@ func _draw_placed_buildings() -> void:
 			var b_top_pos: Vector2 = b_world_pos + b_offset
 
 			var is_active_build: bool = has_active_work and active_work_anchor == grid_pos
-			if is_active_build:
+			if build_pct > 0.0:
+				# Partially built: draw the dark overlay only on the unbuilt
+				# portion so the reveal stays visible whether this anchor is
+				# actively being worked on or just paused mid-build. The
+				# moving yellow line only renders when actively building.
 				var reveal_x: float = b_width * build_pct
 				var unbuilt_rect := Rect2(
 					b_top_pos.x + reveal_x, b_top_pos.y,
 					b_width - reveal_x, b_height
 				)
 				draw_rect(unbuilt_rect, Color(0, 0, 0, 0.65), true)
-				var line_x: float = b_top_pos.x + reveal_x
-				draw_line(
-					Vector2(line_x, b_top_pos.y),
-					Vector2(line_x, b_top_pos.y + b_height),
-					Color(1.0, 0.9, 0.2, 0.9), 2.0
-				)
+				if is_active_build:
+					var line_x: float = b_top_pos.x + reveal_x
+					draw_line(
+						Vector2(line_x, b_top_pos.y),
+						Vector2(line_x, b_top_pos.y + b_height),
+						Color(1.0, 0.9, 0.2, 0.9), 2.0
+					)
 			else:
 				# Pending (scheduled, not yet building): subtle dim + a
 				# soft dashed-look outline. Visually in the same family
@@ -3061,13 +3376,20 @@ func _draw_placed_buildings() -> void:
 					draw_set_transform(centre_s, angle_s)
 					draw_texture_rect(texture_s, Rect2(Vector2(-w_s / 2.0, -h_s / 2.0), Vector2(w_s, h_s)), false, tint_s)
 					draw_set_transform(Vector2.ZERO, 0.0)
-			elif new_data.icon:
-				var draw_rot: int = new_rot if _is_directional(new_id) else 0
-				_draw_block_texture(new_data.icon, top_pos_s, w_s, h_s, draw_rot, tint_s)
 			else:
-				var col_s: Color = _get_block_color(new_id)
-				col_s.a = 0.45
-				draw_rect(Rect2(top_pos_s, Vector2(w_s, h_s)), col_s, true)
+				# Prefer world-facing top/base sprites. data.icon is UI-only.
+				var swap_tex: Texture2D = null
+				if new_data.top_sprite:
+					swap_tex = new_data.top_sprite
+				elif new_data.base_sprite:
+					swap_tex = new_data.base_sprite
+				if swap_tex:
+					var draw_rot: int = new_rot if _is_directional(new_id) else 0
+					_draw_block_texture(swap_tex, top_pos_s, w_s, h_s, draw_rot, tint_s)
+				else:
+					var col_s: Color = _get_block_color(new_id)
+					col_s.a = 0.45
+					draw_rect(Rect2(top_pos_s, Vector2(w_s, h_s)), col_s, true)
 			draw_rect(Rect2(top_pos_s, Vector2(w_s, h_s)), Color(1, 1, 1, 0.35), false, 1.0)
 
 	# --- PASS 2.3: Deconstruct animation overlay (right-to-left, red line) ---
@@ -3088,26 +3410,32 @@ func _draw_placed_buildings() -> void:
 			var d_top_pos: Vector2 = d_world_pos + d_offset
 
 			var is_active_decon: bool = has_active_work and active_work_anchor == grid_pos
+			var d_pct: float = clampf(d_entry["progress"] / d_entry["build_time"], 0.0, 1.0)
+			var max_pct: float = float(d_entry.get("max_build_pct", 1.0))
+			var line_pct: float = max_pct * (1.0 - d_pct)
+			var line_x: float = d_top_pos.x + d_width * line_pct
+			if line_pct < max_pct:
+				var dark_left: float = line_x
+				var dark_right: float = d_top_pos.x + d_width * max_pct
+				draw_rect(Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height), Color(0, 0, 0, 0.65), true)
+			if max_pct < 1.0:
+				var never_left: float = d_top_pos.x + d_width * max_pct
+				draw_rect(Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height), Color(0, 0, 0, 0.65), true)
+			# Moving red line only while actively deconstructing. Paused
+			# entries freeze the reveal at its current position so the
+			# player can see exactly how far decon has gotten.
 			if is_active_decon:
-				var d_pct: float = clampf(d_entry["progress"] / d_entry["build_time"], 0.0, 1.0)
-				var max_pct: float = float(d_entry.get("max_build_pct", 1.0))
-				var line_pct: float = max_pct * (1.0 - d_pct)
-				var line_x: float = d_top_pos.x + d_width * line_pct
-				if line_pct < max_pct:
-					var dark_left: float = line_x
-					var dark_right: float = d_top_pos.x + d_width * max_pct
-					draw_rect(Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height), Color(0, 0, 0, 0.65), true)
-				if max_pct < 1.0:
-					var never_left: float = d_top_pos.x + d_width * max_pct
-					draw_rect(Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height), Color(0, 0, 0, 0.65), true)
 				draw_line(
 					Vector2(line_x, d_top_pos.y),
 					Vector2(line_x, d_top_pos.y + d_height),
 					Color(0.9, 0.2, 0.2, 0.9), 2.0
 				)
 			else:
-				draw_rect(Rect2(d_top_pos, Vector2(d_width, d_height)), Color(0.3, 0, 0, 0.4), true)
-				draw_rect(Rect2(d_top_pos, Vector2(d_width, d_height)), Color(0.9, 0.2, 0.2, 0.4), false, 1.0)
+				# Tint the still-intact (already-built) area a faint red so
+				# paused decons are distinguishable from normal buildings.
+				var intact_w: float = line_x - d_top_pos.x
+				if intact_w > 0.0:
+					draw_rect(Rect2(d_top_pos.x, d_top_pos.y, intact_w, d_height), Color(0.9, 0.2, 0.2, 0.18), true)
 
 	# --- PASS 2.5: Faction tint on enemy buildings ---
 	if any_non_lumina:
@@ -3318,9 +3646,27 @@ func _draw_paused_queue() -> void:
 		else:
 			var q_rot: int = rotation if _is_directional(block_id) else 0
 			var tint := Color(1, 1, 1, 0.45)
-			if data.icon:
-				_draw_block_texture(data.icon, top_pos, w, h, q_rot, tint)
-			else:
+			# Prefer world-facing top/base sprites. data.icon is UI-only.
+			var q_tex: Texture2D = null
+			var q_drew_layered := false
+			# Fabricators/refabricators layer base + top so the block reads
+			# as a whole building, not just its overlay.
+			if data.base_sprite and data.top_sprite:
+				_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
+				_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint)
+				q_drew_layered = true
+			elif data.base_sprite and (data.feed_overlay_back or data.feed_overlay_left or data.feed_overlay_right):
+				_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
+				if data.feed_overlay_back:
+					_draw_block_texture(data.feed_overlay_back, top_pos, w, h, q_rot, tint)
+				q_drew_layered = true
+			elif data.top_sprite:
+				q_tex = data.top_sprite
+			elif data.base_sprite:
+				q_tex = data.base_sprite
+			if q_tex:
+				_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint)
+			elif not q_drew_layered:
 				var color: Color = _get_block_color(block_id)
 				color.a = 0.35
 				draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
@@ -3365,18 +3711,29 @@ func _draw_preview() -> void:
 				preview_rots[cell] = main.placement_rotation
 
 		for cell in _drag_cells:
-			var cell_valid := _can_place_at(cell, main.selected_building)
+			# If the crossings helper decided this cell becomes a junction or
+			# bridge, preview that specific block instead of the selected one
+			# so the player sees what they'll actually get.
+			var cell_block_id: StringName = main.selected_building
+			if _pathfind_bridge_cells.has(cell):
+				cell_block_id = _pathfind_bridge_cells[cell]
+			var cell_data: BlockData = Registry.get_block(cell_block_id)
+			var cell_is_belt: bool = cell_block_id == &"conveyor_belt" and not _belt_textures.is_empty()
+
+			var cell_valid := _can_place_at(cell, cell_block_id)
 			var cell_ok := cell_valid  # No affordability gate — progressive consumption
 
 			var cell_world: Vector2 = main.grid_to_world(cell)
-			var cell_offset := _get_top_offset(cell_world) * _get_height_scale(main.selected_building)
-			var w: float = float(main.GRID_SIZE) * grid_w
-			var h: float = float(main.GRID_SIZE) * grid_h
+			var cell_offset := _get_top_offset(cell_world) * _get_height_scale(cell_block_id)
+			var cell_grid_w: int = cell_data.grid_size.x if cell_data else grid_w
+			var cell_grid_h: int = cell_data.grid_size.y if cell_data else grid_h
+			var w: float = float(main.GRID_SIZE) * cell_grid_w
+			var h: float = float(main.GRID_SIZE) * cell_grid_h
 			var cell_pos: Vector2 = cell_world + cell_offset
 
 			# Draw belt texture preview or fallback rectangle
-			if is_belt:
-				var info: Dictionary = _get_belt_draw_info_with_preview(cell, preview_set, preview_rots, main.selected_building)
+			if cell_is_belt:
+				var info: Dictionary = _get_belt_draw_info_with_preview(cell, preview_set, preview_rots, cell_block_id)
 				var texture: Texture2D = info["texture"]
 				var angle: float = info["angle"]
 				if texture:
@@ -3386,44 +3743,51 @@ func _draw_preview() -> void:
 					draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
 					draw_set_transform(Vector2.ZERO, 0.0)
 				else:
-					var color: Color = base_color if cell_ok else Color(1, 0, 0, 0.4)
-					color.a = 0.5
-					draw_rect(Rect2(cell_pos, Vector2(w, h)), color, true)
+					var cell_color: Color = _get_block_color(cell_block_id) if cell_ok else Color(1, 0, 0, 0.4)
+					cell_color.a = 0.5
+					draw_rect(Rect2(cell_pos, Vector2(w, h)), cell_color, true)
 			else:
-				var cell_rot: int = preview_rots.get(cell, main.placement_rotation) if is_dir else 0
+				var cell_rot: int = preview_rots.get(cell, main.placement_rotation) if _is_directional(cell_block_id) else 0
 				var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
-				# Try texture first
-				if data and data.icon:
-					var draw_rot: int = (cell_rot + 1) % 4 if data.tags.has("shaft") else cell_rot
-					_draw_block_texture(data.icon, cell_pos, w, h, draw_rot, tint)
+				# Prefer world-facing top/base sprites. `icon` is UI-only.
+				var cell_tex: Texture2D = null
+				if cell_data:
+					if cell_data.top_sprite:
+						cell_tex = cell_data.top_sprite
+					elif cell_data.base_sprite:
+						cell_tex = cell_data.base_sprite
+				if cell_tex:
+					var draw_rot: int = (cell_rot + 1) % 4 if cell_data.tags.has("shaft") else cell_rot
+					_draw_block_texture(cell_tex, cell_pos, w, h, draw_rot, tint)
 				else:
 					var color: Color
 					if cell_ok:
-						color = base_color
+						color = _get_block_color(cell_block_id)
 						color.a = 0.5
 					else:
 						color = Color(1, 0, 0, 0.4)
 					draw_rect(Rect2(cell_pos, Vector2(w, h)), color, true)
 					draw_rect(Rect2(cell_pos, Vector2(w, h)), color.lightened(0.2), false, 2.0)
 
-			if is_dir and not is_belt and not (data and data.icon):
+			if _is_directional(cell_block_id) and not cell_is_belt and not (cell_data and (cell_data.top_sprite or cell_data.base_sprite)):
 				var cell_rot: int = preview_rots.get(cell, main.placement_rotation)
 				var center: Vector2 = cell_world + Vector2(
-					main.GRID_SIZE * grid_w / 2.0,
-					main.GRID_SIZE * grid_h / 2.0
+					main.GRID_SIZE * cell_grid_w / 2.0,
+					main.GRID_SIZE * cell_grid_h / 2.0
 				) + cell_offset
 				var arrow_color = Color(1, 1, 1, 0.8) if cell_ok else Color(1, 0.3, 0.3, 0.6)
 				_draw_direction_arrow(center, cell_rot, arrow_color)
 
-			# Drill heads preview: falls back to "N" when placement is invalid.
-			if data and data.tags.has("drill_heads"):
+			# Drill/crusher heads preview: only the selected block shows
+			# these, not junction/bridge substitutions.
+			if cell_block_id == main.selected_building and data and data.tags.has("drill_heads"):
 				var dh_rot: int = preview_rots.get(cell, main.placement_rotation)
 				var dh_variant: String = "N"
 				if cell_ok:
 					dh_variant = _get_drill_head_variant(cell, dh_rot, data.grid_size)
 				var dh_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
 				_draw_drill_heads(cell, dh_rot, data.grid_size, dh_variant, main.selected_building, dh_tint)
-			if data and data.tags.has("crusher_heads"):
+			if cell_block_id == main.selected_building and data and data.tags.has("crusher_heads"):
 				var ch_rot: int = preview_rots.get(cell, main.placement_rotation)
 				var ch_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
 				_draw_crusher_heads(cell, ch_rot, data.grid_size, main.selected_building, ch_tint, false)
@@ -3464,11 +3828,30 @@ func _draw_preview() -> void:
 	else:
 		var hover_rot: int = main.placement_rotation if is_dir else 0
 		var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
-		# Try texture first
-		if data and data.icon:
+		# Prefer the world-facing top_sprite; data.icon is UI-only and
+		# intentionally skipped here.
+		var hover_tex: Texture2D = null
+		var hover_layered := false
+		if data and data.base_sprite and data.top_sprite:
+			var draw_rot_l: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
+			_draw_block_texture(data.base_sprite, top_pos, width, height, draw_rot_l, tint)
+			_draw_block_texture(data.top_sprite, top_pos, width, height, draw_rot_l, tint)
+			hover_layered = true
+		elif data and data.base_sprite and (data.feed_overlay_back or data.feed_overlay_left or data.feed_overlay_right):
+			var draw_rot_l: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
+			_draw_block_texture(data.base_sprite, top_pos, width, height, draw_rot_l, tint)
+			if data.feed_overlay_back:
+				_draw_block_texture(data.feed_overlay_back, top_pos, width, height, draw_rot_l, tint)
+			hover_layered = true
+		elif data:
+			if data.top_sprite:
+				hover_tex = data.top_sprite
+			elif data.base_sprite:
+				hover_tex = data.base_sprite
+		if hover_tex:
 			var draw_rot: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
-			_draw_block_texture(data.icon, top_pos, width, height, draw_rot, tint)
-		else:
+			_draw_block_texture(hover_tex, top_pos, width, height, draw_rot, tint)
+		elif not hover_layered:
 			if cell_ok:
 				color.a = 0.5
 			else:
@@ -3476,7 +3859,7 @@ func _draw_preview() -> void:
 			draw_rect(Rect2(top_pos, Vector2(width, height)), color, true)
 			draw_rect(Rect2(top_pos, Vector2(width, height)), color.lightened(0.2), false, 2.0)
 
-	if is_dir and not is_belt_hover and not (data and data.icon):
+	if is_dir and not is_belt_hover and not (data and (data.top_sprite or data.base_sprite)):
 		var center = world_pos + Vector2(
 			main.GRID_SIZE * grid_w / 2.0,
 			main.GRID_SIZE * grid_h / 2.0

@@ -51,6 +51,18 @@ var turret_cooldowns := {}
 # Key = Vector2i grid pos of a turret, Value = float (current angle in radians)
 var turret_angles := {}
 
+# Multi-barrel turrets track a per-barrel cooldown instead of the single
+# `turret_cooldowns[grid_pos]` float. Alternating fire is achieved by
+# staggering the initial cooldowns across the array (barrel i starts at
+# attack_speed * i / N), then every tick the first barrel with cooldown
+# <= 0 gets to fire and is reset to the full cooldown. With N=2 that
+# produces an exact "left, right, left, right" cadence at 2× the rate.
+# Key = Vector2i (turret anchor), Value = Array[float].
+var turret_barrel_cooldowns := {}
+# Per-barrel fire flash timer, drawn as a brief muzzle highlight so the
+# player can tell which barrel just shot. Value = Array[float].
+var turret_barrel_fire_flash := {}
+
 # --- MANUAL CONTROL ---
 ## Set by UnitManager when the player manually controls a turret (Ctrl+click).
 ## When set, that turret skips auto-targeting and is aimed/fired by the player.
@@ -271,6 +283,22 @@ func _update_turrets(delta: float) -> void:
 			turret_cooldowns[grid_pos] = 0.0
 		if not turret_angles.has(grid_pos):
 			turret_angles[grid_pos] = 0.0
+		var barrel_count: int = maxi(data.barrel_count, 1)
+		if barrel_count > 1:
+			if not turret_barrel_cooldowns.has(grid_pos):
+				# Stagger initial cooldowns so barrels fire in sequence:
+				# barrel 0 ready immediately, barrel i offset by i/N of a
+				# full attack_speed into its cycle. That gives perfect
+				# alternation once steady-state kicks in.
+				var init_arr: Array[float] = []
+				for i in range(barrel_count):
+					init_arr.append(data.attack_speed * float(i) / float(barrel_count))
+				turret_barrel_cooldowns[grid_pos] = init_arr
+			if not turret_barrel_fire_flash.has(grid_pos):
+				var flash_arr: Array[float] = []
+				for _i in range(barrel_count):
+					flash_arr.append(0.0)
+				turret_barrel_fire_flash[grid_pos] = flash_arr
 
 		# Electrical power: scale the cooldown countdown by network
 		# efficiency, so an over-drawn grid fires slower rather than not
@@ -281,6 +309,13 @@ func _update_turrets(delta: float) -> void:
 			if power_sys_t:
 				turret_power_eff = power_sys_t.get_electrical_efficiency(grid_pos)
 		turret_cooldowns[grid_pos] -= delta * turret_power_eff
+		# Tick every barrel's cooldown and fire-flash timer.
+		if barrel_count > 1:
+			var bcd: Array = turret_barrel_cooldowns[grid_pos]
+			var bff: Array = turret_barrel_fire_flash[grid_pos]
+			for i in range(bcd.size()):
+				bcd[i] = float(bcd[i]) - delta * turret_power_eff
+				bff[i] = maxf(float(bff[i]) - delta, 0.0)
 		if turret_power_eff <= 0.0:
 			continue
 
@@ -324,7 +359,18 @@ func _update_turrets(delta: float) -> void:
 		var current_angle = turret_angles[grid_pos]
 		turret_angles[grid_pos] = lerp_angle(current_angle, target_angle, delta * 8.0)
 
-		if turret_cooldowns[grid_pos] > 0:
+		# Multi-barrel: any barrel with a cooldown <= 0 is ready to fire.
+		# Single-barrel falls back to the original scalar cooldown.
+		var ready_barrel: int = -1
+		if barrel_count > 1:
+			var bcd_r: Array = turret_barrel_cooldowns[grid_pos]
+			for i in range(bcd_r.size()):
+				if float(bcd_r[i]) <= 0.0:
+					ready_barrel = i
+					break
+			if ready_barrel < 0:
+				continue
+		elif turret_cooldowns[grid_pos] > 0:
 			continue
 
 		# --- Ammo check: if turret has ammo_types, it needs resources to fire ---
@@ -396,19 +442,60 @@ func _update_turrets(delta: float) -> void:
 			continue
 
 		# Fire!
-		turret_cooldowns[grid_pos] = data.attack_speed * fire_reload_mult
+		var full_cooldown: float = data.attack_speed * fire_reload_mult
+		if barrel_count > 1:
+			# Reset just this barrel; the other barrels keep their own
+			# cooldowns so the stagger holds across fires.
+			var bcd_w: Array = turret_barrel_cooldowns[grid_pos]
+			bcd_w[ready_barrel] = full_cooldown
+			var bff_w: Array = turret_barrel_fire_flash[grid_pos]
+			bff_w[ready_barrel] = 0.1
+			# Also keep the scalar cooldown in sync with the soonest-
+			# ready barrel so non-firing code paths (tooltip, analytics)
+			# see the right value.
+			var min_cd: float = full_cooldown
+			for v in bcd_w:
+				min_cd = minf(min_cd, float(v))
+			turret_cooldowns[grid_pos] = maxf(min_cd, 0.0)
+		else:
+			turret_cooldowns[grid_pos] = full_cooldown
 
-		# Spawn projectile from the barrel TIP, not the building center
-		var barrel_length = main.GRID_SIZE * 0.4
-		var fire_pos = turret_world + Vector2.from_angle(turret_angles[grid_pos]) * barrel_length
+		# Spawn projectile from the rendered barrel TIP. The head sprite is
+		# drawn with its tip at local (lateral, -tex_size.y + 14) before
+		# being rotated by aim+π/2 — mirror that math here so the bullet
+		# comes out of the actual muzzle no matter which barrel just fired
+		# or how big the head texture is. Fallback to GRID_SIZE*0.4 when
+		# the turret has no head sprite (legacy shape-only turrets).
+		var aim_dir := Vector2.from_angle(turret_angles[grid_pos])
+		var aim_perp := Vector2(-aim_dir.y, aim_dir.x)
+		var barrel_length: float = main.GRID_SIZE * 0.4
+		if data.turret_head_sprite:
+			var head_tex_size: Vector2 = data.turret_head_sprite.get_size() * 0.3
+			# +14 matches the pivot offset used in _draw_turret_heads.
+			barrel_length = maxf(head_tex_size.y - 14.0, 0.0)
+		var lateral_offset: float = 0.0
+		if barrel_count > 1:
+			lateral_offset = (float(ready_barrel) - (float(barrel_count) - 1.0) * 0.5) * data.barrel_spacing
+		var fire_pos = turret_world + aim_dir * barrel_length + aim_perp * lateral_offset
 
 		# Spawn one projectile per pellet, applying inaccuracy spread.
+		# Shot direction starts along the aim axis from the firing barrel's
+		# muzzle, not "fire_pos toward target_world". With a lateral barrel
+		# offset (multi-barrel turrets), targeting the absolute target
+		# position would make each bullet veer diagonally back toward the
+		# turret's centre the instant it spawned, which visually reads as
+		# "all bullets come from the middle". Travelling along aim_dir
+		# keeps each bullet in a straight line out of its own barrel.
+		var base_shot_dir: Vector2 = aim_dir
+		if lateral_offset == 0.0 and (target_world - fire_pos).length() > 0.001:
+			base_shot_dir = (target_world - fire_pos).normalized()
+		var shot_distance: float = maxf((target_world - fire_pos).length(), 1.0)
 		for pellet_i in range(maxi(fire_pellets, 1)):
 			var spread_rad: float = 0.0
 			if fire_inaccuracy > 0.0:
 				spread_rad = deg_to_rad(randf_range(-fire_inaccuracy, fire_inaccuracy))
-			var pellet_angle: float = (target_world - fire_pos).angle() + spread_rad
-			var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * (target_world - fire_pos).length()
+			var pellet_angle: float = base_shot_dir.angle() + spread_rad
+			var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * shot_distance
 
 			# Turret effective range in pixels (base range in grid tiles + any
 			# ammo range bonus). Projectiles despawn once they've traveled this
@@ -416,10 +503,18 @@ func _update_turrets(delta: float) -> void:
 			var fire_max_range: float = (data.attack_range * main.GRID_SIZE) + fire_range_bonus
 
 			if shoot_at_unit:
+				# Multi-barrel turrets need their projectiles to travel
+				# along the aim axis so each bullet visibly comes out of
+				# its own barrel instead of snapping back toward the
+				# centre. For single-barrel / centred turrets we preserve
+				# the historical "aim at actual target" behaviour so the
+				# bullet lands exactly on the unit.
+				var proj_target: Vector2 = pellet_target if lateral_offset != 0.0 else \
+					(nearest_unit.position if pellet_i == 0 and fire_pellets == 1 else pellet_target)
 				_spawn_projectile(
 					fire_pos,
 					nearest_unit,
-					nearest_unit.position if pellet_i == 0 and fire_pellets == 1 else pellet_target,
+					proj_target,
 					"enemy",
 					fire_speed,
 					fire_damage * fire_unit_mult,
@@ -443,10 +538,12 @@ func _update_turrets(delta: float) -> void:
 					},
 				)
 			else:
+				var proj_target_b: Vector2 = pellet_target if lateral_offset != 0.0 else \
+					(target_world if pellet_i == 0 and fire_pellets == 1 else pellet_target)
 				_spawn_projectile(
 					fire_pos,
 					nearest_bldg,
-					target_world if pellet_i == 0 and fire_pellets == 1 else pellet_target,
+					proj_target_b,
 					"building",
 					fire_speed,
 					fire_damage * fire_bldg_mult,
@@ -912,6 +1009,8 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	turret_cooldowns.erase(grid_pos)
 	turret_angles.erase(grid_pos)
+	turret_barrel_cooldowns.erase(grid_pos)
+	turret_barrel_fire_flash.erase(grid_pos)
 
 
 # =========================
@@ -951,22 +1050,27 @@ func _draw_turret_heads() -> void:
 
 		# If the block defines a turret_head_sprite, draw that rotated to the
 		# aim angle at its native pixel size (like cable wires), instead of
-		# stretching to the block's tile size.
+		# stretching to the block's tile size. Multi-barrel turrets draw N
+		# copies offset perpendicular to the aim axis so each head sits at
+		# its own muzzle position.
 		if data.turret_head_sprite:
 			var tex: Texture2D = data.turret_head_sprite
 			var tex_size: Vector2 = tex.get_size() * 0.3
-			# Barrel is assumed to point up in the source image, so add PI/2
-			# to convert aim-angle (0 = +x/right) to texture-angle.
 			var draw_angle: float = angle + PI / 2.0
-			draw_set_transform(center, draw_angle)
-			draw_texture_rect(
-				tex,
-				# Pivot at bottom-center (the "back" when facing up) so the turret
-				# rotates around its base attachment point, not its center.
-				Rect2(Vector2(-tex_size.x * 0.5, -tex_size.y + 14.0), tex_size),
-				false
-			)
-			draw_set_transform(Vector2.ZERO, 0.0)
+			var bcount: int = maxi(data.barrel_count, 1)
+			for i in range(bcount):
+				var lateral: float = 0.0
+				if bcount > 1:
+					lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * data.barrel_spacing
+				draw_set_transform(center, draw_angle)
+				# Translate along the head's local X axis (perpendicular to
+				# barrel) to place this head offset from centre.
+				var head_rect := Rect2(
+					Vector2(-tex_size.x * 0.5 + lateral, -tex_size.y + 14.0),
+					tex_size
+				)
+				draw_texture_rect(tex, head_rect, false)
+				draw_set_transform(Vector2.ZERO, 0.0)
 		else:
 			# Fallback: generic circle+barrel placeholder.
 			var head_radius = main.GRID_SIZE * 0.22

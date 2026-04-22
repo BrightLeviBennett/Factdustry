@@ -220,6 +220,7 @@ func _build_game_tab() -> void:
 				var hud = get_node_or_null("/root/Main/HUD")
 				if hud and hud.has_method("_refresh_block_menu"):
 					hud._refresh_block_menu()
+			_save_settings()
 	)
 	_add_toggle("Unlock All Tech (sandbox)",
 		TechTree.unlock_all,
@@ -242,6 +243,7 @@ func _build_game_tab() -> void:
 					tree_ui.tree_canvas.queue_redraw()
 				if tree_ui.has_method("_update_resource_panel"):
 					tree_ui._update_resource_panel()
+			_save_settings()
 	)
 	_add_toggle("Parallax Effect",
 		true,
@@ -249,6 +251,7 @@ func _build_game_tab() -> void:
 			var building_sys = get_node_or_null("/root/Main/BuildingSystem")
 			if building_sys and "parallax_enabled" in building_sys:
 				building_sys.parallax_enabled = v
+			_save_settings()
 	)
 	var cam = get_node_or_null("/root/Main/Camera2D")
 	var current_sens: float = cam.pan_rotate_threshold if cam and "pan_rotate_threshold" in cam else 1.5
@@ -258,6 +261,7 @@ func _build_game_tab() -> void:
 			if c and "pan_rotate_threshold" in c:
 				# Higher slider = more sensitive = lower threshold
 				c.pan_rotate_threshold = clampf(1.0 / maxf(v, 0.1), 0.5, 10.0)
+			_save_settings()
 	)
 
 func _get_show_fps() -> bool:
@@ -279,9 +283,11 @@ func _build_graphics_tab() -> void:
 				0: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 				1: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 				2: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN)
+			_save_settings()
 	)
 	_add_toggle("VSync", DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED, func(v):
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if v else DisplayServer.VSYNC_DISABLED)
+		_save_settings()
 	)
 
 func _get_window_mode_index() -> int:
@@ -297,9 +303,18 @@ func _get_window_mode_index() -> int:
 
 func _build_sound_tab() -> void:
 	_add_section("Volume")
-	_add_slider("Master Volume", _get_bus_volume("Master"), func(v): _set_bus_volume("Master", v))
-	_add_slider("Music Volume", _get_bus_volume("Music"), func(v): _set_bus_volume("Music", v))
-	_add_slider("SFX Volume", _get_bus_volume("SFX"), func(v): _set_bus_volume("SFX", v))
+	_add_slider("Master Volume", _get_bus_volume("Master"), func(v):
+		_set_bus_volume("Master", v)
+		_save_settings()
+	)
+	_add_slider("Music Volume", _get_bus_volume("Music"), func(v):
+		_set_bus_volume("Music", v)
+		_save_settings()
+	)
+	_add_slider("SFX Volume", _get_bus_volume("SFX"), func(v):
+		_set_bus_volume("SFX", v)
+		_save_settings()
+	)
 
 func _get_bus_volume(bus_name: String) -> float:
 	var idx = AudioServer.get_bus_index(bus_name)
@@ -425,6 +440,102 @@ func _save_keybindings() -> void:
 	if file:
 		file.store_string(JSON.stringify(data, "\t"))
 		file.close()
+
+
+## Persists the non-keybinding settings tweakable from the Settings UI
+## (audio bus volumes, graphics mode, a handful of game/UX toggles). Called
+## from every change callback so the on-disk file stays in sync with the
+## running settings. Separate file from keybindings so a bad schema in one
+## can't corrupt the other.
+const _SETTINGS_PATH := "user://settings.json"
+
+func _save_settings() -> void:
+	var data: Dictionary = {}
+	# Audio.
+	data["volume_master"] = _get_bus_volume("Master")
+	data["volume_music"] = _get_bus_volume("Music")
+	data["volume_sfx"] = _get_bus_volume("SFX")
+	# Graphics.
+	data["window_mode"] = _get_window_mode_index()
+	data["vsync"] = DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED
+	# Game / UX.
+	if main and "require_research" in main:
+		data["require_research"] = bool(main.require_research)
+	data["unlock_all_tech"] = bool(TechTree.unlock_all)
+	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	if building_sys and "parallax_enabled" in building_sys:
+		data["parallax_enabled"] = bool(building_sys.parallax_enabled)
+	var cam = get_node_or_null("/root/Main/Camera2D")
+	if cam and "pan_rotate_threshold" in cam:
+		data["pan_rotate_threshold"] = float(cam.pan_rotate_threshold)
+
+	var file = FileAccess.open(_SETTINGS_PATH, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(data, "\t"))
+		file.close()
+
+
+## Loads settings saved by `_save_settings`. Called from the main menu at
+## launch so the running instance reflects the on-disk settings before the
+## settings UI is opened (which otherwise builds its controls against the
+## engine defaults). Silent no-op when the file doesn't exist.
+static func load_settings() -> void:
+	if not FileAccess.file_exists(_SETTINGS_PATH):
+		return
+	var file = FileAccess.open(_SETTINGS_PATH, FileAccess.READ)
+	if not file:
+		return
+	var json = JSON.parse_string(file.get_as_text())
+	file.close()
+	if json == null or not json is Dictionary:
+		return
+	var data: Dictionary = json
+	# Audio.
+	for bus_entry in [["Master", "volume_master"], ["Music", "volume_music"], ["SFX", "volume_sfx"]]:
+		var bus_name: String = bus_entry[0]
+		var key: String = bus_entry[1]
+		if data.has(key):
+			var idx: int = AudioServer.get_bus_index(bus_name)
+			if idx >= 0:
+				AudioServer.set_bus_volume_db(idx, linear_to_db(float(data[key])))
+	# Graphics.
+	if data.has("window_mode"):
+		match int(data["window_mode"]):
+			1: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+			2: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN)
+			_: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	if data.has("vsync"):
+		DisplayServer.window_set_vsync_mode(
+			DisplayServer.VSYNC_ENABLED if bool(data["vsync"]) else DisplayServer.VSYNC_DISABLED
+		)
+	# Game / UX — scene graph nodes may not exist yet when this runs from
+	# the main menu; defer the ones that depend on `/root/Main/*` so they
+	# apply once the game scene is loaded.
+	if data.has("unlock_all_tech"):
+		TechTree.unlock_all = bool(data["unlock_all_tech"])
+	# Stash the rest on the engine singleton metadata for the game scene
+	# to pick up on load.
+	Engine.set_meta(&"_pending_settings", data)
+	print("SettingsUI: Loaded settings from %s" % _SETTINGS_PATH)
+
+
+## Applies settings that depend on scene-graph nodes (require_research on
+## Main, parallax_enabled on BuildingSystem, camera sensitivity). Called
+## from Main._ready() once those nodes exist.
+static func apply_pending_settings() -> void:
+	if not Engine.has_meta(&"_pending_settings"):
+		return
+	var data: Dictionary = Engine.get_meta(&"_pending_settings")
+	Engine.remove_meta(&"_pending_settings")
+	var main_node = Engine.get_main_loop().root.get_node_or_null("Main") if Engine.get_main_loop() else null
+	if main_node and data.has("require_research") and "require_research" in main_node:
+		main_node.require_research = bool(data["require_research"])
+	var building_sys = main_node.get_node_or_null("BuildingSystem") if main_node else null
+	if building_sys and data.has("parallax_enabled") and "parallax_enabled" in building_sys:
+		building_sys.parallax_enabled = bool(data["parallax_enabled"])
+	var cam = main_node.get_node_or_null("Camera2D") if main_node else null
+	if cam and data.has("pan_rotate_threshold") and "pan_rotate_threshold" in cam:
+		cam.pan_rotate_threshold = float(data["pan_rotate_threshold"])
 
 
 static func load_keybindings() -> void:

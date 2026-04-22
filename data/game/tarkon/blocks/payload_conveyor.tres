@@ -1,18 +1,24 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://ceao5pre7cyx6"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cfvhdpqqfgpon" path="res://textures/blocks/units/PayloadConveyor.png" id="1_cvckt"]
 
 [resource]
 script = ExtResource("1")
 id = &"payload_conveyor"
 display_name = "Payload Conveyor"
 description = "Heavy-duty conveyor for large payloads."
+icon = ExtResource("1_cvckt")
 category = 7
+tags = PackedStringArray("payload", "transport")
 color = Color(0.6, 0.5, 0.7, 1)
+grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("1_cvckt")
 max_health = 220.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 1.5
 transport_speed = 7.0
-tags = PackedStringArray("payload", "transport")
-grid_size = Vector2i(3, 3)
 max_payload_size = 3

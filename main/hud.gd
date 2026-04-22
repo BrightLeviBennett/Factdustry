@@ -1129,25 +1129,47 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 						hbox.add_child(lbl)
 						tooltip_vbox.add_child(hbox)
 
-		# Factory: show input requirements and what's buffered
-		elif not data.input_items.is_empty() and _logistics.factory_buffers.has(origin):
+		# Factory: show input requirements and what's buffered.
+		# Unit fabricators consume the produced unit's build_cost rather
+		# than the BlockData's input_items (which often only lists one
+		# token ingredient). Resolve the effective recipe the same way
+		# _update_factories does before rendering the status bars.
+		# Refabricators additionally support per-tier-2 overrides via
+		# `refab_recipes` — pick up the currently-selected tier-2's recipe
+		# when there is one, else fall back to `input_items`.
+		elif (not data.input_items.is_empty() or data.produced_unit != &"") and _logistics.factory_buffers.has(origin):
 			var fb = _logistics.factory_buffers[origin]
 			var inputs: Dictionary = fb.get("inputs", {})
+			var effective_recipe: Dictionary = data.input_items
+			if data.produced_unit != &"":
+				var unit_res = Registry.get_unit(data.produced_unit)
+				if unit_res and not unit_res.build_cost.is_empty():
+					effective_recipe = unit_res.build_cost
+			if data.tags.has("refabricator") and "refabricator_state" in _logistics \
+					and _logistics.refabricator_state.has(origin):
+				var rst: Dictionary = _logistics.refabricator_state[origin]
+				var rsel: StringName = StringName(rst.get("selected_t2", &""))
+				if rsel != &"" and data.refab_recipes.has(rsel):
+					var custom = data.refab_recipes[rsel]
+					if custom is Dictionary and not custom.is_empty():
+						effective_recipe = custom
+			if _logistics.has_method("_normalize_item_keys"):
+				effective_recipe = _logistics._normalize_item_keys(effective_recipe)
 			# Omnidirectional factories buffer inputs up to max_stored_items.
 			var is_omni_bldg: bool = data.tags.has("omnidirectional")
 			var has_need := false
-			for raw_id in data.input_items:
+			for raw_id in effective_recipe:
 				var sn_id := StringName(raw_id)
-				var needed: int = int(data.input_items[raw_id])
+				var needed: int = int(effective_recipe[raw_id])
 				var have: int = int(inputs.get(sn_id, 0))
 				if have < needed:
 					has_need = true
 					break
 			if has_need or is_omni_bldg:
 				_add_tooltip_separator()
-				for raw_id in data.input_items:
+				for raw_id in effective_recipe:
 					var sn_id := StringName(raw_id)
-					var recipe_amt: int = int(data.input_items[raw_id])
+					var recipe_amt: int = int(effective_recipe[raw_id])
 					var have: int = int(inputs.get(sn_id, 0))
 					var needed: int = recipe_amt
 					if is_omni_bldg:
@@ -1229,8 +1251,47 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					max_str = "/%.0f" % data.max_stored_fluids
 				_add_tooltip_line("  %s: %.0f%s" % [fluid_name, amount, max_str], Color(0.7, 0.8, 0.9))
 
-	# --- Factory Phase ---
-	if _logistics and _logistics.factory_buffers.has(origin):
+	# --- Factory / Refabricator Phase ---
+	# Refabricators have their own state dict; the factory_buffers phase
+	# on these blocks is just the default "collecting" and doesn't reflect
+	# whether a unit payload has been picked up yet.
+	var is_refab: bool = data.tags.has("refabricator")
+	if _logistics and is_refab and "refabricator_state" in _logistics and _logistics.refabricator_state.has(origin):
+		var rstate: Dictionary = _logistics.refabricator_state[origin]
+		# Selected tier-2 unit + count/cap for that unit type. When nothing
+		# is selected the block is dormant, so surface that prominently.
+		var sel_t2: StringName = StringName(rstate.get("selected_t2", &""))
+		if sel_t2 == &"":
+			_add_tooltip_line("Selected Unit: (none — click to pick)", Color(0.9, 0.7, 0.3))
+		else:
+			var sel_u = Registry.get_unit(sel_t2)
+			var sel_name: String = sel_u.display_name if sel_u else str(sel_t2)
+			_add_tooltip_line("Producing: %s" % sel_name, Color(0.85, 1.0, 0.8))
+			var sel_count: int = main.get_player_unit_count(sel_t2)
+			var sel_cap: int = main.get_unit_cap_per_type()
+			var sel_at_cap: bool = sel_count >= sel_cap
+			_add_tooltip_line(
+				"%s: %d / %d" % [sel_name, sel_count, sel_cap],
+				Color(0.9, 0.3, 0.3) if sel_at_cap else Color(0.7, 0.9, 0.7)
+			)
+		var rphase: String = rstate.get("phase", "idle")
+		var rcolor := Color(0.6, 0.7, 0.8)
+		match rphase:
+			"idle": rcolor = Color(0.7, 0.7, 0.7)
+			"collecting": rcolor = Color(0.8, 0.8, 0.4)
+			"processing": rcolor = Color(0.4, 0.8, 0.4)
+			"outputting": rcolor = Color(0.4, 0.6, 0.9)
+		_add_tooltip_line("Phase: %s" % rphase.capitalize(), rcolor)
+		# Also show what unit is being held / will be produced.
+		var in_uid: StringName = rstate.get("in_unit_id", &"")
+		if in_uid != &"":
+			var in_u = Registry.get_unit(in_uid)
+			_add_tooltip_line("Holding: %s" % (in_u.display_name if in_u else str(in_uid)), Color(0.7, 0.85, 1.0))
+		var out_uid: StringName = rstate.get("out_unit_id", &"")
+		if out_uid != &"":
+			var out_u = Registry.get_unit(out_uid)
+			_add_tooltip_line("Output: %s" % (out_u.display_name if out_u else str(out_uid)), Color(0.7, 1.0, 0.85))
+	elif _logistics and _logistics.factory_buffers.has(origin):
 		var state = _logistics.factory_buffers[origin]
 		var phase: String = state["phase"]
 		var phase_color := Color(0.6, 0.7, 0.8)

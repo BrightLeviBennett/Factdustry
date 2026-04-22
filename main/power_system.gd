@@ -53,6 +53,15 @@ var linked_pairs: Array = []
 ## Dirty flag — rebuild networks next frame instead of immediately.
 var _networks_dirty := true
 
+## Throttle for the per-frame activity recompute. Network *topology* only
+## changes on placed/destroyed (flagged via `_networks_dirty`), but per-block
+## "is this consumer actually working right now?" state changes every tick
+## as drills fill up, factories swap phases, etc. We re-sum the gen/use
+## totals a few times per second so the bar/efficiency stay live without
+## doing the full flood-fill every frame.
+var _activity_timer: float = 0.0
+const _ACTIVITY_INTERVAL := 0.15
+
 ## Cable node connections discovered during the last network rebuild.
 ## Array of [Vector2i, Vector2i] pairs (cable_pos, target_pos).
 ## Used by BuildingSystem to draw connection lines.
@@ -66,10 +75,19 @@ func _ready() -> void:
 	_networks_dirty = true
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _networks_dirty:
 		_rebuild_electrical_networks()
 		_networks_dirty = false
+		# Align the "active" totals with topology immediately so there's
+		# no one-frame flash of idle consumers being counted.
+		_recompute_active_totals()
+	# Periodic recompute of each network's gen/use so idle consumers stop
+	# drawing power and resume drawing as soon as they start working again.
+	_activity_timer -= delta
+	if _activity_timer <= 0.0:
+		_activity_timer = _ACTIVITY_INTERVAL
+		_recompute_active_totals()
 
 
 # =========================
@@ -285,6 +303,75 @@ func _compute_efficiency(gen: float, use: float) -> float:
 	if use <= 0.0:
 		return 1.0
 	return clampf(gen / use, 0.0, 1.0)
+
+
+## Lightweight rewalk of each network's cells to sum gen/use counting only
+## currently-active consumers (_is_block_drawing_power). Called on a ~0.15s
+## timer so a drill with full storage stops dragging the bar down the moment
+## it stalls, and starts again the moment its storage drains.
+func _recompute_active_totals() -> void:
+	for net in elec_networks:
+		var total_gen := 0.0
+		var total_use := 0.0
+		var counted_anchors: Dictionary = {}
+		for cell in net["cells"]:
+			if main.has_method("is_building_inactive") and main.is_building_inactive(cell):
+				continue
+			var anchor: Vector2i = main.building_origins.get(cell, cell)
+			if counted_anchors.has(anchor):
+				continue
+			counted_anchors[anchor] = true
+			var d: BlockData = Registry.get_block(main.placed_buildings.get(cell, &""))
+			if d == null:
+				continue
+			total_gen += _get_effective_elec_gen(cell, d)
+			if _is_block_drawing_power(anchor, d):
+				total_use += d.electrical_power_use
+		net["gen"] = total_gen
+		net["use"] = total_use
+		net["powered"] = total_gen >= total_use
+		net["efficiency"] = _compute_efficiency(total_gen, total_use)
+
+
+## Returns true if the block at `anchor` is currently doing work that would
+## draw its `electrical_power_use`. Drills with full output storage stop
+## drawing. Factories / fabricators / refabricators only draw while in
+## their "processing" phase. Other consumers (turrets, etc.) always draw
+## so scans, tracking, etc. stay responsive.
+func _is_block_drawing_power(anchor: Vector2i, data: BlockData) -> bool:
+	if data.electrical_power_use <= 0.0:
+		return false
+	# Sector-scripted disables turn the block fully off.
+	var sector = get_node_or_null("/root/Main/SectorScript")
+	if sector and sector.has_method("is_building_disabled") and sector.is_building_disabled(anchor):
+		return false
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if logistics == null:
+		return true
+
+	# Drills / extractors: idle when storage is full (nothing to mine into).
+	if data.category == BlockData.BlockCategory.EXTRACTORS:
+		if logistics.has_method("_is_storage_full") and logistics._is_storage_full(anchor, data):
+			return false
+		return true
+
+	# Refabricators: consume only while actually processing a unit.
+	if data.tags.has("refabricator"):
+		if "refabricator_state" in logistics and logistics.refabricator_state.has(anchor):
+			return logistics.refabricator_state[anchor].get("phase", "") == "processing"
+		return false
+
+	# Regular factories / unit fabricators: consume only while in the
+	# processing/ejecting phase. Collecting-with-no-inputs counts as idle.
+	var is_factory: bool = not data.output_items.is_empty() or data.produced_unit != &""
+	if is_factory:
+		if "factory_buffers" in logistics and logistics.factory_buffers.has(anchor):
+			var phase: String = logistics.factory_buffers[anchor].get("phase", "")
+			return phase == "processing" or phase == "ejecting"
+		return false
+
+	# Default: always drawing (turrets, misc active blocks).
+	return true
 
 
 ## Returns the effective electrical generation for a block, accounting for

@@ -344,6 +344,15 @@ func _ready() -> void:
 
 	_refresh_child_cache()
 
+	# Apply user settings that depend on Main's children (camera rotation
+	# sensitivity, BuildingSystem parallax, require_research). Load-time
+	# application happens in the main menu but those nodes don't exist
+	# yet there, so the settings loader stashes the dict and we apply it
+	# here once the scene graph is ready.
+	var settings_script = load("res://main/settings_ui.gd")
+	if settings_script and settings_script.has_method("apply_pending_settings"):
+		settings_script.apply_pending_settings()
+
 
 ## Populates the _hud / _tech_ui / etc. cache. Call after the main scene tree
 ## has its expected children (typically at the end of _ready).
@@ -712,6 +721,16 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 		return false
 
 	# --- Same-block rotation update ---
+	# Rotating an existing block in place preserves every piece of
+	# runtime state tied to it (factory buffers, refabricator state,
+	# held payloads, constructor selections, conveyor items, etc.). We
+	# only update the rotation entries and deliberately do NOT emit
+	# `building_placed` — that signal is "a new block was placed", and
+	# firing it here would bump stats_blocks_placed / sector_script
+	# placed_counts, reset turret cooldowns, and re-init logistics state
+	# tables that should persist across a rotation. Subsystems that read
+	# rotation (logistics transfer math, building_system draw) already
+	# look it up fresh each tick, so no signal is needed.
 	if placed_buildings.has(grid_pos) and placed_buildings[grid_pos] == selected_building:
 		var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
 		if anchor == grid_pos:
@@ -720,7 +739,6 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 				for x in range(data.grid_size.x):
 					for y in range(data.grid_size.y):
 						building_rotation[grid_pos + Vector2i(x, y)] = placement_rotation
-				building_placed.emit(selected_building, grid_pos)
 			return true
 
 	# --- Same-group swap: placing a belt part on top of another belt part

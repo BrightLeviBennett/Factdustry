@@ -495,6 +495,7 @@ func _register_belt_transport() -> void:
 	_add(&"belt_sorter",         "Belt Sorter",         [&"conveyor_belt"],     [], {&"mat_copper": 80}, Vector2(6, 2))
 	_add(&"overflow_belt",       "Overflow Belt",       [&"conveyor_belt"],     [], {&"mat_copper": 70}, Vector2(7, 2))
 	_add(&"small_container",     "Small Container",     [&"belt_router"],       [], {&"mat_copper": 1}, Vector2(4, 3))
+	_add(&"unloader",            "Unloader",            [&"small_container"],   [&"Not unlockable in campaign"], {&"mat_copper": 60, &"mat_silicon": 25}, Vector2(3, 3))
 	_add(&"cargo_mass_driver",   "Cargo Mass Driver",   [&"belt_bridge"],       [], {&"mat_copper": 150}, Vector2(5, 3))
 	_add(&"inverted_belt_sorter","Inverted Belt Sorter", [&"belt_sorter"],      [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(6, 3))
 	_add(&"underflow_belt",      "Underflow Belt",      [&"overflow_belt"],     [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(7, 3))

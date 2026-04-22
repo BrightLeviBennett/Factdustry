@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cn4yr0uujbwpl"
-path="res://.godot/imported/SteelFurnace.png-a80facddc7d04ea57381d7ca591bcdfd.ctex"
+uid="uid://cfvhdpqqfgpon"
+path="res://.godot/imported/PayloadConveyor.png-f3a3610cd354d240f97cef4b623c48ff.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/factories/SteelFurnace.png"
-dest_files=["res://.godot/imported/SteelFurnace.png-a80facddc7d04ea57381d7ca591bcdfd.ctex"]
+source_file="res://textures/blocks/units/PayloadConveyor.png"
+dest_files=["res://.godot/imported/PayloadConveyor.png-f3a3610cd354d240f97cef4b623c48ff.ctex"]
 
 [params]
 

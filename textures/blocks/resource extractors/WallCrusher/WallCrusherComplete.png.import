@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cn4yr0uujbwpl"
-path="res://.godot/imported/SteelFurnace.png-a80facddc7d04ea57381d7ca591bcdfd.ctex"
+uid="uid://dppnrgc3hbeik"
+path="res://.godot/imported/WallCrusherComplete.png-e8b234e989e7a25749e0665e37702129.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/factories/SteelFurnace.png"
-dest_files=["res://.godot/imported/SteelFurnace.png-a80facddc7d04ea57381d7ca591bcdfd.ctex"]
+source_file="res://textures/blocks/resource extractors/WallCrusher/WallCrusherComplete.png"
+dest_files=["res://.godot/imported/WallCrusherComplete.png-e8b234e989e7a25749e0665e37702129.ctex"]
 
 [params]
 
