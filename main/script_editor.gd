@@ -41,7 +41,7 @@ var no_selection_label: Label
 const CONDITION_TYPES := [
 	"always", "wait", "mined", "deposited", "produced",
 	"placed", "units_produced", "units_destroyed", "ferox_blocks_destroyed",
-	"core_unit_mined", "block_has_item"
+	"core_unit_mined", "block_has_item", "decoded_archive", "waves_defeated",
 ]
 const CONDITION_LABELS := {
 	"always": "Immediately",
@@ -51,24 +51,39 @@ const CONDITION_LABELS := {
 	"produced": "Item Produced",
 	"placed": "Block Placed",
 	"units_produced": "Units Produced",
-	"units_destroyed": "FEROX Units Destroyed",
-	"ferox_blocks_destroyed": "FEROX Blocks Destroyed",
+	"units_destroyed": "Ferox Units Destroyed",
+	"ferox_blocks_destroyed": "Ferox Blocks Destroyed",
 	"core_unit_mined": "Core Unit Mined",
-	"block_has_item": "Block Has Item (grid x,y)",
+	"block_has_item": "Block Has Item",
+	"decoded_archive": "Archive Decoded",
+	"waves_defeated": "All Waves Defeated",
 }
 
 # --- ACTION TYPE OPTIONS ---
 const ACTION_TYPES := [
-	"pause", "unpause", "focus_camera", "release_camera",
-	"draw_box", "remove_box", "clear_boxes",
-	"draw_text", "remove_text", "clear_texts",
-	"disable_block", "enable_block", "spawn_unit",
-	"hide_region", "reveal_region", "capture_sector"
+	"draw_box", 
+	"draw_text", 
+	"remove_box", 
+	"remove_text", 
+	"clear_boxes",
+	"clear_texts",
+	"hide_region", 
+	"reveal_region", 
+	"disable_block", 
+	"enable_block", 
+	"pause", 
+	"unpause", 
+	"focus_camera", 
+	"release_camera",
+	"spawn_unit",
+	"start_waves", 
+	"stop_waves",
+	"capture_sector",
 ]
 const ACTION_LABELS := {
 	"pause": "Pause World",
 	"unpause": "Unpause World",
-	"focus_camera": "Focus Camera (grid x,y)",
+	"focus_camera": "Focus Camera",
 	"release_camera": "Release Camera",
 	"draw_box": "Draw Box",
 	"remove_box": "Remove Box (id)",
@@ -76,12 +91,14 @@ const ACTION_LABELS := {
 	"draw_text": "Draw Text Overlay",
 	"remove_text": "Remove Text Overlay (id)",
 	"clear_texts": "Clear All Text Overlays",
-	"disable_block": "Disable Block (grid x,y)",
-	"enable_block": "Enable Block (grid x,y)",
+	"disable_block": "Disable Block",
+	"enable_block": "Enable Block",
 	"spawn_unit": "Spawn Unit",
 	"hide_region": "Hide Region",
 	"reveal_region": "Reveal Region",
 	"capture_sector": "Capture Sector",
+	"start_waves": "Start Waves",
+	"stop_waves": "Stop Waves",
 }
 
 # Colors for the color dropdown
@@ -386,7 +403,7 @@ func _refresh_step_detail() -> void:
 	add_action_btn.text = "+ Add Action"
 	add_action_btn.add_theme_font_size_override("font_size", 12)
 	add_action_btn.pressed.connect(func():
-		step["actions"].append({"type": "pause"})
+		step["actions"].append({"type": "draw_box"})
 		_refresh_step_detail()
 	)
 	step_detail.add_child(add_action_btn)
@@ -434,7 +451,7 @@ func _refresh_step_detail() -> void:
 	add_exit_btn.text = "+ Add Exit Action"
 	add_exit_btn.add_theme_font_size_override("font_size", 12)
 	add_exit_btn.pressed.connect(func():
-		step["on_exit"].append({"type": "unpause"})
+		step["on_exit"].append({"type": "clear_boxes"})
 		_refresh_step_detail()
 	)
 	step_detail.add_child(add_exit_btn)
@@ -619,6 +636,11 @@ func _populate_conditions(step: Dictionary) -> void:
 			"block_has_item":
 				_add_vec2i_fields(vbox, cond, "pos", "Grid X,Y:")
 				_add_item_dropdown(vbox, cond)
+				_add_int_field(vbox, cond, "amount", "Amount:", 1)
+			"decoded_archive":
+				# Leave archive_id blank to match ANY archive being decoded;
+				# pick a specific archive id to gate on that one alone.
+				_add_archive_dropdown(vbox, cond)
 				_add_int_field(vbox, cond, "amount", "Amount:", 1)
 			# "always" has no params
 
@@ -901,6 +923,45 @@ func _add_unit_dropdown(parent: Control, data: Dictionary) -> void:
 		data["unit_id"] = unit_ids[sel_idx]
 	option.item_selected.connect(func(idx: int):
 		data["unit_id"] = unit_ids[idx]
+		_notify_change()
+	)
+	hbox.add_child(option)
+
+
+## Archive id dropdown for the "decoded_archive" condition. Pulls the list
+## from TechTree.archive_ids and prepends an "(Any)" option that stores the
+## empty StringName so the condition matches any archive being decoded.
+func _add_archive_dropdown(parent: Control, data: Dictionary) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 4)
+	parent.add_child(hbox)
+
+	var lbl = Label.new()
+	lbl.text = "Archive:"
+	lbl.add_theme_font_size_override("font_size", 11)
+	lbl.custom_minimum_size.x = 60
+	hbox.add_child(lbl)
+
+	var option = OptionButton.new()
+	option.add_theme_font_size_override("font_size", 11)
+	option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var archive_ids: Array = [""]
+	option.add_item("(Any archive)")
+	for aid in TechTree.archive_ids:
+		archive_ids.append(String(aid))
+		var nd = TechTree.get_node_data(aid)
+		var aname: String = nd["name"] if nd else String(aid)
+		option.add_item(aname)
+
+	var current_id: String = str(data.get("archive_id", ""))
+	var sel_idx: int = archive_ids.find(current_id)
+	if sel_idx < 0:
+		sel_idx = 0
+	option.selected = sel_idx
+	data["archive_id"] = archive_ids[sel_idx]
+	option.item_selected.connect(func(idx: int):
+		data["archive_id"] = archive_ids[idx]
 		_notify_change()
 	)
 	hbox.add_child(option)

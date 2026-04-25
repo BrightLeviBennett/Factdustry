@@ -78,8 +78,25 @@ var _floor_edge_dirty := true
 # --- WATER DEPTH ---
 ## Auto-computed water depth for each water floor tile: Vector2i → int (1-3).
 ## Distance from the nearest non-water floor tile. Recomputed when floor tiles change.
-var _water_depth_map: Dictionary = {}  # Vector2i -> int
+var _water_depth_map: Dictionary = {}  # Vector2i -> int (1/2/3 — legacy gameplay tier)
+## Continuous depth factor for rendering: 0.0 = right at shore, 1.0 = fully
+## deep. Lets the water blend smoothly instead of snapping between three
+## discrete alpha bands.
+var _water_depth_t: Dictionary = {}  # Vector2i -> float in [0, 1]
+## Pre-baked per-corner depth factor — averaged across the 4 tiles sharing
+## each corner so neighbouring cells line up smoothly at their shared
+## edges. Format: Vector2i -> PackedFloat32Array [tl, tr, br, bl].
+var _water_corner_t: Dictionary = {}
 var _water_depth_dirty := true
+## Batched water layer meshes, grouped by water texture. Each entry is
+## `{texture: Texture2D, mesh: ArrayMesh}` so `_draw_floor_tiles` can
+## blast the whole water layer in one draw call per distinct texture
+## instead of one `draw_polygon` per cell per frame.
+var _water_meshes: Array = []
+## Batched sand underlay: a single ArrayMesh covering every water cell
+## that still shows any sand (any corner with t < 1). Drawn before the
+## water meshes at full opacity.
+var _sand_mesh: ArrayMesh = null
 ## Floor tiles within fewer than this distance of void start fading (higher = wider fade)
 const FLOOR_FADE_START := 6
 ## How many tiles into a hidden region the fade extends
@@ -598,6 +615,8 @@ func select_tile(tile_id: StringName) -> void:
 func _rebuild_water_depth() -> void:
 	_water_depth_dirty = false
 	_water_depth_map.clear()
+	_water_depth_t.clear()
+	_water_corner_t.clear()
 
 	const SMALL_ISLAND_TILES := 30
 
@@ -697,7 +716,11 @@ func _rebuild_water_depth() -> void:
 		var d: int = dist[pos]
 		var iid_p: int = nearest_island.get(pos, -1)
 		var sz: int = island_size.get(iid_p, 0)
+		# Deep-start distance depends on island size — small islands ramp
+		# faster. `deep_at` is the dist at which water is fully deep.
+		var deep_at: float
 		if sz > 0 and sz <= SMALL_ISLAND_TILES:
+			deep_at = 5.0  # dist 1-2 shallow, 3-4 medium, 5+ deep
 			if d <= 2:
 				_water_depth_map[pos] = 1
 			elif d <= 4:
@@ -705,12 +728,195 @@ func _rebuild_water_depth() -> void:
 			else:
 				_water_depth_map[pos] = 3
 		else:
+			deep_at = 7.0  # dist 1-3 shallow, 4-6 medium, 7+ deep
 			if d <= 3:
 				_water_depth_map[pos] = 1
 			elif d <= 6:
 				_water_depth_map[pos] = 2
 			else:
 				_water_depth_map[pos] = 3
+		# Continuous depth factor: 0 at the first water tile adjacent to
+		# land, 1 by the time we hit the deep tier. Renderer smoothly
+		# interpolates water/sand alpha across this.
+		_water_depth_t[pos] = clampf(float(d - 1) / maxf(deep_at - 1.0, 1.0), 0.0, 1.0)
+
+	# Bake per-corner depth by averaging the 4 tiles that share each
+	# corner. Non-water neighbours contribute t=0 (shore-adjacent), which
+	# pulls the corner's alpha down and makes the shoreline fade in over
+	# the diagonal instead of snapping at cell edges.
+	var corner_offsets: Array = [
+		[Vector2i(0, 0), Vector2i(-1, 0), Vector2i(0, -1), Vector2i(-1, -1)],  # TL
+		[Vector2i(0, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(1, -1)],    # TR
+		[Vector2i(0, 0), Vector2i(1, 0), Vector2i(0, 1), Vector2i(1, 1)],      # BR
+		[Vector2i(0, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(-1, 1)],    # BL
+	]
+	for pos in _water_depth_t:
+		var c := PackedFloat32Array([0.0, 0.0, 0.0, 0.0])
+		for ci in range(4):
+			var sum_t := 0.0
+			for off in corner_offsets[ci]:
+				sum_t += float(_water_depth_t.get(pos + off, 0.0))
+			c[ci] = sum_t * 0.25
+		_water_corner_t[pos] = c
+
+	_rebuild_water_meshes()
+
+
+## Bakes the per-frame water & sand draw cost down to one `draw_mesh` per
+## water texture (plus one for sand). A mesh holds every visible water
+## cell's quad with per-corner vertex colors carrying the fade alphas, so
+## the GPU interpolates the shore→deep gradient for free and culls
+## off-screen tiles automatically. Rebuilt alongside `_water_depth_t`,
+## and whenever `_water_depth_dirty` flips back on (terrain edits,
+## sector_script hide/reveal).
+func _rebuild_water_meshes() -> void:
+	_water_meshes.clear()
+	_sand_mesh = null
+	if _water_depth_t.is_empty():
+		return
+
+	var ss := _sector_script_ref()
+	# Group water cells by their tile-icon texture so a map with multiple
+	# water variants (e.g. fresh water + salt water) still compresses to
+	# one draw per distinct texture.
+	var by_tex: Dictionary = {}  # Texture2D -> Array of {pos, corners, opacity}
+	var sand_cells: Array = []   # [pos, opacity] — only cells with any sand
+	for pos in _water_depth_t:
+		if ss and ss.is_tile_hidden(pos):
+			continue
+		if not floor_tiles.has(pos):
+			continue
+		var data = Registry.get_tile(floor_tiles[pos])
+		if data == null or data.icon == null:
+			continue
+		var corners: PackedFloat32Array = _water_corner_t.get(pos,
+			PackedFloat32Array([1.0, 1.0, 1.0, 1.0]))
+		if not by_tex.has(data.icon):
+			by_tex[data.icon] = []
+		by_tex[data.icon].append([pos, corners, data.opacity])
+		# Skip sand under fully-deep cells — water is opaque there, so
+		# the sand underneath is wasted fill.
+		if corners[0] < 1.0 or corners[1] < 1.0 \
+				or corners[2] < 1.0 or corners[3] < 1.0:
+			sand_cells.append([pos, data.opacity])
+
+	if _sand_texture != null and not sand_cells.is_empty():
+		_sand_mesh = _build_flat_quad_mesh(sand_cells)
+	for tex in by_tex:
+		var cells: Array = by_tex[tex]
+		var mesh: ArrayMesh = _build_water_quad_mesh(cells)
+		if mesh != null:
+			_water_meshes.append({"texture": tex, "mesh": mesh})
+
+
+## Builds a batched textured quad mesh with uniform white vertex color
+## modulated by `opacity`. Used for the sand underlay.
+func _build_flat_quad_mesh(cells: Array) -> ArrayMesh:
+	var n := cells.size()
+	if n == 0:
+		return null
+	var gs := float(main.GRID_SIZE)
+	var verts := PackedVector3Array()
+	verts.resize(n * 4)
+	var cols := PackedColorArray()
+	cols.resize(n * 4)
+	var uvs := PackedVector2Array()
+	uvs.resize(n * 4)
+	var idxs := PackedInt32Array()
+	idxs.resize(n * 6)
+	var vi := 0
+	var ii := 0
+	for entry in cells:
+		var pos: Vector2i = entry[0]
+		var opac: float = float(entry[1])
+		var wx: float = float(pos.x) * gs
+		var wy: float = float(pos.y) * gs
+		verts[vi + 0] = Vector3(wx, wy, 0.0)
+		verts[vi + 1] = Vector3(wx + gs, wy, 0.0)
+		verts[vi + 2] = Vector3(wx + gs, wy + gs, 0.0)
+		verts[vi + 3] = Vector3(wx, wy + gs, 0.0)
+		var c := Color(1, 1, 1, opac)
+		cols[vi + 0] = c
+		cols[vi + 1] = c
+		cols[vi + 2] = c
+		cols[vi + 3] = c
+		uvs[vi + 0] = Vector2(0, 0)
+		uvs[vi + 1] = Vector2(1, 0)
+		uvs[vi + 2] = Vector2(1, 1)
+		uvs[vi + 3] = Vector2(0, 1)
+		idxs[ii + 0] = vi + 0
+		idxs[ii + 1] = vi + 1
+		idxs[ii + 2] = vi + 2
+		idxs[ii + 3] = vi + 0
+		idxs[ii + 4] = vi + 2
+		idxs[ii + 5] = vi + 3
+		vi += 4
+		ii += 6
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = idxs
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return m
+
+
+## Builds a batched textured quad mesh with per-corner alpha driven by
+## `_water_corner_t`. Each cell = `[pos, corners: PackedFloat32Array(4),
+## opacity: float]`. The corner→alpha curve (0.5 at shore, 1.0 at deep)
+## matches the old per-tile path and is what gives the smooth fade.
+func _build_water_quad_mesh(cells: Array) -> ArrayMesh:
+	var n := cells.size()
+	if n == 0:
+		return null
+	var gs := float(main.GRID_SIZE)
+	var verts := PackedVector3Array()
+	verts.resize(n * 4)
+	var cols := PackedColorArray()
+	cols.resize(n * 4)
+	var uvs := PackedVector2Array()
+	uvs.resize(n * 4)
+	var idxs := PackedInt32Array()
+	idxs.resize(n * 6)
+	var vi := 0
+	var ii := 0
+	for entry in cells:
+		var pos: Vector2i = entry[0]
+		var corners: PackedFloat32Array = entry[1]
+		var opac: float = float(entry[2])
+		var wx: float = float(pos.x) * gs
+		var wy: float = float(pos.y) * gs
+		verts[vi + 0] = Vector3(wx, wy, 0.0)
+		verts[vi + 1] = Vector3(wx + gs, wy, 0.0)
+		verts[vi + 2] = Vector3(wx + gs, wy + gs, 0.0)
+		verts[vi + 3] = Vector3(wx, wy + gs, 0.0)
+		cols[vi + 0] = Color(1, 1, 1, (0.5 + 0.5 * corners[0]) * opac)
+		cols[vi + 1] = Color(1, 1, 1, (0.5 + 0.5 * corners[1]) * opac)
+		cols[vi + 2] = Color(1, 1, 1, (0.5 + 0.5 * corners[2]) * opac)
+		cols[vi + 3] = Color(1, 1, 1, (0.5 + 0.5 * corners[3]) * opac)
+		uvs[vi + 0] = Vector2(0, 0)
+		uvs[vi + 1] = Vector2(1, 0)
+		uvs[vi + 2] = Vector2(1, 1)
+		uvs[vi + 3] = Vector2(0, 1)
+		idxs[ii + 0] = vi + 0
+		idxs[ii + 1] = vi + 1
+		idxs[ii + 2] = vi + 2
+		idxs[ii + 3] = vi + 0
+		idxs[ii + 4] = vi + 2
+		idxs[ii + 5] = vi + 3
+		vi += 4
+		ii += 6
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = idxs
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return m
 
 
 ## Rebuild the floor-edge distance cache (BFS inward from edges).
@@ -939,6 +1145,12 @@ func _get_floor_corner_darkness(grid_pos: Vector2i) -> Array:
 func _draw() -> void:
 	if _floor_edge_dirty:
 		_rebuild_floor_edge_cache()
+	# Water depth bake is lazy through get_water_depth_at(), but the
+	# renderer reads _water_depth_t directly — force a rebuild here if
+	# dirty so the fade shows on first paint (editor, post-load, or after
+	# bulk terrain edits) instead of only after the first gameplay query.
+	if _water_depth_dirty:
+		_rebuild_water_depth()
 	_draw_floor_tiles()
 	_draw_multi_tiles()
 
@@ -1037,29 +1249,24 @@ func _draw_floor_tiles() -> void:
 
 			var world_pos = main.grid_to_world(grid_pos)
 
-			# Water tiles: draw sand underneath then water on top with depth-based
-			# blend. Depth 1 = 50% sand / 50% water, depth 2 = 30% sand / 70% water,
-			# depth 3 = 100% water (no sand visible).
-			var depth: int = get_water_depth_at(grid_pos)
-			if depth > 0 and _sand_texture != null:
-				var rect := Rect2(world_pos, Vector2(size, size))
-				if depth <= 2:
-					var sand_alpha: float = 0.5 if depth == 1 else 0.3
-					draw_texture_rect(_sand_texture, rect, false, Color(1, 1, 1, sand_alpha * data.opacity))
-				# Water layer on top
-				var water_alpha: float
-				if depth == 1:
-					water_alpha = 0.5
-				elif depth == 2:
-					water_alpha = 0.7
-				else:
-					water_alpha = 1.0
-				_draw_tile_texture(data, world_pos, size, water_alpha * data.opacity)
-			else:
-				_draw_tile_texture(data, world_pos, size, data.opacity)
+			# Water tiles are drawn in one pass via the batched sand/water
+			# meshes below (_sand_mesh + _water_meshes), so skip them
+			# here. Non-water floors take the normal flat-tile path.
+			if _water_depth_t.has(grid_pos):
+				continue
+			_draw_tile_texture(data, world_pos, size, data.opacity)
 
 			# Fade overlay is now rendered in one batched draw_mesh after the
 			# loop (see below). No per-tile fade work here.
+
+	# Batched water underlay + water layer. Rebuilt only when terrain
+	# changes; the GPU interpolates the per-corner vertex colors to
+	# produce the shore→deep gradient, and off-screen triangles cull
+	# for free so the full-map mesh isn't an issue.
+	if _sand_mesh != null and _sand_texture != null:
+		draw_mesh(_sand_mesh, _sand_texture)
+	for bucket in _water_meshes:
+		draw_mesh(bucket["mesh"], bucket["texture"])
 
 	# Single draw call for all faded floor tiles, using a mesh rebuilt only
 	# when _floor_edge_dirty flips. GPU culls off-screen triangles for free.

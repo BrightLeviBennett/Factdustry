@@ -36,6 +36,14 @@ var parallax_enabled := true
 # --- ARCHIVE STATE ---
 ## Per-archive: anchor → archive_id (StringName). Empty string = no archive selected.
 var archive_holdings: Dictionary = {}
+
+# Editor-only fallback stores for the in-world block/unit/filter menus.
+# In-game, this state lives on LogisticsSystem; the map editor has no
+# LogisticsSystem instance, so BuildingSystem owns the dicts directly
+# so authored selections survive a save/load round-trip.
+var editor_constructor_state: Dictionary = {}    # Vector2i → {selected_block: StringName}
+var editor_refabricator_state: Dictionary = {}   # Vector2i → {selected_t2: StringName}
+var editor_sorter_filters: Dictionary = {}       # Vector2i → StringName
 ## Per-archive-decoder: anchor → { progress: float, archive_id: StringName, scanner: Vector2i }
 var archive_decoder_state: Dictionary = {}
 
@@ -921,12 +929,14 @@ func _process(_delta: float) -> void:
 	# (but the draw pass still highlights the frozen active anchor).
 	var anchor: Vector2i = _get_tickable_work_anchor()
 	if anchor != _NO_ACTIVE_WORK:
-		# Deferred same-group swap (belt → junction, etc.): commit the swap
-		# now that the drone is actually here. Until this promotes, the old
-		# block at this cell is still live and functioning.
+		# Deferred same-group swap (belt → junction, etc.): tick the
+		# build progress on the pending_swaps entry while leaving the
+		# OLD block live in placed_buildings. The atomic destroy/replace
+		# only fires at the end so the player never sees the cell as
+		# "non-constructed" during the build.
 		if "pending_swaps" in main and main.pending_swaps.has(anchor):
-			main.execute_pending_swap(anchor)
-		if main.building_build_progress.has(anchor):
+			_tick_pending_swap(anchor, _delta)
+		elif main.building_build_progress.has(anchor):
 			_tick_progressive_build(anchor, _delta)
 		elif main.building_deconstruct_progress.has(anchor):
 			_tick_progressive_deconstruct(anchor, _delta)
@@ -1065,6 +1075,76 @@ func _process(_delta: float) -> void:
 						_compute_path_rotations(_drag_cells)
 
 	queue_redraw()
+
+
+## Mirrors _tick_progressive_build but operates on a pending_swaps entry —
+## the old block stays live in placed_buildings while progress ticks on
+## the swap dict itself. When progress hits build_time AND every build
+## cost has been paid, `execute_pending_swap` atomically destroys the
+## old block and places the new one fully built. Until then the world
+## still sees the original belt / pipe / shaft, with the new block
+## drawn as a translucent ghost overlay.
+func _tick_pending_swap(anchor: Vector2i, delta: float) -> void:
+	var entry: Dictionary = main.pending_swaps[anchor]
+	var new_id: StringName = StringName(entry.get("new_block_id", &""))
+	var new_data = Registry.get_block(new_id)
+	if new_data == null:
+		main.pending_swaps.erase(anchor)
+		main.work_order.erase(anchor)
+		return
+	var build_time: float = float(entry.get("build_time", new_data.build_time))
+	if build_time <= 0.0:
+		build_time = 1.0
+
+	entry["progress"] = float(entry.get("progress", 0.0)) + delta
+	var pct: float = clampf(float(entry["progress"]) / build_time, 0.0, 1.0)
+	var consumed: Dictionary = entry.get("consumed", {})
+
+	var any_consumed := false
+	var all_fully_consumed := true
+	if main.require_resources and not new_data.build_cost.is_empty():
+		for item_id in new_data.build_cost:
+			var rk: StringName = main._resolve_resource_key(str(item_id))
+			var required: int = int(new_data.build_cost[item_id])
+			var target: int = ceili(pct * required)
+			var already: int = int(consumed.get(rk, 0))
+			var need: int = target - already
+			if need > 0:
+				var available: int = int(main.resources.get(rk, 0))
+				var take: int = mini(need, available)
+				if take > 0:
+					main.resources[rk] -= take
+					consumed[rk] = already + take
+					any_consumed = true
+				if int(consumed.get(rk, 0)) < required:
+					all_fully_consumed = false
+		entry["consumed"] = consumed
+
+		# Stall progress when nothing more can be paid for, so the swap
+		# pauses cleanly under resource starvation rather than silently
+		# advancing past the available budget.
+		if not any_consumed and not all_fully_consumed:
+			var min_pct: float = 1.0
+			for item_id in new_data.build_cost:
+				var rk2: StringName = main._resolve_resource_key(str(item_id))
+				var required2: int = int(new_data.build_cost[item_id])
+				if required2 > 0:
+					min_pct = minf(min_pct, float(consumed.get(rk2, 0)) / float(required2))
+			entry["progress"] = min_pct * build_time
+			return
+
+	if any_consumed:
+		main.resources_changed.emit(main.resources)
+
+	if all_fully_consumed and float(entry["progress"]) >= build_time:
+		# Drop work-order bookkeeping BEFORE the swap so completion
+		# matches what the build tick does for normal placements.
+		main.work_order.erase(anchor)
+		if main.has_method("resume_auto_paused_by"):
+			main.resume_auto_paused_by(anchor)
+		if "work_paused" in main:
+			main.work_paused.erase(anchor)
+		main.execute_pending_swap(anchor)
 
 
 ## Progressive build tick: consumes resources toward the build cost proportional
@@ -1687,6 +1767,12 @@ func _unhandled_input(event: InputEvent) -> void:
 							_open_world_menu("archive", click_anchor)
 							get_viewport().set_input_as_handled()
 							return
+						# Fallback: any block with non-empty storage shows a
+						# read-only inventory popup (Mindustry-style).
+						elif click_data and _block_has_any_stored(click_anchor):
+							_open_world_menu("storage", click_anchor)
+							get_viewport().set_input_as_handled()
+							return
 				elif main.selected_building != &"" and not event.ctrl_pressed:
 					# Start drag-place: record start, don't place yet
 					# (Ctrl+click is reserved for unit control)
@@ -1908,7 +1994,27 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 	_world_menu_items.clear()
 	_world_menu_hovered = -1
 
-	if type == "sorter":
+	if type == "storage":
+		# Read-only inventory display. Items come from any of the places a
+		# block can stash things: LogisticsSystem.block_storage, the factory
+		# input/output buffers, and the refabricator's loose buffers. They're
+		# merged here so the popup shows everything the block currently
+		# holds, regardless of which subsystem owns the slot.
+		var merged: Dictionary = _collect_block_stored_items(grid_pos)
+		for item_id in merged:
+			var count: int = int(merged[item_id])
+			if count <= 0:
+				continue
+			var it = Registry.get_item(item_id)
+			var disp_name: String = it.display_name if it else String(item_id)
+			var it_icon: Texture2D = it.icon if it else null
+			_world_menu_items.append({
+				"id": item_id,
+				"icon": it_icon,
+				"name": disp_name,
+				"count": count,
+			})
+	elif type == "sorter":
 		# First entry is the "clear filter" option
 		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
 		for item in Registry.items_list:
@@ -1920,12 +2026,15 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 		var block_data = Registry.get_block(block_id)
 		var max_ps: int = block_data.max_payload_size if block_data else 0
 		var tech_tree = get_node_or_null("/root/Main/TechTree")
+		# In the editor there is no `require_research` on Main — show all
+		# blocks regardless so a sector author can pick anything.
+		var gate_on_research: bool = "require_research" in main and main.require_research
 		for block in Registry.blocks_list:
 			if block.tags.has("core"):
 				continue
 			if block.grid_size.x > max_ps or block.grid_size.y > max_ps:
 				continue
-			if main.require_research and tech_tree and not tech_tree.is_researched(block.id):
+			if gate_on_research and tech_tree and not tech_tree.is_researched(block.id):
 				continue
 			_world_menu_items.append({"id": block.id, "icon": block.icon, "name": block.display_name})
 	elif type == "archive":
@@ -1970,7 +2079,10 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 					break
 			if not has_t1_unit_parent:
 				continue
-			if not TechTree.is_researched(node_id):
+			# Editor mode (no LogisticsSystem running) lists every tier-2
+			# unit unconditionally so authors can pick pre-researched
+			# recipes into sector saves.
+			if _logistics != null and not TechTree.is_researched(node_id):
 				continue
 			if seen.has(node_id):
 				continue
@@ -2000,14 +2112,29 @@ func _apply_world_menu_selection(index: int) -> void:
 
 	var selected_id: StringName = _world_menu_items[index]["id"]
 
+	if _world_menu_type == "storage":
+		# Click-to-withdraw: move as much of the clicked item as possible
+		# (up to the drone's MAX_INVENTORY headroom) from the block into
+		# the drone. Leave the popup open so the player can take from
+		# another slot or repeat — _draw_world_menu auto-closes it the
+		# frame the block ends up empty.
+		var item_id: StringName = StringName(_world_menu_items[index].get("id", &""))
+		if item_id != &"":
+			_withdraw_block_to_drone(_world_menu_pos, item_id)
+		return
 	if _world_menu_type == "sorter":
 		if _logistics:
 			_logistics.sorter_filters[_world_menu_pos] = selected_id
+		else:
+			editor_sorter_filters[_world_menu_pos] = selected_id
 	elif _world_menu_type == "constructor":
-		if _logistics and _logistics.constructor_state.has(_world_menu_pos):
-			_logistics.constructor_state[_world_menu_pos]["selected_block"] = selected_id
-			if selected_id != &"":
-				_logistics.constructor_state[_world_menu_pos]["phase"] = "collecting"
+		if _logistics:
+			if _logistics.constructor_state.has(_world_menu_pos):
+				_logistics.constructor_state[_world_menu_pos]["selected_block"] = selected_id
+				if selected_id != &"":
+					_logistics.constructor_state[_world_menu_pos]["phase"] = "collecting"
+		else:
+			editor_constructor_state[_world_menu_pos] = {"selected_block": selected_id}
 	elif _world_menu_type == "archive":
 		archive_holdings[_world_menu_pos] = selected_id
 	elif _world_menu_type == "refabricator":
@@ -2030,19 +2157,41 @@ func _apply_world_menu_selection(index: int) -> void:
 			rs["out_unit_id"] = &""
 			rs["timer"] = 0.0
 			rs["phase"] = "idle"
+		else:
+			editor_refabricator_state[_world_menu_pos] = {"selected_t2": selected_id}
 
 	_close_world_menu()
+
+
+## Returns the width/height (in that order) of a single cell for the
+## current menu type. Icon-based menus use the square `_world_menu_cell_size`;
+## the archive menu has no item icons, so it drops into a vertical list
+## layout with wide cells that can fit each archive's full display name.
+func _world_menu_cell_dim() -> Vector2:
+	if _world_menu_type == "archive":
+		return Vector2(160.0, 26.0)
+	return Vector2(_world_menu_cell_size, _world_menu_cell_size)
+
+
+## How many columns the current menu type uses. Archive = single column
+## list so each row gets the full cell width for its name.
+func _world_menu_col_count() -> int:
+	if _world_menu_type == "archive":
+		return 1
+	return _world_menu_columns
 
 
 ## Returns the world-space bounding rect for the world menu, or Rect2() if closed.
 func _get_world_menu_rect() -> Rect2:
 	if not _world_menu_open or _world_menu_items.is_empty():
 		return Rect2()
-	var cols := mini(_world_menu_columns, _world_menu_items.size())
+	var dim: Vector2 = _world_menu_cell_dim()
+	var col_max: int = _world_menu_col_count()
+	var cols := mini(col_max, _world_menu_items.size())
 	var rows := ceili(float(_world_menu_items.size()) / float(cols))
 	var padding := 6.0
-	var menu_w: float = cols * _world_menu_cell_size + padding * 2.0
-	var menu_h: float = rows * _world_menu_cell_size + padding * 2.0
+	var menu_w: float = cols * dim.x + padding * 2.0
+	var menu_h: float = rows * dim.y + padding * 2.0
 	# Position above the building, centered
 	var block_id = main.placed_buildings.get(_world_menu_pos, &"")
 	var data = Registry.get_block(block_id)
@@ -2067,9 +2216,10 @@ func _world_menu_hit_test(world_pos: Vector2) -> int:
 	var local_y: float = world_pos.y - menu_rect.position.y - padding
 	if local_x < 0.0 or local_y < 0.0:
 		return -1
-	var col := int(local_x / _world_menu_cell_size)
-	var row := int(local_y / _world_menu_cell_size)
-	var cols := mini(_world_menu_columns, _world_menu_items.size())
+	var dim: Vector2 = _world_menu_cell_dim()
+	var col := int(local_x / dim.x)
+	var row := int(local_y / dim.y)
+	var cols := mini(_world_menu_col_count(), _world_menu_items.size())
 	if col < 0 or col >= cols:
 		return -1
 	var idx := row * cols + col
@@ -2080,11 +2230,43 @@ func _world_menu_hit_test(world_pos: Vector2) -> int:
 
 ## Draws the in-world selection menu (called from _draw).
 func _draw_world_menu() -> void:
-	if not _world_menu_open or _world_menu_items.is_empty():
+	if not _world_menu_open:
+		return
+	# Storage popup is read-only and lives — rebuild the item list from
+	# the current buffers each frame so counts animate in real time
+	# instead of snapshotting at open-time. If the block emptied out
+	# entirely while the popup was open, close it rather than drawing
+	# a zero-item box.
+	if _world_menu_type == "storage":
+		_world_menu_items.clear()
+		var merged: Dictionary = _collect_block_stored_items(_world_menu_pos)
+		for item_id in merged:
+			var count: int = int(merged[item_id])
+			if count <= 0:
+				continue
+			var it = Registry.get_item(item_id)
+			_world_menu_items.append({
+				"id": item_id,
+				"icon": it.icon if it else null,
+				"name": it.display_name if it else String(item_id),
+				"count": count,
+			})
+		if _world_menu_items.is_empty():
+			_close_world_menu()
+			return
+	if _world_menu_items.is_empty():
 		return
 	var menu_rect := _get_world_menu_rect()
 	var padding := 6.0
-	var cols := mini(_world_menu_columns, _world_menu_items.size())
+	var dim: Vector2 = _world_menu_cell_dim()
+	var cols := mini(_world_menu_col_count(), _world_menu_items.size())
+
+	# For the archive menu, resolve the currently-selected archive id
+	# once so we can highlight its row. Empty id (= "Clear") matches when
+	# nothing is set.
+	var selected_archive: StringName = &""
+	if _world_menu_type == "archive":
+		selected_archive = StringName(archive_holdings.get(_world_menu_pos, &""))
 
 	# Background
 	draw_rect(menu_rect, Color(0.08, 0.08, 0.1, 0.92), true)
@@ -2095,24 +2277,31 @@ func _draw_world_menu() -> void:
 	for i in _world_menu_items.size():
 		var col := i % cols
 		var row := i / cols
-		var cell_pos := origin + Vector2(col * _world_menu_cell_size, row * _world_menu_cell_size)
-		var cell_rect := Rect2(cell_pos, Vector2(_world_menu_cell_size, _world_menu_cell_size))
+		var cell_pos := origin + Vector2(col * dim.x, row * dim.y)
+		var cell_rect := Rect2(cell_pos, dim)
 
 		# Hover highlight
 		if i == _world_menu_hovered:
 			draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
 
-		# Cell border
-		draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
+		# Cell border — thicker/brighter blue when this row is the
+		# currently-selected archive so the player can see what's set at
+		# a glance.
+		var is_selected_archive: bool = _world_menu_type == "archive" \
+			and StringName(_world_menu_items[i].get("id", &"")) == selected_archive
+		if is_selected_archive:
+			draw_rect(cell_rect, Color(0.35, 0.65, 1.0, 1.0), false, 2.0)
+		else:
+			draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
 
 		var entry: Dictionary = _world_menu_items[i]
 
 		# Clear button (first cell in sorter or archive mode)
 		if (_world_menu_type == "sorter" or _world_menu_type == "archive") and i == 0:
 			# Draw X for clear
-			var cx := cell_pos.x + _world_menu_cell_size * 0.5
-			var cy := cell_pos.y + _world_menu_cell_size * 0.5
-			var hs := _world_menu_cell_size * 0.25
+			var cx := cell_pos.x + dim.x * 0.5
+			var cy := cell_pos.y + dim.y * 0.5
+			var hs: float = minf(dim.x, dim.y) * 0.25
 			draw_line(Vector2(cx - hs, cy - hs), Vector2(cx + hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
 			draw_line(Vector2(cx + hs, cy - hs), Vector2(cx - hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
 			continue
@@ -2123,16 +2312,40 @@ func _draw_world_menu() -> void:
 			var icon_margin := 4.0
 			var icon_rect := Rect2(
 				cell_pos + Vector2(icon_margin, icon_margin),
-				Vector2(_world_menu_cell_size - icon_margin * 2.0, _world_menu_cell_size - icon_margin * 2.0)
+				Vector2(dim.x - icon_margin * 2.0, dim.y - icon_margin * 2.0)
 			)
 			draw_texture_rect(icon_tex, icon_rect, false)
 		else:
-			# Fallback: draw abbreviated name
+			# Text-label cells (e.g. archive list) fit their full display
+			# name into the wider list-mode cell. Square icon-less cells
+			# fall back to a 4-char abbreviation as before.
 			var font := ThemeDB.fallback_font
-			var font_size := 10
-			var short_name: String = entry.get("name", "?").left(4)
-			var text_pos := cell_pos + Vector2(4.0, _world_menu_cell_size * 0.65)
-			draw_string(font, text_pos, short_name, HORIZONTAL_ALIGNMENT_LEFT, _world_menu_cell_size - 8.0, font_size, Color.WHITE)
+			var font_size := 11
+			var full_name: String = entry.get("name", "?")
+			var side_pad := 6.0
+			var avail_w: float = dim.x - side_pad * 2.0
+			if _world_menu_type == "archive":
+				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + font_size * 0.35)
+				draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, font_size, Color.WHITE)
+			else:
+				var short_name: String = full_name.left(4)
+				var text_pos := cell_pos + Vector2(4.0, dim.y * 0.65)
+				draw_string(font, text_pos, short_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, 10, Color.WHITE)
+
+		# Storage popup: overlay an item count in the bottom-right corner.
+		if _world_menu_type == "storage" and entry.has("count"):
+			var font_c := ThemeDB.fallback_font
+			var font_sz_c := 11
+			var count_str: String = str(entry["count"])
+			var tsz: Vector2 = font_c.get_string_size(count_str, HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c)
+			var pad := 2.0
+			var tx := cell_pos.x + dim.x - tsz.x - pad
+			var ty := cell_pos.y + dim.y - pad
+			# Drop-shadow for legibility over any icon colour.
+			draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color(0, 0, 0, 0.85))
+			draw_string(font_c, Vector2(tx, ty), count_str,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color.WHITE)
 
 
 func _draw() -> void:
@@ -2225,29 +2438,63 @@ func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: floa
 ## light up when a payload conveyor is adjacent on that side of the
 ## building. Each overlay texture rotates with the base.
 func _draw_refabricator(origin: Vector2i, data: BlockData, top_pos: Vector2, w: float, h: float, rot: int) -> void:
-	_draw_block_texture(data.base_sprite, top_pos, w, h, rot)
-	_draw_refabricator_unit_layer(origin, top_pos, w, h, rot)
 	var gsz: Vector2i = data.grid_size
 	var back_dir: int = (rot + 2) % 4
 	var left_dir: int = (rot + 3) % 4
 	var right_dir: int = (rot + 1) % 4
-	var back_fed: bool = _side_has_payload_conveyor(origin, gsz, back_dir)
-	var left_fed: bool = _side_has_payload_conveyor(origin, gsz, left_dir)
-	var right_fed: bool = _side_has_payload_conveyor(origin, gsz, right_dir)
-	# If no side has a payload conveyor yet, fall back to the TopBottom
-	# overlay as the default idle frame so the block still reads as a
-	# refabricator rather than a bare base sprite.
-	var any_fed: bool = back_fed or left_fed or right_fed
-	if not any_fed:
-		if data.feed_overlay_back:
-			_draw_block_texture(data.feed_overlay_back, top_pos, w, h, rot)
-	else:
-		if data.feed_overlay_back and back_fed:
-			_draw_block_texture(data.feed_overlay_back, top_pos, w, h, rot)
-		if data.feed_overlay_left and left_fed:
-			_draw_block_texture(data.feed_overlay_left, top_pos, w, h, rot)
-		if data.feed_overlay_right and right_fed:
-			_draw_block_texture(data.feed_overlay_right, top_pos, w, h, rot)
+	var back_fed: bool = _side_has_payload_input(origin, gsz, back_dir)
+	var left_fed: bool = _side_has_payload_input(origin, gsz, left_dir)
+	var right_fed: bool = _side_has_payload_input(origin, gsz, right_dir)
+	# Pick ONE active feeding side. A previously-locked side keeps priority
+	# as long as it's still feeding (so the first-placed conveyor wins and
+	# later additions don't stack on top of it). When no side is locked or
+	# the locked side stops feeding, fall back to a stable tiebreak order
+	# (back > left > right).
+	var active_side := -1  # 0=back, 1=left, 2=right
+	var state_ref: Dictionary = {}
+	if _logistics and _logistics.refabricator_state.has(origin):
+		state_ref = _logistics.refabricator_state[origin]
+		var prev: int = int(state_ref.get("active_feed_side", -1))
+		if prev == 0 and back_fed:
+			active_side = 0
+		elif prev == 1 and left_fed:
+			active_side = 1
+		elif prev == 2 and right_fed:
+			active_side = 2
+	if active_side == -1:
+		if back_fed:
+			active_side = 0
+		elif left_fed:
+			active_side = 1
+		elif right_fed:
+			active_side = 2
+	if not state_ref.is_empty():
+		state_ref["active_feed_side"] = active_side
+
+	var base_tex: Texture2D = data.base_sprite
+	var overlay_tex: Texture2D = null
+	match active_side:
+		0:
+			if data.base_sprite_back:
+				base_tex = data.base_sprite_back
+			overlay_tex = data.feed_overlay_back
+		1:
+			if data.base_sprite_left:
+				base_tex = data.base_sprite_left
+			overlay_tex = data.feed_overlay_left
+		2:
+			if data.base_sprite_right:
+				base_tex = data.base_sprite_right
+			overlay_tex = data.feed_overlay_right
+		_:
+			# Idle frame: use the back variant as the default look.
+			if data.base_sprite_back:
+				base_tex = data.base_sprite_back
+			overlay_tex = data.feed_overlay_back
+	_draw_block_texture(base_tex, top_pos, w, h, rot)
+	_draw_refabricator_unit_layer(origin, top_pos, w, h, rot)
+	if overlay_tex:
+		_draw_block_texture(overlay_tex, top_pos, w, h, rot)
 
 
 ## Draws the unit currently held inside a refabricator — the tier-1 input
@@ -2314,7 +2561,300 @@ func _draw_refabricator_unit_layer(origin: Vector2i, top_pos: Vector2, w: float,
 ## Returns true if any cell along the `dir` edge of the footprint at `origin`
 ## contains a payload/freight conveyor. `dir` uses the building convention:
 ## 0=east, 1=south, 2=west, 3=north.
-func _side_has_payload_conveyor(origin: Vector2i, gsz: Vector2i, dir: int) -> bool:
+## Returns true if the block at `anchor` has any items stashed anywhere
+## LogisticsSystem tracks per-block storage (shared storage, factory I/O
+## buffers, refabricator holding slots). Fluids are intentionally left
+## out — the storage popup is items-only for now.
+func _block_has_any_stored(anchor: Vector2i) -> bool:
+	var merged: Dictionary = _collect_block_stored_items(anchor)
+	for item_id in merged:
+		if int(merged[item_id]) > 0:
+			return true
+	return false
+
+
+## Merges every item-storage source a block can hold into a single
+## `{item_id: count}` dict for the inventory popup. Keeps overlapping
+## item_ids on separate sources summed together (e.g. a factory that has
+## copper in both its input buffer and its generic storage shows the
+## combined total).
+func _collect_block_stored_items(anchor: Vector2i) -> Dictionary:
+	var merged: Dictionary = {}
+	var block_id: StringName = main.placed_buildings.get(anchor, &"")
+	var data = Registry.get_block(block_id)
+
+	# Cores: the player resource pool is shared across every Lumina core,
+	# so clicking any core shows the entire stockpile (mirrors Mindustry).
+	if data and data.tags.has("core") \
+			and main.has_method("get_building_faction") \
+			and main.get_building_faction(anchor) == FACTION_LUMINA:
+		for k in main.resources:
+			var c: int = int(main.resources[k])
+			if c > 0:
+				merged[k] = int(merged.get(k, 0)) + c
+		return merged
+
+	# Conveyors: a belt cell holds at most one item, tracked in
+	# LogisticsSystem.conveyor_items. Show it as a one-count entry so the
+	# player can inspect what's currently riding the belt.
+	if _logistics and "conveyor_items" in _logistics \
+			and _logistics.conveyor_items.has(anchor):
+		var ci: Dictionary = _logistics.conveyor_items[anchor]
+		var cid: StringName = StringName(ci.get("item_id", &""))
+		if cid != &"":
+			merged[cid] = int(merged.get(cid, 0)) + 1
+
+	if _logistics == null:
+		return merged
+	# Shared block storage (loaders, unloaders, generic storage blocks).
+	if "block_storage" in _logistics and _logistics.block_storage.has(anchor):
+		var s: Dictionary = _logistics.block_storage[anchor]
+		var items: Dictionary = s.get("items", {})
+		for k in items:
+			merged[k] = int(merged.get(k, 0)) + int(items[k])
+	# Factory input + output buffers (furnaces, crushers, fabricators).
+	if "factory_buffers" in _logistics and _logistics.factory_buffers.has(anchor):
+		var fb: Dictionary = _logistics.factory_buffers[anchor]
+		var fin: Dictionary = fb.get("inputs", {})
+		for k in fin:
+			merged[k] = int(merged.get(k, 0)) + int(fin[k])
+		var fout: Dictionary = fb.get("outputs", {})
+		for k in fout:
+			merged[k] = int(merged.get(k, 0)) + int(fout[k])
+	return merged
+
+
+## Withdraws up to `count` of `item_id` from the block at `anchor`.
+## Drains sources in priority order (core pool → factory outputs → factory
+## inputs → block storage → conveyor cell) and returns the total amount
+## actually taken.
+func _withdraw_items_from_block(anchor: Vector2i, item_id: StringName, count: int) -> int:
+	if count <= 0:
+		return 0
+	var remaining: int = count
+	var block_id: StringName = main.placed_buildings.get(anchor, &"")
+	var data = Registry.get_block(block_id)
+
+	# Core: pull from main.resources (shared player stockpile).
+	if data and data.tags.has("core") \
+			and main.has_method("get_building_faction") \
+			and main.get_building_faction(anchor) == FACTION_LUMINA:
+		var have: int = int(main.resources.get(item_id, 0))
+		var take: int = mini(have, remaining)
+		if take > 0:
+			main.resources[item_id] = have - take
+			if "resources_changed" in main:
+				main.resources_changed.emit(main.resources)
+			remaining -= take
+		return count - remaining
+
+	if _logistics == null:
+		return 0
+	# Conveyor cell holds a single unit.
+	if "conveyor_items" in _logistics and _logistics.conveyor_items.has(anchor) and remaining > 0:
+		var ci: Dictionary = _logistics.conveyor_items[anchor]
+		if StringName(ci.get("item_id", &"")) == item_id:
+			_logistics.conveyor_items.erase(anchor)
+			remaining -= 1
+	# Factory output buffers next (already-produced items).
+	if "factory_buffers" in _logistics and _logistics.factory_buffers.has(anchor) and remaining > 0:
+		var fb: Dictionary = _logistics.factory_buffers[anchor]
+		var fout: Dictionary = fb.get("outputs", {})
+		if fout.has(item_id):
+			var have_o: int = int(fout[item_id])
+			var take_o: int = mini(have_o, remaining)
+			if take_o > 0:
+				fout[item_id] = have_o - take_o
+				if int(fout[item_id]) <= 0:
+					fout.erase(item_id)
+				remaining -= take_o
+		var fin: Dictionary = fb.get("inputs", {})
+		if remaining > 0 and fin.has(item_id):
+			var have_i: int = int(fin[item_id])
+			var take_i: int = mini(have_i, remaining)
+			if take_i > 0:
+				fin[item_id] = have_i - take_i
+				if int(fin[item_id]) <= 0:
+					fin.erase(item_id)
+				remaining -= take_i
+	# Shared block storage.
+	if "block_storage" in _logistics and _logistics.block_storage.has(anchor) and remaining > 0:
+		var s: Dictionary = _logistics.block_storage[anchor]
+		var items: Dictionary = s.get("items", {})
+		if items.has(item_id):
+			var have_s: int = int(items[item_id])
+			var take_s: int = mini(have_s, remaining)
+			if take_s > 0:
+				items[item_id] = have_s - take_s
+				if int(items[item_id]) <= 0:
+					items.erase(item_id)
+				remaining -= take_s
+	return count - remaining
+
+
+## Click-to-withdraw handler: fills the drone's mined_inventory from the
+## block, capped by the drone's MAX_INVENTORY.
+func _withdraw_block_to_drone(anchor: Vector2i, item_id: StringName) -> int:
+	var drone = get_node_or_null("/root/Main/PlayerDrone")
+	if drone == null:
+		return 0
+	var max_inv: int = int(drone.MAX_INVENTORY) if "MAX_INVENTORY" in drone else 60
+	var current_total: int = 0
+	if drone.has_method("_get_inventory_total"):
+		current_total = drone._get_inventory_total()
+	var capacity: int = max_inv - current_total
+	if capacity <= 0:
+		return 0
+	var taken: int = _withdraw_items_from_block(anchor, item_id, capacity)
+	if taken > 0 and "mined_inventory" in drone:
+		drone.mined_inventory[item_id] = int(drone.mined_inventory.get(item_id, 0)) + taken
+	return taken
+
+
+## Deposits up to `count` of `item_id` into the block at `anchor`. Returns
+## the amount actually accepted. Picks the right bucket based on the
+## block's role:
+##   - storage-tagged blocks fill block_storage up to max_stored_items
+##   - factories fill factory_buffers["inputs"] for items in input_items
+##     (also capped by max_stored_items when set)
+##   - cores drop into main.resources (subject to storage capacity)
+## Blocks that don't match any of the above accept nothing.
+func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int) -> int:
+	if count <= 0 or _logistics == null:
+		return 0
+	var block_id: StringName = main.placed_buildings.get(anchor, &"")
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return 0
+
+	# Core deposit: hand off to main.resources (honors can_accept_resource
+	# so we don't exceed core storage capacity).
+	if data.tags.has("core") \
+			and main.has_method("get_building_faction") \
+			and main.get_building_faction(anchor) == FACTION_LUMINA:
+		var accepted_c: int = 0
+		for _i in range(count):
+			if main.has_method("can_accept_resource") and not main.can_accept_resource(item_id):
+				break
+			main.resources[item_id] = int(main.resources.get(item_id, 0)) + 1
+			accepted_c += 1
+		if accepted_c > 0 and "resources_changed" in main:
+			main.resources_changed.emit(main.resources)
+		return accepted_c
+
+	# Factory input buffer: only accept items the recipe actually uses.
+	if data.input_items.size() > 0 and data.input_items.has(item_id):
+		if not _logistics.factory_buffers.has(anchor):
+			_logistics.factory_buffers[anchor] = {
+				"inputs": {},
+				"phase": "collecting",
+				"timer": 0.0,
+				"pending_outputs": {},
+			}
+		var fb: Dictionary = _logistics.factory_buffers[anchor]
+		if not fb.has("inputs"):
+			fb["inputs"] = {}
+		var fin: Dictionary = fb["inputs"]
+		var have_i: int = int(fin.get(item_id, 0))
+		var cap_i: int = data.max_stored_items if data.max_stored_items > 0 else int(data.input_items[item_id]) * 10
+		var space_i: int = maxi(0, cap_i - have_i)
+		var take_i: int = mini(space_i, count)
+		if take_i > 0:
+			fin[item_id] = have_i + take_i
+		return take_i
+
+	# Turret: accepts items whose id matches one of its AmmoType entries,
+	# filling block_storage up to max_stored_items (default 30).
+	if data.is_turret() and not data.ammo_types.is_empty():
+		var is_ammo := false
+		for ammo in data.ammo_types:
+			if ammo is AmmoType and (ammo as AmmoType).item_id == item_id:
+				is_ammo = true
+				break
+		if not is_ammo:
+			return 0
+		if not _logistics.block_storage.has(anchor):
+			_logistics.block_storage[anchor] = {"items": {}, "fluids": {}}
+		var ts: Dictionary = _logistics.block_storage[anchor]
+		if not ts.has("items"):
+			ts["items"] = {}
+		var titems: Dictionary = ts["items"]
+		var cap_t: int = data.max_stored_items if data.max_stored_items > 0 else 30
+		var total_t: int = 0
+		for k in titems:
+			total_t += int(titems[k])
+		var space_t: int = maxi(0, cap_t - total_t)
+		var take_t: int = mini(space_t, count)
+		if take_t > 0:
+			titems[item_id] = int(titems.get(item_id, 0)) + take_t
+		return take_t
+
+	# Conveyor: a single empty belt cell takes one unit. Payload/freight
+	# conveyors move buildings, not items — skip those.
+	if data.is_transport() and not data.transports_fluid \
+			and not data.tags.has("payload") and not data.tags.has("freight"):
+		if not _logistics.conveyor_items.has(anchor):
+			_logistics.conveyor_items[anchor] = {
+				"item_id": item_id,
+				"progress": 0.0,
+				"entry_dir": -1,
+			}
+			return 1
+		return 0
+
+	# Generic storage block.
+	if data.tags.has("storage"):
+		if not _logistics.block_storage.has(anchor):
+			_logistics.block_storage[anchor] = {"items": {}, "fluids": {}}
+		var s: Dictionary = _logistics.block_storage[anchor]
+		if not s.has("items"):
+			s["items"] = {}
+		var items: Dictionary = s["items"]
+		var cap_s: int = data.max_stored_items if data.max_stored_items > 0 else 0
+		if cap_s <= 0:
+			return 0
+		var total_s: int = 0
+		for k in items:
+			total_s += int(items[k])
+		var space_s: int = maxi(0, cap_s - total_s)
+		var take_s: int = mini(space_s, count)
+		if take_s > 0:
+			items[item_id] = int(items.get(item_id, 0)) + take_s
+		return take_s
+
+	return 0
+
+
+## Returns true when the block at `anchor` is a valid drop target for any
+## amount of `item_id` — used by the drone's drag-drop to decide between
+## "deposit here" and "drop on terrain" (delete).
+func _block_accepts_item(anchor: Vector2i, item_id: StringName) -> bool:
+	var block_id: StringName = main.placed_buildings.get(anchor, &"")
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return false
+	if data.tags.has("core") \
+			and main.has_method("get_building_faction") \
+			and main.get_building_faction(anchor) == FACTION_LUMINA:
+		return true
+	if data.input_items.has(item_id):
+		return true
+	if data.tags.has("storage"):
+		return true
+	# Turret accepts anything listed in its ammo_types.
+	if data.is_turret() and not data.ammo_types.is_empty():
+		for ammo in data.ammo_types:
+			if ammo is AmmoType and (ammo as AmmoType).item_id == item_id:
+				return true
+	# Item conveyors accept any item when the cell is empty.
+	if data.is_transport() and not data.transports_fluid \
+			and not data.tags.has("payload") and not data.tags.has("freight"):
+		if _logistics and not _logistics.conveyor_items.has(anchor):
+			return true
+	return false
+
+
+func _side_has_payload_input(origin: Vector2i, gsz: Vector2i, dir: int) -> bool:
 	var cells: Array[Vector2i] = []
 	match dir:
 		0:
@@ -2329,6 +2869,10 @@ func _side_has_payload_conveyor(origin: Vector2i, gsz: Vector2i, dir: int) -> bo
 		3:
 			for x in range(gsz.x):
 				cells.append(Vector2i(origin.x + x, origin.y - 1))
+	# For a neighbour on the refab's `dir` side to feed INTO the refab,
+	# its own output must point back toward the refab. The direction from
+	# the neighbour pointing into the refab is (dir + 2) % 4.
+	var into_dir: int = (dir + 2) % 4
 	for c in cells:
 		if not main.placed_buildings.has(c):
 			continue
@@ -2336,8 +2880,18 @@ func _side_has_payload_conveyor(origin: Vector2i, gsz: Vector2i, dir: int) -> bo
 		var d = Registry.get_block(main.placed_buildings[nb_anchor])
 		if d == null:
 			continue
+		var nb_rot: int = main.building_rotation.get(nb_anchor, 0)
+		# Payload / freight conveyors (directional transports)
 		if (d.tags.has("payload") or d.tags.has("freight")) and d.transport_speed > 0:
-			return true
+			if nb_rot == into_dir:
+				return true
+			continue
+		# Unit fabricators / refabricators eject their produced unit out
+		# their front edge — count them as feeding when they face the refab.
+		if d.tags.has("fabricator") or d.tags.has("refabricator") \
+				or (d.produced_unit != &""):
+			if nb_rot == into_dir:
+				return true
 	return false
 
 

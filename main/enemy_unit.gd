@@ -41,6 +41,11 @@ var move_target: Variant = null  # Vector2 or null
 # reassigned by auto-combat for opportunistic fire.
 var manual_target_unit: Variant = null       # Node2D or null
 var manual_target_building: Variant = null   # Vector2i or null
+## Block id at `manual_target_building` when the order was issued. If the
+## cell is destroyed and a new block is placed there, or the block gets
+## converted to the unit's own faction, we compare against this snapshot
+## so the unit stops attacking instead of chewing on the wrong target.
+var manual_target_building_block_id: StringName = &""
 
 # --- RUNTIME TEAM ---
 # Set by UnitManager at spawn time (overrides team which defaults to PLAYER in .tres)
@@ -101,6 +106,41 @@ func _combat_sys_ref() -> Node:
 	if _combat_sys == null:
 		_combat_sys = get_node_or_null("/root/Main/CombatSystem")
 	return _combat_sys
+
+
+## Returns true when the building at `grid_pos` belongs to the same
+## faction as this unit's team — i.e. attacking it would be friendly
+## fire. PLAYER units treat LUMINA as own-side; ENEMY units treat FEROX
+## as own-side. DERELICT is considered "no-one's side" so units keep
+## attacking derelict targets when explicitly ordered, but auto-target
+## validators use this check to drop converted targets.
+func _is_same_faction_as_target(grid_pos: Vector2i) -> bool:
+	if main == null or not main.placed_buildings.has(grid_pos):
+		return false
+	var bfaction: int = main.get_building_faction(grid_pos)
+	match team:
+		UnitData.Team.PLAYER:
+			return bfaction == main.Faction.LUMINA
+		UnitData.Team.ENEMY:
+			return bfaction == main.Faction.FEROX
+	return false
+
+
+## True only when `grid_pos` houses a building whose faction is the
+## *opposing* side for this unit. DERELICT is neither side, so it's never
+## a valid attack target — units shouldn't maul abandoned blocks, and a
+## live target that converts to DERELICT (or to our own faction) should
+## drop out of the attack queue immediately.
+func _is_valid_attack_target(grid_pos: Vector2i) -> bool:
+	if main == null or not main.placed_buildings.has(grid_pos):
+		return false
+	var bfaction: int = main.get_building_faction(grid_pos)
+	match team:
+		UnitData.Team.PLAYER:
+			return bfaction == main.Faction.FEROX
+		UnitData.Team.ENEMY:
+			return bfaction == main.Faction.LUMINA
+	return false
 
 
 func _ready() -> void:
@@ -372,8 +412,30 @@ func _player_update(delta: float) -> void:
 		if not is_instance_valid(manual_target_unit) or manual_target_unit.is_dead:
 			manual_target_unit = null
 	if manual_target_building != null:
+		# Cell empty → target gone. Different block at the same tile → the
+		# block we were ordered to attack is gone too (replaced), stop.
+		# Target faction no longer opposing (converted to our own side OR
+		# to DERELICT) → drop the order; PLAYER units only fight FEROX and
+		# ENEMY units only fight LUMINA, nothing attacks DERELICT.
 		if not main.placed_buildings.has(manual_target_building):
 			manual_target_building = null
+			manual_target_building_block_id = &""
+		else:
+			var current_bid: StringName = main.placed_buildings[manual_target_building]
+			if manual_target_building_block_id != &"" and current_bid != manual_target_building_block_id:
+				manual_target_building = null
+				manual_target_building_block_id = &""
+			elif not _is_valid_attack_target(manual_target_building):
+				manual_target_building = null
+				manual_target_building_block_id = &""
+	# Auto-acquired target_building should invalidate the same way so a
+	# FEROX building that gets converted to DERELICT (or captured) stops
+	# being fired at by in-flight attacks.
+	if target_building != null:
+		if not main.placed_buildings.has(target_building):
+			target_building = null
+		elif not _is_valid_attack_target(target_building):
+			target_building = null
 
 	# Decrement the shared attack timer so both path-following and auto-combat can fire.
 	attack_timer = maxf(attack_timer - delta, -1.0)
@@ -464,8 +526,13 @@ func _opportunistic_fire() -> void:
 			_attack_enemy_unit()
 			return
 
-	# Then any nearby FEROX building (opportunistic)
-	if manual_target_building != null and main.placed_buildings.has(manual_target_building):
+	# Then any nearby FEROX building (opportunistic). Skip if the manual
+	# target is no longer a valid attack target (captured, converted to
+	# DERELICT, etc.) — `_player_update` clears it next frame, but we
+	# don't want to get one last free shot off at an ally.
+	if manual_target_building != null \
+			and main.placed_buildings.has(manual_target_building) \
+			and _is_valid_attack_target(manual_target_building):
 		var bw: Vector2 = main.grid_to_world(manual_target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 		if position.distance_squared_to(bw) <= range_sq:
 			attack_timer = attack_cooldown
@@ -547,12 +614,10 @@ func _try_attack(delta: float) -> void:
 		unit_manager.request_new_path(self)
 		return
 
-	# Don't attack buildings of the same faction
-	if team == UnitData.Team.ENEMY and main.get_building_faction(target_building) == main.Faction.FEROX:
-		target_building = null
-		unit_manager.request_new_path(self)
-		return
-	if team == UnitData.Team.PLAYER and main.get_building_faction(target_building) == main.Faction.LUMINA:
+	# Only attack opposing-faction buildings. DERELICT is off-limits for
+	# both teams — neutral blocks shouldn't get chewed on just because a
+	# unit ended up near one.
+	if not _is_valid_attack_target(target_building):
 		target_building = null
 		unit_manager.request_new_path(self)
 		return

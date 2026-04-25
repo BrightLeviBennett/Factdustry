@@ -19,11 +19,15 @@ grid_size = Vector2i(3, 3)
 base_sprite = ExtResource("3")
 lumina_overlay = ExtResource("4_dpqvi")
 ferox_overlay = ExtResource("2_4rvnv")
+barrel_count = null
+barrel_spacing = null
 max_health = 500.0
 build_cost = {
 "copper": 1500,
 "graphite": 1500,
 "silicon": 500
 }
+build_time = 20.0
+refab_recipes = null
 unit_capacity = 15
 storage_capacity = 4000

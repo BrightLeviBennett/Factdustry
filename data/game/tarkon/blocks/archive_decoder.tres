@@ -8,7 +8,9 @@ id = &"archive_decoder"
 display_name = "Archive Decoder"
 description = "Decodes raw archive data piped in through a data cable. Each completed decode reveals lost technology from before the collapse."
 category = 0
+tags = PackedStringArray("production", "archive", "archive_decoder")
 color = Color(0.5, 0.4, 0.9, 1)
+grid_size = Vector2i(3, 3)
 max_health = 360.0
 build_cost = {
 "copper": 200,
@@ -19,4 +21,3 @@ production_time = 8.0
 requires_power = true
 power_consumption = 6.0
 electrical_power_use = 10.0
-tags = PackedStringArray("production", "archive", "archive_decoder")

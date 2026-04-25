@@ -1,14 +1,14 @@
-[gd_resource type="Resource" script_class="TerrainTileData" format=3]
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://c5n641eksnvpc"]
 
-[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tiles/tile_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://bv1phaf7ovjd1" path="res://textures/terrain/Water.png" id="2"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://crsycnqx1546a" path="res://textures/terrain/Water.png" id="1_uf7ph"]
 
 [resource]
 script = ExtResource("1")
 id = &"water"
 display_name = "Water"
 description = "A body of fresh water. Depth is computed automatically from distance to shore. Ground units wade at half speed; they drown if submerged too long."
-icon = ExtResource("2")
+icon = ExtResource("1_uf7ph")
 color = Color(0.2, 0.4, 0.8, 1)
 speed_modifier = 0.5
 tags = PackedStringArray("liquid", "water")

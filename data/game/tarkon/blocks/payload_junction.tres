@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bhxhghapd1p3e"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -8,11 +8,14 @@ id = &"payload_junction"
 display_name = "Payload Junction"
 description = "Junction point for merging payload streams."
 category = 7
+tags = PackedStringArray("payload", "junction", "transport")
 color = Color(0.6, 0.5, 0.7, 1)
+grid_size = Vector2i(3, 3)
 max_health = 380.0
-build_cost = { "copper": 350, "silicon": 150 }
+build_cost = {
+"copper": 20,
+"silicon": 10
+}
 build_time = 1.5
 transport_speed = 11.0
-tags = PackedStringArray("payload", "junction", "transport")
-grid_size = Vector2i(3, 3)
 max_payload_size = 3

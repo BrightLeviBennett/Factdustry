@@ -275,11 +275,14 @@ func _register_unlock_rules() -> void:
 	# Materials unlock when their resource is first mined
 	_add_rule("item_mined", &"mat_copper", &"mat_copper")
 	_add_rule("item_mined", &"mat_graphite", &"mat_graphite")
+	_add_rule("item_mined", &"mat_sand", &"mat_sand")
 	# Iron is produced by the mineral extractor, not mined — unlock it as
 	# soon as the extractor emits its first unit.
 	_add_rule("item_produced", &"mat_iron", &"mat_iron")
 	# Steel is smelted from iron + graphite in the steel furnace.
 	_add_rule("item_produced", &"mat_steel", &"mat_steel")
+	# Silicon is refined from sand + graphite in the silicon refinery.
+	_add_rule("item_produced", &"mat_silicon", &"mat_silicon")
 
 	# Campaign sector chain (shared with the save-migration pass in load_save_data).
 	var campaign_chain: Array[StringName] = CAMPAIGN_CHAIN
@@ -541,35 +544,55 @@ func _register_mining() -> void:
 	_add(&"eruption_harvester",    "Eruption Harvester",    [&"earthquake_harvester"],  [], {&"mat_copper": 300, &"mat_silicon": 120, &"mat_steel": 80}, Vector2(25, -4))
 
 func _register_materials() -> void:
-	# Row 1 — Root
-	_add(&"mat_copper",         "Copper",          [&"core_shard"],                      [], {}, Vector2(27, 1), true)
-	# Row 2 — Copper's children
-	_add(&"mat_salt_water",     "Salt Water",      [&"mat_copper"],                      [], {}, Vector2(24, 1), true)
-	_add(&"mat_water",          "Water",           [&"mat_salt_water"],                  [], {}, Vector2(23, 2), true)
-	_add(&"mat_salt",           "Salt",            [&"mat_salt_water"],                  [], {}, Vector2(24, 2), true)
-	_add(&"mat_sand",           "Sand",            [&"mat_salt_water"],                  [], {}, Vector2(25, 2), true)
-	_add(&"mat_graphite",       "Graphite",        [&"mat_copper"],                      [], {}, Vector2(27, 2), true)
-	_add(&"mat_iron",           "Iron",            [&"mat_copper"],                      [], {}, Vector2(29, 2), true)
-	_add(&"mat_silver",         "Silver",          [&"mat_copper"],                      [], {}, Vector2(31, 2), true)
-	_add(&"mat_zinc",           "Zinc",            [&"mat_copper"],                      [], {}, Vector2(32, 2), true)
-	# Row 3 — Second generation
-	_add(&"mat_oxygen",         "Oxygen",          [&"mat_water"],                       [], {}, Vector2(22.5, 3), true)
-	_add(&"mat_hydrogen",       "Hydrogen",        [&"mat_water"],                       [], {}, Vector2(23.5, 3), true)
-	_add(&"mat_silicon",        "Silicon",         [&"mat_sand", &"mat_graphite"],       [], {}, Vector2(25, 3), true)
-	_add(&"mat_steel",          "Steel",           [&"mat_iron", &"mat_graphite"],       [], {}, Vector2(29, 3), true)
-	_add(&"mat_brass",          "Brass",           [&"mat_copper", &"mat_zinc"],         [], {}, Vector2(32, 3), true)
-	# Row 4 — Third generation
-	_add(&"mat_coal",           "Coal",            [&"mat_petroleum"],                   [], {}, Vector2(26, 4), true)
-	_add(&"mat_petroleum",      "Petroleum",       [&"mat_graphite"],                    [], {}, Vector2(27, 4), true)
-	_add(&"mat_acetylene",      "Acetylene",       [&"mat_graphite"],                    [], {}, Vector2(26, 4), true)
-	_add(&"mat_bauxite",        "Bauxite",         [&"mat_steel"],                       [], {}, Vector2(29, 4), true)
-	_add(&"mat_alumina",        "Alumina",         [&"mat_bauxite"],                     [], {}, Vector2(30.5, 4), true)
-	_add(&"mat_aluminum",       "Aluminum",        [&"mat_alumina"],                     [], {}, Vector2(32, 4), true)
-	# Row 5 — Fossil fuels
-	_add(&"mat_ethane",         "Ethane",          [&"mat_petroleum"],                   [], {}, Vector2(25, 5), true)
-	_add(&"mat_methane",        "Methane",         [&"mat_petroleum"],                   [], {}, Vector2(26, 5), true)
-	_add(&"mat_butane",         "Butane",          [&"mat_petroleum"],                   [], {}, Vector2(27, 5), true)
-	_add(&"mat_propane",        "Propane",         [&"mat_petroleum"],                   [], {}, Vector2(28, 5), true)
+	# Row 1 — Root. Copper is the entry-point material and sits centered
+	# below the eight primary extractables.
+	_add(&"mat_copper",   "Copper",   [&"core_shard"],  [], {}, Vector2(27, 1), true)
+
+	# Row 2 — Primary extractables. Each is Copper's direct child; even
+	# the ones with no shown children (Coal, Water, Graphite, Silver)
+	# still appear in the row so the eight slots line up.
+	_add(&"mat_coal",     "Coal",     [&"mat_copper"],  [], {}, Vector2(25, 2), true)
+	_add(&"mat_water",    "Water",    [&"mat_copper"],  [], {}, Vector2(26, 2), true)
+	_add(&"mat_graphite", "Graphite", [&"mat_copper"],  [], {}, Vector2(27, 2), true)
+	_add(&"mat_sand",     "Sand",     [&"mat_copper"],  [], {}, Vector2(28, 2), true)
+	_add(&"mat_iron",     "Iron",     [&"mat_copper"],  [], {}, Vector2(29, 2), true)
+	_add(&"mat_bauxite",  "Bauxite",  [&"mat_copper"],  [], {}, Vector2(30, 2), true)
+	_add(&"mat_zinc",     "Zinc",     [&"mat_copper"],  [], {}, Vector2(31, 2), true)
+	_add(&"mat_silver",   "Silver",   [&"mat_copper"],  [], {}, Vector2(32, 2), true)
+
+	# Row 3 — First-pass refinements sitting directly above their
+	# source extractable.
+	_add(&"mat_silicon",  "Silicon",  [&"mat_sand"],    [], {}, Vector2(28, 3), true)
+	_add(&"mat_steel",    "Steel",    [&"mat_iron"],    [], {}, Vector2(29, 3), true)
+	_add(&"mat_alumina",  "Alumina",  [&"mat_bauxite"], [], {}, Vector2(30, 3), true)
+	_add(&"mat_brass",    "Brass",    [&"mat_zinc"],    [], {}, Vector2(31, 3), true)
+
+	# Row 4 — Second-pass refinement. Aluminum sits above Alumina.
+	_add(&"mat_aluminum", "Aluminum", [&"mat_alumina"], [], {}, Vector2(30, 4), true)
+
+	# Keep the legacy nodes in the data model but mark them hidden so
+	# they don't render in the tech-tree UI. They stay reachable from
+	# code (e.g. event-based unlocks) and from any content that still
+	# references them; re-exposing one is a matter of dropping the
+	# `hidden` flag + giving it a position.
+	var hidden_legacy: Array[StringName] = [
+		&"mat_salt_water", &"mat_salt", &"mat_oxygen", &"mat_hydrogen",
+		&"mat_petroleum", &"mat_acetylene",
+		&"mat_ethane", &"mat_methane", &"mat_butane", &"mat_propane",
+	]
+	_add(&"mat_salt_water", "Salt Water", [&"mat_copper"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_salt",       "Salt",       [&"mat_salt_water"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_oxygen",     "Oxygen",     [&"mat_water"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_hydrogen",   "Hydrogen",   [&"mat_water"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_petroleum",  "Petroleum",  [&"mat_graphite"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_acetylene",  "Acetylene",  [&"mat_graphite"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_ethane",     "Ethane",     [&"mat_petroleum"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_methane",    "Methane",    [&"mat_petroleum"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_butane",     "Butane",     [&"mat_petroleum"], [], {}, Vector2.ZERO, true)
+	_add(&"mat_propane",    "Propane",    [&"mat_petroleum"], [], {}, Vector2.ZERO, true)
+	for id in hidden_legacy:
+		if nodes.has(id):
+			nodes[id]["hidden"] = true
 
 func _register_production() -> void:
 	_add(&"silicon_mixer",               "Silicon Refinery",            [&"core_shard"],                       [&"mat_graphite"], {&"mat_copper": 100, &"mat_graphite": 20}, Vector2(-6, 1))
@@ -577,7 +600,8 @@ func _register_production() -> void:
 	_add(&"graphite_electrolyzer",       "Graphite Electrolyzer",       [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_graphite": 30}, Vector2(-6, 2))
 	_add(&"circuit_printer",             "Circuit Printer",             [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_graphite": 25}, Vector2(-5, 2))
 	_add(&"water_filter",                "Water Filter",                [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(-4, 2))
-	_add(&"petroleum_refinery",          "Petroleum Refinery",          [&"steel_furnace"],                    [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 110, &"mat_silicon": 60}, Vector2(-7, 3))
+	_add(&"brass_mixer",                 "Brass Mixer",                 [&"steel_furnace"],                    [&"mat_zinc"], {&"mat_copper": 180, &"mat_silicon": 60, &"mat_steel": 30}, Vector2(-7, 3))
+	_add(&"petroleum_refinery",          "Petroleum Refinery",          [&"brass_mixer"],                      [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 110, &"mat_silicon": 60}, Vector2(-7, 4))
 	_add(&"air_filter",                  "Air Filter",                  [&"graphite_electrolyzer"],            [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_graphite": 40, &"mat_steel": 25}, Vector2(-6, 3))
 
 func _register_turrets() -> void:
@@ -736,17 +760,23 @@ func _register_archives() -> void:
 	# Marked hidden so they never render in the tech tree UI — they exist
 	# only as research milestones that other tech depends on via -D-archive_id.
 	_add(&"archive_payload_systems",   "Archive: Payload Systems",   [], [], {}, Vector2(30, -1), true)
-	_add(&"archive_resonant_drilling", "Archive: Resonant Drilling", [], [], {}, Vector2(30, -2), true)
-	_add(&"archive_collapse_records",  "Archive: Collapse Records",  [], [], {}, Vector2(30, -3), true)
+	_add(&"archive_better_turrets", "Archive: Better Turrets", [], [], {}, Vector2(30, -2), true)
+	_add(&"archive_better_units",  "Archive: Better Units",  [], [], {}, Vector2(30, -3), true)
+	_add(&"archive_launch_systems",  "Archive: Launch Systems",  [], [], {}, Vector2(30, -3), true)
+	_add(&"archive_interplanetary_launch_systems",  "Archive: Interplanetary Launch Systems",  [], [], {}, Vector2(30, -3), true)
 	nodes[&"archive_payload_systems"]["hidden"] = true
-	nodes[&"archive_resonant_drilling"]["hidden"] = true
-	nodes[&"archive_collapse_records"]["hidden"] = true
+	nodes[&"archive_better_turrets"]["hidden"] = true
+	nodes[&"archive_better_units"]["hidden"] = true
+	nodes[&"archive_launch_systems"]["hidden"] = true
+	nodes[&"archive_interplanetary_launch_systems"]["hidden"] = true
 
 	# Track archive ids so the -D- markers and archive_decoded rules get created.
 	archive_ids = [
 		&"archive_payload_systems",
-		&"archive_resonant_drilling",
-		&"archive_collapse_records",
+		&"archive_better_turrets",
+		&"archive_better_units",
+		&"archive_launch_systems",
+		&"archive_interplanetary_launch_systems",
 	]
 	# Auto-research the archive's own node when its archive is decoded in-world.
 	for aid in archive_ids:

@@ -193,8 +193,10 @@
 		"170,75": 1,
 		"170,76": 1,
 		"170,80": 1,
+		"170,81": 1,
 		"170,82": 1,
 		"170,83": 1,
+		"170,84": 1,
 		"170,88": 1,
 		"171,103": 1,
 		"171,106": 1,
@@ -217,8 +219,6 @@
 		"172,107": 1,
 		"172,108": 1,
 		"172,77": 1,
-		"172,78": 1,
-		"172,79": 1,
 		"172,80": 1,
 		"172,81": 1,
 		"172,82": 1,
@@ -241,6 +241,8 @@
 		"174,107": 1,
 		"174,108": 1,
 		"174,77": 1,
+		"174,80": 1,
+		"174,83": 1,
 		"174,85": 1,
 		"174,88": 1,
 		"175,103": 1,
@@ -250,6 +252,12 @@
 		"175,107": 1,
 		"175,108": 1,
 		"175,77": 1,
+		"175,78": 1,
+		"175,79": 1,
+		"175,80": 1,
+		"175,81": 1,
+		"175,82": 1,
+		"175,83": 1,
 		"175,85": 1,
 		"176,103": 1,
 		"176,106": 1,
@@ -674,8 +682,10 @@
 		"170,75": 500.0,
 		"170,76": 500.0,
 		"170,80": 200.0,
-		"170,82": 560.0,
-		"170,83": 560.0,
+		"170,81": 120.0,
+		"170,82": 200.0,
+		"170,83": 120.0,
+		"170,84": 560.0,
 		"170,88": 560.0,
 		"171,103": 120.0,
 		"171,106": 140.0,
@@ -697,9 +707,7 @@
 		"172,106": 140.0,
 		"172,107": 280.0,
 		"172,108": 280.0,
-		"172,77": 200.0,
-		"172,78": 120.0,
-		"172,79": 120.0,
+		"172,77": 120.0,
 		"172,80": 200.0,
 		"172,81": 200.0,
 		"172,82": 200.0,
@@ -722,6 +730,8 @@
 		"174,107": 280.0,
 		"174,108": 280.0,
 		"174,77": 120.0,
+		"174,80": 120.0,
+		"174,83": 120.0,
 		"174,85": 120.0,
 		"174,88": 560.0,
 		"175,103": 200.0,
@@ -730,7 +740,13 @@
 		"175,106": 140.0,
 		"175,107": 280.0,
 		"175,108": 280.0,
-		"175,77": 120.0,
+		"175,77": 200.0,
+		"175,78": 120.0,
+		"175,79": 120.0,
+		"175,80": 200.0,
+		"175,81": 120.0,
+		"175,82": 120.0,
+		"175,83": 120.0,
 		"175,85": 120.0,
 		"176,103": 120.0,
 		"176,106": 140.0,
@@ -1160,9 +1176,11 @@
 		"170,74": 0,
 		"170,75": 0,
 		"170,76": 0,
-		"170,80": 0,
-		"170,82": 0,
+		"170,80": 1,
+		"170,81": 1,
+		"170,82": 1,
 		"170,83": 0,
+		"170,84": 0,
 		"170,88": 0,
 		"171,103": 0,
 		"171,106": 0,
@@ -1185,8 +1203,6 @@
 		"172,107": 0,
 		"172,108": 0,
 		"172,77": 2,
-		"172,78": 1,
-		"172,79": 1,
 		"172,80": 1,
 		"172,81": 1,
 		"172,82": 1,
@@ -1209,6 +1225,8 @@
 		"174,107": 0,
 		"174,108": 0,
 		"174,77": 2,
+		"174,80": 2,
+		"174,83": 2,
 		"174,85": 2,
 		"174,88": 0,
 		"175,103": 0,
@@ -1218,6 +1236,12 @@
 		"175,107": 0,
 		"175,108": 0,
 		"175,77": 2,
+		"175,78": 1,
+		"175,79": 1,
+		"175,80": 1,
+		"175,81": 1,
+		"175,82": 1,
+		"175,83": 2,
 		"175,85": 2,
 		"176,103": 0,
 		"176,106": 0,
@@ -1642,8 +1666,10 @@
 		"170,75": "core_shard",
 		"170,76": "core_shard",
 		"170,80": "belt_bridge",
-		"170,82": "cable_node",
-		"170,83": "cable_node",
+		"170,81": "conveyor_belt",
+		"170,82": "belt_router",
+		"170,83": "conveyor_belt",
+		"170,84": "cable_node",
 		"170,88": "cable_node",
 		"171,103": "conveyor_belt",
 		"171,106": "copper_wall",
@@ -1665,9 +1691,7 @@
 		"172,106": "copper_wall",
 		"172,107": "large_copper_wall",
 		"172,108": "large_copper_wall",
-		"172,77": "belt_router",
-		"172,78": "conveyor_belt",
-		"172,79": "conveyor_belt",
+		"172,77": "conveyor_belt",
 		"172,80": "tank_fabricator",
 		"172,81": "tank_fabricator",
 		"172,82": "tank_fabricator",
@@ -1690,6 +1714,8 @@
 		"174,107": "large_copper_wall",
 		"174,108": "large_copper_wall",
 		"174,77": "conveyor_belt",
+		"174,80": "conveyor_belt",
+		"174,83": "conveyor_belt",
 		"174,85": "conveyor_belt",
 		"174,88": "cable_node",
 		"175,103": "belt_router",
@@ -1698,7 +1724,13 @@
 		"175,106": "copper_wall",
 		"175,107": "large_copper_wall",
 		"175,108": "large_copper_wall",
-		"175,77": "conveyor_belt",
+		"175,77": "belt_router",
+		"175,78": "conveyor_belt",
+		"175,79": "conveyor_belt",
+		"175,80": "belt_router",
+		"175,81": "conveyor_belt",
+		"175,82": "conveyor_belt",
+		"175,83": "conveyor_belt",
 		"175,85": "conveyor_belt",
 		"176,103": "conveyor_belt",
 		"176,106": "copper_wall",
@@ -1959,7 +1991,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1776707136.26536
+		"timestamp": 1777079265.35412
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -15111,8 +15143,20 @@
 
 	},
 	"player_units": [],
+	"refabricator_state": {
+		"171,83": {
+			"in_unit_id": "",
+			"out_unit_id": "",
+			"phase": "idle",
+			"selected_t2": "beattle",
+			"timer": 0.0
+		}
+	},
 	"resources": {
-
+		"mat_copper": 993,
+		"mat_graphite": 574,
+		"mat_silicon": 2965,
+		"mat_steel": 1526
 	},
 	"script_steps": [
 		{
@@ -15125,6 +15169,7 @@
 				},
 				{
 					"from": "83,139",
+					"id": "ET",
 					"text": "(-white)This sector has an abundance of geysers making it perfect for Steel production. ",
 					"to": "93,139",
 					"type": "draw_text"
@@ -15201,13 +15246,15 @@
 			"actions": [
 				{
 					"from": "67,137",
-					"text": "(-white)Now research and place a [res://textures/blocks/factories/SteelFurnace.png]Steel Furnace to produce steel out of iron.",
+					"id": "SFT",
+					"text": "(-white)Now research and place a [res://textures/blocks/factories/SteelFurnace.png]Steel Furnace to produce steel from iron.",
 					"to": "73,137",
 					"type": "draw_text"
 				},
 				{
 					"color": "white",
 					"from": "69,139",
+					"id": "SFB",
 					"to": "71,141",
 					"type": "draw_box"
 				}
@@ -15232,10 +15279,25 @@
 		{
 			"actions": [
 				{
-					"from": "84,138",
-					"text": "(-white)Research and place the Unit Refabricator to upgrade tier 1 units to tier 2.\n(-white)You will need to suply it with the required resources associated with each unit, viewable in the core database.",
-					"to": "95,138",
+					"from": "84,145",
+					"id": "RU1",
+					"text": "(-white)Research and place the Unit Refabricator with a Fabricator Facing into it to upgrade tier 1 units to tier 2.\n(-white)You will need to supply it with the required resources associated with each unit, viewable in the core database.",
+					"to": "96,145",
 					"type": "draw_text"
+				},
+				{
+					"color": "white",
+					"from": "89,147",
+					"id": "RUB1",
+					"to": "91,149",
+					"type": "draw_box"
+				},
+				{
+					"color": "orange",
+					"from": "86,147",
+					"id": "RUB2",
+					"to": "88,149",
+					"type": "draw_box"
 				}
 			],
 			"conditions": [
@@ -15263,31 +15325,36 @@
 			"actions": [
 				{
 					"from": "107,135",
-					"text": "(-white)You will need to resarch the [image]Single Barrel and [imageLarge ]Steel Wall then build a defense with them to better attack the enemy's stronger units.(make sure to supply them with resources)",
+					"id": "TT",
+					"text": "(-white)You will need to resarch the [image]Double Barrel and [imageLarge ]Large Steel Wall then build a defense with them to better attack the enemy's stronger units. make sure to supply them with resources.",
 					"to": "119,135",
 					"type": "draw_text"
 				},
 				{
 					"color": "black",
 					"from": "120,149",
+					"id": "TB1",
 					"to": "121,136",
 					"type": "draw_box"
 				},
 				{
 					"color": "red",
 					"from": "119,137",
+					"id": "TB2",
 					"to": "119,137",
 					"type": "draw_box"
 				},
 				{
 					"color": "red",
 					"from": "119,143",
+					"id": "TB3",
 					"to": "119,143",
 					"type": "draw_box"
 				},
 				{
 					"color": "red",
 					"from": "119,149",
+					"id": "TB4",
 					"to": "119,149",
 					"type": "draw_box"
 				}
@@ -15300,7 +15367,7 @@
 				},
 				{
 					"amount": 6.0,
-					"block_id": "steel_wall",
+					"block_id": "large_steel_wall",
 					"type": "placed"
 				}
 			],
@@ -24001,6 +24068,18 @@
 		"99,174": "grassy_wall",
 		"99,175": "grassy_wall",
 		"99,176": "grassy_wall"
+	},
+	"waves_bundle": {
+		"config": {
+			"auto_unit_templates": [],
+			"auto_wave_count": 10,
+			"generation_mode": "manual",
+			"initial_delay": 30.0,
+			"interval": 30.0,
+			"start_mode": "landing"
+		},
+		"spawn_points": [],
+		"waves": []
 	},
 	"work_order": []
 }

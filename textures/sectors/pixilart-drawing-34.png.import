@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://b8fp1ekbv4cfs"
-path="res://.godot/imported/CopperOre_old.png-18f9385e05536bdc8f6e3c5a8c331ced.ctex"
+uid="uid://d3gqkc0keiql3"
+path="res://.godot/imported/pixilart-drawing-34.png-beabc51e09e6e719e132610f864dc5b7.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/CopperOre_old.png"
-dest_files=["res://.godot/imported/CopperOre_old.png-18f9385e05536bdc8f6e3c5a8c331ced.ctex"]
+source_file="res://textures/sectors/pixilart-drawing-34.png"
+dest_files=["res://.godot/imported/pixilart-drawing-34.png-beabc51e09e6e719e132610f864dc5b7.ctex"]
 
 [params]
 

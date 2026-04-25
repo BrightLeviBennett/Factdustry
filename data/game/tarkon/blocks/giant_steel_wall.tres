@@ -11,6 +11,6 @@ category = 5
 color = Color(0.4, 0.5, 0.6, 1)
 max_health = 1040.0
 grid_size = Vector2i(4, 4)
-build_cost = { "copper": 800, "silicon": 320 }
+build_cost = { "steel": 54 }
 build_time = 1.5
 tags = PackedStringArray("wall", "defense")

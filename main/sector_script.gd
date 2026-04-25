@@ -42,6 +42,7 @@ var _units_destroyed_counts: Dictionary = {}  # unit_id -> int
 var _ferox_blocks_destroyed_counts: Dictionary = {} # block_id -> int
 var _ferox_specific_destroyed: Dictionary = {} # "block_id:x:y" -> bool
 var _core_unit_mined_counts: Dictionary = {}   # item_id -> int
+var _decoded_archive_counts: Dictionary = {}   # archive_id -> int
 
 # --- STEP BASELINE SNAPSHOTS ---
 ## Snapshots at step entry, so conditions check relative increase.
@@ -83,6 +84,8 @@ func _ready() -> void:
 			main.building_destroyed.connect(_on_building_destroyed)
 		if main.has_signal("core_unit_item_mined"):
 			main.core_unit_item_mined.connect(_on_core_unit_item_mined)
+		if main.has_signal("archive_decoded"):
+			main.archive_decoded.connect(_on_archive_decoded)
 
 
 func _process(delta: float) -> void:
@@ -150,6 +153,14 @@ func _check_condition(cond: Dictionary, delta: float) -> bool:
 			return has_destroyed_ferox_blocks(StringName(cond.get("block_id", "")), int(cond.get("amount", 1)))
 		"core_unit_mined":
 			return has_core_unit_mined(StringName(cond.get("item_id", "")), int(cond.get("amount", 1)))
+		"decoded_archive":
+			# Archive scripting uses the `-D-<archive_id>` tech-tree marker,
+			# but we track decoded events in a local counter so the
+			# condition only fires for decodes that happened DURING this
+			# step (keeps semantics consistent with placed/produced). A
+			# bare amount = 1 is the common case: "wait until one of
+			# archive X is decoded here".
+			return has_decoded_archive(StringName(cond.get("archive_id", "")), int(cond.get("amount", 1)))
 		"block_has_item":
 			var pos_str: String = str(cond.get("pos", "0,0"))
 			var parts = pos_str.split(",")
@@ -157,6 +168,13 @@ func _check_condition(cond: Dictionary, delta: float) -> bool:
 				var gpos := Vector2i(int(parts[0].strip_edges()), int(parts[1].strip_edges()))
 				return block_has_item(gpos, StringName(cond.get("item_id", "")), int(cond.get("amount", 1)))
 			return false
+		"waves_defeated":
+			# Fires once the last scheduled wave has been spawned AND
+			# every unit from every wave is dead. Infinite-auto runs
+			# never satisfy this unless stop_waves has been called and
+			# the currently-spawned units have all died.
+			var wm = get_node_or_null("/root/Main/WaveManager")
+			return wm != null and bool(wm.get("waves_all_defeated"))
 	return true
 
 
@@ -440,6 +458,24 @@ func reset_core_unit_mined(item_id: StringName = &"") -> void:
 		_core_unit_mined_counts.erase(item_id)
 
 
+## Returns true if `archive_id` has been decoded at least `amount` times
+## since the last reset. An empty archive_id matches ANY archive decode
+## (useful for "decode any archive" gates).
+func has_decoded_archive(archive_id: StringName, amount: int) -> bool:
+	return _decoded_archive_counts.get(archive_id, 0) >= amount
+
+
+func get_decoded_archive_count(archive_id: StringName) -> int:
+	return _decoded_archive_counts.get(archive_id, 0)
+
+
+func reset_decoded_archive(archive_id: StringName = &"") -> void:
+	if archive_id == &"":
+		_decoded_archive_counts.clear()
+	else:
+		_decoded_archive_counts.erase(archive_id)
+
+
 # =========================
 # DETECTION: RESOURCES IN CORE
 # =========================
@@ -671,6 +707,9 @@ func _invalidate_caches() -> void:
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	if terrain:
 		terrain._floor_edge_dirty = true
+		# Water meshes skip hidden cells, so toggling visibility also
+		# invalidates the water bake.
+		terrain._water_depth_dirty = true
 		terrain.queue_redraw()
 	# Update pathfinding grids so hidden tiles become impassable
 	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
@@ -718,10 +757,47 @@ func is_building_disabled(grid_pos: Vector2i) -> bool:
 # =========================
 
 ## Load script steps from data (called by save_manager after sector load).
+## Also resets every piece of runtime state, so a re-launch after abandon
+## starts from the same blank slate a fresh install would. Callers that
+## need to preserve state (save-load) invoke `load_runtime_state`
+## immediately after and explicitly overwrite the fields they care about.
 func load_script_steps(steps: Array) -> void:
 	_script_steps = steps.duplicate(true)
+	reset_runtime_state()
+
+
+## Wipes every piece of per-sector runtime state: step counters, visual
+## overlays (boxes / text), hidden-tile list, disabled-building list,
+## baselines, timers. Leaves `_script_steps` alone so the caller can
+## re-run `start_script` on the same data. Cheap to call — this is how
+## we guarantee a clean state when a sector is re-entered after abandon.
+func reset_runtime_state() -> void:
 	_current_step = -1
 	_script_running = false
+	_step_wait_timer = 0.0
+	_mined_counts.clear()
+	_core_counts.clear()
+	_produced_counts.clear()
+	_placed_counts.clear()
+	_units_produced_counts.clear()
+	_units_destroyed_counts.clear()
+	_ferox_blocks_destroyed_counts.clear()
+	_ferox_specific_destroyed.clear()
+	_core_unit_mined_counts.clear()
+	_decoded_archive_counts.clear()
+	_step_deposited_baselines.clear()
+	_step_placed_baselines.clear()
+	_highlight_boxes.clear()
+	_text_overlays.clear()
+	# Before clearing hidden tiles / disabled buildings we need to tell
+	# downstream systems the visibility/power state changed, else the
+	# tile fade cache and power network keep the old masking.
+	var had_hidden := not _hidden_tiles.is_empty()
+	_hidden_tiles.clear()
+	_disabled_buildings.clear()
+	if had_hidden:
+		_invalidate_caches()
+	queue_redraw()
 
 
 ## Start executing the script from step 0.
@@ -753,6 +829,7 @@ func get_runtime_state() -> Dictionary:
 		"units_destroyed_counts": _dict_sname_to_str(_units_destroyed_counts),
 		"ferox_blocks_destroyed_counts": _dict_sname_to_str(_ferox_blocks_destroyed_counts),
 		"core_unit_mined_counts": _dict_sname_to_str(_core_unit_mined_counts),
+		"decoded_archive_counts": _dict_sname_to_str(_decoded_archive_counts),
 		"deposited_baselines": _dict_sname_to_str(_step_deposited_baselines),
 		"placed_baselines": _dict_sname_to_str(_step_placed_baselines),
 		"hidden_tiles": hidden_arr,
@@ -773,6 +850,7 @@ func load_runtime_state(state: Dictionary) -> void:
 	_units_destroyed_counts = _dict_str_to_sname(state.get("units_destroyed_counts", {}))
 	_ferox_blocks_destroyed_counts = _dict_str_to_sname(state.get("ferox_blocks_destroyed_counts", {}))
 	_core_unit_mined_counts = _dict_str_to_sname(state.get("core_unit_mined_counts", {}))
+	_decoded_archive_counts = _dict_str_to_sname(state.get("decoded_archive_counts", {}))
 	_hidden_tiles.clear()
 	for pos_str in state.get("hidden_tiles", []):
 		var parts = str(pos_str).split(",")
@@ -1041,6 +1119,22 @@ func _execute_action(action: Dictionary) -> void:
 				print("SectorScript: Sector '%s' captured!" % sector_id)
 			else:
 				print("SectorScript: capture_sector — no active sector ID set.")
+		"start_waves":
+			# Fires off the WaveManager from whatever wave is currently
+			# armed. Useful as a sector-script trigger so designers can
+			# gate the first wave behind a step rather than an absolute
+			# map-start timer.
+			var wm_s = get_node_or_null("/root/Main/WaveManager")
+			if wm_s and wm_s.has_method("start"):
+				wm_s.start()
+				print("SectorScript: Waves started.")
+		"stop_waves":
+			# Halts wave scheduling. Any currently-alive enemies stay
+			# alive — this only prevents FUTURE waves from spawning.
+			var wm_x = get_node_or_null("/root/Main/WaveManager")
+			if wm_x and wm_x.has_method("stop"):
+				wm_x.stop()
+				print("SectorScript: Waves stopped.")
 
 
 # =========================
@@ -1071,6 +1165,7 @@ func reset_all() -> void:
 	_ferox_blocks_destroyed_counts.clear()
 	_ferox_specific_destroyed.clear()
 	_core_unit_mined_counts.clear()
+	_decoded_archive_counts.clear()
 	_step_deposited_baselines.clear()
 	_step_placed_baselines.clear()
 	_disabled_buildings.clear()
@@ -1092,6 +1187,16 @@ func _on_item_absorbed_in_core(item_id: StringName) -> void:
 
 func _on_core_unit_item_mined(item_id: StringName) -> void:
 	_core_unit_mined_counts[item_id] = _core_unit_mined_counts.get(item_id, 0) + 1
+
+
+## Fired by Main.archive_decoded once an archive_decoder building finishes
+## its cycle. Increments both the specific-archive counter AND an
+## "any archive" bucket keyed by &"" so sector authors can write either
+## "wait until archive X is decoded" or "wait until any archive is
+## decoded" without needing two separate signals.
+func _on_archive_decoded(archive_id: StringName) -> void:
+	_decoded_archive_counts[archive_id] = _decoded_archive_counts.get(archive_id, 0) + 1
+	_decoded_archive_counts[&""] = _decoded_archive_counts.get(&"", 0) + 1
 
 
 func _on_item_produced(item_id: StringName) -> void:

@@ -15,4 +15,5 @@ available_resources = PackedStringArray()
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray("nightfall_depths")
 required_sectors = PackedStringArray("ferrum_ridge")
+map_path = "res://data/game/tarkon/maps/WFR.sector.json"
 tags = PackedStringArray("campaign", "sector", "water")

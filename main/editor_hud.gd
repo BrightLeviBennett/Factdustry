@@ -61,6 +61,9 @@ const GRID_COLS := 4
 
 
 var script_editor_panel: Node = null
+var wave_editor_panel: Node = null
+var wave_editor_btn: Button = null
+var _toolbar_hbox: HBoxContainer = null
 
 func _ready() -> void:
 	await get_tree().process_frame
@@ -71,6 +74,7 @@ func _ready() -> void:
 	_create_faction_popup()
 	_create_status_label()
 	_create_script_editor()
+	_create_wave_editor()
 	_populate_tiles(selected_category)
 	_update_mode_visibility()
 
@@ -101,6 +105,7 @@ func _create_toolbar() -> void:
 	var hbox = HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 6)
 	toolbar.add_child(hbox)
+	_toolbar_hbox = hbox
 
 	# Mode toggle buttons
 	_add_mode_btn(hbox, "Terrain", main.EditorMode.TERRAIN)
@@ -655,6 +660,33 @@ func _create_script_editor() -> void:
 
 
 # =========================
+# WAVE EDITOR
+# =========================
+
+func _create_wave_editor() -> void:
+	var we = load("res://main/wave_editor.gd").new()
+	add_child(we)
+	wave_editor_panel = we
+	# Toolbar toggle button — keeps the wave editor accessible from any
+	# mode rather than hijacking a dedicated EditorMode slot.
+	if _toolbar_hbox:
+		wave_editor_btn = Button.new()
+		wave_editor_btn.text = "Waves"
+		wave_editor_btn.toggle_mode = true
+		wave_editor_btn.toggled.connect(_on_wave_toggle)
+		_toolbar_hbox.add_child(wave_editor_btn)
+
+
+func _on_wave_toggle(pressed: bool) -> void:
+	if wave_editor_panel == null:
+		return
+	if pressed:
+		wave_editor_panel.show_panel()
+	else:
+		wave_editor_panel.hide_panel()
+
+
+# =========================
 # SAVE / LOAD / NEW / MENU
 # =========================
 
@@ -685,6 +717,34 @@ func _on_new() -> void:
 		terrain.queue_redraw()
 	main.core_position = Vector2i(48, 48)
 	main.clear_buildings()
+	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	if building_sys:
+		if "editor_constructor_state" in building_sys:
+			building_sys.editor_constructor_state.clear()
+		if "editor_refabricator_state" in building_sys:
+			building_sys.editor_refabricator_state.clear()
+		if "editor_sorter_filters" in building_sys:
+			building_sys.editor_sorter_filters.clear()
+		# Archive selections live on BuildingSystem in both editor + game,
+		# so clearing them here also resets authored archive contents when
+		# the designer starts a fresh map.
+		if "archive_holdings" in building_sys:
+			building_sys.archive_holdings.clear()
+	if main.get("editor_waves") != null:
+		main.editor_waves.clear()
+	if main.get("editor_wave_spawns") != null:
+		main.editor_wave_spawns.clear()
+	if main.get("editor_wave_config") != null:
+		main.editor_wave_config = {
+			"start_mode": "landing",
+			"initial_delay": 30.0,
+			"interval": 30.0,
+			"generation_mode": "manual",
+			"auto_wave_count": 10,
+			"auto_unit_templates": [],
+		}
+	if wave_editor_panel and wave_editor_panel.has_method("_refresh_all"):
+		wave_editor_panel._refresh_all()
 	main._overlay.queue_redraw()
 	map_name_input.text = "untitled"
 	# Clear script steps
@@ -705,6 +765,8 @@ var _settings_panel: PanelContainer
 var _settings_open := false
 var _width_input: SpinBox
 var _height_input: SpinBox
+var _alignment_input: OptionButton
+var _map_alignment := 0  # 0=TL,1=TM,2=TR,3=ML,4=MM,5=MR,6=BL,7=BM,8=BR
 
 func _create_settings_panel() -> void:
 	_settings_panel = PanelContainer.new()
@@ -712,10 +774,10 @@ func _create_settings_panel() -> void:
 	_settings_panel.anchor_right = 0.5
 	_settings_panel.anchor_top = 0.5
 	_settings_panel.anchor_bottom = 0.5
-	_settings_panel.offset_left = -140
-	_settings_panel.offset_right = 140
-	_settings_panel.offset_top = -100
-	_settings_panel.offset_bottom = 100
+	_settings_panel.offset_left = -160
+	_settings_panel.offset_right = 160
+	_settings_panel.offset_top = -130
+	_settings_panel.offset_bottom = 130
 	_settings_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.08, 0.08, 0.1, 0.95)))
 	_settings_panel.visible = false
 	add_child(_settings_panel)
@@ -764,6 +826,28 @@ func _create_settings_panel() -> void:
 	h_hbox.add_child(_height_input)
 	vbox.add_child(h_hbox)
 
+	# Alignment (anchor of existing content within the resized map)
+	var a_hbox = HBoxContainer.new()
+	a_hbox.add_theme_constant_override("separation", 8)
+	var a_label = Label.new()
+	a_label.text = "Alignment:"
+	a_label.custom_minimum_size.x = 90
+	a_hbox.add_child(a_label)
+	_alignment_input = OptionButton.new()
+	_alignment_input.add_item("Top Left", 0)
+	_alignment_input.add_item("Top Middle", 1)
+	_alignment_input.add_item("Top Right", 2)
+	_alignment_input.add_item("Middle Left", 3)
+	_alignment_input.add_item("Center", 4)
+	_alignment_input.add_item("Middle Right", 5)
+	_alignment_input.add_item("Bottom Left", 6)
+	_alignment_input.add_item("Bottom Middle", 7)
+	_alignment_input.add_item("Bottom Right", 8)
+	_alignment_input.selected = _map_alignment
+	_alignment_input.custom_minimum_size.x = 140
+	a_hbox.add_child(_alignment_input)
+	vbox.add_child(a_hbox)
+
 	# Apply + Close buttons
 	var btn_hbox = HBoxContainer.new()
 	btn_hbox.add_theme_constant_override("separation", 8)
@@ -788,18 +872,117 @@ func _toggle_settings() -> void:
 	if _settings_open:
 		_width_input.value = main.GRID_WIDTH
 		_height_input.value = main.GRID_HEIGHT
+		_alignment_input.selected = _map_alignment
 
 
 func _on_settings_apply() -> void:
 	var new_w := int(_width_input.value)
 	var new_h := int(_height_input.value)
+	_map_alignment = _alignment_input.selected
 	if new_w != main.GRID_WIDTH or new_h != main.GRID_HEIGHT:
+		var old_w := int(main.GRID_WIDTH)
+		var old_h := int(main.GRID_HEIGHT)
+		var dw := new_w - old_w
+		var dh := new_h - old_h
+		var hx := _map_alignment % 3
+		var vy := _map_alignment / 3
+		var offset := Vector2i(
+			int(round(float(dw) * float(hx) * 0.5)),
+			int(round(float(dh) * float(vy) * 0.5))
+		)
 		main.GRID_WIDTH = new_w
 		main.GRID_HEIGHT = new_h
+		_shift_map_content(offset, new_w, new_h)
 		var overlay = main.get_node_or_null("EditorOverlay")
 		if overlay:
 			overlay.queue_redraw()
+		var terrain = get_node_or_null("/root/Main/TerrainSystem")
+		if terrain:
+			terrain.queue_redraw()
 		_show_status("Map size changed to %d × %d" % [new_w, new_h])
+
+
+func _shift_map_content(offset: Vector2i, new_w: int, new_h: int) -> void:
+	# Always walk the dicts — even with a zero offset, a shrink needs to
+	# clip content now outside the new bounds, and `main.GRID_WIDTH` has
+	# already been updated to `new_w` by the caller so we can't compare
+	# against the old size cheaply here.
+	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	if terrain:
+		_shift_dict_keys(terrain.floor_tiles, offset, new_w, new_h)
+		_shift_dict_keys(terrain.wall_tiles, offset, new_w, new_h)
+		_shift_dict_keys(terrain.ore_tiles, offset, new_w, new_h)
+		_shift_dict_keys(terrain.tile_health, offset, new_w, new_h)
+		_shift_dict_keys_and_values(terrain.multi_tile_origins, offset, new_w, new_h)
+		terrain._floor_edge_dirty = true
+		terrain._water_depth_dirty = true
+	if main.get("placed_buildings") != null:
+		_shift_dict_keys(main.placed_buildings, offset, new_w, new_h)
+	if main.get("building_rotation") != null:
+		_shift_dict_keys(main.building_rotation, offset, new_w, new_h)
+	if main.get("building_health") != null:
+		_shift_dict_keys(main.building_health, offset, new_w, new_h)
+	if main.get("building_factions") != null:
+		_shift_dict_keys(main.building_factions, offset, new_w, new_h)
+	# building_origins maps every tile of a multi-tile building back to
+	# its anchor cell, so both keys AND values need the same offset
+	# applied or the anchor-resolver returns positions outside the new
+	# placed_buildings set.
+	if main.get("building_origins") != null:
+		_shift_dict_keys_and_values(main.building_origins, offset, new_w, new_h)
+	if main.get("linked_pairs") != null:
+		_shift_link_pairs(main.linked_pairs, offset, new_w, new_h)
+	if main.get("core_position") != null:
+		var cp: Vector2i = main.core_position + offset
+		cp.x = clamp(cp.x, 0, max(0, new_w - 1))
+		cp.y = clamp(cp.y, 0, max(0, new_h - 1))
+		main.core_position = cp
+
+
+func _shift_dict_keys(d: Dictionary, offset: Vector2i, new_w: int, new_h: int) -> void:
+	var replacement := {}
+	for k in d.keys():
+		if typeof(k) != TYPE_VECTOR2I:
+			replacement[k] = d[k]
+			continue
+		var nk: Vector2i = k + offset
+		if nk.x < 0 or nk.y < 0 or nk.x >= new_w or nk.y >= new_h:
+			continue
+		replacement[nk] = d[k]
+	d.clear()
+	for k in replacement:
+		d[k] = replacement[k]
+
+
+func _shift_dict_keys_and_values(d: Dictionary, offset: Vector2i, new_w: int, new_h: int) -> void:
+	var replacement := {}
+	for k in d.keys():
+		if typeof(k) != TYPE_VECTOR2I:
+			continue
+		var nk: Vector2i = k + offset
+		if nk.x < 0 or nk.y < 0 or nk.x >= new_w or nk.y >= new_h:
+			continue
+		var v = d[k]
+		if typeof(v) == TYPE_VECTOR2I:
+			v = (v as Vector2i) + offset
+		replacement[nk] = v
+	d.clear()
+	for k in replacement:
+		d[k] = replacement[k]
+
+
+func _shift_link_pairs(pairs: Array, offset: Vector2i, new_w: int, new_h: int) -> void:
+	for i in range(pairs.size() - 1, -1, -1):
+		var p = pairs[i]
+		if typeof(p) != TYPE_ARRAY or p.size() < 2:
+			continue
+		var a: Vector2i = p[0] + offset
+		var b: Vector2i = p[1] + offset
+		if a.x < 0 or a.y < 0 or a.x >= new_w or a.y >= new_h \
+		or b.x < 0 or b.y < 0 or b.x >= new_w or b.y >= new_h:
+			pairs.remove_at(i)
+			continue
+		pairs[i] = [a, b]
 
 
 # =========================

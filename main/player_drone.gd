@@ -50,6 +50,12 @@ var range_border_color: Color
 
 # --- MINING ---
 var mining_target: Variant = null   # Vector2i ore grid pos, or null
+# Last ore tile the drone was actively mining before building preempted it.
+# Let the drone auto-resume on the same ore once the queued build finishes,
+# so pause→queue→build→repause→mine doesn't lose the player's focus.
+# Cleared by explicit re-click (user-intended stop), never by auto-stop.
+var _resume_mining_target: Variant = null  # Vector2i or null
+var _resume_mining_item_id: StringName = &""
 var mining_timer: float = 0.0
 var mining_item_id: StringName = &""
 var mining_speed: float = 2.0       # Loaded from mechanical_drill production_time
@@ -145,6 +151,7 @@ func _input(event: InputEvent) -> void:
 		return
 	if event.is_action_pressed("respawn"):
 		health = max_health
+		_clear_inventory()
 		_move_to_core()
 
 
@@ -171,27 +178,54 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			if _dragging_inventory:
 				_dragging_inventory = false
-				# Check if released over the core — deposit all items
+				# Resolve the drop cell + block once, then branch:
+				#   (1) over a LUMINA core → deposit everything into
+				#       main.resources (subject to core capacity)
+				#   (2) over a storage-tagged block or factory-input block
+				#       → fill each slot item-by-item until the block's
+				#       cap is hit, keep the rest
+				#   (3) over bare terrain (no block or a non-accepting
+				#       block) → delete the held inventory
 				var mouse_world = get_global_mouse_position()
-				var core_grid: Vector2i = main.core_position
-				var core_data = Registry.get_block(&"core_shard")
-				if core_data == null:
-					core_data = Registry.get_block(&"core")
-				var core_size: Vector2i = core_data.grid_size if core_data else Vector2i(3, 3)
-				var core_rect := Rect2(
-					main.grid_to_world(core_grid),
-					Vector2(core_size.x * main.GRID_SIZE, core_size.y * main.GRID_SIZE)
-				)
-				if core_rect.has_point(mouse_world):
-					# Deposit everything
-					for item_id in mined_inventory:
-						var count: int = int(mined_inventory[item_id])
-						if count > 0:
-							main.resources[item_id] = main.resources.get(item_id, 0) + count
-					mined_inventory.clear()
-					for item in Registry.items_list:
-						mined_inventory[item.id] = 0
-					main.resources_changed.emit(main.resources)
+				var drop_cell: Vector2i = main.world_to_grid(mouse_world)
+				var handled := false
+				if main.placed_buildings.has(drop_cell):
+					var drop_anchor: Vector2i = main.building_origins.get(drop_cell, drop_cell)
+					var drop_data = Registry.get_block(main.placed_buildings[drop_anchor])
+					var bs = get_node_or_null("/root/Main/BuildingSystem")
+					# Core branch (shared resource pool).
+					if drop_data and drop_data.tags.has("core") \
+							and main.get_building_faction(drop_anchor) == main.Faction.LUMINA:
+						for item_id in mined_inventory.keys():
+							var have: int = int(mined_inventory[item_id])
+							while have > 0:
+								if main.has_method("can_accept_resource") \
+										and not main.can_accept_resource(item_id):
+									break
+								main.resources[item_id] = int(main.resources.get(item_id, 0)) + 1
+								have -= 1
+							mined_inventory[item_id] = have
+						main.resources_changed.emit(main.resources)
+						handled = true
+					# Non-core block that can accept items.
+					elif bs and bs.has_method("_block_accepts_item"):
+						for item_id in mined_inventory.keys():
+							var held: int = int(mined_inventory[item_id])
+							if held <= 0:
+								continue
+							if not bs._block_accepts_item(drop_anchor, item_id):
+								continue
+							var accepted: int = bs._deposit_items_into_block(drop_anchor, item_id, held)
+							if accepted > 0:
+								mined_inventory[item_id] = held - accepted
+								handled = true
+				# Drop onto bare terrain (nothing placed at drop_cell) is
+				# the explicit "trash everything" gesture. Dropping on a
+				# block that exists but doesn't accept the held items
+				# keeps the inventory — it'd be mean to vaporize a
+				# stockpile because the player missed the intended block.
+				if not handled and not main.placed_buildings.has(drop_cell):
+					_clear_inventory()
 				get_viewport().set_input_as_handled()
 				return
 
@@ -214,9 +248,12 @@ func _unhandled_input(event: InputEvent) -> void:
 
 		if terrain.ore_tiles.has(grid_pos):
 			if mining_target == grid_pos:
-				# Re-click same ore — stop mining
+				# Re-click same ore — stop mining. Explicit user stop
+				# should also cancel any pending auto-resume.
 				mining_target = null
 				mining_item_id = &""
+				_resume_mining_target = null
+				_resume_mining_item_id = &""
 			else:
 				# Start mining this ore
 				var ore_data = terrain.get_ore_at(grid_pos)
@@ -224,6 +261,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					mining_target = grid_pos
 					mining_item_id = ore_data.minable_resource
 					mining_timer = mining_speed
+					_resume_mining_target = grid_pos
+					_resume_mining_item_id = mining_item_id
 			get_viewport().set_input_as_handled()
 		elif mining_target != null:
 			# Currently mining — ignore non-ore clicks (don't shoot or stop mining)
@@ -326,9 +365,6 @@ func _handle_destroy() -> void:
 # --- MINING LOGIC ---
 
 func _handle_mining(delta: float) -> void:
-	if mining_target == null:
-		return
-
 	# Pause mining when the game is paused
 	if main.world_paused:
 		return
@@ -336,10 +372,36 @@ func _handle_mining(delta: float) -> void:
 	# Building/deconstructing fully CLEARS the mining target so the laser and
 	# the "move-away slowdown" both stop. Only pause mining when there's an
 	# in-range work item the drone could actually be building this frame —
-	# distant queued work no longer holds the drone off its ore.
+	# distant queued work no longer holds the drone off its ore. The current
+	# mining target is stashed so we can auto-resume once the build is done.
 	if _has_in_range_work():
-		mining_target = null
-		mining_item_id = &""
+		if mining_target != null:
+			_resume_mining_target = mining_target
+			_resume_mining_item_id = mining_item_id
+			mining_target = null
+			mining_item_id = &""
+		return
+
+	# No active work and no active mining: if we had one stashed from before
+	# the build, pick it back up (still valid ore, still in range).
+	if mining_target == null and _resume_mining_target != null:
+		var t = _terrain_ref()
+		var rg: Vector2i = _resume_mining_target
+		var in_range := false
+		if t:
+			var dg: Vector2i = main.world_to_grid(position)
+			in_range = maxi(absi(dg.x - rg.x), absi(dg.y - rg.y)) <= MINING_RANGE
+		if t and t.ore_tiles.has(rg) and in_range:
+			mining_target = rg
+			mining_item_id = _resume_mining_item_id
+			mining_timer = mining_speed
+		else:
+			# Resume condition no longer satisfied — drop the memory
+			# so we don't spuriously re-arm later.
+			_resume_mining_target = null
+			_resume_mining_item_id = &""
+
+	if mining_target == null:
 		return
 
 	# Validate ore still exists
@@ -347,6 +409,8 @@ func _handle_mining(delta: float) -> void:
 	if terrain == null or not terrain.ore_tiles.has(mining_target):
 		mining_target = null
 		mining_item_id = &""
+		_resume_mining_target = null
+		_resume_mining_item_id = &""
 		return
 
 	# Stop mining if drone moves too far from the ore
@@ -356,6 +420,8 @@ func _handle_mining(delta: float) -> void:
 	if maxi(dx, dy) > MINING_RANGE:
 		mining_target = null
 		mining_item_id = &""
+		_resume_mining_target = null
+		_resume_mining_item_id = &""
 		return
 
 	# Lock rotation toward the ore while mining
@@ -470,13 +536,36 @@ func take_damage(amount: float) -> void:
 
 func _on_death() -> void:
 	health = max_health
+	_clear_inventory()
 	_move_to_core()
 
 
+## Drops the mined inventory. Called on any respawn path — death, manual
+## respawn hotkey, and release-from-controlled-entity — since any of those
+## are "start a new session" from the drone's perspective and holding onto
+## pre-session mined items is a free teleport-to-core shortcut.
+func _clear_inventory() -> void:
+	mined_inventory.clear()
+	for item in Registry.items_list:
+		mined_inventory[item.id] = 0
+
+
 func _move_to_core() -> void:
-	var core_data = Registry.get_block(&"core")
-	var core_size = core_data.grid_size if core_data else Vector2i(3, 3)
-	var core_pos = main.core_position
+	# Prefer the closest LUMINA core to the drone's current position so a
+	# respawn from the far side of the map doesn't teleport back to the
+	# original spawn core when a nearer one exists. Falls back to the
+	# legacy `main.core_position` if no LUMINA core is reachable (e.g.
+	# during initial sector load before building_factions is populated).
+	var anchor: Vector2i = main.get_nearest_lumina_core_anchor(position)
+	var core_pos: Vector2i
+	var core_data: BlockData = null
+	if anchor != Vector2i(-1, -1):
+		core_pos = anchor
+		core_data = Registry.get_block(main.placed_buildings[anchor])
+	else:
+		core_pos = main.core_position
+		core_data = Registry.get_block(&"core")
+	var core_size: Vector2i = core_data.grid_size if core_data else Vector2i(3, 3)
 	position = Vector2(
 		(core_pos.x + core_size.x / 2.0) * main.GRID_SIZE,
 		(core_pos.y + core_size.y / 2.0) * main.GRID_SIZE
@@ -488,6 +577,7 @@ func _move_to_core() -> void:
 ## (or where it died), not all the way at the core.
 func respawn_at(world_pos: Vector2) -> void:
 	position = world_pos
+	_clear_inventory()
 
 
 func is_in_build_range(grid_pos: Vector2i) -> bool:

@@ -48,6 +48,26 @@ var active_sector_id: StringName = &""
 ## Maps sector_id (StringName) → resources Dictionary (item_id → amount).
 var sector_resources: Dictionary = {}
 
+## Per-sector offline production rates (items per second).
+## Maps sector_id → {item_id: float rate}. Captured when the sector is saved
+## via SectorProductionSim, then applied to sector_resources across elapsed
+## real-time via advance_offline_production().
+var sector_production_rates: Dictionary = {}
+
+## Per-sector unix timestamp of the last accrual tick. When a sector is
+## re-entered or accrual is requested, (now - timestamp) * rate is added to
+## that sector's sector_resources, then the timestamp resets to now.
+var sector_production_timestamps: Dictionary = {}
+
+## Fractional carryover so slow producers don't lose sub-integer production
+## between accrual calls. Maps sector_id → {item_id: float fractional}.
+var _sector_production_fractions: Dictionary = {}
+
+## Per-sector storage cap (per resource) captured at snapshot time. Offline
+## accrual clamps against this so a sector with a 4K-capacity shard can't
+## keep filling up past 4K while the player is away. Maps sector_id → int.
+var sector_storage_caps: Dictionary = {}
+
 
 func _ready() -> void:
 	# Create the maps directory if it doesn't exist.
@@ -245,10 +265,23 @@ func load_game(save_name: String) -> bool:
 		drone.health = data.get("drone_health", drone.max_health)
 
 	# --- Rebuild pathfinding ---
+	# Both the main-thread astar AND the threaded path_worker need a
+	# fresh solids list — the worker was started at unit_manager._ready
+	# with whatever terrain existed at that moment (often empty, before
+	# the sector load populated walls / floor tiles), so leaving it
+	# stale causes async paths to walk right across walls into void.
 	if unit_mgr:
 		unit_mgr._setup_astar()
+		unit_mgr._setup_path_worker()
 
 	# --- Redraw ---
+	# Bulk-loaded terrain bypassed the `place_tile` dirty hooks, so any
+	# rebuild triggered between map-clear and now ran against an empty
+	# floor_tiles set and latched _water_depth_dirty / _floor_edge_dirty
+	# to false. Re-arm them so the next draw pass actually bakes the
+	# gradient meshes against the real tile set.
+	terrain._water_depth_dirty = true
+	terrain._floor_edge_dirty = true
 	terrain.walls_changed.emit()
 	terrain.queue_redraw()
 	if building_sys:
@@ -488,6 +521,30 @@ func save_sector(sector_name: String) -> bool:
 					"phase": str(state.get("phase", "idle")),
 					"timer": state.get("timer", 0.0),
 				}
+	# Editor mode (no LogisticsSystem): fall back to BuildingSystem's
+	# authored-selection dicts so selections made in the map editor
+	# survive into the sector .json.
+	if building_sys:
+		if refabricator_state_save.is_empty() and "editor_refabricator_state" in building_sys:
+			for pos in building_sys.editor_refabricator_state:
+				var rs_e: Dictionary = building_sys.editor_refabricator_state[pos]
+				refabricator_state_save[_vec2i_to_str(pos)] = {
+					"phase": "idle",
+					"in_unit_id": "",
+					"out_unit_id": "",
+					"timer": 0.0,
+					"selected_t2": String(rs_e.get("selected_t2", &"")),
+				}
+		if constructor_state_save.is_empty() and "editor_constructor_state" in building_sys:
+			for pos in building_sys.editor_constructor_state:
+				var cs_e: Dictionary = building_sys.editor_constructor_state[pos]
+				constructor_state_save[_vec2i_to_str(pos)] = {
+					"selected_block": str(cs_e.get("selected_block", &"")),
+					"collected": {},
+					"phase": "idle",
+					"timer": 0.0,
+				}
+	if logistics:
 		if "deconstructor_state" in logistics:
 			for pos in logistics.deconstructor_state:
 				var state = logistics.deconstructor_state[pos]
@@ -592,6 +649,26 @@ func save_sector(sector_name: String) -> bool:
 	if sector_script and sector_script.has_method("get_runtime_state"):
 		data["script_runtime"] = sector_script.get_runtime_state()
 
+	# Authored enemy-wave bundle: global config + spawn points + either
+	# manual waves or an auto-generation template set. Pull from the
+	# live WaveManager in-game, or from the editor's staging fields in
+	# map-editor mode.
+	var wm_script = preload("res://main/wave_manager.gd")
+	var wm_live = get_node_or_null("/root/Main/WaveManager")
+	var cfg_src: Dictionary = {}
+	var spawns_src: Array = []
+	var waves_src: Array = []
+	if wm_live and wm_live.get("config") != null:
+		cfg_src = wm_live.config
+		spawns_src = wm_live.spawn_points
+		waves_src = wm_live.waves
+	elif main.get("editor_wave_config") != null:
+		cfg_src = main.editor_wave_config
+		spawns_src = main.editor_wave_spawns
+		waves_src = main.editor_waves
+	if not cfg_src.is_empty() or not spawns_src.is_empty() or not waves_src.is_empty():
+		data["waves_bundle"] = wm_script.serialize_all(cfg_src, spawns_src, waves_src)
+
 	# Compute offline defense simulation (time before sector falls)
 	var sim_result = SectorDefenseSim.calculate_time_to_fall(main)
 	data["defense_sim"] = {
@@ -600,6 +677,10 @@ func save_sector(sector_name: String) -> bool:
 		"summary": sim_result.summary,
 		"timestamp": Time.get_unix_time_from_system(),
 	}
+
+	# Capture production rate so the sector keeps earning items while the
+	# player is on the planet menu / in another sector / the game is closed.
+	capture_production_snapshot(StringName(sector_name), main)
 
 	return _write_json(SAVE_DIR + sector_name + ".sector.json", data)
 
@@ -671,11 +752,35 @@ func load_sector_from_path(path: String) -> bool:
 
 	# --- Load sorter filters ---
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	var building_sys_early = get_node_or_null("/root/Main/BuildingSystem")
+	var sf_data = data.get("sorter_filters", {})
 	if logistics:
 		logistics.sorter_filters.clear()
-		var sf_data = data.get("sorter_filters", {})
 		for key in sf_data:
 			logistics.sorter_filters[_str_to_vec2i(key)] = StringName(sf_data[key])
+	elif building_sys_early and "editor_sorter_filters" in building_sys_early:
+		building_sys_early.editor_sorter_filters.clear()
+		for key in sf_data:
+			building_sys_early.editor_sorter_filters[_str_to_vec2i(key)] = StringName(sf_data[key])
+	# Editor-mode constructor/refab state. In-game these are restored
+	# later in this function from the same data dict into the live
+	# LogisticsSystem; for the editor we mirror them into BuildingSystem
+	# so menus show the right selection on re-open.
+	if logistics == null and building_sys_early:
+		if "editor_constructor_state" in building_sys_early:
+			building_sys_early.editor_constructor_state.clear()
+			var cs_data = data.get("constructor_state", {})
+			for key in cs_data:
+				var raw = cs_data[key]
+				var sel: StringName = StringName(raw.get("selected_block", "")) if raw is Dictionary else &""
+				building_sys_early.editor_constructor_state[_str_to_vec2i(key)] = {"selected_block": sel}
+		if "editor_refabricator_state" in building_sys_early:
+			building_sys_early.editor_refabricator_state.clear()
+			var rs_data = data.get("refabricator_state", {})
+			for key in rs_data:
+				var raw = rs_data[key]
+				var sel2: StringName = StringName(raw.get("selected_t2", "")) if raw is Dictionary else &""
+				building_sys_early.editor_refabricator_state[_str_to_vec2i(key)] = {"selected_t2": sel2}
 
 	# --- Load script steps ---
 	var script_steps_data = data.get("script_steps", [])
@@ -686,11 +791,45 @@ func load_sector_from_path(path: String) -> bool:
 		var sector_script = get_node_or_null("/root/Main/SectorScript")
 		if sector_script and sector_script.has_method("load_script_steps"):
 			sector_script.load_script_steps(script_steps_data)
-			# Restore runtime state if saved (autosave), otherwise start fresh
-			if data.has("script_runtime") and data["script_runtime"] is Dictionary:
+			# Only restore runtime state when loading a USER autosave
+			# (under user://maps/). Bundled map_paths (res://…) can ship
+			# with a `script_runtime` block baked in from whatever state
+			# the map editor was in at save-time — restoring that on a
+			# fresh launch would make the script think it had already
+			# run, so an abandoned-and-re-launched sector never re-arms
+			# its steps. Treat bundled loads as always-fresh.
+			var is_user_autosave: bool = path.begins_with(SAVE_DIR) \
+				or path.begins_with("user://")
+			if is_user_autosave \
+					and data.has("script_runtime") \
+					and data["script_runtime"] is Dictionary:
 				sector_script.call_deferred("load_runtime_state", data["script_runtime"])
 			else:
 				sector_script.call_deferred("start_script")
+
+	# --- Load authored wave bundle into WaveManager (gameplay) or onto
+	# the editor's staging fields (map editor). Fresh/empty bundle
+	# clears any inherited wave data.
+	var wm_script_l = preload("res://main/wave_manager.gd")
+	var bundle_raw = data.get("waves_bundle", {})
+	var bundle: Dictionary = wm_script_l.deserialize_all(bundle_raw)
+	var wave_mgr_l = get_node_or_null("/root/Main/WaveManager")
+	if wave_mgr_l:
+		wave_mgr_l.config = bundle.get("config", {})
+		wave_mgr_l.spawn_points = bundle.get("spawn_points", [])
+		wave_mgr_l.waves = bundle.get("waves", [])
+		# Only auto-start when the authored config says "on landing";
+		# script-triggered runs wait for a sector-script start_waves
+		# action. `start()` itself also honors the start_mode flag so
+		# calling it is always safe — included for backwards compat
+		# with the previous call site.
+		if String(wave_mgr_l.config.get("start_mode", "landing")) == "landing":
+			if wave_mgr_l.has_method("start"):
+				wave_mgr_l.call_deferred("start")
+	elif main.get("editor_wave_config") != null:
+		main.editor_wave_config = bundle.get("config", {})
+		main.editor_wave_spawns = bundle.get("spawn_points", [])
+		main.editor_waves = bundle.get("waves", [])
 
 	# --- Restore building health (use saved values if present, else max_health) ---
 	if data.has("building_health") and data["building_health"] is Dictionary:
@@ -770,8 +909,14 @@ func load_sector_from_path(path: String) -> bool:
 				main.building_resources_refunded[_str_to_vec2i(key)] = inner
 
 	# --- Rebuild pathfinding ---
+	# Both the main-thread astar AND the threaded path_worker need a
+	# fresh solids list — the worker was started at unit_manager._ready
+	# with whatever terrain existed at that moment (often empty, before
+	# the sector load populated walls / floor tiles), so leaving it
+	# stale causes async paths to walk right across walls into void.
 	if unit_mgr:
 		unit_mgr._setup_astar()
+		unit_mgr._setup_path_worker()
 
 	# --- Restore player units ---
 	if unit_mgr and data.has("player_units") and data["player_units"] is Array:
@@ -970,6 +1115,13 @@ func load_sector_from_path(path: String) -> bool:
 			}
 
 	# --- Redraw ---
+	# Bulk-loaded terrain bypassed the `place_tile` dirty hooks, so any
+	# rebuild triggered between map-clear and now ran against an empty
+	# floor_tiles set and latched _water_depth_dirty / _floor_edge_dirty
+	# to false. Re-arm them so the next draw pass actually bakes the
+	# gradient meshes against the real tile set.
+	terrain._water_depth_dirty = true
+	terrain._floor_edge_dirty = true
 	terrain.walls_changed.emit()
 	terrain.queue_redraw()
 	if building_sys:
@@ -1241,13 +1393,20 @@ func _serialize_archive_decoder_state() -> Dictionary:
 
 func _serialize_sorter_filters() -> Dictionary:
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
-	if logistics == null:
-		return {}
 	var result := {}
-	for grid_pos in logistics.sorter_filters:
-		var filter_id = logistics.sorter_filters[grid_pos]
-		if filter_id != &"":
-			result[_vec2i_to_str(grid_pos)] = String(filter_id)
+	if logistics != null:
+		for grid_pos in logistics.sorter_filters:
+			var filter_id = logistics.sorter_filters[grid_pos]
+			if filter_id != &"":
+				result[_vec2i_to_str(grid_pos)] = String(filter_id)
+		return result
+	# Editor fallback: BuildingSystem.editor_sorter_filters
+	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	if building_sys and "editor_sorter_filters" in building_sys:
+		for grid_pos in building_sys.editor_sorter_filters:
+			var filter_id = building_sys.editor_sorter_filters[grid_pos]
+			if filter_id != &"":
+				result[_vec2i_to_str(grid_pos)] = String(filter_id)
 	return result
 
 
@@ -1349,11 +1508,18 @@ func sync_active_sector_resources() -> void:
 	if active_sector_id == &"":
 		# No sector ID set — use a fallback key so resources are still accessible
 		active_sector_id = &"_default"
+	# Refresh the live cap every sync so placing/losing cores while
+	# playing keeps the offline accrual ceiling accurate.
+	if main.has_method("get_storage_cap_per_resource"):
+		sector_storage_caps[active_sector_id] = int(main.get_storage_cap_per_resource())
 	sector_resources[active_sector_id] = main.resources.duplicate()
 
 
 ## Returns the global resource pool: sum of all captured sectors' resources.
 func get_global_resources() -> Dictionary:
+	# Apply offline accrual so UIs that poll this see live-updating totals
+	# while the player is on the planet menu.
+	advance_offline_production()
 	var pool: Dictionary = {}
 	for sector_id in sector_resources:
 		for item_id in sector_resources[sector_id]:
@@ -1408,8 +1574,150 @@ func save_campaign() -> bool:
 		"type": "campaign",
 		"tech_tree": TechTree.get_save_data(),
 		"sector_resources": _serialize_sector_resources(),
+		"sector_production_rates": _serialize_production_rates(),
+		"sector_production_timestamps": _serialize_production_timestamps(),
+		"sector_storage_caps": _serialize_storage_caps(),
 	}
 	return _write_json(SAVE_DIR + "campaign.json", data)
+
+
+func _serialize_storage_caps() -> Dictionary:
+	var result := {}
+	for sid in sector_storage_caps:
+		result[String(sid)] = int(sector_storage_caps[sid])
+	return result
+
+
+func _deserialize_storage_caps(data: Dictionary) -> void:
+	sector_storage_caps.clear()
+	for sid_str in data:
+		sector_storage_caps[StringName(sid_str)] = int(data[sid_str])
+
+
+## Trims every sector's stockpile down to its saved per-resource cap.
+## No-op for sectors that never had a cap recorded (old saves / sectors
+## that were never actually saved) so we don't zero out legit progress.
+func _clamp_sector_resources_to_caps() -> void:
+	for sid in sector_resources.keys():
+		var cap: int = int(sector_storage_caps.get(sid, 0))
+		if cap <= 0:
+			continue
+		var bucket: Dictionary = sector_resources[sid]
+		for item_id in bucket.keys():
+			if int(bucket[item_id]) > cap:
+				bucket[item_id] = cap
+
+
+## Captures the live sector's resource production rate and stamps "now".
+## Called when the active sector is about to go idle (player returns to
+## planet menu, quits, or switches sectors) so its rates are locked in
+## for offline accrual. The caller must ensure `main` is the live scene
+## for the sector identified by `sector_id`.
+func capture_production_snapshot(sector_id: StringName, main: Node2D) -> void:
+	if sector_id == &"":
+		return
+	var rates: Dictionary = SectorProductionSim.calculate_rates(main)
+	sector_production_rates[sector_id] = rates
+	sector_production_timestamps[sector_id] = Time.get_unix_time_from_system()
+	# Snapshot storage cap at the same moment so offline accrual knows
+	# when to stop producing for this sector even though the sector
+	# isn't simulated in full.
+	if main.has_method("get_storage_cap_per_resource"):
+		sector_storage_caps[sector_id] = int(main.get_storage_cap_per_resource())
+
+
+## Advances offline production for every non-active sector: for each one,
+## adds `rate * elapsed` of each item_id into its sector_resources dict
+## and resets its timestamp to `now`. Fractional leftovers are preserved
+## so slow producers still accrue integer items over multiple calls.
+func advance_offline_production() -> void:
+	var now: float = Time.get_unix_time_from_system()
+	for sid in sector_production_rates:
+		if sid == active_sector_id:
+			# Live sector is simulated by the running game — skip.
+			sector_production_timestamps[sid] = now
+			continue
+		var rates: Dictionary = sector_production_rates[sid]
+		if rates.is_empty():
+			sector_production_timestamps[sid] = now
+			continue
+		var last: float = float(sector_production_timestamps.get(sid, now))
+		var elapsed: float = now - last
+		if elapsed <= 0.0:
+			continue
+		if not sector_resources.has(sid):
+			sector_resources[sid] = {}
+		if not _sector_production_fractions.has(sid):
+			_sector_production_fractions[sid] = {}
+		var bucket: Dictionary = sector_resources[sid]
+		var fracs: Dictionary = _sector_production_fractions[sid]
+		var cap: int = int(sector_storage_caps.get(sid, 0))
+		for item_id in rates:
+			var rate: float = float(rates[item_id])
+			if rate == 0.0:
+				continue
+			var added: float = rate * elapsed + float(fracs.get(item_id, 0.0))
+			var whole: int = int(floor(added))
+			fracs[item_id] = added - float(whole)
+			if whole == 0:
+				continue
+			var current: int = int(bucket.get(item_id, 0))
+			var new_amt: int = current + whole
+			# Net-negative rates (under-fed factories) can't drive a
+			# stockpile below zero — clamp and drop the fractional
+			# carryover so the factory doesn't keep "owing" items.
+			if new_amt < 0:
+				new_amt = 0
+				fracs[item_id] = 0.0
+			# Storage cap: a sector can't accrue past what its cores
+			# could actually hold if it were live. Clamp AND stop
+			# carrying fractional overflow so it doesn't just leak out
+			# next tick.
+			if cap > 0 and new_amt > cap:
+				new_amt = cap
+				fracs[item_id] = 0.0
+			bucket[item_id] = new_amt
+		# Defensive sweep: if the bucket has pre-existing items that
+		# already exceed the cap (destroyed core, data migration, etc.)
+		# clamp them too. Zero-rate items were never visited by the loop.
+		if cap > 0:
+			for item_id in bucket.keys():
+				if int(bucket[item_id]) > cap:
+					bucket[item_id] = cap
+		sector_production_timestamps[sid] = now
+
+
+func _serialize_production_rates() -> Dictionary:
+	var result := {}
+	for sid in sector_production_rates:
+		var inner := {}
+		for item_id in sector_production_rates[sid]:
+			inner[String(item_id)] = float(sector_production_rates[sid][item_id])
+		result[String(sid)] = inner
+	return result
+
+
+func _serialize_production_timestamps() -> Dictionary:
+	var result := {}
+	for sid in sector_production_timestamps:
+		result[String(sid)] = float(sector_production_timestamps[sid])
+	return result
+
+
+func _deserialize_production_rates(data: Dictionary) -> void:
+	sector_production_rates.clear()
+	for sid_str in data:
+		var sid := StringName(sid_str)
+		var inner := {}
+		for item_id_str in data[sid_str]:
+			inner[StringName(item_id_str)] = float(data[sid_str][item_id_str])
+		sector_production_rates[sid] = inner
+
+
+func _deserialize_production_timestamps(data: Dictionary) -> void:
+	sector_production_timestamps.clear()
+	for sid_str in data:
+		sector_production_timestamps[StringName(sid_str)] = float(data[sid_str])
 
 
 ## Loads campaign-level state. Called automatically on startup.
@@ -1430,6 +1738,20 @@ func load_campaign() -> bool:
 		TechTree.load_save_data(td)
 	if data.has("sector_resources"):
 		_deserialize_sector_resources(data["sector_resources"])
+	if data.has("sector_production_rates"):
+		_deserialize_production_rates(data["sector_production_rates"])
+	if data.has("sector_production_timestamps"):
+		_deserialize_production_timestamps(data["sector_production_timestamps"])
+	if data.has("sector_storage_caps"):
+		_deserialize_storage_caps(data["sector_storage_caps"])
+	# Clamp any existing stockpile against its saved cap before the
+	# accrual pass — handles the "a core was destroyed last session"
+	# case, old saves that pre-date the cap, and any other over-cap
+	# state that somehow got persisted.
+	_clamp_sector_resources_to_caps()
+	# Apply any resources produced while the game was closed. Uses the
+	# saved per-sector rates + timestamps captured at last snapshot.
+	advance_offline_production()
 	print("SaveManager: Campaign loaded (%d sectors with resources)" % sector_resources.size())
 	return true
 

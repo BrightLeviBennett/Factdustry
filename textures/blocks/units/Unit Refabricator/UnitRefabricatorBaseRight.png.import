@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://crsycnqx1546a"
-path="res://.godot/imported/Water.png-42d32ee03ba2c59e29e89bfabe6c3ac3.ctex"
+uid="uid://j2peaj078si5"
+path="res://.godot/imported/UnitRefabricatorBaseRight.png-4e1d05893f77fde6c325fb30d10f66f7.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/Water.png"
-dest_files=["res://.godot/imported/Water.png-42d32ee03ba2c59e29e89bfabe6c3ac3.ctex"]
+source_file="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseRight.png"
+dest_files=["res://.godot/imported/UnitRefabricatorBaseRight.png-4e1d05893f77fde6c325fb30d10f66f7.ctex"]
 
 [params]
 

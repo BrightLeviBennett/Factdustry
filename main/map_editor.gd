@@ -29,6 +29,22 @@ var building_health := {}
 var building_rotation := {}
 var building_origins := {}
 var building_factions := {}
+## Authored wave bundle — staged here in the editor, serialized into
+## the sector .json by SaveManager, and consumed by WaveManager at
+## runtime. Three pieces:
+##   * editor_wave_config — global schedule + generation mode
+##   * editor_wave_spawns — named spawn points
+##   * editor_waves       — manual-mode wave list
+var editor_wave_config: Dictionary = {
+	"start_mode": "landing",
+	"initial_delay": 30.0,
+	"interval": 30.0,
+	"generation_mode": "manual",
+	"auto_wave_count": 10,
+	"auto_unit_templates": [],
+}
+var editor_wave_spawns: Array = []
+var editor_waves: Array = []
 
 # Compatibility stubs used by BuildingSystem
 var selected_building: StringName = &""
@@ -236,6 +252,39 @@ func _unhandled_input(event: InputEvent) -> void:
 		# --- Building mode ---
 		if editor_mode == EditorMode.BUILDING:
 			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+				# World-menu handling: if the world menu is already open,
+				# resolve the click against it first. Then, with no block
+				# selected from the palette, left-clicking on a sorter /
+				# constructor / refabricator / archive opens its menu so
+				# authors can bake selections into the sector.
+				var bs = get_node_or_null("BuildingSystem")
+				if bs and bs.get("_world_menu_open"):
+					var mouse_world = get_global_mouse_position()
+					var hit: int = bs._world_menu_hit_test(mouse_world)
+					if hit >= 0:
+						bs._apply_world_menu_selection(hit)
+					else:
+						bs._close_world_menu()
+					return
+				if selected_block == &"" and placed_buildings.has(grid_pos):
+					var click_block_id = placed_buildings[grid_pos]
+					var click_data = Registry.get_block(click_block_id)
+					var click_anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+					if click_data and bs:
+						if click_data.tags.has("sorter") \
+								or click_data.tags.has("inverted_sorter") \
+								or click_data.tags.has("unloader"):
+							bs._open_world_menu("sorter", click_anchor)
+							return
+						if click_data.tags.has("constructor"):
+							bs._open_world_menu("constructor", click_anchor)
+							return
+						if click_data.tags.has("refabricator"):
+							bs._open_world_menu("refabricator", click_anchor)
+							return
+						if click_data.id == &"archive":
+							bs._open_world_menu("archive", click_anchor)
+							return
 				# Center multi-tile buildings on the mouse cursor
 				var place_pos := grid_pos
 				var sel_data = Registry.get_block(selected_block)
@@ -243,6 +292,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					place_pos -= Vector2i(sel_data.grid_size.x / 2, sel_data.grid_size.y / 2)
 				_place_block_at(place_pos)
 			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+				# Close an open world menu without erasing the block beneath.
+				var bs_r = get_node_or_null("BuildingSystem")
+				if bs_r and bs_r.get("_world_menu_open"):
+					bs_r._close_world_menu()
+					return
 				_erase_block_at(grid_pos)
 			return
 

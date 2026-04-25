@@ -19,7 +19,6 @@ var _terrain: Node2D
 var _sector_script: Node
 
 var enemy_script = preload("res://main/enemy_unit.gd")
-var nest_script = preload("res://main/enemy_nest.gd")
 
 # --- PATHFINDING ---
 var astar: AStarGrid2D              # GROUND layer pathfinding (main thread — WASD only)
@@ -32,6 +31,10 @@ var _path_worker: PathfindingWorker  # Background thread for enemy/unit pathfind
 # --- TRACKING ---
 var enemies: Array[Node2D] = []
 var player_units: Array[Node2D] = []
+# Kept as an always-empty stub so SectorDefenseSim's `for nest in nests`
+# loop still compiles. The nest-based continuous spawner was removed in
+# favour of the scripted wave system; defense-sim degrades to "no
+# threats" when there are no nests, which is the desired behaviour.
 var nests: Array[Node2D] = []
 
 # --- SETTINGS ---
@@ -333,6 +336,7 @@ func _command_attack_unit(enemy: Node2D) -> void:
 			continue
 		unit.manual_target_unit = enemy
 		unit.manual_target_building = null
+		unit.manual_target_building_block_id = &""
 		unit.move_target = null
 		unit.target_unit = enemy
 		unit.target_building = null
@@ -349,6 +353,12 @@ func _command_attack_building(bldg_anchor: Vector2i) -> void:
 			continue
 		unit.manual_target_building = bldg_anchor
 		unit.manual_target_unit = null
+		# Snapshot the block id that was targeted. The unit's per-tick
+		# validator compares against this so if the block is destroyed
+		# and a different one built on the same tile (or the block is
+		# converted to the unit's own faction), the chase stops instead
+		# of continuing to attack the wrong thing.
+		unit.manual_target_building_block_id = main.placed_buildings.get(bldg_anchor, &"")
 		unit.move_target = null
 		unit.target_building = bldg_anchor
 		unit.target_unit = null
@@ -366,6 +376,7 @@ func _command_move(world_pos: Vector2) -> void:
 			# Clear any previous manual target — this is a plain move order.
 			unit.manual_target_unit = null
 			unit.manual_target_building = null
+			unit.manual_target_building_block_id = &""
 			living.append(unit)
 
 	if living.size() == 0:
@@ -488,7 +499,11 @@ func _release_control() -> void:
 			drone.respawn_at(respawn_pos)
 		elif respawn_pos != null:
 			drone.position = respawn_pos
+			if drone.has_method("_clear_inventory"):
+				drone._clear_inventory()
 		else:
+			if drone.has_method("_clear_inventory"):
+				drone._clear_inventory()
 			drone._move_to_core()
 
 
@@ -1003,6 +1018,24 @@ func _setup_astar() -> void:
 		if _is_building_wall(grid_pos):
 			astar_crawler.set_point_solid(grid_pos, true)
 
+	# Mark VOID cells (no floor tile) as solid for ground & crawler: they
+	# can't walk on nothing. Without this guard, ground units could
+	# pathfind across empty map regions and physically stand on void.
+	# Hover/flying can still cross void (handled by not touching astar_hover
+	# here). A cell with a wall but no floor still counts as "has content"
+	# via wall_tiles and would already have been marked by the wall pass,
+	# so this only flips the all-empty cells.
+	if terrain_sys:
+		for x in range(main.GRID_WIDTH):
+			for y in range(main.GRID_HEIGHT):
+				var gp := Vector2i(x, y)
+				if terrain_sys.floor_tiles.has(gp):
+					continue
+				if terrain_sys.wall_tiles.has(gp):
+					continue
+				astar.set_point_solid(gp, true)
+				astar_crawler.set_point_solid(gp, true)
+
 	# --- HOVER AStar (blocked only by large terrain wall segments) ---
 	astar_hover = AStarGrid2D.new()
 	astar_hover.region = Rect2i(0, 0, main.GRID_WIDTH, main.GRID_HEIGHT)
@@ -1028,33 +1061,51 @@ func _setup_astar() -> void:
 func _setup_path_worker() -> void:
 	var terrain_sys = _terrain_ref()
 
+	# Build solid sets as Dictionaries (O(1) membership) then flatten to
+	# arrays at the end. Using Array.has() inside a full-grid loop is
+	# O(n²) and blows up load time on mid-sized maps.
+	var ground_set: Dictionary = {}
+	var crawler_set: Dictionary = {}
+	var hover_set: Dictionary = {}
+
 	# GROUND solids: non-transport buildings + terrain walls that block pathfinding
-	var ground_solids: Array[Vector2i] = []
 	for grid_pos in main.placed_buildings:
 		if not _is_ground_passable_building(grid_pos):
-			ground_solids.append(grid_pos)
+			ground_set[grid_pos] = true
 	if terrain_sys:
 		for grid_pos in terrain_sys.wall_tiles:
 			var tile_data = Registry.get_tile(terrain_sys.wall_tiles[grid_pos])
-			if tile_data and tile_data.blocks_pathfinding and not ground_solids.has(grid_pos):
-				ground_solids.append(grid_pos)
+			if tile_data and tile_data.blocks_pathfinding:
+				ground_set[grid_pos] = true
 
 	# CRAWLER solids: building walls + large terrain wall segments (>= 4 cells)
-	var crawler_solids: Array[Vector2i] = []
 	for grid_pos in main.placed_buildings:
 		if _is_building_wall(grid_pos):
-			crawler_solids.append(grid_pos)
+			crawler_set[grid_pos] = true
 	if terrain_sys:
 		for grid_pos in terrain_sys.wall_tiles:
 			if not _crawler_passable_walls.has(grid_pos):
-				crawler_solids.append(grid_pos)
+				crawler_set[grid_pos] = true
 
 	# HOVER solids: only large terrain wall segments (> 8 cells)
-	var hover_solids: Array[Vector2i] = []
 	if terrain_sys:
 		for grid_pos in terrain_sys.wall_tiles:
 			if not _hover_passable_walls.has(grid_pos):
-				hover_solids.append(grid_pos)
+				hover_set[grid_pos] = true
+
+	# VOID cells (no floor, no wall) block ground + crawler movement — a
+	# ground ant should never pathfind across an empty map region. Hover
+	# and flying layers are unaffected.
+	if terrain_sys:
+		for x in range(main.GRID_WIDTH):
+			for y in range(main.GRID_HEIGHT):
+				var gp := Vector2i(x, y)
+				if terrain_sys.floor_tiles.has(gp):
+					continue
+				if terrain_sys.wall_tiles.has(gp):
+					continue
+				ground_set[gp] = true
+				crawler_set[gp] = true
 
 	# Add hidden tiles to all solid lists (impassable barrier)
 	var sector_script = _sector_script_ref()
@@ -1063,13 +1114,26 @@ func _setup_path_worker() -> void:
 			for y in range(main.GRID_HEIGHT):
 				var gp := Vector2i(x, y)
 				if sector_script.is_tile_hidden(gp):
-					if not ground_solids.has(gp):
-						ground_solids.append(gp)
-					if not crawler_solids.has(gp):
-						crawler_solids.append(gp)
-					if not hover_solids.has(gp):
-						hover_solids.append(gp)
+					ground_set[gp] = true
+					crawler_set[gp] = true
+					hover_set[gp] = true
 
+	var ground_solids: Array[Vector2i] = []
+	var crawler_solids: Array[Vector2i] = []
+	var hover_solids: Array[Vector2i] = []
+	for gp in ground_set: ground_solids.append(gp)
+	for gp in crawler_set: crawler_solids.append(gp)
+	for gp in hover_set: hover_solids.append(gp)
+
+	# Tear down any previously-running worker before spawning a new one,
+	# otherwise reloading a sector leaks a thread and the old worker
+	# continues to answer pathfind requests with its stale (empty)
+	# grid — which is exactly how ground ants end up pathing across
+	# walls that WERE in the up-to-date main-thread astar but weren't
+	# in the old worker's initial solids list.
+	if _path_worker:
+		_path_worker.stop()
+		_path_worker = null
 	_path_worker = PathfindingWorker.new()
 	_path_worker.start(main.GRID_WIDTH, main.GRID_HEIGHT, main.GRID_SIZE,
 		ground_solids, crawler_solids, hover_solids)
@@ -1200,16 +1264,6 @@ func spawn_player_unit(spawn_position: Vector2, unit_id: StringName) -> void:
 	# Player units don't pathfind to buildings — they idle at spawn
 
 
-func spawn_nest(nest_position: Vector2) -> void:
-	var nest = Node2D.new()
-	nest.set_script(nest_script)
-	nest.main = main
-	nest.unit_manager = self
-	nest.position = nest_position
-	add_child(nest)
-	nests.append(nest)
-
-
 func _spawn_test_nests() -> void:
 	pass  # No hardcoded test nests — enemies are spawned by sector data
 
@@ -1308,10 +1362,6 @@ func on_player_unit_died(unit: Node2D) -> void:
 	player_units.erase(unit)
 	selected_units.erase(unit)
 	main.stats_units_destroyed += 1
-
-
-func on_nest_destroyed(nest: Node2D) -> void:
-	nests.erase(nest)
 
 
 func request_new_path(enemy: Node2D) -> void:

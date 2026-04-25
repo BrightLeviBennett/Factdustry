@@ -73,6 +73,25 @@ var paused_label: Label
 # Block info tooltip (shown when hovering over a placed block)
 var block_tooltip: PanelContainer
 var tooltip_vbox: VBoxContainer
+
+# Smoothed-power-display state. Keyed by the displayed building's anchor
+# so switching to a different block instantly snaps to that block's
+# current values, but staying on the same block animates the gen / use
+# numbers toward their targets across frames instead of teleporting
+# whenever a network event lands.
+var _power_display_anchor: Vector2i = Vector2i(-9999, -9999)
+var _power_display_gen: float = 0.0
+var _power_display_use: float = 0.0
+var _power_display_last_t: float = 0.0
+## Floor count-up rate (units / second). At 60 FPS this works out to
+## ~1 unit per frame, so any change <= ~240 units shows every integer
+## ticking past in order (… 97, 98, 99, 100). Larger gaps accelerate
+## so a 1000-unit swing still finishes in a few seconds — see the
+## ceiling-duration constant below.
+const _POWER_DISPLAY_FLOOR_PER_SEC := 60.0
+## Soft cap on how long the count-up takes for huge gaps. Above this
+## the rate scales up so a 10 000 unit change doesn't take 3 minutes.
+const _POWER_DISPLAY_MAX_DURATION := 4.0
 var _last_hovered_grid := Vector2i(-9999, -9999)
 var _logistics: Node2D
 # Cached sibling refs (populated in _ready). Avoid re-looking-up from _process.
@@ -975,7 +994,8 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				_add_tooltip_power_bar(
 					float(info.get("efficiency", 1.0)),
 					float(info.get("gen", 0.0)),
-					float(info.get("use", 0.0))
+					float(info.get("use", 0.0)),
+					origin
 				)
 
 	# --- Unit Fabricator Input Progress + Unit Count ---
@@ -1043,7 +1063,13 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		# Mirror _update_drills' hit-check so the tooltip matches actual
 		# production rather than always reporting 0%.
 		var is_wall_miner: bool = data.tags.has("wall_miner")
-		if terrain:
+		# Geyser miners (mineral extractor) sit on a single geyser tile
+		# and don't read front-edge ore at all — placement validation
+		# already guarantees they're on a geyser, so they're 100% as
+		# long as they have power. Reading front-edge ore for these
+		# would always hit 0% and report a broken extractor.
+		var is_geyser_miner: bool = data.tags.has("geyser_miner")
+		if terrain and not is_geyser_miner:
 			for cell in front_cells:
 				if is_wall_miner:
 					var c1_ok: bool = terrain.get_ore_at(cell) == null \
@@ -1057,7 +1083,11 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 						hit_count += 1
 					elif terrain.get_ore_at(cell + dir) != null:
 						hit_count += 1
-		var ore_eff: float = float(hit_count) / float(front_count) if front_count > 0 else 1.0
+		var ore_eff: float
+		if is_geyser_miner:
+			ore_eff = 1.0
+		else:
+			ore_eff = float(hit_count) / float(front_count) if front_count > 0 else 1.0
 		# Power efficiency multiplies ore efficiency so the displayed %/rate
 		# matches the actual production speed (network over-draw slows drills).
 		var pow_eff: float = 1.0
@@ -1448,7 +1478,50 @@ func _add_tooltip_health_bar(pct: float, current: float, max_hp: float) -> void:
 ## Half-bar width = one full generator rating, so +gen fills to the right
 ## edge and -gen fills to the left edge; more extreme values pin.
 ## A network with zero generators paints the whole left half red.
-func _add_tooltip_power_bar(efficiency: float, gen: float, use: float) -> void:
+## Moves `current` toward `target` by at most a per-frame budget. Budget
+## is `max(absolute, fraction * gap)` so small gaps tick at a steady
+## rate (visible 1-by-1 counting) and huge gaps still close in finite
+## time. Snaps when within one unit so the readout settles on the
+## target integer cleanly.
+func _step_toward_display(current: float, target: float, dt: float) -> float:
+	var gap: float = target - current
+	var abs_gap: float = absf(gap)
+	if abs_gap < 1.0:
+		return target
+	# Default rate gives ~1 unit per frame at 60 FPS so the integer
+	# readout visibly counts up. For big gaps the rate scales so the
+	# whole animation still finishes within `_POWER_DISPLAY_MAX_DURATION`.
+	var rate: float = maxf(_POWER_DISPLAY_FLOOR_PER_SEC, abs_gap / _POWER_DISPLAY_MAX_DURATION)
+	var step: float = rate * dt
+	if step >= abs_gap:
+		return target
+	return current + sign(gap) * step
+
+
+func _add_tooltip_power_bar(efficiency: float, gen: float, use: float, anchor: Vector2i = Vector2i(-9999, -9999)) -> void:
+	# Smooth gen / use toward the live values across frames so a sudden
+	# network change (a wire snap, a turbine going online, etc.) animates
+	# the displayed numbers rather than teleporting them. Switching to a
+	# different building snaps instantly so the player doesn't see a
+	# bogus carry-over from the previous tooltip.
+	var now_t: float = Time.get_ticks_msec() / 1000.0
+	var dt: float = now_t - _power_display_last_t
+	_power_display_last_t = now_t
+	if anchor == _power_display_anchor and dt > 0.0 and dt < 1.0:
+		# Linear count-up: per-frame step capped at the larger of an
+		# absolute units-per-second budget or a fraction of the gap.
+		# This makes the integer readout visibly tick through every
+		# intermediate value at a steady pace rather than jumping in
+		# large stutters.
+		_power_display_gen = _step_toward_display(_power_display_gen, gen, dt)
+		_power_display_use = _step_toward_display(_power_display_use, use, dt)
+	else:
+		_power_display_anchor = anchor
+		_power_display_gen = gen
+		_power_display_use = use
+	var smooth_gen: float = _power_display_gen
+	var smooth_use: float = _power_display_use
+
 	var bar_container = HBoxContainer.new()
 	bar_container.add_theme_constant_override("separation", 6)
 	bar_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1471,15 +1544,15 @@ func _add_tooltip_power_bar(efficiency: float, gen: float, use: float) -> void:
 
 	# Net power = gen - use. Normalize by gen so one "unit" of deficit or
 	# surplus equals one full generator rating worth of travel on the bar.
-	var net_val: float = gen - use
-	var scale_ref: float = gen if gen > 0.0 else maxf(use, 1.0)
+	var net_val: float = smooth_gen - smooth_use
+	var scale_ref: float = smooth_gen if smooth_gen > 0.0 else maxf(smooth_use, 1.0)
 	var frac: float = clampf(net_val / scale_ref, -1.0, 1.0)
 	var overdraw: bool = net_val < 0.0
 
 	var fill_color: Color
 	if overdraw:
 		fill_color = Color(0.95, 0.3, 0.2)
-	elif gen > 0.0 and use / gen >= 0.8:
+	elif smooth_gen > 0.0 and smooth_use / smooth_gen >= 0.8:
 		# Close to capacity — warning yellow so you notice before brownout.
 		fill_color = Color(1.0, 0.85, 0.25)
 	else:
@@ -1514,7 +1587,7 @@ func _add_tooltip_power_bar(efficiency: float, gen: float, use: float) -> void:
 	# number is the total generation capacity.
 	var power_lbl = Label.new()
 	var sign_prefix: String = "+" if net_val > 0.0 else ""
-	power_lbl.text = "%s%.0f / %.0f" % [sign_prefix, net_val, gen]
+	power_lbl.text = "%s%.0f / %.0f" % [sign_prefix, net_val, smooth_gen]
 	power_lbl.add_theme_font_size_override("font_size", 11)
 	var lbl_color: Color = Color(0.95, 0.55, 0.5) if overdraw else Color(0.7, 0.8, 1.0)
 	power_lbl.add_theme_color_override("font_color", lbl_color)
@@ -2579,14 +2652,19 @@ func show_sector_loss() -> void:
 
 
 func _on_sector_loss_ok() -> void:
-	# Reset the save for this sector
+	# Reset the save for this sector so a re-launch goes through the
+	# fresh-map path (and SectorScript starts from step 0 with no
+	# pre-existing counts / overlays / hidden regions).
 	if SaveManager.active_sector_id != &"":
 		var sector_id: StringName = SaveManager.active_sector_id
 		SaveManager.sector_resources.erase(sector_id)
-		# Delete the sector save file
-		var save_path: String = "user://maps/sectors/%s.save.json" % sector_id
-		if FileAccess.file_exists(save_path):
-			DirAccess.remove_absolute(save_path)
+		# Use SaveManager.delete_sector so we hit the same path
+		# save_sector writes to (user://maps/<id>.sector.json). The old
+		# hard-coded "user://maps/sectors/<id>.save.json" path was wrong
+		# — that file never existed, so a natural loss could leave a
+		# stale save in place and replaying the sector would pick up
+		# old script progress instead of starting clean.
+		SaveManager.delete_sector(str(sector_id))
 		SaveManager.save_campaign()
 		print("HUD: Sector '%s' save reset after loss." % sector_id)
 	# Return to planet select

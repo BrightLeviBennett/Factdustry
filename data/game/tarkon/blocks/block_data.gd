@@ -40,6 +40,15 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var feed_overlay_left: Texture2D
 ## Drawn when a payload conveyor sits on the building's right side.
 @export var feed_overlay_right: Texture2D
+## Replaces `base_sprite` while a payload conveyor is feeding from the
+## back (bottom) side. Falls back to `base_sprite` when unset.
+@export var base_sprite_back: Texture2D
+## Replaces `base_sprite` while a payload conveyor is feeding from the
+## left side.
+@export var base_sprite_left: Texture2D
+## Replaces `base_sprite` while a payload conveyor is feeding from the
+## right side.
+@export var base_sprite_right: Texture2D
 @export_subgroup("Faction Overlays")
 @export var lumina_overlay: Texture2D
 @export var ferox_overlay: Texture2D

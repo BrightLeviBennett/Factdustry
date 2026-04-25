@@ -208,24 +208,33 @@ func _push_targeting_snapshot() -> void:
 				"unit_size": u.unit_size,
 			})
 
-	# Build turret list
+	# Build turret list. Only anchor cells generate snapshot entries —
+	# otherwise a 2×2 turret would be simulated four times (quadrupling
+	# its fire rate), and non-anchor cells can hold stale/default
+	# faction values after a conversion pass, flipping a captured turret
+	# back to acting Lumina for a frame.
 	var turrets_snap: Array = []
+	var seen_anchors: Dictionary = {}
 	for grid_pos in main.placed_buildings:
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.is_turret():
 			continue
-		if grid_pos == manually_controlled_turret:
+		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if seen_anchors.has(anchor):
+			continue
+		seen_anchors[anchor] = true
+		if anchor == manually_controlled_turret:
 			continue
 		# Skip disabled or under-construction buildings
 		var sector_script = _sector_script_ref()
-		if sector_script and sector_script.is_building_disabled(grid_pos):
+		if sector_script and sector_script.is_building_disabled(anchor):
 			continue
-		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
 			continue
-		var turret_faction: int = main.get_building_faction(grid_pos)
+		var turret_faction: int = main.get_building_faction(anchor)
 		turrets_snap.append({
-			"grid_pos": grid_pos,
+			"grid_pos": anchor,
 			"faction": turret_faction,
 			"range_pixels": data.attack_range * main.GRID_SIZE,
 			"block_id": block_id,
@@ -272,6 +281,18 @@ func _update_turrets(delta: float) -> void:
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.is_turret():
+			continue
+
+		# Derelict / under-construction / deconstructing / sector-disabled
+		# turrets must not rotate, fire, or consume ammo. The targeting
+		# worker already filters these out of its snapshot, but we guard
+		# here too so a stale `_turret_targets` entry (present for one
+		# frame after a faction convert, for example) can't sneak off a
+		# shot before the next worker poll clears it.
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			continue
+		var sector_script_guard = _sector_script_ref()
+		if sector_script_guard and sector_script_guard.is_building_disabled(grid_pos):
 			continue
 
 		# Skip turrets being manually controlled by the player
@@ -325,7 +346,13 @@ func _update_turrets(delta: float) -> void:
 
 		var target_info: Dictionary = _turret_targets[grid_pos]
 		var turret_world: Vector2 = main.grid_to_world(grid_pos) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-		var turret_faction: int = main.get_building_faction(grid_pos)
+		# Prefer the anchor's faction: multi-tile buildings only guarantee
+		# building_factions entries on tiles placed via the full placement
+		# path, and conversion loops (Ferox→Derelict, Derelict→Lumina) can
+		# leave non-anchor cells with a stale/default value. Reading the
+		# anchor's faction is authoritative.
+		var turret_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		var turret_faction: int = main.get_building_faction(turret_anchor)
 
 		var target_world: Vector2 = target_info["target_pos"]
 		var shoot_at_unit: bool = target_info["target_type"] == "unit"
@@ -346,6 +373,25 @@ func _update_turrets(delta: float) -> void:
 			if not main.placed_buildings.has(nearest_bldg):
 				continue  # Building destroyed since scan
 			target_world = main.grid_to_world(nearest_bldg) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+
+		# Final-pass faction guard: the pre-computed target is up to one
+		# worker tick stale. If the turret was captured (FEROX → LUMINA)
+		# or the target itself converted factions since the snapshot, the
+		# cached `target_info` would happily aim the new-LUMINA turret at
+		# its new-LUMINA ally for a frame. Drop the shot when the two
+		# sides are the same or neither side is opposing.
+		var target_faction: int = -1
+		if shoot_at_unit:
+			if nearest_unit and "team" in nearest_unit:
+				target_faction = main.Faction.LUMINA if nearest_unit.team == UnitData.Team.PLAYER else main.Faction.FEROX
+		else:
+			var bldg_anchor: Vector2i = main.building_origins.get(nearest_bldg, nearest_bldg)
+			target_faction = main.get_building_faction(bldg_anchor)
+		if turret_faction == main.Faction.DERELICT \
+				or target_faction == main.Faction.DERELICT \
+				or target_faction == -1 \
+				or target_faction == turret_faction:
+			continue
 
 		# Live range re-check: the targeting worker may have pre-computed this
 		# target when it was in range, but the target may have moved away since.

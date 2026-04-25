@@ -17,8 +17,8 @@ grid_size = Vector2i(2, 2)
 top_sprite = ExtResource("1_uuuo3")
 max_health = 240.0
 build_cost = {
-"copper": 100,
-"graphite": 30
+"copper": 45,
+"graphite": 15
 }
 build_time = 2.0
 output_items = {

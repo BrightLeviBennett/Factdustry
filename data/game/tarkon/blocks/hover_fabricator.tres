@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://k56o1hb3us5e"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 [ext_resource type="Texture2D" uid="uid://cbacyyyjmoa4" path="res://textures/blocks/units/HoverFabricator/HoverFabricatorComplete.png" id="2"]
@@ -12,18 +12,28 @@ display_name = "Hover Fabricator"
 description = "Builds hover-class vehicles."
 icon = ExtResource("2")
 category = 6
+tags = PackedStringArray("fabricator", "units")
 color = Color(0.4, 0.6, 0.8, 1)
-base_sprite = ExtResource("3")
-top_sprite = ExtResource("4")
 grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("4")
+base_sprite = ExtResource("3")
 max_health = 280.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 50,
+"silicon": 30
+}
 build_time = 4.0
-input_items = { "mat_copper": 25 }
-max_stored_items = 40
+input_items = {
+"mat_copper": 25
+}
 requires_power = true
 power_consumption = 5.0
 electrical_power_use = 25.0
-side_inputs = { 0: &"mat_copper", 1: &"mat_copper", 2: &"mat_copper", 3: &"mat_copper" }
-tags = PackedStringArray("fabricator", "units")
+side_inputs = {
+0: &"mat_copper",
+1: &"mat_copper",
+2: &"mat_copper",
+3: &"mat_copper"
+}
+max_stored_items = 40
 produced_unit = &"hoverboard"

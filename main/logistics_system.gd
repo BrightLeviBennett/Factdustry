@@ -402,6 +402,12 @@ func _update_drills(delta: float) -> void:
 		var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
 		drill_timers[origin] = cycle_time
 
+		# `item_mined` is a tech-tree progression signal, not a general
+		# "any drill fired" event — only the player's own drills count.
+		# Pre-placed FEROX mining chains would otherwise unlock Copper/
+		# Graphite/etc. the moment the sector loads, before the player
+		# has mined anything themselves.
+		var drill_is_lumina: bool = main.get_building_faction(origin) == main.Faction.LUMINA
 		var output_cells = _get_all_output_cells(origin, data.grid_size, rot)
 		for item_id in produced:
 			var amount: int = int(produced[item_id])
@@ -413,12 +419,12 @@ func _update_drills(delta: float) -> void:
 					var push_entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
 					if _try_push_item(out_pos, item_id, push_entry_dir):
 						pushed = true
-						if main.has_signal("item_mined"):
+						if drill_is_lumina and main.has_signal("item_mined"):
 							main.item_mined.emit(item_id)
 						break
 				if not pushed:
 					if _add_to_storage(origin, item_id, data):
-						if main.has_signal("item_mined"):
+						if drill_is_lumina and main.has_signal("item_mined"):
 							main.item_mined.emit(item_id)
 
 ## Finds the top-left origin cell of a multi-tile building.
@@ -1914,6 +1920,16 @@ func _update_storage_unloading(_delta: float) -> void:
 		# For multi-tile buildings, check all output cells (not just origin neighbors)
 		var block_id: StringName = main.placed_buildings.get(origin, &"")
 		var data: BlockData = Registry.get_block(block_id) if block_id != &"" else null
+		# Turret ammo lives in `block_storage` so combat_system can pop a
+		# round off the stack per shot — it's an INPUT buffer, not a
+		# product stockpile. Auto-unloading it onto adjacent conveyors
+		# caused copper fed in as ammo to immediately cycle back out
+		# onto the same belt that delivered it, so the loop "pulls items
+		# out of the turret" even though nothing asked it to. Same
+		# principle for any future block whose storage is an input-only
+		# buffer: add a guard here.
+		if data and data.is_turret():
+			continue
 		var grid_size: Vector2i = data.grid_size if data else Vector2i(1, 1)
 		var rot: int = main.building_rotation.get(origin, 0)
 		# Omnidirectional blocks push from all four edges regardless of rotation.
@@ -2045,8 +2061,19 @@ func _update_belt_unloaders(_delta: float) -> void:
 			# Sink: empty conveyor cell facing away from us
 			if _is_conveyor_cell(nb) and not conveyor_items.has(nb):
 				sinks.append(nb)
-			# Source: any building with items in block_storage
+			# Source: any building with items in block_storage that
+			# legitimately outputs those items. Turrets store ammo in
+			# block_storage so combat_system can consume it on fire —
+			# that storage is an INPUT buffer, not a product stockpile,
+			# so we must not let an unloader pull it back out and feed
+			# the ammo in circles. Same principle for constructor /
+			# deconstructor / loader-type blocks that own their storage.
 			elif block_storage.has(nb_anchor) and not block_storage[nb_anchor]["items"].is_empty():
+				var nb_data = Registry.get_block(main.placed_buildings.get(nb_anchor, &""))
+				if nb_data == null:
+					continue
+				if nb_data.is_turret():
+					continue
 				sources.append(nb_anchor)
 
 		if sources.is_empty() or sinks.is_empty():
@@ -4170,6 +4197,11 @@ func _update_factories(delta: float) -> void:
 						state["eject_progress"] = 0.0
 					else:
 						state["phase"] = "outputting"
+						# Same tech-tree gating as the drill path: only the
+						# player's own factories count toward `item_produced`
+						# so pre-placed FEROX furnaces / extractors don't
+						# unlock Iron and Steel on sector landing.
+						var factory_is_lumina: bool = main.get_building_faction(origin) == main.Faction.LUMINA
 						# Build pending outputs list. Omnidirectional factories
 						# have no side_outputs — derive the pending list from
 						# output_items instead (one entry per item unit to push).
@@ -4182,12 +4214,14 @@ func _update_factories(delta: float) -> void:
 								for i in range(amt):
 									pending[str(slot)] = out_sn
 									slot += 1
-									main.item_produced.emit(out_sn)
+									if factory_is_lumina:
+										main.item_produced.emit(out_sn)
 						else:
 							for rel_dir_key in data.side_outputs:
 								var out_id := StringName(data.side_outputs[rel_dir_key])
 								pending[rel_dir_key] = out_id
-								main.item_produced.emit(out_id)
+								if factory_is_lumina:
+									main.item_produced.emit(out_id)
 						state["pending_outputs"] = pending
 
 			"outputting":

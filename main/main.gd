@@ -292,6 +292,15 @@ func _ready() -> void:
 	sector_script_node.name = "SectorScript"
 	add_child(sector_script_node)
 
+	# WaveManager ticks authored enemy waves. Attached before sector load
+	# so SaveManager can pass the deserialized waves straight to it.
+	var wave_mgr_scene = load("res://main/wave_manager.gd")
+	if wave_mgr_scene:
+		var wm = Node.new()
+		wm.set_script(wave_mgr_scene)
+		wm.name = "WaveManager"
+		add_child(wm)
+
 	# Initialize resources from item .tres files
 	_init_resources()
 
@@ -333,8 +342,25 @@ func _ready() -> void:
 		var sid := SaveManager.pending_sector_id
 		SaveManager.pending_sector_id = &""
 		SaveManager.active_sector_id = sid
+		# Apply any resources produced while this sector was idle (offline
+		# accrual), then prefer the campaign pool over what came from the
+		# .sector.json file — the campaign pool is the authoritative total
+		# once accrual has been applied.
+		SaveManager.advance_offline_production()
+		if SaveManager.sector_resources.has(sid):
+			for k in SaveManager.sector_resources[sid]:
+				resources[k] = int(SaveManager.sector_resources[sid][k])
+			resources_changed.emit(resources)
+		# Legacy saves can ship with stockpiles that exceed the current
+		# core cap (made before the cap existed, or after a core was
+		# destroyed mid-session). Trim them immediately so the player
+		# doesn't land into an over-cap state.
+		clamp_resources_to_cap()
 		# Sync starting resources into the global pool for this sector
 		SaveManager.sector_resources[sid] = resources.duplicate()
+		# Reset the timestamp so offline accrual doesn't double-count the
+		# time the player just spent loading in.
+		SaveManager.sector_production_timestamps[sid] = Time.get_unix_time_from_system()
 		SaveManager.save_campaign()
 		sector_launched.emit(sid)
 
@@ -387,7 +413,23 @@ func _init_resources() -> void:
 
 
 ## Keeps the global resource pool in sync with in-game resource changes.
+## Also trims against the per-resource cap as a defensive net — if anything
+## ever slips past `can_accept_resource`, this catches it before the
+## over-cap value gets mirrored into the campaign pool.
 func _on_resources_changed_sync(_res: Dictionary) -> void:
+	var cap: int = get_storage_cap_per_resource()
+	if cap > 0:
+		var trimmed := false
+		for item_id in resources.keys():
+			if int(resources[item_id]) > cap:
+				resources[item_id] = cap
+				trimmed = true
+		if trimmed:
+			# Re-emit so UI reflects the trim. The next trip through this
+			# function finds nothing to trim and is a no-op, so this
+			# terminates after one round.
+			resources_changed.emit(resources)
+			return
 	if SaveManager.active_sector_id != &"":
 		SaveManager.sector_resources[SaveManager.active_sector_id] = resources.duplicate()
 
@@ -454,6 +496,41 @@ func get_building_faction(grid_pos: Vector2i) -> int:
 	return building_factions.get(grid_pos, Faction.LUMINA)
 
 
+## Returns every LUMINA core anchor currently on the grid. Used when the
+## drone needs to address "any of my cores" rather than the original
+## spawn core — e.g. depositing mined items or picking a respawn target.
+func get_lumina_core_anchors() -> Array:
+	var anchors: Array = []
+	for grid_pos in placed_buildings:
+		if building_origins.get(grid_pos, grid_pos) != grid_pos:
+			continue
+		if get_building_faction(grid_pos) != Faction.LUMINA:
+			continue
+		var data = Registry.get_block(placed_buildings[grid_pos])
+		if data and data.tags.has("core"):
+			anchors.append(grid_pos)
+	return anchors
+
+
+## Returns the LUMINA core anchor closest to `world_pos`, or Vector2i(-1, -1)
+## if no LUMINA core exists. Used for drone respawn targeting.
+func get_nearest_lumina_core_anchor(world_pos: Vector2) -> Vector2i:
+	var best := Vector2i(-1, -1)
+	var best_dist_sq := INF
+	for anchor in get_lumina_core_anchors():
+		var data = Registry.get_block(placed_buildings[anchor])
+		var sz: Vector2i = data.grid_size if data else Vector2i(3, 3)
+		var center := Vector2(
+			(anchor.x + sz.x / 2.0) * GRID_SIZE,
+			(anchor.y + sz.y / 2.0) * GRID_SIZE
+		)
+		var d_sq: float = world_pos.distance_squared_to(center)
+		if d_sq < best_dist_sq:
+			best_dist_sq = d_sq
+			best = anchor
+	return best
+
+
 ## Returns the per-type unit capacity based on all placed LUMINA cores.
 ## Each core's unit_capacity adds to the total.
 func get_unit_cap_per_type() -> int:
@@ -510,6 +587,28 @@ func can_accept_resource(item_id: StringName) -> bool:
 	if cap <= 0:
 		return true  # No cores = no limit (shouldn't happen in normal gameplay)
 	return resources.get(item_id, 0) < cap
+
+
+## Trims every entry in `main.resources` down to the current per-resource
+## storage cap. Cheap to call — returns early when everything already
+## fits. Meant for situations where the cap can drop out from under an
+## existing stockpile (a core getting destroyed is the obvious one) or
+## where something sneaks a deposit past can_accept_resource.
+func clamp_resources_to_cap() -> void:
+	var cap: int = get_storage_cap_per_resource()
+	if cap <= 0:
+		# No cores = no cap (pre-placement / transient state). Leave
+		# resources alone so the first core's placement doesn't zero
+		# out any in-flight stockpile.
+		return
+	var changed := false
+	for item_id in resources.keys():
+		var amt: int = int(resources[item_id])
+		if amt > cap:
+			resources[item_id] = cap
+			changed = true
+	if changed:
+		resources_changed.emit(resources)
 
 
 ## Returns how much room is left for a specific resource.
@@ -643,10 +742,17 @@ func _swap_building_in_place(grid_pos: Vector2i, _old_data: BlockData, new_data:
 	# in execute_pending_swap() when BuildingSystem begins ticking this anchor.
 	if new_data.build_time > 0:
 		# Replace any previous pending swap on the same cell (e.g. the player
-		# dragged over it twice with different block selections).
+		# dragged over it twice with different block selections). The build
+		# is tracked HERE on the swap entry rather than on
+		# `building_build_progress`, so the existing block stays in
+		# placed_buildings (and visible at full opacity) until the drone
+		# finishes the work — at which point the swap commits atomically.
 		pending_swaps[grid_pos] = {
 			"new_block_id": new_data.id,
 			"new_rotation": placement_rotation,
+			"progress": 0.0,
+			"consumed": {},
+			"build_time": new_data.build_time,
 		}
 		if not work_order.has(grid_pos):
 			work_order.append(grid_pos)
@@ -673,12 +779,15 @@ func execute_pending_swap(grid_pos: Vector2i) -> bool:
 	var new_data = Registry.get_block(new_id)
 	if new_data == null:
 		return false
-	return _execute_swap_now(grid_pos, new_id, new_rot)
+	# Resources were consumed while progress was ticking on the pending
+	# entry itself, and progress has hit build_time — commit the swap as
+	# fully built. No further drone work needed here.
+	return _execute_swap_now(grid_pos, new_id, new_rot, true)
 
 
 ## Immediate swap: destroys the old block and places the new one at the same
 ## cell. Build progress starts at 0 (the drone will tick it up as usual).
-func _execute_swap_now(grid_pos: Vector2i, new_id: StringName, new_rot: int) -> bool:
+func _execute_swap_now(grid_pos: Vector2i, new_id: StringName, new_rot: int, already_built: bool = false) -> bool:
 	var new_data = Registry.get_block(new_id)
 	if new_data == null:
 		return false
@@ -696,8 +805,10 @@ func _execute_swap_now(grid_pos: Vector2i, new_id: StringName, new_rot: int) -> 
 	building_origins[grid_pos] = grid_pos
 	building_factions[grid_pos] = Faction.LUMINA
 
-	# Start build with progressive resource consumption.
-	if new_data.build_time > 0:
+	# Start build with progressive resource consumption — unless the
+	# caller already paid the build cost out-of-band (deferred swap path
+	# that ticked progress on the pending_swaps entry itself).
+	if new_data.build_time > 0 and not already_built:
 		building_build_progress[grid_pos] = 0.0
 		building_resources_consumed[grid_pos] = {}
 		if not work_order.has(grid_pos):
@@ -886,7 +997,7 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 		return
 	building_health[grid_pos] -= amount
 	if building_health[grid_pos] <= 0:
-		destroy_building(grid_pos)
+		destroy_building(grid_pos, true)
 
 
 # Queues a building for deconstruction. Resources are refunded progressively
@@ -1226,7 +1337,11 @@ func get_deconstruct_pct(grid_pos: Vector2i) -> float:
 
 
 # Completely removes a building from the grid.
-func destroy_building(grid_pos: Vector2i) -> void:
+# `by_enemy` distinguishes a destruction inflicted by combat damage (which
+# feeds the Hold-B rebuild preview) from a player-initiated removal like a
+# deconstruction or same-tile swap (which shouldn't — the player asked for
+# that block to go away, so offering to rebuild it is noise).
+func destroy_building(grid_pos: Vector2i, by_enemy: bool = false) -> void:
 	if not placed_buildings.has(grid_pos):
 		return
 
@@ -1250,8 +1365,10 @@ func destroy_building(grid_pos: Vector2i) -> void:
 				"rotation": rot,
 			})
 
-	# Track destroyed player buildings for rebuild mode (only anchors)
-	if faction == Faction.LUMINA and data and anchor == grid_pos:
+	# Track destroyed player buildings for rebuild mode — only when the
+	# destruction was inflicted by enemies. Deconstructions / swaps set
+	# by_enemy=false so they don't clutter the Hold-B preview.
+	if by_enemy and faction == Faction.LUMINA and data and anchor == grid_pos:
 		destroyed_player_buildings[anchor] = {
 			"block_id": block_id,
 			"rotation": rot,
@@ -1276,6 +1393,10 @@ func destroy_building(grid_pos: Vector2i) -> void:
 		_check_enemy_cores_remaining()
 	if faction == Faction.LUMINA and data and data.tags.has("core"):
 		_check_player_cores_remaining()
+		# Losing a core shrinks the storage cap, so any resource over
+		# the new cap needs trimming right now — otherwise the pool
+		# would sit permanently over capacity.
+		clamp_resources_to_cap()
 
 	building_build_progress.erase(anchor)
 	building_deconstruct_progress.erase(anchor)
