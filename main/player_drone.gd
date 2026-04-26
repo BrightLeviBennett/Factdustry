@@ -161,11 +161,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	if main.is_ui_blocking():
 		return
 
+	# Inventory drag (deposit drone storage onto a block / trash on bare
+	# terrain) is locked while the world is paused — moving items in or
+	# out of the drone during a freeze would smuggle resources around the
+	# pause-aware production / consumption ticks.
+	var paused_world: bool = "world_paused" in main and main.world_paused
 	# --- Drag-drop inventory deposit ---
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
 			# Start drag if clicking near the drone and inventory is non-empty
-			if _get_inventory_total() > 0 and main.selected_building == &"":
+			if _get_inventory_total() > 0 and main.selected_building == &"" and not paused_world:
 				var mouse_world = get_global_mouse_position()
 				if mouse_world.distance_to(position) < 40.0:
 					var terrain = _terrain_ref()

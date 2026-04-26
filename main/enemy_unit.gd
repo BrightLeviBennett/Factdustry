@@ -87,6 +87,11 @@ var _stuck_timer := 0.0
 var _stuck_origin := Vector2.ZERO
 const STUCK_TIME := 3.0
 const STUCK_RADIUS := 5.0  # Must move at least this many pixels in STUCK_TIME to not be "stuck"
+# Throttle for the wall-overlap rescue. Cheap enough we could do it
+# every tick but no need — a unit "phasing" into a wall via a building
+# placement is a rare event.
+var _wall_check_timer: float = 0.0
+const WALL_CHECK_INTERVAL := 0.5
 
 # --- REFERENCES (set by UnitManager) ---
 var main: Node2D
@@ -203,6 +208,7 @@ func _process(delta: float) -> void:
 			_try_attack(delta)
 
 	_check_stuck(delta)
+	_check_wall_overlap(delta)
 	_tick_water(delta)
 	_tick_aim_angle(delta)
 	_tick_facing_angle(delta)
@@ -931,6 +937,36 @@ func _check_stuck(delta: float) -> void:
 
 
 ## Pushes this unit away from the centroid of nearby same-layer units.
+## Periodic safety check — if the unit's current cell turned solid for
+## its movement layer (e.g. a building was placed on top of it, or a
+## disperse / push from another unit landed it on a wall), search a small
+## ring of neighbours for a walkable cell and slide there. Throttled so
+## the cost is negligible per-unit.
+func _check_wall_overlap(delta: float) -> void:
+	_wall_check_timer -= delta
+	if _wall_check_timer > 0.0:
+		return
+	_wall_check_timer = WALL_CHECK_INTERVAL
+	if data == null or unit_manager == null:
+		return
+	if data.movement_layer == UnitData.MovementLayer.FLYING:
+		return
+	if unit_manager.is_world_pos_walkable(position, data.movement_layer):
+		return
+	# Spiral outward looking for a free cell.
+	var here: Vector2i = main.world_to_grid(position)
+	for radius in range(1, 5):
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				if absi(dx) != radius and absi(dy) != radius:
+					continue
+				var probe: Vector2i = here + Vector2i(dx, dy)
+				var probe_world: Vector2 = main.grid_to_world(probe) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+				if unit_manager.is_world_pos_walkable(probe_world, data.movement_layer):
+					position = probe_world
+					return
+
+
 func _disperse_from_nearby_units() -> void:
 	var nearby_center := Vector2.ZERO
 	var nearby_count := 0
@@ -960,9 +996,30 @@ func _disperse_from_nearby_units() -> void:
 		var angle := randf() * TAU
 		away_dir = Vector2(cos(angle), sin(angle))
 
-	# Nudge away — enough to break the cluster but not teleport across the map
+	# Nudge away — enough to break the cluster but not teleport across
+	# the map. Validate the destination against the unit's movement
+	# layer first so a disperse never pushes someone onto a wall /
+	# building / void cell. If the primary direction is blocked, try a
+	# few rotated alternates before giving up; better to stay clustered
+	# one tick than to phase through a wall.
 	var nudge_dist := unit_size * 3.0
-	position += away_dir * nudge_dist
+	var ml: int = data.movement_layer if data else 0
+	var candidate_dirs: Array[Vector2] = [
+		away_dir,
+		away_dir.rotated(deg_to_rad(45.0)),
+		away_dir.rotated(deg_to_rad(-45.0)),
+		away_dir.rotated(deg_to_rad(90.0)),
+		away_dir.rotated(deg_to_rad(-90.0)),
+	]
+	var moved := false
+	for dir in candidate_dirs:
+		var target_pos: Vector2 = position + dir * nudge_dist
+		if unit_manager.is_world_pos_walkable(target_pos, ml):
+			position = target_pos
+			moved = true
+			break
+	if not moved:
+		return
 
 	# Clamp to map bounds
 	var map_w: float = main.GRID_SIZE * main.GRID_WIDTH

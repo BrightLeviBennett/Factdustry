@@ -45,7 +45,7 @@ enum Faction { LUMINA, FEROX, DERELICT }
 var selected_building: StringName = &""
 var require_resources := true
 var require_research := true
-var enemies_attack := false
+var enemies_attack := true
 
 ## Tracks player buildings destroyed by enemies for potential rebuild.
 ## Key = Vector2i (anchor), Value = { "block_id": StringName, "rotation": int }
@@ -256,6 +256,13 @@ signal resources_changed(resources: Dictionary)
 signal building_selected(block_id: StringName)
 signal building_placed(block_id: StringName, grid_pos: Vector2i)
 signal building_destroyed(grid_pos: Vector2i)
+## Fires once a queued build reaches 100% (build_progress >= build_time and
+## every input resource fully paid). Distinct from building_placed which
+## fires the moment the queue accepts the block — sector-script "placed"
+## conditions and similar count gates should listen to this instead so a
+## ghost queue doesn't satisfy a "build N drills" goal before the drone
+## actually finishes them.
+signal building_completed(block_id: StringName, grid_pos: Vector2i)
 @warning_ignore("unused_signal") signal item_mined(item_id: StringName)
 @warning_ignore("unused_signal") signal item_absorbed_in_core(item_id: StringName)
 @warning_ignore("unused_signal") signal core_unit_item_mined(item_id: StringName)
@@ -499,6 +506,10 @@ func get_building_faction(grid_pos: Vector2i) -> int:
 ## Returns every LUMINA core anchor currently on the grid. Used when the
 ## drone needs to address "any of my cores" rather than the original
 ## spawn core — e.g. depositing mined items or picking a respawn target.
+## Excludes cores that are still under construction or actively being
+## deconstructed; depositing into them or respawning on top of them
+## would either silently lose resources or strand the drone on an
+## inactive block.
 func get_lumina_core_anchors() -> Array:
 	var anchors: Array = []
 	for grid_pos in placed_buildings:
@@ -507,8 +518,11 @@ func get_lumina_core_anchors() -> Array:
 		if get_building_faction(grid_pos) != Faction.LUMINA:
 			continue
 		var data = Registry.get_block(placed_buildings[grid_pos])
-		if data and data.tags.has("core"):
-			anchors.append(grid_pos)
+		if data == null or not data.tags.has("core"):
+			continue
+		if is_building_inactive(grid_pos):
+			continue
+		anchors.append(grid_pos)
 	return anchors
 
 
@@ -532,7 +546,9 @@ func get_nearest_lumina_core_anchor(world_pos: Vector2) -> Vector2i:
 
 
 ## Returns the per-type unit capacity based on all placed LUMINA cores.
-## Each core's unit_capacity adds to the total.
+## Each core's unit_capacity adds to the total. Under-construction cores
+## (or cores actively being deconstructed) don't contribute — a core has
+## to be fully built before it lifts the cap.
 func get_unit_cap_per_type() -> int:
 	var cap := 0
 	for grid_pos in placed_buildings:
@@ -541,6 +557,8 @@ func get_unit_cap_per_type() -> int:
 		if building_origins.get(grid_pos, grid_pos) != grid_pos:
 			continue
 		if get_building_faction(grid_pos) != Faction.LUMINA:
+			continue
+		if is_building_inactive(grid_pos):
 			continue
 		var data = Registry.get_block(block_id)
 		if data and data.unit_capacity > 0:
@@ -566,7 +584,10 @@ func can_spawn_unit(unit_id: StringName) -> bool:
 
 
 ## Returns the per-resource storage capacity based on all placed LUMINA cores.
-## Each core's storage_capacity adds to the total. 0 = no cores placed.
+## Each core's storage_capacity adds to the total. Under-construction cores
+## (or cores actively being deconstructed) don't count toward the cap — a
+## core only contributes once it's fully built and operational.
+## 0 = no operational cores placed.
 func get_storage_cap_per_resource() -> int:
 	var cap := 0
 	for grid_pos in placed_buildings:
@@ -574,6 +595,8 @@ func get_storage_cap_per_resource() -> int:
 		if building_origins.get(grid_pos, grid_pos) != grid_pos:
 			continue
 		if get_building_faction(grid_pos) != Faction.LUMINA:
+			continue
+		if is_building_inactive(grid_pos):
 			continue
 		var data = Registry.get_block(block_id)
 		if data and data.storage_capacity > 0:
@@ -819,6 +842,30 @@ func _execute_swap_now(grid_pos: Vector2i, new_id: StringName, new_rot: int, alr
 	return true
 
 
+## True if any live (non-flying — flying units occupy a different layer
+## and shouldn't block construction) unit currently overlaps the cell at
+## `grid_pos`. Used by placement to refuse dropping a wall on a unit.
+func _is_cell_occupied_by_unit(grid_pos: Vector2i) -> bool:
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	if unit_mgr == null:
+		return false
+	var lists: Array = []
+	if unit_mgr.get("player_units") is Array:
+		lists.append(unit_mgr.player_units)
+	if unit_mgr.get("enemies") is Array:
+		lists.append(unit_mgr.enemies)
+	for arr in lists:
+		for u in arr:
+			if not is_instance_valid(u) or u.get("is_dead"):
+				continue
+			var ml: int = u.data.movement_layer if u.get("data") != null else 0
+			if ml == UnitData.MovementLayer.FLYING:
+				continue
+			if world_to_grid(u.position) == grid_pos:
+				return true
+	return false
+
+
 func try_place_building(grid_pos: Vector2i) -> bool:
 	if selected_building == &"":
 		return false
@@ -873,6 +920,11 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 				return false
 			# Can't place on walls
 			if terrain and terrain.has_wall(check_pos):
+				return false
+			# Can't place on a unit — would phase the unit inside a wall
+			# the moment construction completes. Players, enemies, and
+			# the player's piloted unit all count.
+			if _is_cell_occupied_by_unit(check_pos):
 				return false
 
 	# Core zone rule: core blocks MUST be on core_zone floor tiles.
@@ -962,6 +1014,8 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 				return false
 			if terrain and terrain.has_wall(check_pos):
 				return false
+			if _is_cell_occupied_by_unit(check_pos):
+				return false
 
 	# Deduct costs
 	if require_resources:
@@ -1026,6 +1080,27 @@ func destroy_building_with_refund(grid_pos: Vector2i) -> void:
 		if build_time_full <= 0:
 			build_time_full = 1.0
 		starting_progress = clampf(building_build_progress[anchor], 0.0, build_time_full)
+		# Pure-ghost case: the block was queued (placement preview) but the
+		# drone never reached it — no time elapsed, no resources paid.
+		# There's nothing to deconstruct visually, so wipe the queue
+		# entry and destroy the placeholder immediately rather than
+		# playing a full-length decon animation against an empty shell.
+		var any_paid: bool = false
+		for k in total_to_refund:
+			if int(total_to_refund[k]) > 0:
+				any_paid = true
+				break
+		if starting_progress <= 0.0 and not any_paid:
+			building_build_progress.erase(anchor)
+			building_resources_consumed.erase(anchor)
+			var wi_g := work_order.find(anchor)
+			if wi_g >= 0:
+				work_order.remove_at(wi_g)
+			if "work_paused" in self and work_paused.has(anchor):
+				work_paused.erase(anchor)
+			destroyed_player_buildings.erase(anchor)
+			destroy_building(anchor)
+			return
 		# Clean up the build entry — it's now a deconstruct.
 		building_build_progress.erase(anchor)
 		building_resources_consumed.erase(anchor)
@@ -1567,6 +1642,23 @@ func _convert_ferox_to_derelict() -> void:
 			converted += 1
 	ferox_rebuild_queue.clear()  # Stop ferox rebuilds
 	print("Main: Converted %d FEROX blocks to DERELICT." % converted)
+	# Any FEROX units still on the map have nothing to defend or rebuild
+	# to anymore — explode every one of them so the player isn't left
+	# chasing stragglers across the map. Iterates a copy because
+	# take_damage → _on_death → unit_manager.on_enemy_died mutates the
+	# live array. We do NOT convert units to a neutral team or to
+	# DERELICT — they all just die.
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	if unit_mgr and unit_mgr.get("enemies") is Array:
+		var ferox_killed := 0
+		for u in unit_mgr.enemies.duplicate():
+			if not is_instance_valid(u) or u.is_dead:
+				continue
+			if u.has_method("take_damage"):
+				u.take_damage(1.0e9)
+				ferox_killed += 1
+		if ferox_killed > 0:
+			print("Main: Exploded %d remaining FEROX units." % ferox_killed)
 
 
 ## Convert all DERELICT buildings in a rect to LUMINA.

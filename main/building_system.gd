@@ -873,11 +873,23 @@ func _input(event: InputEvent) -> void:
 
 	# --- SCHEMATIC PLACEMENT: click to place ---
 	if _placing_schematic and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		# Schematics drop a whole batch of build orders — also locked
+		# while piloting a non-builder.
+		if _is_controlling_non_builder():
+			return
 		_execute_schematic_placement()
 		return
 
 	# Rebuild mode (hold to show destroyed ghosts, drag to select)
 	if event.is_action("rebuild_mode"):
+		# Hold-B reconstructs destroyed buildings in a rect → also a
+		# placement action, so block it while piloting.
+		if _is_controlling_non_builder():
+			# Make sure we don't get stuck mid-drag if control was taken
+			# while the key was already held.
+			_rebuild_mode = false
+			_rebuild_dragging = false
+			return
 		if event.is_action_pressed("rebuild_mode"):
 			# Start dragging immediately from current mouse position
 			var mouse_world = get_global_mouse_position()
@@ -1228,6 +1240,12 @@ func _tick_progressive_build(anchor: Vector2i, delta: float) -> void:
 	if all_fully_consumed and main.building_build_progress[anchor] >= build_time:
 		main.building_build_progress.erase(anchor)
 		main.building_resources_consumed.erase(anchor)
+		# Fire the completion signal so listeners that care about *fully
+		# built* blocks (sector-script "placed", tutorial counters, etc.)
+		# advance now rather than at queue time.
+		var built_id: StringName = main.placed_buildings.get(anchor, &"")
+		if built_id != &"" and main.has_signal("building_completed"):
+			main.building_completed.emit(built_id, anchor)
 		# erase by value, not index — the active anchor may not be at [0]
 		# if earlier entries were skipped for being out of build range.
 		main.work_order.erase(anchor)
@@ -1736,6 +1754,27 @@ func _reverse_decon_to_build(anchor: Vector2i) -> bool:
 	return true
 
 
+## True when the player is currently piloting a unit / turret / crane that
+## isn't classified as a BUILDER. Used to gate drone-driven build and
+## deconstruct so manual control doesn't accidentally trigger them. A
+## controlled BUILDER unit is allowed to build/deconstruct, anticipating
+## future builder-unit gameplay.
+func _is_controlling_non_builder() -> bool:
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	if unit_mgr == null or unit_mgr.controlled_entity == null:
+		return false
+	# Turret / crane control always blocks; only direct-piloted units
+	# could potentially be builders.
+	if unit_mgr.controlled_type != "unit":
+		return true
+	var u = unit_mgr.controlled_entity
+	if u == null or not is_instance_valid(u):
+		return false
+	if u.get("data") == null:
+		return true
+	return u.data.category != UnitData.UnitCategory.BUILDER
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
 		return
@@ -1801,6 +1840,13 @@ func _unhandled_input(event: InputEvent) -> void:
 							get_viewport().set_input_as_handled()
 							return
 				elif main.selected_building != &"" and not event.ctrl_pressed:
+					# Build is locked while the player is directly controlling
+					# something (a unit / turret / crane) — drone-side
+					# construction would steal focus from whatever they're
+					# piloting. Builder-class units are exempt so a future
+					# builder unit can drop blocks under manual control.
+					if _is_controlling_non_builder():
+						return
 					# Start drag-place: record start, don't place yet
 					# (Ctrl+click is reserved for unit control)
 					_drag_start = preview_grid_pos
@@ -1809,6 +1855,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				# Release: place all blocks in the preview line
 				if _drag_placing:
+					# If the player took control of a unit / turret / crane
+					# mid-drag, cancel the placement on release rather than
+					# committing it. Mirrors the press-side gate so a drag
+					# started before the gate flipped doesn't sneak through.
+					if _is_controlling_non_builder():
+						_drag_placing = false
+						_drag_cells.clear()
+						return
 					var old_rot: int = main.placement_rotation
 					var old_building: StringName = main.selected_building
 					if ("world_paused" in main and main.world_paused):
@@ -1906,6 +1960,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			# units are still selected in the background.
 			var unit_mgr = get_node_or_null("/root/Main/UnitManager")
 			if unit_mgr and unit_mgr.unit_mode_active and unit_mgr.selected_units.size() > 0:
+				return
+			# Same gate as left-click placement: deconstruct via the drone
+			# is unavailable while the player is piloting a non-builder
+			# unit / turret / crane. Clear any in-flight drag state so a
+			# drag started before the gate flipped doesn't get committed
+			# the next frame the player releases control.
+			if _is_controlling_non_builder():
+				_demolish_dragging = false
 				return
 			if event.pressed:
 				_drag_placing = false
@@ -2896,6 +2958,28 @@ func _withdraw_items_from_block(anchor: Vector2i, item_id: StringName, count: in
 ## Click-to-withdraw handler: fills the drone's mined_inventory from the
 ## block, capped by the drone's MAX_INVENTORY.
 func _withdraw_block_to_drone(anchor: Vector2i, item_id: StringName) -> int:
+	# Locked while paused — pulling items into the drone during a freeze
+	# would side-step pause-aware production / consumption ticks. The
+	# storage popup itself stays open so the player can read counts.
+	if "world_paused" in main and main.world_paused:
+		return 0
+	# While the player is piloting something, withdrawing into the
+	# drone's bag would smuggle resources around the drone's location
+	# (the drone isn't where the cursor is). Allow it only when the
+	# controlled entity is a unit with its own item storage — those
+	# units are stand-ins for the drone in this case.
+	var unit_mgr_w = get_node_or_null("/root/Main/UnitManager")
+	if unit_mgr_w and unit_mgr_w.controlled_entity != null:
+		var ok_storage_unit: bool = false
+		if unit_mgr_w.controlled_type == "unit":
+			var u = unit_mgr_w.controlled_entity
+			if is_instance_valid(u) and u.get("data") != null:
+				# A unit "has storage for items" if its UnitData declares any
+				# inventory capacity (max_inventory > 0).
+				if "max_inventory" in u.data and int(u.data.max_inventory) > 0:
+					ok_storage_unit = true
+		if not ok_storage_unit:
+			return 0
 	var drone = get_node_or_null("/root/Main/PlayerDrone")
 	if drone == null:
 		return 0
@@ -2929,10 +3013,13 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 		return 0
 
 	# Core deposit: hand off to main.resources (honors can_accept_resource
-	# so we don't exceed core storage capacity).
+	# so we don't exceed core storage capacity). Under-construction or
+	# being-deconstructed cores reject deposits — silently swallowing
+	# items into a non-functional core would surprise the player.
 	if data.tags.has("core") \
 			and main.has_method("get_building_faction") \
-			and main.get_building_faction(anchor) == FACTION_LUMINA:
+			and main.get_building_faction(anchor) == FACTION_LUMINA \
+			and not main.is_building_inactive(anchor):
 		var accepted_c: int = 0
 		for _i in range(count):
 			if main.has_method("can_accept_resource") and not main.can_accept_resource(item_id):
@@ -2943,8 +3030,27 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 			main.resources_changed.emit(main.resources)
 		return accepted_c
 
-	# Factory input buffer: only accept items the recipe actually uses.
-	if data.input_items.size() > 0 and data.input_items.has(item_id):
+	# Factory input buffer: only accept items the *effective* recipe
+	# actually uses. Unit fabricators have empty `input_items` and pull
+	# their recipe from the produced unit's build_cost; refabricators use
+	# `_refab_effective_recipe` based on the player's selected tier-2.
+	# Falling through to data.input_items only would silently reject
+	# every drone-drop on those blocks.
+	var effective_recipe: Dictionary = data.input_items
+	if data.produced_unit != &"":
+		var unit_res = Registry.get_unit(data.produced_unit)
+		if unit_res and not unit_res.build_cost.is_empty():
+			effective_recipe = unit_res.build_cost
+	if data.tags.has("refabricator") and "refabricator_state" in _logistics \
+			and _logistics.refabricator_state.has(anchor):
+		var rsel: StringName = StringName(_logistics.refabricator_state[anchor].get("selected_t2", &""))
+		if rsel != &"" and data.refab_recipes.has(rsel):
+			var custom = data.refab_recipes[rsel]
+			if custom is Dictionary and not custom.is_empty():
+				effective_recipe = custom
+	if _logistics.has_method("_normalize_item_keys"):
+		effective_recipe = _logistics._normalize_item_keys(effective_recipe)
+	if not effective_recipe.is_empty() and effective_recipe.has(item_id):
 		if not _logistics.factory_buffers.has(anchor):
 			_logistics.factory_buffers[anchor] = {
 				"inputs": {},
@@ -2957,7 +3063,7 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 			fb["inputs"] = {}
 		var fin: Dictionary = fb["inputs"]
 		var have_i: int = int(fin.get(item_id, 0))
-		var cap_i: int = data.max_stored_items if data.max_stored_items > 0 else int(data.input_items[item_id]) * 10
+		var cap_i: int = data.max_stored_items if data.max_stored_items > 0 else int(effective_recipe[item_id]) * 10
 		var space_i: int = maxi(0, cap_i - have_i)
 		var take_i: int = mini(space_i, count)
 		if take_i > 0:
@@ -3927,6 +4033,18 @@ func _draw_placed_buildings() -> void:
 		var top_pos: Vector2 = world_pos + offset
 		var data: BlockData = _get_block.call(block_id)
 
+		# A queued-but-not-yet-actively-building block renders as a faded
+		# ghost so the player can tell which one the drone is currently
+		# working on. The active anchor and any partially-built block keep
+		# the full-texture render plus the overlay reveal line / dim.
+		if has_build_progress and main.building_build_progress.has(grid_pos):
+			var anchor_q: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+			var pct_q: float = main.get_build_progress_pct(anchor_q)
+			if pct_q == 0.0 and not (has_active_work and active_work_anchor == anchor_q):
+				_draw_block_ghost_preview(grid_pos, block_id, data, top_pos, width, height,
+					main.building_rotation.get(grid_pos, 0))
+				continue
+
 		# Conveyor belts use auto-tiled textures based on neighbors
 		if block_id == &"conveyor_belt" and not _belt_textures.is_empty():
 			var info: Dictionary = _get_belt_draw_info(grid_pos)
@@ -4094,12 +4212,8 @@ func _draw_placed_buildings() -> void:
 						Vector2(line_x, b_top_pos.y + b_height),
 						Color(1.0, 0.9, 0.2, 0.9), 2.0
 					)
-			else:
-				# Pending (scheduled, not yet building): subtle dim + a
-				# soft dashed-look outline. Visually in the same family
-				# as the out-of-range queued-ghost preview.
-				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(0, 0, 0, 0.22), true)
-				draw_rect(Rect2(b_top_pos, Vector2(b_width, b_height)), Color(1, 1, 1, 0.35), false, 1.0)
+			# Pending-not-active blocks are now rendered by the faded
+			# ghost preview path in PASS 2 — nothing to overlay here.
 
 	# --- PASS 2.27: Deferred same-group swap preview ---
 	# pending_swaps are junctions / bridges / etc. queued over an existing
@@ -4439,6 +4553,57 @@ func _draw_paused_queue() -> void:
 
 		# Yellow outline for all queued blocks
 		draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
+
+
+## Renders a queued (in-range, build_progress == 0, not actively being
+## built) block as a faded ghost — same look-and-feel as the out-of-range
+## paused-queue preview, so the player can tell at a glance which block
+## the drone is actually working on right now versus the rest of the
+## queue. Anchored at `top_pos` with the block's full footprint.
+func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: BlockData, top_pos: Vector2,
+		w: float, h: float, rot: int) -> void:
+	if data == null:
+		return
+	var tint := Color(1, 1, 1, 0.45)
+	# Conveyor belts use the auto-tile texture system so the ghost belt
+	# orients with its neighbours instead of always pointing the same way.
+	if block_id == &"conveyor_belt" and not _belt_textures.is_empty():
+		var info: Dictionary = _get_belt_draw_info(grid_pos)
+		var texture: Texture2D = info["texture"]
+		var angle: float = info["angle"]
+		if texture:
+			var center: Vector2 = top_pos + Vector2(w / 2.0, h / 2.0)
+			draw_set_transform(center, angle)
+			draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
+			draw_set_transform(Vector2.ZERO, 0.0)
+			return
+	var q_rot: int = rot if _is_directional(block_id) else 0
+	var q_tex: Texture2D = null
+	var q_drew_layered := false
+	if data.base_sprite and data.top_sprite:
+		_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
+		_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint)
+		q_drew_layered = true
+	elif data.base_sprite and (data.feed_overlay_back or data.feed_overlay_left or data.feed_overlay_right):
+		_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
+		if data.feed_overlay_back:
+			_draw_block_texture(data.feed_overlay_back, top_pos, w, h, q_rot, tint)
+		q_drew_layered = true
+	elif data.top_sprite:
+		q_tex = data.top_sprite
+	elif data.base_sprite:
+		q_tex = data.base_sprite
+	if q_tex:
+		_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint)
+	elif not q_drew_layered:
+		var color: Color = _get_block_color(block_id)
+		color.a = 0.35
+		draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
+		if _is_directional(block_id):
+			var center := top_pos + Vector2(w / 2.0, h / 2.0)
+			_draw_direction_arrow(center, q_rot, Color(1, 1, 1, 0.5))
+	# Yellow outline marks "queued, waiting for the drone".
+	draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
 
 
 func _draw_preview() -> void:

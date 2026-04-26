@@ -2134,6 +2134,13 @@ func _absorb_item(item_id: StringName, core_grid_pos: Vector2i = Vector2i(-1, -1
 	# succeeded so the item is consumed rather than backing up the belt.
 	if item_id == &"mat_sand":
 		return true
+	# Refuse deposits into a core that isn't fully built (under
+	# construction or actively being deconstructed). Returning false
+	# backs the conveyor up and the drone retries against the next
+	# valid core.
+	if core_grid_pos != Vector2i(-1, -1) \
+			and main.has_method("is_building_inactive") and main.is_building_inactive(core_grid_pos):
+		return false
 	var is_ferox := false
 	if core_grid_pos != Vector2i(-1, -1):
 		is_ferox = main.get_building_faction(core_grid_pos) == main.Faction.FEROX
@@ -2915,18 +2922,23 @@ func _update_refabricators(delta: float) -> void:
 					state["phase"] = "processing"
 
 			"processing":
-				state["timer"] -= delta * refab_eff
 				# Drain materials gradually so the buffer visibly empties
-				# while the upgrade runs.
+				# while the upgrade runs. Stall the timer when the buffer
+				# can't afford the next step (e.g. player withdrew items
+				# from the storage popup mid-build) so progress matches
+				# what's been paid for.
 				var _sel_t2_p: StringName = StringName(state.get("selected_t2", &""))
 				var _recipe_p: Dictionary = _refab_effective_recipe(data, _sel_t2_p)
 				var _t_total_r: float = float(state.get("timer_total", state["timer"] + 0.0001))
 				if _t_total_r <= 0.0:
 					_t_total_r = 0.0001
-				var _prog_r: float = clampf(1.0 - state["timer"] / _t_total_r, 0.0, 1.0)
 				if not state.has("recipe_consumed"):
 					state["recipe_consumed"] = {}
-				_consume_progressive(item_buf, _recipe_p, state["recipe_consumed"], _prog_r)
+				var _tentative_timer_r: float = state["timer"] - delta * refab_eff
+				var _new_prog_r: float = clampf(1.0 - _tentative_timer_r / _t_total_r, 0.0, 1.0)
+				if _can_afford_progress(item_buf, _recipe_p, state["recipe_consumed"], _new_prog_r):
+					state["timer"] = _tentative_timer_r
+					_consume_progressive(item_buf, _recipe_p, state["recipe_consumed"], _new_prog_r)
 				if state["timer"] <= 0.0:
 					_consume_progressive(item_buf, _recipe_p, state["recipe_consumed"], 1.0)
 					# Prefer the explicit selection; fall back to the
@@ -4207,16 +4219,24 @@ func _update_factories(delta: float) -> void:
 					state["recipe_consumed"] = {}
 
 			"processing":
-				state["timer"] -= delta * factory_power_eff
-				# Spread the recipe cost evenly across the build timer.
+				# Progress is gated by what's actually in the buffer —
+				# if the player pulls items out mid-build, the timer
+				# stalls until enough material returns to cover the
+				# next step. Mirrors the way drone construction stalls
+				# on a missing resource.
 				var _recipe := _get_effective_inputs(data)
 				var _t_total: float = float(state.get("timer_total", state["timer"] + 0.0001))
 				if _t_total <= 0.0:
 					_t_total = 0.0001
-				var _prog: float = clampf(1.0 - state["timer"] / _t_total, 0.0, 1.0)
 				if not state.has("recipe_consumed"):
 					state["recipe_consumed"] = {}
-				_consume_progressive(state["inputs"], _recipe, state["recipe_consumed"], _prog)
+				var _tentative_timer: float = state["timer"] - delta * factory_power_eff
+				var _new_prog: float = clampf(1.0 - _tentative_timer / _t_total, 0.0, 1.0)
+				if _can_afford_progress(state["inputs"], _recipe, state["recipe_consumed"], _new_prog):
+					state["timer"] = _tentative_timer
+					_consume_progressive(state["inputs"], _recipe, state["recipe_consumed"], _new_prog)
+				# Otherwise: don't advance the timer this tick, leaving
+				# the build paused until items show up.
 				if state["timer"] <= 0:
 					# Final flush — guarantee the full recipe has been
 					# deducted by the time output begins.
@@ -4326,6 +4346,26 @@ func _normalize_item_keys(d: Dictionary) -> Dictionary:
 			normalized = s
 		out[normalized] = d[raw_id]
 	return out
+
+
+## Returns true if `inputs` has enough material to cover the recipe up to
+## `progress` (0..1) given what's already been consumed. Used by factory
+## and refab tick loops to stall the timer when the buffer can't pay for
+## the next progress step — e.g. the player pulled an ingredient out via
+## the storage menu mid-build.
+func _can_afford_progress(inputs: Dictionary, recipe: Dictionary, consumed: Dictionary, progress: float) -> bool:
+	progress = clampf(progress, 0.0, 1.0)
+	for raw_id in recipe:
+		var sn := StringName(raw_id)
+		var needed: int = int(recipe[raw_id])
+		var target: int = int(progress * float(needed))
+		var already: int = int(consumed.get(sn, 0))
+		var diff: int = target - already
+		if diff <= 0:
+			continue
+		if int(inputs.get(sn, 0)) < diff:
+			return false
+	return true
 
 
 ## Drains items from `inputs` to match the per-recipe consumption ratio

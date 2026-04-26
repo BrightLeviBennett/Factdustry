@@ -407,7 +407,21 @@ func _process(delta: float) -> void:
 
 	var hovered_grid: Vector2i = main.world_to_grid(mouse_world)
 
-	if main.selected_building != &"":
+	# Unit mode owns left-click for selection / commands and the build
+	# tooltip / cost panel just clutter the screen during it. Hide both
+	# while in unit mode (along with the build-block menu) so the
+	# player's attention stays on units. The unit-mode flag also gates
+	# entering selected_building above, so a stale build-cost panel
+	# can't bleed in either.
+	var unit_mgr = _unit_mgr_ref()
+	var in_unit_mode: bool = unit_mgr != null and "unit_mode_active" in unit_mgr and unit_mgr.unit_mode_active
+
+	if in_unit_mode:
+		block_tooltip.visible = false
+		build_cost_panel.visible = false
+		_last_hovered_grid = Vector2i(-9999, -9999)
+		_last_cost_building = &""
+	elif main.selected_building != &"":
 		# Placing a block — show build cost. Rebuilds when the block changes
 		# or when _cost_dirty is set (by the resources_changed signal).
 		block_tooltip.visible = false
@@ -438,10 +452,14 @@ func _process(delta: float) -> void:
 		_last_hovered_grid = Vector2i(-9999, -9999)
 		_last_cost_building = &""
 
+	# Block-place menu mirrors the unit-mode hide so the right-side build
+	# panel collapses while you're commanding units.
+	if block_menu:
+		block_menu.visible = not in_unit_mode
+
 	# Show unit mode panel when shift is held
 	# Unit mode panel — visible whenever the UnitManager is in unit mode.
-	var unit_mgr = _unit_mgr_ref()
-	unit_mode_panel.visible = unit_mgr != null and "unit_mode_active" in unit_mgr and unit_mgr.unit_mode_active
+	unit_mode_panel.visible = in_unit_mode
 
 	# Update portrait UI
 	_update_portrait_panel()

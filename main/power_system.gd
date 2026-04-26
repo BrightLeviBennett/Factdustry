@@ -296,8 +296,20 @@ func _rebuild_electrical_networks() -> void:
 	for cell in elec_cells:
 		adjacency[cell] = []
 
+	# Each faction runs its own grid — LUMINA can't power a FEROX block by
+	# laying cable next to it (or vice versa), and DERELICT acts as an
+	# inert third party. Without this, a captured turret next to an
+	# enemy generator would silently feed off the player's network (or
+	# the other way round). Blocks of the same faction connect normally.
+	var _same_faction := func(a: Vector2i, b: Vector2i) -> bool:
+		if main.has_method("get_building_faction"):
+			return main.get_building_faction(a) == main.get_building_faction(b)
+		return true
+
 	var _link_edge := func(a: Vector2i, b: Vector2i) -> void:
 		if not adjacency.has(a) or not adjacency.has(b):
+			return
+		if not _same_faction.call(a, b):
 			return
 		if a not in adjacency[b]:
 			adjacency[b].append(a)
@@ -315,13 +327,18 @@ func _rebuild_electrical_networks() -> void:
 			if is_cable and cable_range > 0:
 				# Straight-line scan — connect to the nearest electrical block.
 				# cable_range is the number of EMPTY tiles the cable can bridge,
-				# so the reachable distance is cable_range + 1 tiles.
+				# so the reachable distance is cable_range + 1 tiles. Cross-
+				# faction blocks are skipped (and don't terminate the scan)
+				# so a player cable can reach past an enemy generator to a
+				# friendly node further down the line.
 				for dist in range(1, cable_range + 2):
 					var scan: Vector2i = pos + DIR_VECTORS[dir_idx] * dist
 					if not main.placed_buildings.has(scan):
 						continue
 					if not cell_data.has(scan):
 						continue  # Non-electrical building — keep scanning
+					if not _same_faction.call(pos, scan):
+						continue
 					_link_edge.call(pos, scan)
 					cable_connections.append([pos, scan])
 					break

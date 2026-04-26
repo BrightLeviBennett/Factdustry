@@ -1062,6 +1062,29 @@ func _update_controlled_turret(_delta: float) -> void:
 # PATHFINDING SETUP
 # =========================
 
+## Returns true if a unit on movement layer `ml` is allowed to occupy
+## `world_pos`. FLYING is always permitted; HOVER uses astar_hover; ground
+## uses astar; crawlers use astar_crawler. Out-of-bounds and unset grids
+## are treated as walkable to avoid false positives blocking edge nudges.
+func is_world_pos_walkable(world_pos: Vector2, ml: int) -> bool:
+	if ml == UnitData.MovementLayer.FLYING:
+		return true
+	var grid: Vector2i = main.world_to_grid(world_pos)
+	if not main.is_within_bounds(grid):
+		return false
+	var astar_grid: AStarGrid2D = null
+	match ml:
+		UnitData.MovementLayer.GROUND:
+			astar_grid = astar
+		UnitData.MovementLayer.CRAWLER:
+			astar_grid = astar_crawler
+		UnitData.MovementLayer.HOVER:
+			astar_grid = astar_hover
+	if astar_grid == null:
+		return true
+	return not astar_grid.is_point_solid(grid)
+
+
 func _setup_astar() -> void:
 	# --- GROUND AStar (blocked by all buildings + terrain walls) ---
 	astar = AStarGrid2D.new()

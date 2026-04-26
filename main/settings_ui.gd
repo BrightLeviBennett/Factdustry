@@ -222,6 +222,13 @@ func _build_game_tab() -> void:
 					hud._refresh_block_menu()
 			_save_settings()
 	)
+	_add_toggle("Enemies Attack",
+		main.enemies_attack if main else true,
+		func(v):
+			if main:
+				main.enemies_attack = v
+			_save_settings()
+	)
 	_add_toggle("Unlock All Tech (sandbox)",
 		TechTree.unlock_all,
 		func(v):
@@ -461,6 +468,8 @@ func _save_settings() -> void:
 	# Game / UX.
 	if main and "require_research" in main:
 		data["require_research"] = bool(main.require_research)
+	if main and "enemies_attack" in main:
+		data["enemies_attack"] = bool(main.enemies_attack)
 	data["unlock_all_tech"] = bool(TechTree.unlock_all)
 	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
 	if building_sys and "parallax_enabled" in building_sys:
@@ -530,6 +539,8 @@ static func apply_pending_settings() -> void:
 	var main_node = Engine.get_main_loop().root.get_node_or_null("Main") if Engine.get_main_loop() else null
 	if main_node and data.has("require_research") and "require_research" in main_node:
 		main_node.require_research = bool(data["require_research"])
+	if main_node and data.has("enemies_attack") and "enemies_attack" in main_node:
+		main_node.enemies_attack = bool(data["enemies_attack"])
 	var building_sys = main_node.get_node_or_null("BuildingSystem") if main_node else null
 	if building_sys and data.has("parallax_enabled") and "parallax_enabled" in building_sys:
 		building_sys.parallax_enabled = bool(data["parallax_enabled"])

@@ -55,6 +55,68 @@ func _ready() -> void:
 	_setup_categories()
 	_build_ui()
 	_hide_ui()
+	# Refresh tile lock state whenever a tech node flips, so newly-
+	# researched entries lose their padlock without the player having to
+	# re-open the database. Sections themselves are stable (no add/remove);
+	# only the per-tile lock visual changes.
+	if TechTree.has_signal("node_state_changed"):
+		TechTree.node_state_changed.connect(_on_tech_state_changed_db)
+
+
+func _on_tech_state_changed_db(_node_id: StringName, _new_state: int) -> void:
+	for tile in _all_tiles:
+		_refresh_tile_lock(tile)
+	# If the detail overlay is open, refresh it too in case its tile flipped.
+	if _detail_overlay and _detail_overlay.visible:
+		_close_detail()
+
+
+## Recomputes is_locked for one tile and toggles its visuals. Cheap —
+## drops the lock label and replaces it with the entry's icon (or vice
+## versa) instead of rebuilding the whole panel hierarchy.
+func _refresh_tile_lock(tile: Dictionary) -> void:
+	var entry: Resource = tile.get("entry")
+	if entry == null:
+		return
+	var panel: PanelContainer = tile.get("node")
+	if panel == null or not is_instance_valid(panel):
+		return
+	var tech_id := _get_tech_id_for_entry(entry)
+	var locked: bool = false
+	if tech_id != &"":
+		locked = not TechTree.is_researched(tech_id)
+	if bool(tile.get("is_locked", false)) == locked:
+		return
+	tile["is_locked"] = locked
+	# Strip current children (lock label or icon) and replace.
+	for c in panel.get_children():
+		c.queue_free()
+	if locked:
+		var lock_label = Label.new()
+		lock_label.text = "🔒"
+		lock_label.add_theme_font_size_override("font_size", 16)
+		lock_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lock_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lock_label.anchor_right = 1.0
+		lock_label.anchor_bottom = 1.0
+		lock_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(lock_label)
+	else:
+		var icon_rect = TextureRect.new()
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+		icon_rect.custom_minimum_size = Vector2(TILE_SIZE - 8, TILE_SIZE - 8)
+		icon_rect.texture = entry.icon if entry.icon else _fallback_icon
+		icon_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		panel.add_child(icon_rect)
+	# Re-bind input/hover with the fresh is_locked flag.
+	for sig in ["mouse_entered", "mouse_exited", "gui_input"]:
+		var s: Signal = panel.get(sig)
+		for c in s.get_connections():
+			s.disconnect(c["callable"])
+	panel.mouse_entered.connect(_on_tile_hover.bind(entry, locked))
+	panel.mouse_exited.connect(_on_tile_unhover)
+	panel.gui_input.connect(_on_tile_input.bind(entry, tile.get("cat_key", ""), locked))
 
 
 func _input(event: InputEvent) -> void:
@@ -1105,6 +1167,12 @@ func _show_ui() -> void:
 	_scroll.visible = true
 	_tooltip_panel.visible = false
 	_close_detail()
+	# Sync every tile against the current tech state — covers the case
+	# where the player researched something while the database was closed
+	# and the node_state_changed signal fired but we no longer needed to
+	# refresh until reopen.
+	for tile in _all_tiles:
+		_refresh_tile_lock(tile)
 	get_tree().paused = true
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	if _search_bar:

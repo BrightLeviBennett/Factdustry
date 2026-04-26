@@ -109,8 +109,14 @@ func _ready() -> void:
 			main.item_absorbed_in_core.connect(_on_item_absorbed_in_core)
 		if main.has_signal("item_produced"):
 			main.item_produced.connect(_on_item_produced)
-		if main.has_signal("building_placed"):
-			main.building_placed.connect(_on_building_placed)
+		# `_placed_counts` only counts blocks the player actually finished
+		# building, so a tutorial step asking for N drills doesn't tick
+		# off the moment a ghost queue is enqueued. Pre-placed sector
+		# blocks emit building_placed but never reach building_completed,
+		# which matches the intent here — "block up and running by player
+		# action", not "block exists at all".
+		if main.has_signal("building_completed"):
+			main.building_completed.connect(_on_building_placed)
 		if main.has_signal("building_destroyed"):
 			main.building_destroyed.connect(_on_building_destroyed)
 		if main.has_signal("core_unit_item_mined"):
