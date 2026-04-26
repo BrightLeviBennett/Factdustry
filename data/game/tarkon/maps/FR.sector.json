@@ -15152,12 +15152,6 @@
 			"timer": 0.0
 		}
 	},
-	"resources": {
-		"mat_copper": 993,
-		"mat_graphite": 574,
-		"mat_silicon": 2965,
-		"mat_steel": 1526
-	},
 	"script_steps": [
 		{
 			"actions": [

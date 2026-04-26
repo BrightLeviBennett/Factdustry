@@ -53,6 +53,7 @@ const COLOR_EMPTY     = Color(0, 0, 0, 0)           # invisible
 const COLOR_LOCKED    = Color(0, 0, 0, 0)            # invisible
 const COLOR_UNLOCKED  = Color(0.7, 0.85, 0.7, 0.55)  # visible white-green
 const COLOR_CAPTURED  = Color(1.0, 0.85, 0.0, 0.65)  # visible gold
+const COLOR_ABANDONED = Color(1.0, 1.0, 1.0, 0.7)    # visible white — captured then lost
 const COLOR_HOVER     = Color(0.4, 0.6, 0.4, 0.3)    # hover highlight for any cell
 const EDGE_COLOR      = Color(0.3, 0.5, 0.3, 0.4)    # grid edge color
 
@@ -583,7 +584,13 @@ func _get_cell_outline_color(planet_id: StringName, cell_idx: int) -> Color:
 	# Sectors render as RESEARCHED in the tech tree as soon as they become
 	# accessible, so "captured" vs "unlocked but not yet captured" has to be
 	# distinguished by the hidden "-C-sector_id" marker instead of NodeState.
-	if TechTree.is_sector_captured(sector.id):
+	# Abandoned check goes first: once a sector is captured, the -C- marker
+	# stays researched forever (tech-tree contract), so is_sector_captured
+	# would also return true for an abandoned sector. The breadcrumb tells
+	# us which one to render.
+	if TechTree.was_sector_abandoned(sector.id):
+		return COLOR_ABANDONED
+	elif TechTree.is_sector_captured(sector.id):
 		return COLOR_CAPTURED
 	elif not TechTree.is_locked(sector.id):
 		return COLOR_UNLOCKED

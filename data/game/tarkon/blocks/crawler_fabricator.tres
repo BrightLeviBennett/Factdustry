@@ -1,18 +1,27 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://c2bfv72qidi2l"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://ctkk08r4leem3" path="res://textures/blocks/units/CarawlerFabricator/CrawlerFabricatorBase.png" id="1_yrmgy"]
+[ext_resource type="Texture2D" uid="uid://bli1l13n655qd" path="res://textures/blocks/units/CarawlerFabricator/CrawlerFabricatorComplete.png" id="2_yvh4u"]
+[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_yvh4u"]
 
 [resource]
 script = ExtResource("1")
 id = &"crawler_fabricator"
 display_name = "Crawler Fabricator"
 description = "Produces crawler-class ground units."
+icon = ExtResource("2_yvh4u")
 category = 6
+tags = PackedStringArray("fabricator", "units")
 color = Color(0.5, 0.7, 0.4, 1)
 grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("4_yvh4u")
+base_sprite = ExtResource("1_yrmgy")
 max_health = 280.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 4.0
 requires_power = true
 power_consumption = 5.0
-tags = PackedStringArray("fabricator", "units")

@@ -1,5 +1,19 @@
 extends Node2D
 
+
+# Overlay child Node2D used to draw the in-world menu / storage popup.
+# Sits at a very high z_index so popups always render above units and
+# any other in-world content, no matter what's stacked beneath them.
+class PopupOverlay extends Node2D:
+	var owner_sys: Node = null
+	func _draw() -> void:
+		if owner_sys:
+			owner_sys._draw_world_menu(self)
+			owner_sys._draw_storage_panel(self)
+
+
+var _popup_overlay: PopupOverlay = null
+
 # ============================================================
 # BUILDING_SYSTEM.GD - Building Placement & Rendering
 # ============================================================
@@ -78,6 +92,7 @@ const DIR_NAMES := ["→", "↓", "←", "↑"]
 # --- BELT AUTO-TILE TEXTURES ---
 # Loaded in _ready(). Used to pick the right visual based on neighboring belts.
 var _belt_textures := {}
+var _payload_conveyor_textures := {}
 
 # --- PIPE / PUMP TEXTURES ---
 var _pipe_texture: Texture2D
@@ -249,6 +264,16 @@ var link_source := Vector2i(-1, -1)
 
 func _ready() -> void:
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	# Popup overlay: drawn on a separate Node2D so we can pin a very high
+	# z_index without affecting BuildingSystem's main draw stack. With
+	# z_as_relative = false, this beats every in-world Node2D regardless
+	# of where it sits in the tree.
+	_popup_overlay = PopupOverlay.new()
+	_popup_overlay.owner_sys = self
+	_popup_overlay.z_index = 4096
+	_popup_overlay.z_as_relative = false
+	_popup_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	add_child(_popup_overlay)
 	# Kick off all texture loads on background threads so they can overlap
 	# with Registry essentials + main/sector initialization. They're resolved
 	# the first time _draw() runs (see _ensure_textures_loaded).
@@ -536,6 +561,14 @@ const _PIPE_TEX_PATH := "res://textures/blocks/fluid transportation/FluidConduit
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
+# Payload conveyor swaps to a merge texture when an upstream payload source
+# feeds it from the left/right side. Default ("PayloadConveyor.png") is used
+# when the back is fed (or nothing is fed).
+const _PAYLOAD_CONV_TEX_PATHS := {
+	"straight": "res://textures/blocks/units/PayloadConveyor/PayloadConveyor.png",
+	"left":     "res://textures/blocks/units/PayloadConveyor/PayloadConveyorLeft.png",
+	"right":    "res://textures/blocks/units/PayloadConveyor/PayloadConveyorRight.png",
+}
 
 var _textures_ready: bool = false
 
@@ -550,6 +583,8 @@ func _queue_texture_loads() -> void:
 	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
+	for key in _PAYLOAD_CONV_TEX_PATHS:
+		ResourceLoader.load_threaded_request(_PAYLOAD_CONV_TEX_PATHS[key])
 
 
 ## Blocks until all queued textures are resolved, then stashes them.
@@ -566,6 +601,8 @@ func _ensure_textures_loaded() -> void:
 	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
 	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
+	for key in _PAYLOAD_CONV_TEX_PATHS:
+		_payload_conveyor_textures[key] = ResourceLoader.load_threaded_get(_PAYLOAD_CONV_TEX_PATHS[key])
 	_textures_ready = true
 
 
@@ -1829,10 +1866,10 @@ func _unhandled_input(event: InputEvent) -> void:
 							_open_world_menu("refabricator", click_anchor)
 							get_viewport().set_input_as_handled()
 							return
-						elif click_data and click_data.id == &"archive":
-							_open_world_menu("archive", click_anchor)
-							get_viewport().set_input_as_handled()
-							return
+						# Archive id is an authoring-only choice — only the map
+						# editor exposes the archive picker. In-game, fall
+						# through to the read-only storage popup if the archive
+						# has anything in it.
 						# Fallback: any block with non-empty storage shows a
 						# read-only inventory popup (Mindustry-style).
 						elif click_data and _block_has_any_stored(click_anchor):
@@ -2430,7 +2467,7 @@ func _storage_panel_hit_test(world_pos: Vector2) -> int:
 ## Draws the secondary resource (storage) panel — same look-and-feel as the
 ## standalone storage popup, but anchored 1 tile right of the parent
 ## block's top-right corner.
-func _draw_storage_panel() -> void:
+func _draw_storage_panel(ci: CanvasItem) -> void:
 	if not _storage_panel_open:
 		return
 	# Re-pull counts each frame so the display animates live.
@@ -2455,8 +2492,8 @@ func _draw_storage_panel() -> void:
 	var dim: float = _world_menu_cell_size
 	var cols: int = mini(_world_menu_columns, _storage_panel_items.size())
 
-	draw_rect(rect, Color(0.08, 0.08, 0.1, 0.92), true)
-	draw_rect(rect, Color(0.4, 0.4, 0.5, 0.8), false, 1.5)
+	ci.draw_rect(rect, Color(0.08, 0.08, 0.1, 0.92), true)
+	ci.draw_rect(rect, Color(0.4, 0.4, 0.5, 0.8), false, 1.5)
 
 	var origin := rect.position + Vector2(padding, padding)
 	for i in _storage_panel_items.size():
@@ -2465,8 +2502,8 @@ func _draw_storage_panel() -> void:
 		var cell_pos := origin + Vector2(col * dim, row * dim)
 		var cell_rect := Rect2(cell_pos, Vector2(dim, dim))
 		if i == _storage_panel_hovered:
-			draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
-		draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
+			ci.draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
+		ci.draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
 		var entry: Dictionary = _storage_panel_items[i]
 		var icon_tex: Texture2D = entry.get("icon")
 		if icon_tex:
@@ -2475,7 +2512,7 @@ func _draw_storage_panel() -> void:
 				cell_pos + Vector2(icon_margin, icon_margin),
 				Vector2(dim - icon_margin * 2.0, dim - icon_margin * 2.0)
 			)
-			draw_texture_rect(icon_tex, icon_rect, false)
+			ci.draw_texture_rect(icon_tex, icon_rect, false)
 		# Count overlay
 		var font_c := ThemeDB.fallback_font
 		var font_sz_c := 11
@@ -2484,14 +2521,14 @@ func _draw_storage_panel() -> void:
 		var pad := 2.0
 		var tx := cell_pos.x + dim - tsz.x - pad
 		var ty := cell_pos.y + dim - pad
-		draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
+		ci.draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color(0, 0, 0, 0.85))
-		draw_string(font_c, Vector2(tx, ty), count_str,
+		ci.draw_string(font_c, Vector2(tx, ty), count_str,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color.WHITE)
 
 
-## Draws the in-world selection menu (called from _draw).
-func _draw_world_menu() -> void:
+## Draws the in-world selection menu onto `ci` (the popup overlay).
+func _draw_world_menu(ci: CanvasItem) -> void:
 	if not _world_menu_open:
 		return
 	# Storage popup is read-only and lives — rebuild the item list from
@@ -2523,16 +2560,19 @@ func _draw_world_menu() -> void:
 	var dim: Vector2 = _world_menu_cell_dim()
 	var cols := mini(_world_menu_col_count(), _world_menu_items.size())
 
-	# For the archive menu, resolve the currently-selected archive id
-	# once so we can highlight its row. Empty id (= "Clear") matches when
-	# nothing is set.
+	# For the archive / sorter / unloader menus, resolve the currently-
+	# selected id once so we can highlight its cell. Empty id (= "Clear")
+	# matches when nothing is set.
 	var selected_archive: StringName = &""
 	if _world_menu_type == "archive":
 		selected_archive = StringName(archive_holdings.get(_world_menu_pos, &""))
+	var selected_sorter: StringName = &""
+	if _world_menu_type == "sorter" and _logistics:
+		selected_sorter = StringName(_logistics.sorter_filters.get(_world_menu_pos, &""))
 
 	# Background
-	draw_rect(menu_rect, Color(0.08, 0.08, 0.1, 0.92), true)
-	draw_rect(menu_rect, Color(0.4, 0.4, 0.5, 0.8), false, 1.5)
+	ci.draw_rect(menu_rect, Color(0.08, 0.08, 0.1, 0.92), true)
+	ci.draw_rect(menu_rect, Color(0.4, 0.4, 0.5, 0.8), false, 1.5)
 
 	# Draw cells
 	var origin := menu_rect.position + Vector2(padding, padding)
@@ -2544,17 +2584,22 @@ func _draw_world_menu() -> void:
 
 		# Hover highlight
 		if i == _world_menu_hovered:
-			draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
+			ci.draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
 
 		# Cell border — thicker/brighter blue when this row is the
-		# currently-selected archive so the player can see what's set at
-		# a glance.
-		var is_selected_archive: bool = _world_menu_type == "archive" \
-			and StringName(_world_menu_items[i].get("id", &"")) == selected_archive
-		if is_selected_archive:
-			draw_rect(cell_rect, Color(0.35, 0.65, 1.0, 1.0), false, 2.0)
+		# currently-selected archive / sorter filter so the player can
+		# see what's set at a glance. Skip the "Clear" cell at index 0
+		# when nothing is selected (avoids the X cell looking active).
+		var entry_id: StringName = StringName(_world_menu_items[i].get("id", &""))
+		var is_selected: bool = false
+		if _world_menu_type == "archive":
+			is_selected = entry_id == selected_archive and entry_id != &""
+		elif _world_menu_type == "sorter":
+			is_selected = entry_id == selected_sorter and entry_id != &""
+		if is_selected:
+			ci.draw_rect(cell_rect, Color(0.35, 0.65, 1.0, 1.0), false, 2.0)
 		else:
-			draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
+			ci.draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
 
 		var entry: Dictionary = _world_menu_items[i]
 
@@ -2564,8 +2609,8 @@ func _draw_world_menu() -> void:
 			var cx := cell_pos.x + dim.x * 0.5
 			var cy := cell_pos.y + dim.y * 0.5
 			var hs: float = minf(dim.x, dim.y) * 0.25
-			draw_line(Vector2(cx - hs, cy - hs), Vector2(cx + hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
-			draw_line(Vector2(cx + hs, cy - hs), Vector2(cx - hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
+			ci.draw_line(Vector2(cx - hs, cy - hs), Vector2(cx + hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
+			ci.draw_line(Vector2(cx + hs, cy - hs), Vector2(cx - hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
 			continue
 
 		# Draw icon if available
@@ -2576,7 +2621,7 @@ func _draw_world_menu() -> void:
 				cell_pos + Vector2(icon_margin, icon_margin),
 				Vector2(dim.x - icon_margin * 2.0, dim.y - icon_margin * 2.0)
 			)
-			draw_texture_rect(icon_tex, icon_rect, false)
+			ci.draw_texture_rect(icon_tex, icon_rect, false)
 		else:
 			# Text-label cells (e.g. archive list) fit their full display
 			# name into the wider list-mode cell. Square icon-less cells
@@ -2588,11 +2633,11 @@ func _draw_world_menu() -> void:
 			var avail_w: float = dim.x - side_pad * 2.0
 			if _world_menu_type == "archive":
 				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + font_size * 0.35)
-				draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, font_size, Color.WHITE)
+				ci.draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, font_size, Color.WHITE)
 			else:
 				var short_name: String = full_name.left(4)
 				var text_pos := cell_pos + Vector2(4.0, dim.y * 0.65)
-				draw_string(font, text_pos, short_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, 10, Color.WHITE)
+				ci.draw_string(font, text_pos, short_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, 10, Color.WHITE)
 
 		# Storage popup: overlay an item count in the bottom-right corner.
 		if _world_menu_type == "storage" and entry.has("count"):
@@ -2604,9 +2649,9 @@ func _draw_world_menu() -> void:
 			var tx := cell_pos.x + dim.x - tsz.x - pad
 			var ty := cell_pos.y + dim.y - pad
 			# Drop-shadow for legibility over any icon colour.
-			draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
+			ci.draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color(0, 0, 0, 0.85))
-			draw_string(font_c, Vector2(tx, ty), count_str,
+			ci.draw_string(font_c, Vector2(tx, ty), count_str,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color.WHITE)
 
 
@@ -2623,8 +2668,10 @@ func _draw() -> void:
 	_draw_rebuild_mode()
 	_draw_schematic_rect()
 	_draw_schematic_placement()
-	_draw_world_menu()
-	_draw_storage_panel()
+	# World menu / storage panel render on the popup overlay so they sit
+	# above units and other in-world content.
+	if _popup_overlay:
+		_popup_overlay.queue_redraw()
 
 
 ## Returns the fade alpha for a wall tile (1.0 = fully visible, 0.0 = fully dark).
@@ -4100,6 +4147,36 @@ func _draw_placed_buildings() -> void:
 			# adjacent payload conveyors.
 			elif data and data.tags.has("refabricator") and data.base_sprite:
 				_draw_refabricator(grid_pos, data, top_pos, width, height, rot)
+			# Payload conveyor: swap top texture based on whether an upstream
+			# payload source feeds the left/right side. Back-fed (or no feed)
+			# uses the straight texture.
+			elif block_id == &"payload_conveyor" and not _payload_conveyor_textures.is_empty():
+				var anchor_pc: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+				var gsz_pc: Vector2i = data.grid_size if data else Vector2i(3, 3)
+				# In our convention rot=0 → facing right. "Left" in the
+				# conveyor's local frame is `(rot + 3) % 4`, "right" is
+				# `(rot + 1) % 4`. Texture rotation handles world-space
+				# orientation, so picking the right local texture is enough.
+				var left_dir_pc: int = (rot + 3) % 4
+				var right_dir_pc: int = (rot + 1) % 4
+				var fed_left: bool = _side_has_payload_input(anchor_pc, gsz_pc, left_dir_pc)
+				var fed_right: bool = _side_has_payload_input(anchor_pc, gsz_pc, right_dir_pc)
+				var tex_key: String = "straight"
+				if fed_left and not fed_right:
+					tex_key = "left"
+				elif fed_right and not fed_left:
+					tex_key = "right"
+				var tex: Texture2D = _payload_conveyor_textures.get(tex_key)
+				if tex == null:
+					tex = data.top_sprite
+				_draw_block_texture(tex, top_pos, width, height, rot)
+			# Plain layered render: base + top (no faction overlay, no
+			# fabricator unit layer, no refabricator side overlays). Used
+			# by payload loader/unloader and any future block that just
+			# wants a static two-layer sprite.
+			elif data and data.base_sprite and data.top_sprite:
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
 			# Faction-layered rendering (cores): base sprite + faction overlay
 			elif data and data.base_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)

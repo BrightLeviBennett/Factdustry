@@ -1,0 +1,27 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d4mpat21o7f0t"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://brbut8o4oc78a" path="res://textures/blocks/units/NavalFabricator/NavalFabricatorBase.png" id="1_pv6ed"]
+[ext_resource type="Texture2D" uid="uid://bp6016x4iews8" path="res://textures/blocks/units/NavalFabricator/NavalFabricatorComplete.png" id="2_4qffy"]
+[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_4qffy"]
+
+[resource]
+script = ExtResource("1")
+id = &"ship_fabricator"
+display_name = "Ship Fabricator"
+description = "Constructs flying ship-class units."
+icon = ExtResource("2_4qffy")
+category = 6
+tags = PackedStringArray("fabricator", "units")
+color = Color(0.5, 0.6, 0.9, 1)
+grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("4_4qffy")
+base_sprite = ExtResource("1_pv6ed")
+max_health = 280.0
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
+build_time = 4.0
+requires_power = true
+power_consumption = 5.0

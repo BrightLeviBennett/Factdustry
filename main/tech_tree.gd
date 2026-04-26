@@ -119,6 +119,30 @@ func is_sector_captured(sector_id: StringName) -> bool:
 	return nodes[marker]["amount_spent"].has(&"_event_researched")
 
 
+## Marks a previously-captured sector as abandoned. Tech-tree state is
+## intentionally left untouched — `_event_researched` stays set so any
+## tech gated on capturing this sector remains unlocked. We just leave a
+## separate `_event_abandoned` breadcrumb on the `-C-` marker so the
+## planet-select UI can render the sector's outline differently from a
+## still-held capture. Re-capturing clears the breadcrumb via
+## `_force_researched`.
+func mark_sector_abandoned(sector_id: StringName) -> void:
+	var marker := StringName("-C-%s" % sector_id)
+	if not nodes.has(marker):
+		return
+	var spent: Dictionary = nodes[marker]["amount_spent"]
+	if not spent.has(&"_event_researched"):
+		return
+	spent[&"_event_abandoned"] = 1
+
+
+func was_sector_abandoned(sector_id: StringName) -> bool:
+	var marker := StringName("-C-%s" % sector_id)
+	if not nodes.has(marker):
+		return false
+	return nodes[marker]["amount_spent"].has(&"_event_abandoned")
+
+
 # ================================
 # PUBLIC API — Resource Spending
 # ================================
@@ -394,6 +418,10 @@ func _force_researched(id: StringName) -> void:
 	# For event_only nodes, set a marker so get_state knows they've been researched
 	if node.get("event_only", false):
 		node["amount_spent"][&"_event_researched"] = 1
+	# Re-capturing a sector clears the abandoned-after-capture breadcrumb
+	# so planet-select goes back to the gold "captured" outline instead of
+	# the white "abandoned" one.
+	node["amount_spent"].erase(&"_event_abandoned")
 
 ## Creates a hidden marker node (no UI, no position, event_only).
 ## Used for -L- (landed) and -C- (captured) sector dependency markers.
@@ -455,7 +483,7 @@ func _register_all_nodes() -> void:
 func _register_cores() -> void:
 	_add(&"core_shard",        "Core: Shard",        [],                  [], {}, Vector2(0, 0))
 	_add(&"core_fragment",     "Core: Fragment",     [&"core_shard"],     [&"mat_steel"], {&"mat_copper": 1500, &"mat_graphite": 1200, &"mat_silicon": 300, &"mat_steel": 50}, Vector2(-2, 1))
-	_add(&"core_remanent",     "Core: Remanent",     [&"core_fragment"],  [], {&"mat_copper": 2500, &"mat_graphite": 2000, &"mat_silicon": 600, &"mat_steel": 150}, Vector2(-2, 2))
+	_add(&"core_remanent",     "Core: Remanent",     [&"core_fragment"],  [&"Not unlockable in campaign"], {&"mat_copper": 2500, &"mat_graphite": 2000, &"mat_silicon": 600, &"mat_steel": 150}, Vector2(-2, 2))
 	_add(&"core_bastion",      "Core: Bastion",      [&"core_remanent"],  [], {&"mat_copper": 4000, &"mat_graphite": 3500, &"mat_silicon": 1200, &"mat_steel": 400}, Vector2(-2, 3))
 	_add(&"core_fortress",     "Core: Fortress",     [&"core_bastion"],   [], {&"mat_copper": 5500, &"mat_graphite": 5000, &"mat_silicon": 2000, &"mat_steel": 1000}, Vector2(-2, 4))
 	_add(&"core_crucible",     "Core: Crucible",     [&"core_fortress"],  [], {&"mat_copper": 7500, &"mat_graphite": 6500, &"mat_silicon": 3000, &"mat_steel": 1800, &"mat_brass": 300}, Vector2(-2, 5))
@@ -485,8 +513,8 @@ func _register_power() -> void:
 	_add(&"cable_node",           "Cable Node",           [&"vent_turbine"],            [], {&"mat_copper": 15}, Vector2(0, 2))
 	_add(&"solar_panel",          "Solar Panel",          [&"vent_turbine"],            [&"Not unlockable in campaign"], {&"mat_copper": 50, &"mat_silicon": 20}, Vector2(-1, 2))
 	_add(&"solar_array",          "Solar Array",          [&"solar_panel"],             [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(-1, 3))
-	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(0, 3))
-	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(0, 4))
+	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(0, 3))
+	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [&"Not unlockable in campaign"], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(0, 4))
 	_add(&"combustion_generator", "Combustion Generator", [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
 	_add(&"combustion_reactor",   "Combustion Reactor",   [&"combustion_generator"],    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
 

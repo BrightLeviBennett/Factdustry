@@ -340,6 +340,24 @@ func delete_save(save_name: String) -> bool:
 
 ## Deletes a sector file.
 func delete_sector(sector_name: String) -> bool:
+	# Wipe campaign-level pools for this sector too — otherwise an abandon
+	# leaves the on-disk file gone but the accrued offline-production
+	# stockpile (and rates / timestamps / fractions / caps) lingers in the
+	# campaign save, and a relaunch hands it back to the player on landing.
+	var sid: StringName = StringName(sector_name)
+	# If this sector was captured, leave a breadcrumb so planet-select can
+	# render its outline in white ("abandoned") instead of gold ("captured")
+	# or green ("unlocked, never captured"). Re-capturing clears the flag.
+	if TechTree.is_sector_captured(sid):
+		TechTree.mark_sector_abandoned(sid)
+	sector_resources.erase(sid)
+	sector_production_rates.erase(sid)
+	sector_production_timestamps.erase(sid)
+	_sector_production_fractions.erase(sid)
+	sector_storage_caps.erase(sid)
+	# Persist the cleared pools so a crash before the next save doesn't
+	# resurrect them from the previous campaign.json.
+	save_campaign()
 	var path = SAVE_DIR + sector_name + ".sector.json"
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
@@ -863,7 +881,12 @@ func load_sector_from_path(path: String) -> bool:
 	_rebuild_building_origins(main)
 
 	# --- Restore resources (if saved, e.g. from autosave) ---
-	if data.has("resources") and data["resources"] is Dictionary:
+	# Bundled res:// sectors can ship with a `resources` block baked in
+	# from playtest/authoring; applying it on a fresh landing would gift
+	# the player a stockpile they didn't earn. Only user autosaves under
+	# user://maps/ restore the saved stockpile — bundled loads start clean.
+	var is_user_save_res: bool = path.begins_with(SAVE_DIR) or path.begins_with("user://")
+	if is_user_save_res and data.has("resources") and data["resources"] is Dictionary:
 		for item_id in data["resources"]:
 			main.resources[StringName(item_id)] = int(data["resources"][item_id])
 

@@ -15,7 +15,7 @@ var content_panel: PanelContainer
 var content_vbox: VBoxContainer
 var current_tab := "Game"
 
-const TABS := ["Game", "Graphics", "Sound", "Controls", "Game Data"]
+const TABS := ["Game", "Graphics", "Sound", "Controls", "Game Data", "Developer"]
 var tab_buttons: Dictionary = {}
 
 # Controls tab: stores action → button mapping for rebinding
@@ -143,7 +143,7 @@ func _build_ui() -> void:
 		var btn = Button.new()
 		btn.text = tab_name
 		btn.add_theme_font_size_override("font_size", 13)
-		btn.custom_minimum_size = Vector2(100, 30)
+		btn.custom_minimum_size = Vector2(90, 30)
 		btn.pressed.connect(_select_tab.bind(tab_name))
 		tab_container.add_child(btn)
 		tab_buttons[tab_name] = btn
@@ -202,6 +202,8 @@ func _select_tab(tab_name: String) -> void:
 			_build_controls_tab()
 		"Game Data":
 			_build_game_data_tab()
+		"Developer":
+			_build_developer_tab()
 
 
 # =========================
@@ -212,46 +214,6 @@ func _build_game_tab() -> void:
 	_add_section("General")
 	_add_toggle("Show FPS", _get_show_fps(), func(v): _set_show_fps(v))
 	_add_toggle("Autosave", true, func(_v): pass)  # Placeholder
-	_add_toggle("Require Research to Place Blocks",
-		main.require_research if main else true,
-		func(v):
-			if main:
-				main.require_research = v
-				var hud = get_node_or_null("/root/Main/HUD")
-				if hud and hud.has_method("_refresh_block_menu"):
-					hud._refresh_block_menu()
-			_save_settings()
-	)
-	_add_toggle("Enemies Attack",
-		main.enemies_attack if main else true,
-		func(v):
-			if main:
-				main.enemies_attack = v
-			_save_settings()
-	)
-	_add_toggle("Unlock All Tech (sandbox)",
-		TechTree.unlock_all,
-		func(v):
-			TechTree.unlock_all = v
-			# Notify listeners that node states have effectively changed so
-			# the HUD block menu and any open tech tree UI refresh immediately.
-			for nid in TechTree.nodes:
-				TechTree.node_state_changed.emit(nid, TechTree.get_state(nid))
-			var hud = get_node_or_null("/root/Main/HUD")
-			if hud and hud.has_method("_refresh_block_menu"):
-				hud._refresh_block_menu()
-			# The tech tree renders into its internal tree_canvas Control.
-			# queue_redraw on the CanvasLayer doesn't propagate to a Control
-			# child, so redraw the canvas directly. Any open tooltip is
-			# refreshed too so ??? names update instantly.
-			var tree_ui = get_node_or_null("/root/Main/TechTreeUI")
-			if tree_ui:
-				if "tree_canvas" in tree_ui and tree_ui.tree_canvas:
-					tree_ui.tree_canvas.queue_redraw()
-				if tree_ui.has_method("_update_resource_panel"):
-					tree_ui._update_resource_panel()
-			_save_settings()
-	)
 	_add_toggle("Parallax Effect",
 		true,
 		func(v):
@@ -621,6 +583,85 @@ func _build_game_data_tab() -> void:
 		reset_keys_btn.disabled = true
 	)
 	content_vbox.add_child(reset_keys_btn)
+
+
+# =========================
+# DEVELOPER TAB
+# =========================
+
+func _build_developer_tab() -> void:
+	_add_section("Cheats")
+	_add_toggle("Require Research to Place Blocks",
+		main.require_research if main else true,
+		func(v):
+			if main:
+				main.require_research = v
+				var hud = get_node_or_null("/root/Main/HUD")
+				if hud and hud.has_method("_refresh_block_menu"):
+					hud._refresh_block_menu()
+			_save_settings()
+	)
+	_add_toggle("Enemies Attack",
+		main.enemies_attack if main else true,
+		func(v):
+			if main:
+				main.enemies_attack = v
+			_save_settings()
+	)
+	_add_toggle("Unlock All Tech (sandbox)",
+		TechTree.unlock_all,
+		func(v):
+			TechTree.unlock_all = v
+			for nid in TechTree.nodes:
+				TechTree.node_state_changed.emit(nid, TechTree.get_state(nid))
+			var hud = get_node_or_null("/root/Main/HUD")
+			if hud and hud.has_method("_refresh_block_menu"):
+				hud._refresh_block_menu()
+			var tree_ui = get_node_or_null("/root/Main/TechTreeUI")
+			if tree_ui:
+				if "tree_canvas" in tree_ui and tree_ui.tree_canvas:
+					tree_ui.tree_canvas.queue_redraw()
+				if tree_ui.has_method("_update_resource_panel"):
+					tree_ui._update_resource_panel()
+			_save_settings()
+	)
+
+	_add_section("Debug Actions")
+	var reset_archive_btn = Button.new()
+	reset_archive_btn.text = "Reset Archive Research"
+	reset_archive_btn.custom_minimum_size = Vector2(0, 36)
+	reset_archive_btn.add_theme_font_size_override("font_size", 13)
+	var ars = StyleBoxFlat.new()
+	ars.bg_color = Color(0.3, 0.1, 0.1, 0.8)
+	ars.set_corner_radius_all(4)
+	ars.content_margin_left = 12
+	ars.content_margin_right = 12
+	reset_archive_btn.add_theme_stylebox_override("normal", ars)
+	reset_archive_btn.add_theme_color_override("font_color", Color(1.0, 0.5, 0.5))
+	reset_archive_btn.pressed.connect(func():
+		# Wipe amount_spent on every archive node so the -D-archive_id
+		# markers go LOCKED again and any tech gated on them re-locks.
+		for aid in TechTree.archive_ids:
+			if TechTree.nodes.has(aid):
+				TechTree.nodes[aid]["amount_spent"] = {}
+				TechTree.node_state_changed.emit(aid, TechTree.get_state(aid))
+		# Clear in-world decoder progress so the player has to decode again.
+		var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+		if building_sys and "archive_decoder_state" in building_sys:
+			building_sys.archive_decoder_state.clear()
+		# Refresh any open UI that depends on archive state.
+		for nid in TechTree.nodes:
+			TechTree.node_state_changed.emit(nid, TechTree.get_state(nid))
+		var hud = get_node_or_null("/root/Main/HUD")
+		if hud and hud.has_method("_refresh_block_menu"):
+			hud._refresh_block_menu()
+		var tree_ui = get_node_or_null("/root/Main/TechTreeUI")
+		if tree_ui and "tree_canvas" in tree_ui and tree_ui.tree_canvas:
+			tree_ui.tree_canvas.queue_redraw()
+		reset_archive_btn.text = "Archive Research Reset!"
+		reset_archive_btn.disabled = true
+	)
+	content_vbox.add_child(reset_archive_btn)
 
 
 # =========================

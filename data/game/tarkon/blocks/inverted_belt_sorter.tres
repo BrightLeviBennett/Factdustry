@@ -1,16 +1,21 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d188ejodgxaac"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dc7d6rrn68c7g" path="res://textures/blocks/item transportation/InvertedBeltSorter.png" id="1_8yn35"]
 
 [resource]
 script = ExtResource("1")
 id = &"inverted_belt_sorter"
 display_name = "Inverted Belt Sorter"
 description = "Reverse sorter: blocks specific items, passes the rest."
-category = 8
+icon = ExtResource("1_8yn35")
+tags = PackedStringArray("belt", "transport", "inverted_sorter")
 color = Color(0.9, 0.85, 0.3, 1)
+top_sprite = ExtResource("1_8yn35")
 max_health = 280.0
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
 build_time = 0.8
 transport_speed = 5.0
-tags = PackedStringArray("belt", "transport", "inverted_sorter")

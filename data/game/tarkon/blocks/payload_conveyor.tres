@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://ceao5pre7cyx6"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cfvhdpqqfgpon" path="res://textures/blocks/units/PayloadConveyor.png" id="1_cvckt"]
+[ext_resource type="Texture2D" uid="uid://cfvhdpqqfgpon" path="res://textures/blocks/units/PayloadConveyor/PayloadConveyor.png" id="1_cvckt"]
 
 [resource]
 script = ExtResource("1")

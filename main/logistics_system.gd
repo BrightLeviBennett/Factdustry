@@ -2047,34 +2047,49 @@ func _update_belt_unloaders(_delta: float) -> void:
 		# Item filter (reuses sorter_filters dict — click the unloader to set)
 		var filter_id: StringName = sorter_filters.get(origin, &"")
 
-		# Gather source neighbors (buildings with block_storage) and
-		# sink neighbors (conveyors with no item that face away from us).
-		var sources: Array[Vector2i] = []
+		# Unloader is fully directional: input is the cell directly behind
+		# it, output is the cell directly in front. The two perpendicular
+		# sides are ignored entirely.
+		# Source entries are tagged so the pull step knows which storage to
+		# read from: {"anchor": Vector2i, "kind": "block" | "core"}.
+		var sources: Array = []
 		var sinks: Array[Vector2i] = []
-		for dir_idx in range(4):
+		var rot: int = int(main.building_rotation.get(origin, 0))
+		var front_dir: int = rot
+		var back_dir: int = (rot + 2) % 4
+		for dir_idx in [front_dir, back_dir]:
 			var nb: Vector2i = origin + DIR_VECTORS[dir_idx]
 			if _is_cross_faction(origin, nb):
 				continue
 			if not main.placed_buildings.has(nb):
 				continue
 			var nb_anchor: Vector2i = main.building_origins.get(nb, nb)
-			# Sink: empty conveyor cell facing away from us
-			if _is_conveyor_cell(nb) and not conveyor_items.has(nb):
-				sinks.append(nb)
-			# Source: any building with items in block_storage that
-			# legitimately outputs those items. Turrets store ammo in
-			# block_storage so combat_system can consume it on fire —
-			# that storage is an INPUT buffer, not a product stockpile,
-			# so we must not let an unloader pull it back out and feed
-			# the ammo in circles. Same principle for constructor /
-			# deconstructor / loader-type blocks that own their storage.
-			elif block_storage.has(nb_anchor) and not block_storage[nb_anchor]["items"].is_empty():
+			# Front: the only valid sink — must be an empty conveyor cell.
+			if dir_idx == front_dir:
+				if _is_conveyor_cell(nb) and not conveyor_items.has(nb):
+					sinks.append(nb)
+				continue
+			# Skip neighbours mid-construction — they shouldn't leak items.
+			if main.has_method("is_building_inactive") and main.is_building_inactive(nb_anchor):
+				continue
+			# Source (core): unloader pulls from the LUMINA pool when adjacent
+			# to a player core, FEROX pool when adjacent to an enemy core.
+			if _is_core_cell(nb_anchor):
+				sources.append({"anchor": nb_anchor, "kind": "core"})
+				continue
+			# Source (block_storage): any building that owns its storage and
+			# legitimately outputs items. Turrets store ammo as an INPUT
+			# buffer (combat_system consumes from it on fire) — letting the
+			# unloader pull from there would cycle ammo back onto the same
+			# belt that fed it. Same principle for any future input-only
+			# storage block.
+			if block_storage.has(nb_anchor) and not block_storage[nb_anchor]["items"].is_empty():
 				var nb_data = Registry.get_block(main.placed_buildings.get(nb_anchor, &""))
 				if nb_data == null:
 					continue
 				if nb_data.is_turret():
 					continue
-				sources.append(nb_anchor)
+				sources.append({"anchor": nb_anchor, "kind": "block"})
 
 		if sources.is_empty() or sinks.is_empty():
 			continue
@@ -2082,17 +2097,32 @@ func _update_belt_unloaders(_delta: float) -> void:
 		# Round-robin across sources
 		var rr: int = state["round_robin"] % sources.size()
 		state["round_robin"] = rr + 1
-		var src: Vector2i = sources[rr]
-		var storage: Dictionary = block_storage[src]
+		var src_entry: Dictionary = sources[rr]
+		var src: Vector2i = src_entry["anchor"]
+		var src_kind: String = src_entry["kind"]
 
-		# Pick the first matching item (or any item if no filter)
+		# Pick the first matching item (or any item if no filter).
 		var pulled_id: StringName = &""
+		var src_pool: Dictionary = {}
+		if src_kind == "core":
+			# Pick the right faction pool for the core we're adjacent to.
+			var face: int = main.get_building_faction(src) if main.has_method("get_building_faction") else 0
+			var ferox_face_value: int = 1
+			if "Faction" in main and "FEROX" in main.Faction:
+				ferox_face_value = int(main.Faction.FEROX)
+			if face == ferox_face_value and "ferox_resources" in main:
+				src_pool = main.ferox_resources
+			else:
+				src_pool = main.resources
+		else:
+			src_pool = block_storage[src]["items"]
+
 		if filter_id != &"":
-			if storage["items"].has(filter_id) and int(storage["items"][filter_id]) > 0:
+			if src_pool.has(filter_id) and int(src_pool[filter_id]) > 0:
 				pulled_id = filter_id
 		else:
-			for item_id in storage["items"]:
-				if int(storage["items"][item_id]) > 0:
+			for item_id in src_pool:
+				if int(src_pool[item_id]) > 0:
 					pulled_id = item_id
 					break
 		if pulled_id == &"":
@@ -2116,9 +2146,17 @@ func _update_belt_unloaders(_delta: float) -> void:
 			pushed = true
 			break
 		if pushed:
-			storage["items"][pulled_id] = int(storage["items"][pulled_id]) - 1
-			if int(storage["items"][pulled_id]) <= 0:
-				storage["items"].erase(pulled_id)
+			src_pool[pulled_id] = int(src_pool[pulled_id]) - 1
+			if int(src_pool[pulled_id]) <= 0:
+				src_pool.erase(pulled_id)
+			# Cores: emit the resources_changed signal so HUD totals + the
+			# storage-cap recompute fire immediately, the same way
+			# core-absorption does.
+			if src_kind == "core":
+				if main.has_signal("resources_changed") and src_pool == main.resources:
+					main.resources_changed.emit(main.resources)
+				elif main.has_signal("ferox_resources_changed") and "ferox_resources" in main and src_pool == main.ferox_resources:
+					main.ferox_resources_changed.emit(main.ferox_resources)
 
 
 # =========================

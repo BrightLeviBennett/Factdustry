@@ -1,19 +1,26 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bq77b6s3wi2cg"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://33k3eue3klxu" path="res://textures/blocks/units/PayloadUnloader/PayloadUnloaderBase.png" id="1_6o1vg"]
+[ext_resource type="Texture2D" uid="uid://cdtr0ntw3dmkg" path="res://textures/blocks/units/PayloadUnloader/PayloadUnloaderComplete.png" id="2_6a5yu"]
 
 [resource]
 script = ExtResource("1")
 id = &"freight_unloader"
 display_name = "Freight Unloader"
 description = "Unloads bulk freight at destination hubs."
+icon = ExtResource("2_6a5yu")
 category = 7
+tags = PackedStringArray("freight", "freight_unloader")
 color = Color(0.7, 0.5, 0.25, 1)
+grid_size = Vector2i(6, 6)
+base_sprite = ExtResource("1_6o1vg")
 max_health = 460.0
-build_cost = { "copper": 500, "silicon": 250 }
+build_cost = {
+"copper": 500,
+"silicon": 250
+}
 build_time = 1.5
 transport_speed = 13.0
-max_stored_items = 400
-tags = PackedStringArray("freight", "freight_unloader")
-grid_size = Vector2i(6, 6)
 max_payload_size = 5
+max_stored_items = 400

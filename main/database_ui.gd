@@ -303,6 +303,12 @@ func _build_section(cat_key: String) -> void:
 
 	# Populate tiles
 	for entry in cat["list"]:
+		# Skip blocks that aren't really player-facing tech entries — the
+		# &"archive" and &"power_source" blocks are level-design fixtures
+		# (no tech-tree node, no place button), not catalog entries.
+		if cat_key == "blocks" and entry is BlockData:
+			if entry.id == &"archive" or entry.id == &"power_source":
+				continue
 		var tile = _build_tile(entry, cat_key)
 		flow.add_child(tile["node"])
 		section_data["tiles"].append(tile)

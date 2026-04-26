@@ -7,13 +7,14 @@
 [ext_resource type="Texture2D" uid="uid://j8usst4fgubt" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopRight.png" id="5"]
 [ext_resource type="Texture2D" uid="uid://bfxtjgivne2no" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseLeft.png" id="6"]
 [ext_resource type="Texture2D" uid="uid://j2peaj078si5" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseRight.png" id="7"]
+[ext_resource type="Texture2D" uid="uid://camwtit5rw1gg" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorComplete.png" id="7_vjqcj"]
 
 [resource]
 script = ExtResource("1")
 id = &"unit_refabricator"
 display_name = "Unit Refabricator"
 description = "Consumes a tier-1 unit and materials to produce its tier-2 successor. Accepts the unit as a payload on any side."
-icon = ExtResource("2")
+icon = ExtResource("7_vjqcj")
 category = 6
 tags = PackedStringArray("fabricator", "units", "refabricator")
 color = Color(0.6, 0.5, 0.7, 1)

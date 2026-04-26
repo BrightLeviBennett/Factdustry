@@ -1,18 +1,27 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://c3qfeeyfu278l"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dy5yvpo8l4pv7" path="res://textures/blocks/units/SupportHoverFabricator/SupportHoverFabricatorBase.png" id="1_21alc"]
+[ext_resource type="Texture2D" uid="uid://bvp2bpeq06pop" path="res://textures/blocks/units/SupportHoverFabricator/SupportHoverFabricatorComplete.png" id="2_qcxg6"]
+[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_qcxg6"]
 
 [resource]
 script = ExtResource("1")
 id = &"support_hover_fabricator"
 display_name = "Support Hover Fabricator"
 description = "Manufactures support hover drones."
+icon = ExtResource("2_qcxg6")
 category = 6
+tags = PackedStringArray("fabricator", "units")
 color = Color(0.4, 0.8, 0.6, 1)
 grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("4_qcxg6")
+base_sprite = ExtResource("1_21alc")
 max_health = 280.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 4.0
 requires_power = true
 power_consumption = 5.0
-tags = PackedStringArray("fabricator", "units")

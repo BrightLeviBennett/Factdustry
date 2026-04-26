@@ -483,7 +483,10 @@ func _draw_node(nid: StringName, _node: Dictionary, z: float, nw: float, nh: flo
 			icon_size,
 			icon_size
 		)
-		tree_canvas.draw_texture_rect(icon, icon_rect, false, lc)
+		# `lc` doubles as the text colour, which is the gold researched tint
+		# for finished nodes. Tinting the icon with it washed out the
+		# original art, so always draw the icon untinted.
+		tree_canvas.draw_texture_rect(icon, icon_rect, false, Color.WHITE)
 
 
 # =========================
@@ -874,4 +877,6 @@ func _get_node_icon(nid: StringName) -> Texture2D:
 		return Registry.items[nid].icon
 	if Registry.units.has(nid) and Registry.units[nid].icon:
 		return Registry.units[nid].icon
+	if Registry.sectors.has(nid) and Registry.sectors[nid].icon:
+		return Registry.sectors[nid].icon
 	return fallback_icon

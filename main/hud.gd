@@ -3161,11 +3161,63 @@ func _build_network_info_row(anchor: Vector2i, d: BlockData, ps: Node) -> HBoxCo
 	eff_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(eff_lbl)
 
+	# Tiny 60-sample (1 min @ 1 Hz) sparkline showing this block's recent
+	# efficiency. Samples are pushed in _apply_network_info_status.
+	var eff_graph := Control.new()
+	eff_graph.custom_minimum_size = Vector2(50, 14)
+	eff_graph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	eff_graph.draw.connect(_draw_eff_graph.bind(eff_graph))
+	hbox.add_child(eff_graph)
+
 	hbox.set_meta("status_lbl", status_lbl)
 	hbox.set_meta("power_lbl", power_lbl)
 	hbox.set_meta("eff_lbl", eff_lbl)
+	hbox.set_meta("eff_graph", eff_graph)
+	hbox.set_meta("eff_history", PackedFloat32Array())
+	hbox.set_meta("eff_last_sample_t", 0.0)
 	_apply_network_info_status(hbox, anchor, d, ps)
 	return hbox
+
+
+## Draws the per-row efficiency sparkline. Called from the Control's `draw`
+## signal — reads the rolling history off the parent row's meta.
+func _draw_eff_graph(ctrl: Control) -> void:
+	var hbox := ctrl.get_parent() as HBoxContainer
+	if hbox == null:
+		return
+	var w: float = ctrl.size.x
+	var h: float = ctrl.size.y
+	# Frame
+	ctrl.draw_rect(Rect2(Vector2.ZERO, Vector2(w, h)), Color(0.08, 0.08, 0.1, 0.6), true)
+	ctrl.draw_rect(Rect2(Vector2.ZERO, Vector2(w, h)), Color(0.3, 0.3, 0.35, 0.5), false, 1.0)
+	# 50% reference line
+	var mid_y: float = h * 0.5
+	ctrl.draw_line(Vector2(0, mid_y), Vector2(w, mid_y), Color(0.4, 0.4, 0.45, 0.35), 1.0)
+	var hist: PackedFloat32Array = hbox.get_meta("eff_history", PackedFloat32Array())
+	var n: int = hist.size()
+	if n < 2:
+		return
+	const MAX_N: int = 60
+	# Anchor the most recent sample at the right edge so a row that's only
+	# been on screen for 5 s shows 5 ticks of history at the right rather
+	# than stretching them across the whole width.
+	var step: float = w / float(MAX_N - 1)
+	var pts := PackedVector2Array()
+	for i in n:
+		var v: float = clampf(hist[i], 0.0, 1.0)
+		var x: float = w - float(n - 1 - i) * step
+		var y: float = h - 1.0 - v * (h - 2.0)
+		pts.append(Vector2(x, y))
+	# Tier colour matches the % label.
+	var last_v: float = clampf(hist[n - 1], 0.0, 1.0)
+	var line_col: Color
+	if last_v >= 0.75:
+		line_col = Color(0.4, 0.95, 0.4)
+	elif last_v >= 0.4:
+		line_col = Color(0.95, 0.85, 0.35)
+	else:
+		line_col = Color(1.0, 0.45, 0.45)
+	ctrl.draw_polyline(pts, line_col, 1.5, true)
 
 
 func _apply_network_info_status(hbox: HBoxContainer, anchor: Vector2i, d: BlockData, ps: Node) -> void:
@@ -3216,6 +3268,22 @@ func _apply_network_info_status(hbox: HBoxContainer, anchor: Vector2i, d: BlockD
 	else:
 		eff_col = Color(1.0, 0.45, 0.45)
 	eff_lbl.add_theme_color_override("font_color", eff_col)
+
+	# Push a sample into the per-row efficiency history at ~1 Hz, then
+	# repaint the sparkline.
+	if hbox.has_meta("eff_graph"):
+		var now: float = Time.get_ticks_msec() / 1000.0
+		var last_t: float = float(hbox.get_meta("eff_last_sample_t", 0.0))
+		if now - last_t >= 1.0:
+			var hist: PackedFloat32Array = hbox.get_meta("eff_history", PackedFloat32Array())
+			hist.append(float(eff_pct) / 100.0)
+			while hist.size() > 60:
+				hist.remove_at(0)
+			hbox.set_meta("eff_history", hist)
+			hbox.set_meta("eff_last_sample_t", now)
+		var graph: Control = hbox.get_meta("eff_graph", null)
+		if graph and is_instance_valid(graph):
+			graph.queue_redraw()
 
 
 ## Live-update only the per-row status labels (network unchanged).

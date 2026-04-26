@@ -1,12 +1,16 @@
 [gd_resource type="Resource" script_class="BlockData" format=3]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://33k3eue3klxu" path="res://textures/blocks/units/PayloadUnloader/PayloadUnloaderBase.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://cdtr0ntw3dmkg" path="res://textures/blocks/units/PayloadUnloader/PayloadUnloaderComplete.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://cdbacb0dq2jax" path="res://textures/blocks/units/LoaderTop.png" id="4"]
 
 [resource]
 script = ExtResource("1")
 id = &"payload_unloader"
 display_name = "Payload Unloader"
 description = "Unloads payloads at their destination."
+icon = ExtResource("3")
 category = 7
 color = Color(0.8, 0.6, 0.3, 1)
 max_health = 300.0
@@ -17,3 +21,5 @@ max_stored_items = 200
 tags = PackedStringArray("payload", "payload_unloader")
 grid_size = Vector2i(3, 3)
 max_payload_size = 3
+base_sprite = ExtResource("2")
+top_sprite = ExtResource("4")

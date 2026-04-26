@@ -22697,10 +22697,6 @@
 
 	},
 	"resources": {
-		"mat_copper": 994,
-		"mat_graphite": 574,
-		"mat_silicon": 379,
-		"mat_steel": 232
 	},
 	"script_runtime": {
 		"core_counts": {
