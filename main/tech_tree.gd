@@ -454,14 +454,14 @@ func _register_all_nodes() -> void:
 
 func _register_cores() -> void:
 	_add(&"core_shard",        "Core: Shard",        [],                  [], {}, Vector2(0, 0))
-	_add(&"core_fragment",     "Core: Fragment",     [&"core_shard"],     [&"mat_steel"], {&"mat_copper": 50}, Vector2(-2, 1))
-	_add(&"core_remanent",     "Core: Remanent",     [&"core_fragment"],  [], {&"mat_copper": 100, &"mat_silicon": 30}, Vector2(-2, 2))
-	_add(&"core_bastion",      "Core: Bastion",      [&"core_remanent"],  [], {&"mat_copper": 200, &"mat_graphite": 40, &"mat_steel": 20}, Vector2(-2, 3))
-	_add(&"core_fortress",     "Core: Fortress",     [&"core_bastion"],   [], {&"mat_copper": 350, &"mat_steel": 80}, Vector2(-2, 4))
-	_add(&"core_crucible",     "Core: Crucible",     [&"core_fortress"],  [], {&"mat_copper": 500, &"mat_steel": 150, &"mat_brass": 30}, Vector2(-2, 5))
-	_add(&"core_pantheon",     "Core: Pantheon",     [&"core_crucible"],  [], {&"mat_copper": 800, &"mat_steel": 230}, Vector2(-2, 6))
-	_add(&"core_aegis",        "Core: Aegis",        [&"core_pantheon"],  [], {&"mat_copper": 1200, &"mat_steel": 370, &"mat_aluminum": 30}, Vector2(-2, 7))
-	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 2000, &"mat_steel": 600, &"mat_aluminum": 50}, Vector2(-2, 8))
+	_add(&"core_fragment",     "Core: Fragment",     [&"core_shard"],     [&"mat_steel"], {&"mat_copper": 1500, &"mat_graphite": 1200, &"mat_silicon": 300, &"mat_steel": 50}, Vector2(-2, 1))
+	_add(&"core_remanent",     "Core: Remanent",     [&"core_fragment"],  [], {&"mat_copper": 2500, &"mat_graphite": 2000, &"mat_silicon": 600, &"mat_steel": 150}, Vector2(-2, 2))
+	_add(&"core_bastion",      "Core: Bastion",      [&"core_remanent"],  [], {&"mat_copper": 4000, &"mat_graphite": 3500, &"mat_silicon": 1200, &"mat_steel": 400}, Vector2(-2, 3))
+	_add(&"core_fortress",     "Core: Fortress",     [&"core_bastion"],   [], {&"mat_copper": 5500, &"mat_graphite": 5000, &"mat_silicon": 2000, &"mat_steel": 1000}, Vector2(-2, 4))
+	_add(&"core_crucible",     "Core: Crucible",     [&"core_fortress"],  [], {&"mat_copper": 7500, &"mat_graphite": 6500, &"mat_silicon": 3000, &"mat_steel": 1800, &"mat_brass": 300}, Vector2(-2, 5))
+	_add(&"core_pantheon",     "Core: Pantheon",     [&"core_crucible"],  [], {&"mat_copper": 10000, &"mat_graphite": 9000, &"mat_silicon": 4500, &"mat_steel": 3000, &"mat_brass": 700}, Vector2(-2, 6))
+	_add(&"core_aegis",        "Core: Aegis",        [&"core_pantheon"],  [], {&"mat_copper": 13500, &"mat_graphite": 12000, &"mat_silicon": 6000, &"mat_steel": 4500, &"mat_aluminum": 1000}, Vector2(-2, 7))
+	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 18000, &"mat_graphite": 16000, &"mat_silicon": 8500, &"mat_steel": 6500, &"mat_aluminum": 2000}, Vector2(-2, 8))
 	# Archive line
 	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-waterfront_ruins"], {&"mat_copper": 180}, Vector2(-3, 1))
 	_add(&"data_cable",        "Data Cable",         [&"archive_scanner"],[], {&"mat_copper": 40}, Vector2(-4, 1))
