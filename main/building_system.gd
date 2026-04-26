@@ -148,6 +148,16 @@ var _world_menu_columns := 8
 var _world_menu_cell_size := 44.0
 var _world_menu_hovered := -1  # Index of hovered item, -1 = none
 
+# --- Secondary "resource" panel ---
+# Opens alongside a UI world menu (sorter / constructor / refabricator /
+# archive) whenever the underlying block also has stored items. Lets the
+# player both pick a recipe / filter AND inspect/withdraw the block's
+# inventory in one click.
+var _storage_panel_open := false
+var _storage_panel_pos := Vector2i.ZERO
+var _storage_panel_items: Array = []
+var _storage_panel_hovered := -1
+
 # --- WALL RENDER CACHE ---
 ## Cached set of wall positions (rebuilt when terrain changes)
 var _cached_wall_set := {}
@@ -991,6 +1001,11 @@ func _process(_delta: float) -> void:
 		if new_hovered != _world_menu_hovered:
 			_world_menu_hovered = new_hovered
 			queue_redraw()
+		if _storage_panel_open:
+			var sh := _storage_panel_hit_test(mw)
+			if sh != _storage_panel_hovered:
+				_storage_panel_hovered = sh
+				queue_redraw()
 
 	if main.selected_building == &"":
 		_drag_placing = false
@@ -1736,6 +1751,18 @@ func _unhandled_input(event: InputEvent) -> void:
 						var hit := _world_menu_hit_test(mouse_world)
 						if hit >= 0:
 							_apply_world_menu_selection(hit)
+						elif _storage_panel_open:
+							# Clicking on the secondary resource panel
+							# withdraws into the drone (same behaviour as
+							# the standalone storage popup), without
+							# closing the UI menu beside it.
+							var shit := _storage_panel_hit_test(mouse_world)
+							if shit >= 0:
+								var sid: StringName = StringName(_storage_panel_items[shit].get("id", &""))
+								if sid != &"":
+									_withdraw_block_to_drone(_storage_panel_pos, sid)
+							else:
+								_close_world_menu()
 						else:
 							_close_world_menu()
 						get_viewport().set_input_as_handled()
@@ -1794,7 +1821,13 @@ func _unhandled_input(event: InputEvent) -> void:
 							var cell_rot: int = _pathfind_rotations.get(cell, old_rot)
 							if _pathfind_bridge_cells.has(cell):
 								cell_block = _pathfind_bridge_cells[cell]
-							if (main.is_cell_empty(cell) or main.placed_buildings.get(cell, &"") == cell_block) and not queued_positions.has(cell):
+							# _can_place_ignoring_range allows empty cells,
+							# same-block re-placements, AND swap-compatible
+							# cells (belt → junction, conduit → bridge, etc.)
+							# via _can_place_terrain, so paused drag-place
+							# now queues swaps the same way the unpaused
+							# path does.
+							if _can_place_ignoring_range(cell, cell_block, cell_rot) and not queued_positions.has(cell):
 								_paused_queue.append({
 									"grid_pos": cell,
 									"block_id": cell_block,
@@ -2094,13 +2127,53 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 			})
 
 	_world_menu_open = true
+	# Whenever a UI-style menu (sorter / constructor / refabricator /
+	# archive) opens for a block that also has stored items, open the
+	# secondary resource panel beside it. The standalone "storage" popup
+	# already shows that data itself, so don't double-up.
+	if type != "storage":
+		_open_storage_panel(grid_pos)
+	else:
+		_close_storage_panel()
 	queue_redraw()
+
+
+## Opens the secondary resource panel for a block. Snapshots its current
+## stored items; _draw_storage_panel re-pulls fresh counts each frame so
+## the display animates as the block fills/empties.
+func _open_storage_panel(grid_pos: Vector2i) -> void:
+	_storage_panel_items.clear()
+	_storage_panel_hovered = -1
+	var merged: Dictionary = _collect_block_stored_items(grid_pos)
+	for item_id in merged:
+		var count: int = int(merged[item_id])
+		if count <= 0:
+			continue
+		var it = Registry.get_item(item_id)
+		_storage_panel_items.append({
+			"id": item_id,
+			"icon": it.icon if it else null,
+			"name": it.display_name if it else String(item_id),
+			"count": count,
+		})
+	if _storage_panel_items.is_empty():
+		_storage_panel_open = false
+		return
+	_storage_panel_pos = grid_pos
+	_storage_panel_open = true
+
+
+func _close_storage_panel() -> void:
+	_storage_panel_open = false
+	_storage_panel_hovered = -1
+	_storage_panel_items.clear()
 
 
 ## Closes the in-world menu.
 func _close_world_menu() -> void:
 	_world_menu_open = false
 	_world_menu_hovered = -1
+	_close_storage_panel()
 	queue_redraw()
 
 
@@ -2181,10 +2254,51 @@ func _world_menu_col_count() -> int:
 	return _world_menu_columns
 
 
+## Returns the world-space bounding rect for a resource (storage) panel
+## anchored on the tile immediately to the right of the block's top-right
+## corner. Used both for the standalone storage popup and the secondary
+## resource panel that opens beside a UI menu.
+func _get_resource_panel_rect_for(grid_pos: Vector2i, items: Array) -> Rect2:
+	if items.is_empty():
+		return Rect2()
+	var dim: Vector2 = Vector2(_world_menu_cell_size, _world_menu_cell_size)
+	var cols: int = mini(_world_menu_columns, items.size())
+	var rows: int = ceili(float(items.size()) / float(cols))
+	var padding := 6.0
+	var menu_w: float = cols * dim.x + padding * 2.0
+	var menu_h: float = rows * dim.y + padding * 2.0
+	var data = Registry.get_block(main.placed_buildings.get(grid_pos, &""))
+	var gs: Vector2i = data.grid_size if data else Vector2i(1, 1)
+	# Top-right corner tile is at (grid_pos.x + gs.x - 1, grid_pos.y).
+	# One tile to the right of that = (grid_pos.x + gs.x, grid_pos.y).
+	var anchor_world: Vector2 = main.grid_to_world(Vector2i(grid_pos.x + gs.x, grid_pos.y))
+	return Rect2(anchor_world, Vector2(menu_w, menu_h))
+
+
+## Returns the world-space bounding rect for the secondary resource panel.
+## Anchored at the same tile-right-of-top-right column as the primary
+## world menu, but stacked underneath it so the two panels don't overlap.
+func _get_storage_panel_rect() -> Rect2:
+	if not _storage_panel_open:
+		return Rect2()
+	var rect := _get_resource_panel_rect_for(_storage_panel_pos, _storage_panel_items)
+	if _world_menu_open:
+		var top := _get_world_menu_rect()
+		if top.size != Vector2.ZERO:
+			rect.position.y = top.position.y + top.size.y + 6.0
+	return rect
+
+
 ## Returns the world-space bounding rect for the world menu, or Rect2() if closed.
 func _get_world_menu_rect() -> Rect2:
 	if not _world_menu_open or _world_menu_items.is_empty():
 		return Rect2()
+	# Storage popup anchors 1 tile right of the block's top-right corner so
+	# inventory readouts don't overlap the block they belong to. Other
+	# pickers (sorter / constructor / refabricator / archive) keep the
+	# original centred-above-the-block layout.
+	if _world_menu_type == "storage":
+		return _get_resource_panel_rect_for(_world_menu_pos, _world_menu_items)
 	var dim: Vector2 = _world_menu_cell_dim()
 	var col_max: int = _world_menu_col_count()
 	var cols := mini(col_max, _world_menu_items.size())
@@ -2192,7 +2306,6 @@ func _get_world_menu_rect() -> Rect2:
 	var padding := 6.0
 	var menu_w: float = cols * dim.x + padding * 2.0
 	var menu_h: float = rows * dim.y + padding * 2.0
-	# Position above the building, centered
 	var block_id = main.placed_buildings.get(_world_menu_pos, &"")
 	var data = Registry.get_block(block_id)
 	var gs := Vector2i(1, 1)
@@ -2200,7 +2313,7 @@ func _get_world_menu_rect() -> Rect2:
 		gs = data.grid_size
 	var block_world: Vector2 = main.grid_to_world(_world_menu_pos)
 	var block_center_x: float = block_world.x + float(gs.x) * main.GRID_SIZE * 0.5
-	var block_top_y: float = block_world.y - 8.0  # 8px gap above block
+	var block_top_y: float = block_world.y - 8.0
 	var menu_x: float = block_center_x - menu_w * 0.5
 	var menu_y: float = block_top_y - menu_h
 	return Rect2(menu_x, menu_y, menu_w, menu_h)
@@ -2226,6 +2339,93 @@ func _world_menu_hit_test(world_pos: Vector2) -> int:
 	if idx < 0 or idx >= _world_menu_items.size():
 		return -1
 	return idx
+
+
+## Returns the storage-panel item index under the given world position, or -1.
+func _storage_panel_hit_test(world_pos: Vector2) -> int:
+	if not _storage_panel_open:
+		return -1
+	var rect := _get_storage_panel_rect()
+	if not rect.has_point(world_pos):
+		return -1
+	var padding := 6.0
+	var local_x: float = world_pos.x - rect.position.x - padding
+	var local_y: float = world_pos.y - rect.position.y - padding
+	if local_x < 0.0 or local_y < 0.0:
+		return -1
+	var dim: float = _world_menu_cell_size
+	var col := int(local_x / dim)
+	var row := int(local_y / dim)
+	var cols: int = mini(_world_menu_columns, _storage_panel_items.size())
+	if col < 0 or col >= cols:
+		return -1
+	var idx := row * cols + col
+	if idx < 0 or idx >= _storage_panel_items.size():
+		return -1
+	return idx
+
+
+## Draws the secondary resource (storage) panel — same look-and-feel as the
+## standalone storage popup, but anchored 1 tile right of the parent
+## block's top-right corner.
+func _draw_storage_panel() -> void:
+	if not _storage_panel_open:
+		return
+	# Re-pull counts each frame so the display animates live.
+	_storage_panel_items.clear()
+	var merged: Dictionary = _collect_block_stored_items(_storage_panel_pos)
+	for item_id in merged:
+		var count: int = int(merged[item_id])
+		if count <= 0:
+			continue
+		var it = Registry.get_item(item_id)
+		_storage_panel_items.append({
+			"id": item_id,
+			"icon": it.icon if it else null,
+			"name": it.display_name if it else String(item_id),
+			"count": count,
+		})
+	if _storage_panel_items.is_empty():
+		_storage_panel_open = false
+		return
+	var rect := _get_storage_panel_rect()
+	var padding := 6.0
+	var dim: float = _world_menu_cell_size
+	var cols: int = mini(_world_menu_columns, _storage_panel_items.size())
+
+	draw_rect(rect, Color(0.08, 0.08, 0.1, 0.92), true)
+	draw_rect(rect, Color(0.4, 0.4, 0.5, 0.8), false, 1.5)
+
+	var origin := rect.position + Vector2(padding, padding)
+	for i in _storage_panel_items.size():
+		var col := i % cols
+		var row := i / cols
+		var cell_pos := origin + Vector2(col * dim, row * dim)
+		var cell_rect := Rect2(cell_pos, Vector2(dim, dim))
+		if i == _storage_panel_hovered:
+			draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
+		draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
+		var entry: Dictionary = _storage_panel_items[i]
+		var icon_tex: Texture2D = entry.get("icon")
+		if icon_tex:
+			var icon_margin := 4.0
+			var icon_rect := Rect2(
+				cell_pos + Vector2(icon_margin, icon_margin),
+				Vector2(dim - icon_margin * 2.0, dim - icon_margin * 2.0)
+			)
+			draw_texture_rect(icon_tex, icon_rect, false)
+		# Count overlay
+		var font_c := ThemeDB.fallback_font
+		var font_sz_c := 11
+		var count_str: String = str(int(entry.get("count", 0)))
+		var tsz: Vector2 = font_c.get_string_size(count_str, HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c)
+		var pad := 2.0
+		var tx := cell_pos.x + dim - tsz.x - pad
+		var ty := cell_pos.y + dim - pad
+		draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color(0, 0, 0, 0.85))
+		draw_string(font_c, Vector2(tx, ty), count_str,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color.WHITE)
 
 
 ## Draws the in-world selection menu (called from _draw).
@@ -2362,6 +2562,7 @@ func _draw() -> void:
 	_draw_schematic_rect()
 	_draw_schematic_placement()
 	_draw_world_menu()
+	_draw_storage_panel()
 
 
 ## Returns the fade alpha for a wall tile (1.0 = fully visible, 0.0 = fully dark).

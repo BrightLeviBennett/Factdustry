@@ -751,7 +751,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1776969942.53357
+		"timestamp": 1777158799.23061
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -3199,6 +3199,55 @@
 	},
 	"grid_height": 100,
 	"grid_width": 100,
+	"hints": [
+		{
+			"can_be_ignored": true,
+			"condition": {
+				"type": "landing"
+			},
+			"id": "move",
+			"remove_when": {
+				"type": "user_pressed_ok"
+			},
+			"text": "Press W, A, S, D to move, R to respawn, SPACE to pause."
+		},
+		{
+			"can_be_ignored": true,
+			"condition": {
+				"block_id": "vent_turbine",
+				"type": "block_placed"
+			},
+			"id": "power",
+			"remove_when": {
+				"type": "user_pressed_ok"
+			},
+			"text": "Press \"P\" and hover over a power gnerating/consuming block to view info about the network it is on.\nPress \"N\" while viewing a network to set that as the viewed network. It will keep viewing that network until you press \"N\" again on a non-power block or a different network. "
+		},
+		{
+			"can_be_ignored": true,
+			"condition": {
+				"item_id": "mat_sand",
+				"type": "item_produced"
+			},
+			"id": "sand",
+			"remove_when": {
+				"type": "user_pressed_ok"
+			},
+			"text": "Some resources like [res://textures/resources/sand.png]Sand are destroyed upon trying to be inputted into the core."
+		},
+		{
+			"can_be_ignored": true,
+			"condition": {
+				"type": "units_produced",
+				"unit_id": "ant"
+			},
+			"id": "units",
+			"remove_when": {
+				"type": "user_pressed_ok"
+			},
+			"text": "You need to be in command mode to command units.\nPress \"U\" to go into command mode then left-click and drag to select units; then right-click to have the units go where you right-clicked."
+		}
+	],
 	"linked_pairs": [
 		[
 			"80,25",
@@ -6081,6 +6130,18 @@
 		"99,7": "grassy_wall",
 		"99,8": "grassy_wall",
 		"99,9": "grassy_wall"
+	},
+	"waves_bundle": {
+		"config": {
+			"auto_unit_templates": [],
+			"auto_wave_count": 10,
+			"generation_mode": "manual",
+			"initial_delay": 30.0,
+			"interval": 30.0,
+			"start_mode": "landing"
+		},
+		"spawn_points": [],
+		"waves": []
 	},
 	"work_order": []
 }

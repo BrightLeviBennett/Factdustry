@@ -38,7 +38,7 @@ const BUTTON_LABELS := [
 ]
 
 const BUTTON_SCALE := 2.5
-const TITLE_SCALE := 5.0
+const TITLE_SCALE := 1.0
 const GRID_COLUMNS := 2
 const GRID_H_SEP := 14
 const GRID_V_SEP := 12

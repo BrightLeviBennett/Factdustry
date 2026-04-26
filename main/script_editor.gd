@@ -18,6 +18,11 @@ var main: Node2D
 var script_steps: Array = []
 var selected_step_index: int = -1
 
+# --- HINT DATA ---
+## Array of hint dictionaries, see SectorScript HINT FORMAT for the schema.
+var hints: Array = []
+var selected_hint_index: int = -1
+
 # --- PREVIEW STATE ---
 ## When on, every `draw_box` / `draw_text` action across every step is
 ## pushed into the live SectorScript's highlight/overlay dicts so the
@@ -36,6 +41,29 @@ var actions_list: VBoxContainer
 var condition_container: VBoxContainer
 var exit_actions_list: VBoxContainer
 var no_selection_label: Label
+
+# Hints tab
+var hint_list: VBoxContainer
+var hint_detail: VBoxContainer
+var hint_no_selection_label: Label
+
+# Hint condition / remove-condition vocabulary
+const HINT_TRIGGER_TYPES := ["landing", "block_placed", "item_produced", "units_produced", "time_after"]
+const HINT_TRIGGER_LABELS := {
+	"landing": "On Landing",
+	"block_placed": "Block Placed",
+	"item_produced": "Item Produced",
+	"units_produced": "Units Produced",
+	"time_after": "Time After (s)",
+}
+const HINT_REMOVE_TYPES := ["user_pressed_ok", "block_placed", "block_changed", "item_produced", "units_produced"]
+const HINT_REMOVE_LABELS := {
+	"user_pressed_ok": "User Pressed OK",
+	"block_placed": "Block Placed",
+	"block_changed": "Block Changed (at position)",
+	"item_produced": "Item Produced",
+	"units_produced": "Units Produced",
+}
 
 # --- CONDITION TYPE OPTIONS ---
 const CONDITION_TYPES := [
@@ -126,6 +154,8 @@ func _ready() -> void:
 func show_panel() -> void:
 	visible = true
 	_refresh_step_list()
+	_refresh_hint_list()
+	_refresh_hint_detail()
 
 
 func hide_panel() -> void:
@@ -192,11 +222,24 @@ func _create_panel() -> void:
 	var sep = HSeparator.new()
 	root_vbox.add_child(sep)
 
+	# Tabs: Steps (existing UI) and Hints (new authoring panel).
+	var tabs := TabContainer.new()
+	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tabs.tabs_visible = true
+	root_vbox.add_child(tabs)
+
+	# --- STEPS TAB ---
+	var steps_tab := VBoxContainer.new()
+	steps_tab.name = "Steps"
+	steps_tab.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tabs.add_child(steps_tab)
+
 	# Horizontal split: step list on left, step detail on right
 	var hbox_split = HBoxContainer.new()
 	hbox_split.add_theme_constant_override("separation", 8)
 	hbox_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root_vbox.add_child(hbox_split)
+	steps_tab.add_child(hbox_split)
 
 	# --- LEFT SIDE: Step list ---
 	var left_vbox = VBoxContainer.new()
@@ -247,6 +290,221 @@ func _create_panel() -> void:
 	no_selection_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	no_selection_label.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
 	step_detail.add_child(no_selection_label)
+
+	# --- HINTS TAB ---
+	var hints_tab := VBoxContainer.new()
+	hints_tab.name = "Hints"
+	hints_tab.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tabs.add_child(hints_tab)
+
+	var h_hbox := HBoxContainer.new()
+	h_hbox.add_theme_constant_override("separation", 8)
+	h_hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	hints_tab.add_child(h_hbox)
+
+	# Left column: hint list + add button
+	var h_left := VBoxContainer.new()
+	h_left.add_theme_constant_override("separation", 4)
+	h_left.custom_minimum_size.x = 120
+	h_hbox.add_child(h_left)
+
+	var h_label := Label.new()
+	h_label.text = "Hints:"
+	h_label.add_theme_font_size_override("font_size", 13)
+	h_left.add_child(h_label)
+
+	var h_scroll := ScrollContainer.new()
+	h_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	h_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	h_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	h_left.add_child(h_scroll)
+
+	hint_list = VBoxContainer.new()
+	hint_list.add_theme_constant_override("separation", 2)
+	h_scroll.add_child(hint_list)
+
+	var h_add_btn := Button.new()
+	h_add_btn.text = "+ Add Hint"
+	h_add_btn.pressed.connect(_on_add_hint)
+	h_left.add_child(h_add_btn)
+
+	var h_vsep := VSeparator.new()
+	h_hbox.add_child(h_vsep)
+
+	# Right column: hint detail editor
+	var h_detail_scroll := ScrollContainer.new()
+	h_detail_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	h_detail_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	h_detail_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	h_detail_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h_hbox.add_child(h_detail_scroll)
+
+	hint_detail = VBoxContainer.new()
+	hint_detail.add_theme_constant_override("separation", 6)
+	h_detail_scroll.add_child(hint_detail)
+
+	hint_no_selection_label = Label.new()
+	hint_no_selection_label.text = "Select a hint to edit"
+	hint_no_selection_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint_no_selection_label.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+	hint_detail.add_child(hint_no_selection_label)
+
+
+# =========================
+# HINT LIST MANAGEMENT
+# =========================
+
+func _on_add_hint() -> void:
+	# Compose a unique id by counting existing hints; the user can rename.
+	var n: int = hints.size() + 1
+	while _hint_id_in_use("h%d" % n):
+		n += 1
+	hints.append({
+		"id": "h%d" % n,
+		"text": "New hint",
+		"condition": {"type": "landing"},
+		"remove_when": {"type": "user_pressed_ok"},
+		"can_be_ignored": true,
+	})
+	selected_hint_index = hints.size() - 1
+	_refresh_hint_list()
+	_refresh_hint_detail()
+	_notify_change()
+
+
+func _hint_id_in_use(id: String) -> bool:
+	for h in hints:
+		if String(h.get("id", "")) == id:
+			return true
+	return false
+
+
+func _refresh_hint_list() -> void:
+	for c in hint_list.get_children():
+		c.queue_free()
+	for i in hints.size():
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 2)
+		hint_list.add_child(row)
+		var btn := Button.new()
+		btn.text = String(hints[i].get("id", ""))
+		btn.toggle_mode = true
+		btn.button_pressed = (i == selected_hint_index)
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var idx := i
+		btn.pressed.connect(func():
+			selected_hint_index = idx
+			_refresh_hint_list()
+			_refresh_hint_detail()
+		)
+		row.add_child(btn)
+		var del_btn := Button.new()
+		del_btn.text = "✕"
+		del_btn.tooltip_text = "Delete hint"
+		del_btn.add_theme_font_size_override("font_size", 11)
+		del_btn.pressed.connect(func():
+			hints.remove_at(idx)
+			if selected_hint_index == idx:
+				selected_hint_index = -1
+			elif selected_hint_index > idx:
+				selected_hint_index -= 1
+			_refresh_hint_list()
+			_refresh_hint_detail()
+			_notify_change()
+		)
+		row.add_child(del_btn)
+
+
+func _refresh_hint_detail() -> void:
+	for c in hint_detail.get_children():
+		c.queue_free()
+	if selected_hint_index < 0 or selected_hint_index >= hints.size():
+		hint_no_selection_label = Label.new()
+		hint_no_selection_label.text = "Select a hint to edit"
+		hint_no_selection_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		hint_no_selection_label.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+		hint_detail.add_child(hint_no_selection_label)
+		return
+	var hint: Dictionary = hints[selected_hint_index]
+	# id (read-only via LineEdit, editable but uniqueness enforced on text changed)
+	_add_string_field(hint_detail, hint, "id", "ID:")
+	# text — multiline so authors can write paragraphs
+	_add_multiline_field(hint_detail, hint, "text", "Hint Text:")
+	# can_be_ignored
+	_add_checkbox(hint_detail, hint, "can_be_ignored", "Show OK button (ignorable)")
+
+	# Condition group
+	hint_detail.add_child(HSeparator.new())
+	var cond_title := Label.new()
+	cond_title.text = "Condition (when to show):"
+	cond_title.add_theme_font_size_override("font_size", 12)
+	cond_title.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+	hint_detail.add_child(cond_title)
+	if not (hint.get("condition") is Dictionary):
+		hint["condition"] = {"type": "landing"}
+	_add_hint_trigger_editor(hint_detail, hint["condition"], HINT_TRIGGER_TYPES, HINT_TRIGGER_LABELS)
+
+	# Remove-when group
+	hint_detail.add_child(HSeparator.new())
+	var rm_title := Label.new()
+	rm_title.text = "Remove When (when to hide):"
+	rm_title.add_theme_font_size_override("font_size", 12)
+	rm_title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.7))
+	hint_detail.add_child(rm_title)
+	if not (hint.get("remove_when") is Dictionary):
+		hint["remove_when"] = {"type": "user_pressed_ok"}
+	_add_hint_trigger_editor(hint_detail, hint["remove_when"], HINT_REMOVE_TYPES, HINT_REMOVE_LABELS)
+
+
+## Renders a (type-dropdown + per-type args) editor for a hint condition or
+## remove_when dict. Args are stored on the same dict (block_id, item_id,
+## unit_id, amount, position, seconds) so a type change leaves stale keys
+## in place but harmless — the runtime only reads the keys relevant to
+## the current type.
+func _add_hint_trigger_editor(parent: Control, data: Dictionary, types: Array, labels: Dictionary) -> void:
+	var holder := VBoxContainer.new()
+	holder.add_theme_constant_override("separation", 4)
+	parent.add_child(holder)
+	var row := HBoxContainer.new()
+	holder.add_child(row)
+	var lbl := Label.new()
+	lbl.text = "Type:"
+	lbl.custom_minimum_size.x = 60
+	row.add_child(lbl)
+	var opt := OptionButton.new()
+	for t in types:
+		opt.add_item(String(labels.get(t, t)))
+	var current_type := String(data.get("type", types[0]))
+	if not types.has(current_type):
+		current_type = types[0]
+		data["type"] = current_type
+	opt.select(types.find(current_type))
+	opt.item_selected.connect(func(i: int):
+		data["type"] = types[i]
+		# Re-render the entire detail so the args section reflects the new type.
+		_refresh_hint_detail()
+		_notify_change()
+	)
+	row.add_child(opt)
+
+	# Per-type args.
+	match current_type:
+		"block_placed", "block_changed":
+			_add_block_dropdown(holder, data)
+			if current_type == "block_placed":
+				_add_int_field(holder, data, "amount", "Amount:", 1)
+			else:
+				_add_vec2i_fields(holder, data, "position", "Position (x,y):")
+		"item_produced":
+			_add_item_dropdown(holder, data)
+			_add_int_field(holder, data, "amount", "Amount:", 1)
+		"units_produced":
+			_add_unit_dropdown(holder, data)
+			_add_int_field(holder, data, "amount", "Amount:", 1)
+		"time_after":
+			_add_float_field(holder, data, "seconds", "Seconds:", 5.0)
+		_:
+			pass
 
 
 # =========================
@@ -1019,6 +1277,37 @@ func _add_checkbox(parent: Control, data: Dictionary, key: String, label_text: S
 func _notify_change() -> void:
 	if _preview_enabled:
 		_refresh_preview()
+	# Hints don't need the script-step runner to be live — push them to
+	# SectorScript on every edit so authoring → display works without
+	# round-tripping through save/load.
+	_push_hints_to_runtime()
+
+
+## Mirrors the authored hints into the live SectorScript so the HUD's
+## fade-in panel triggers as soon as the player meets a condition. The
+## runtime preserves prior state for ids that still exist (so editing an
+## unrelated hint doesn't re-fire one already in flight).
+func _push_hints_to_runtime() -> void:
+	var sector = get_node_or_null("/root/Main/SectorScript")
+	if sector == null:
+		return
+	if not sector.has_method("load_hints"):
+		return
+	# Capture which ids are currently active/dismissed so a benign edit
+	# doesn't reset their state.
+	var prior: Dictionary = {}
+	if sector.get("_hint_runtime") is Dictionary:
+		prior = sector._hint_runtime.duplicate(true)
+	sector.load_hints(hints)
+	# Re-apply prior runtime entries for surviving ids.
+	if prior.is_empty():
+		return
+	for h in hints:
+		var id := String(h.get("id", ""))
+		if id != "" and prior.has(id):
+			sector._hint_runtime[id] = prior[id]
+			if String(prior[id].get("state", "")) == "active":
+				sector.hint_show.emit(h)
 
 
 ## Walks every step's `actions` (and `on_exit`) looking for `draw_box` and
@@ -1112,6 +1401,20 @@ func set_script_data(data: Array) -> void:
 	if visible:
 		_refresh_step_list()
 		_refresh_step_detail()
+
+
+## Returns the authored hints as a serializable array for JSON.
+func get_hints_data() -> Array:
+	return hints.duplicate(true)
+
+
+func set_hints_data(data: Array) -> void:
+	hints = data.duplicate(true) if data is Array else []
+	selected_hint_index = -1
+	if visible and hint_list != null:
+		_refresh_hint_list()
+		_refresh_hint_detail()
+	_push_hints_to_runtime()
 
 
 # =========================

@@ -67,6 +67,98 @@ const _ACTIVITY_INTERVAL := 0.15
 ## Used by BuildingSystem to draw connection lines.
 var cable_connections: Array = []
 
+# --- HISTORY SAMPLING (for the HUD's network info / graph) ---
+# Networks rebuild whenever a power block is placed/destroyed and their
+# array indices shift, so we key history by a stable "representative
+# cell" (the smallest cell in the network). When a rebuild happens, the
+# new network finds its history by re-deriving that key. Networks that
+# truly disappear stop receiving samples and age out naturally as their
+# entries fall off the 10-minute window.
+const _HISTORY_WINDOW_SECONDS := 600.0
+const _HISTORY_SAMPLE_INTERVAL := 1.0
+var _history_timer: float = 0.0
+var _network_history: Dictionary = {}  # Vector2i (rep cell) -> Array[{t, gen, use}]
+
+
+## Returns the representative cell for the network containing grid_pos, or
+## Vector2i(-9999,-9999) if no network covers it.
+func _network_rep_cell(net: Dictionary) -> Vector2i:
+	var best: Vector2i = Vector2i(2147483647, 2147483647)
+	for cell in net.get("cells", []):
+		if cell.y < best.y or (cell.y == best.y and cell.x < best.x):
+			best = cell
+	return best
+
+
+## Public: returns the recent (gen,use,t) samples for the network the
+## given cell belongs to. Empty array if not in any network.
+func get_network_history(grid_pos: Vector2i) -> Array:
+	if not elec_cell_to_net.has(grid_pos):
+		return []
+	var net_idx: int = elec_cell_to_net[grid_pos]
+	if net_idx < 0 or net_idx >= elec_networks.size():
+		return []
+	var rep := _network_rep_cell(elec_networks[net_idx])
+	return _network_history.get(rep, [])
+
+
+## Public: returns the average power consumption for the network the
+## given cell belongs to over the last `seconds` seconds. Returns 0.0
+## if the network has no recorded samples.
+func get_network_avg_use(grid_pos: Vector2i, seconds: float) -> float:
+	var samples: Array = get_network_history(grid_pos)
+	if samples.is_empty():
+		return 0.0
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var cutoff: float = now - seconds
+	var sum: float = 0.0
+	var n: int = 0
+	for s in samples:
+		if float(s["t"]) >= cutoff:
+			sum += float(s["use"])
+			n += 1
+	if n == 0:
+		return 0.0
+	return sum / float(n)
+
+
+func _sample_network_history(delta: float) -> void:
+	_history_timer -= delta
+	if _history_timer > 0.0:
+		return
+	_history_timer = _HISTORY_SAMPLE_INTERVAL
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var cutoff: float = now - _HISTORY_WINDOW_SECONDS
+	var live_keys: Dictionary = {}
+	for net in elec_networks:
+		var rep := _network_rep_cell(net)
+		if rep.x == 2147483647:
+			continue
+		live_keys[rep] = true
+		var samples: Array = _network_history.get(rep, [])
+		samples.append({
+			"t": now,
+			"gen": float(net.get("gen", 0.0)),
+			"use": float(net.get("use", 0.0)),
+		})
+		# Prune old samples (keep only the 10-minute window).
+		while samples.size() > 0 and float(samples[0]["t"]) < cutoff:
+			samples.pop_front()
+		_network_history[rep] = samples
+	# Also age out histories whose networks vanished — their last sample
+	# is already older than the window, so we drop the whole entry once
+	# everything has rolled off.
+	for k in _network_history.keys():
+		if live_keys.has(k):
+			continue
+		var samples2: Array = _network_history[k]
+		while samples2.size() > 0 and float(samples2[0]["t"]) < cutoff:
+			samples2.pop_front()
+		if samples2.is_empty():
+			_network_history.erase(k)
+		else:
+			_network_history[k] = samples2
+
 
 func _ready() -> void:
 	await get_tree().process_frame
@@ -88,6 +180,7 @@ func _process(delta: float) -> void:
 	if _activity_timer <= 0.0:
 		_activity_timer = _ACTIVITY_INTERVAL
 		_recompute_active_totals()
+	_sample_network_history(delta)
 
 
 # =========================

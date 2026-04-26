@@ -92,6 +92,15 @@ const _POWER_DISPLAY_FLOOR_PER_SEC := 60.0
 ## Soft cap on how long the count-up takes for huge gaps. Above this
 ## the rate scales up so a 10 000 unit change doesn't take 3 minutes.
 const _POWER_DISPLAY_MAX_DURATION := 4.0
+
+# Cached widgets from the most recent power-bar build — updated every
+# frame in _process so the count-up animates between the 0.25 s tooltip
+# refreshes. Cleared / overwritten on the next rebuild.
+var _power_bar_panel: Control = null
+var _power_bar_fill: ColorRect = null
+var _power_bar_label: Label = null
+var _power_bar_half_w: float = 0.0
+var _power_bar_height: float = 0.0
 var _last_hovered_grid := Vector2i(-9999, -9999)
 var _logistics: Node2D
 # Cached sibling refs (populated in _ready). Avoid re-looking-up from _process.
@@ -115,6 +124,41 @@ var unit_mode_panel: PanelContainer
 # Objective panel (top-right, shows current script step conditions)
 var objective_panel: PanelContainer
 var objective_vbox: VBoxContainer
+
+# Hint panel (mid-left of the screen, fade-in/out tutorial bubbles)
+var hint_panel: PanelContainer
+var hint_text_label: RichTextLabel
+var hint_ok_button: Button
+var _hint_queue: Array = []  # array of hint dicts not yet shown
+var _hint_current: Dictionary = {}
+var _hint_alpha: float = 0.0
+var _hint_target_alpha: float = 0.0
+var _hint_fade_speed: float = 4.0  # seconds⁻¹
+# Hint ids the HUD has already accepted into its queue/current/displayed
+# pipeline. Lets us poll SectorScript's runtime each frame for newly-active
+# hints without re-queueing ones we've already shown or dismissed — sidesteps
+# any race between HUD._ready connecting signals and SectorScript ticking.
+var _hint_seen: Dictionary = {}
+
+# Network info panel (toggled with P; bottom-centre of the screen)
+var network_info_panel: PanelContainer
+var network_info_root: HBoxContainer
+var network_info_left: VBoxContainer
+var network_info_right: ScrollContainer
+var network_info_right_vbox: VBoxContainer
+var network_info_placeholder: Label
+var network_info_open: bool = false
+var _network_info_last_net: int = -2  # -2 = uninitialised, -1 = no network
+var _network_info_avg_lbl: Label = null
+var _network_info_pinned_cell: Vector2i = Vector2i(-9999, -9999)
+# Network locked via the "N" key — survives panel close/reopen and hover
+# changes until the player presses N again (over a different network to
+# repin, or off any network to clear).
+var _network_info_locked_cell: Vector2i = Vector2i(-9999, -9999)
+# Power-history graph overlay
+var network_graph_overlay: CanvasLayer = null
+var network_graph_canvas: Control = null
+var network_graph_pinned_cell: Vector2i = Vector2i(-9999, -9999)
 
 # Category display names and icons (emoji fallback)
 const CATEGORY_INFO := {
@@ -183,6 +227,8 @@ func _ready() -> void:
 	_create_build_cost_panel()
 	_create_unit_mode_panel()
 	_create_objective_panel()
+	_create_network_info_panel()
+	_create_hint_panel()
 	_create_escape_menu()
 
 	_create_unlock_notify()
@@ -190,6 +236,37 @@ func _ready() -> void:
 	main.resources_changed.connect(_on_resources_changed)
 	main.building_selected.connect(_on_building_selected)
 	TechTree.node_state_changed.connect(_on_tech_state_changed)
+
+	# Connect hint signals from the sector script. SectorScript lives as a
+	# child of Main and is set up before HUD._ready runs in practice, but
+	# guard for editor / test contexts where it may be missing.
+	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	print("HUD._ready: sector_script = %s" % str(sector_script))
+	if sector_script:
+		if sector_script.has_signal("hint_show"):
+			sector_script.hint_show.connect(_on_hint_show)
+			print("HUD._ready: connected hint_show")
+		if sector_script.has_signal("hint_hide"):
+			sector_script.hint_hide.connect(_on_hint_hide)
+		if sector_script.has_signal("hints_cleared"):
+			sector_script.hints_cleared.connect(_on_hints_cleared)
+		# A hint may have already activated before we connected — replay
+		# any "active" entries so the HUD catches up.
+		var hints_arr = sector_script.get("_hints")
+		var rt_dict = sector_script.get("_hint_runtime")
+		print("HUD._ready: catch-up _hints.size=%d, _hint_runtime.size=%d" % [
+			hints_arr.size() if hints_arr is Array else -1,
+			rt_dict.size() if rt_dict is Dictionary else -1
+		])
+		if hints_arr is Array and rt_dict is Dictionary:
+			for h in hints_arr:
+				var id := String(h.get("id", ""))
+				if id == "":
+					continue
+				var rt: Dictionary = rt_dict.get(id, {})
+				print("HUD._ready: hint %s state=%s" % [id, String(rt.get("state", "?"))])
+				if String(rt.get("state", "")) == "active":
+					_on_hint_show(h)
 
 	# Show current resources immediately (signal may have fired before we connected)
 	_on_resources_changed(main.resources)
@@ -233,6 +310,38 @@ func _input(event: InputEvent) -> void:
 			_open_escape_menu()
 		get_viewport().set_input_as_handled()
 		# Cmd+Shift+\ (or Ctrl+Shift+\) = Clean Save Data
+	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_P \
+			and not event.shift_pressed and not event.ctrl_pressed and not event.meta_pressed and not event.alt_pressed:
+		# Don't steal P from text inputs (rename fields, etc.).
+		var fc := get_viewport().gui_get_focus_owner()
+		if fc is LineEdit or fc is TextEdit:
+			return
+		network_info_open = not network_info_open
+		network_info_panel.visible = network_info_open
+		_network_info_last_net = -2  # force refresh on next process tick
+		get_viewport().set_input_as_handled()
+	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_N \
+			and not event.shift_pressed and not event.ctrl_pressed and not event.meta_pressed and not event.alt_pressed \
+			and network_info_open:
+		var fc2 := get_viewport().gui_get_focus_owner()
+		if fc2 is LineEdit or fc2 is TextEdit:
+			return
+		# Resolve the cell the player is hovering. If it sits in a power
+		# network (producer/consumer cell), lock onto it. Otherwise clear
+		# the lock so the panel reverts to following hover.
+		var camera2 = get_viewport().get_camera_2d()
+		var mw2 := Vector2.ZERO
+		if camera2:
+			mw2 = camera2.get_screen_center_position() + (get_viewport().get_mouse_position() - get_viewport().get_visible_rect().size / 2.0) / camera2.zoom
+		else:
+			mw2 = get_viewport().get_mouse_position()
+		var hg2: Vector2i = main.world_to_grid(mw2)
+		if _network_index_for(hg2) >= 0:
+			_network_info_locked_cell = hg2
+		else:
+			_network_info_locked_cell = Vector2i(-9999, -9999)
+		_network_info_last_net = -2  # force a panel refresh
+		get_viewport().set_input_as_handled()
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_BACKSLASH and event.shift_pressed and (event.meta_pressed or event.ctrl_pressed):
 		_show_clean_save_dialog()
 		get_viewport().set_input_as_handled()
@@ -318,6 +427,9 @@ func _process(delta: float) -> void:
 			_last_hovered_grid = hovered_grid
 			_tooltip_refresh_timer = TOOLTIP_REFRESH_INTERVAL
 			_update_block_tooltip(hovered_grid)
+		# Per-frame power bar smoothing — runs between rebuilds so the
+		# count-up animates instead of stepping every 0.25 s.
+		_tick_power_bar_display(delta)
 		block_tooltip.visible = true
 	else:
 		# Neither — hide both
@@ -333,6 +445,19 @@ func _process(delta: float) -> void:
 
 	# Update portrait UI
 	_update_portrait_panel()
+
+	# Hint panel — fade in/out and rotate the queue.
+	_tick_hint_panel(delta)
+
+	# Network info panel (P toggle) — refresh against the hovered cell.
+	if network_info_open:
+		_update_network_info_panel(hovered_grid)
+
+	# Live-redraw the graph overlay while it's open.
+	if network_graph_overlay and is_instance_valid(network_graph_overlay) \
+			and network_graph_overlay.visible \
+			and network_graph_canvas and is_instance_valid(network_graph_canvas):
+		network_graph_canvas.queue_redraw()
 
 
 # =========================
@@ -933,6 +1058,12 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 	# Clear old content
 	for c in tooltip_vbox.get_children():
 		c.queue_free()
+	# Stale power-bar widget refs from the previous tooltip — null them
+	# out before potentially re-adding so the per-frame tick doesn't
+	# write into queue_freed nodes.
+	_power_bar_panel = null
+	_power_bar_fill = null
+	_power_bar_label = null
 
 	if not main.placed_buildings.has(grid_pos):
 		block_tooltip.visible = false
@@ -1187,6 +1318,16 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				effective_recipe = _logistics._normalize_item_keys(effective_recipe)
 			# Omnidirectional factories buffer inputs up to max_stored_items.
 			var is_omni_bldg: bool = data.tags.has("omnidirectional")
+			# Refabricators are also omni-buffered (they can over-fill past
+			# the recipe amount up to max_stored_items, and they hold
+			# materials between unit feeds). Show the inputs panel any time
+			# a tier-2 is selected so the player can verify what's already
+			# stocked before the next tier-1 arrives.
+			var rsel_for_panel: StringName = &""
+			if data.tags.has("refabricator") and "refabricator_state" in _logistics \
+					and _logistics.refabricator_state.has(origin):
+				rsel_for_panel = StringName(_logistics.refabricator_state[origin].get("selected_t2", &""))
+			var is_refab_with_t2: bool = data.tags.has("refabricator") and rsel_for_panel != &""
 			var has_need := false
 			for raw_id in effective_recipe:
 				var sn_id := StringName(raw_id)
@@ -1195,7 +1336,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				if have < needed:
 					has_need = true
 					break
-			if has_need or is_omni_bldg:
+			if has_need or is_omni_bldg or is_refab_with_t2:
 				_add_tooltip_separator()
 				for raw_id in effective_recipe:
 					var sn_id := StringName(raw_id)
@@ -1499,23 +1640,12 @@ func _step_toward_display(current: float, target: float, dt: float) -> float:
 
 
 func _add_tooltip_power_bar(efficiency: float, gen: float, use: float, anchor: Vector2i = Vector2i(-9999, -9999)) -> void:
-	# Smooth gen / use toward the live values across frames so a sudden
-	# network change (a wire snap, a turbine going online, etc.) animates
-	# the displayed numbers rather than teleporting them. Switching to a
-	# different building snaps instantly so the player doesn't see a
-	# bogus carry-over from the previous tooltip.
-	var now_t: float = Time.get_ticks_msec() / 1000.0
-	var dt: float = now_t - _power_display_last_t
-	_power_display_last_t = now_t
-	if anchor == _power_display_anchor and dt > 0.0 and dt < 1.0:
-		# Linear count-up: per-frame step capped at the larger of an
-		# absolute units-per-second budget or a fraction of the gap.
-		# This makes the integer readout visibly tick through every
-		# intermediate value at a steady pace rather than jumping in
-		# large stutters.
-		_power_display_gen = _step_toward_display(_power_display_gen, gen, dt)
-		_power_display_use = _step_toward_display(_power_display_use, use, dt)
-	else:
+	# Smoothing target tracking: switching to a different building snaps
+	# the smoothed values to the new live numbers. Otherwise the per-
+	# frame `_tick_power_bar_display` keeps animating toward whatever
+	# the live network reports — so the readout counts up smoothly
+	# between the 0.25 s tooltip rebuilds.
+	if anchor != _power_display_anchor:
 		_power_display_anchor = anchor
 		_power_display_gen = gen
 		_power_display_use = use
@@ -1566,19 +1696,23 @@ func _add_tooltip_power_bar(efficiency: float, gen: float, use: float, anchor: V
 	centre_tick.size = Vector2(1.0, BAR_H)
 	bar_panel.add_child(centre_tick)
 
+	# Always create the fill ColorRect so the per-frame tick can adjust
+	# its size / position without rebuilding the node tree. Sized to
+	# zero when frac == 0.
+	var bar_fill := ColorRect.new()
+	bar_fill.color = fill_color
+	bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	if frac != 0.0:
-		var bar_fill = ColorRect.new()
-		bar_fill.color = fill_color
-		bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var fill_len: float = half_w * absf(frac)
 		if frac > 0.0:
-			# Surplus: grow right from the midpoint.
 			bar_fill.position = Vector2(half_w, 0.0)
 		else:
-			# Deficit: grow left from the midpoint.
 			bar_fill.position = Vector2(half_w - fill_len, 0.0)
 		bar_fill.size = Vector2(fill_len, BAR_H)
-		bar_panel.add_child(bar_fill)
+	else:
+		bar_fill.position = Vector2(half_w, 0.0)
+		bar_fill.size = Vector2(0.0, BAR_H)
+	bar_panel.add_child(bar_fill)
 
 	bar_container.add_child(bar_panel)
 
@@ -1595,10 +1729,76 @@ func _add_tooltip_power_bar(efficiency: float, gen: float, use: float, anchor: V
 	bar_container.add_child(power_lbl)
 
 	tooltip_vbox.add_child(bar_container)
+	# Cache widget refs + dimensions so _tick_power_bar_display can
+	# update label text and fill size every frame between the (0.25 s)
+	# tooltip rebuilds. The _power_display_anchor was already set
+	# above and survives the rebuild.
+	_power_bar_panel = bar_panel
+	_power_bar_fill = bar_fill
+	_power_bar_label = power_lbl
+	_power_bar_half_w = half_w
+	_power_bar_height = BAR_H
 	# efficiency is accepted for API symmetry with the in-world bar even
 	# though this tooltip derives the fill directly from gen/use. Silence
 	# an unused-arg warning without dropping it from the signature.
 	var _unused_eff: float = efficiency
+
+
+## Per-frame updater for the power bar: ticks the smoothed gen / use
+## toward whatever the live network reports for the current anchor and
+## rewrites the label text + fill rect in place. Keeps the count-up
+## animation smooth between the 0.25 s tooltip rebuilds.
+func _tick_power_bar_display(delta: float) -> void:
+	if _power_bar_panel == null or not is_instance_valid(_power_bar_panel):
+		_power_bar_panel = null
+		_power_bar_fill = null
+		_power_bar_label = null
+		return
+	if _power_display_anchor == Vector2i(-9999, -9999):
+		return
+	var ps = _power_sys_ref()
+	if ps == null:
+		return
+	var info: Dictionary = ps.get_electrical_network_info(_power_display_anchor)
+	var target_gen: float = float(info.get("gen", 0.0))
+	var target_use: float = float(info.get("use", 0.0))
+	_power_display_gen = _step_toward_display(_power_display_gen, target_gen, delta)
+	_power_display_use = _step_toward_display(_power_display_use, target_use, delta)
+
+	var smooth_gen: float = _power_display_gen
+	var smooth_use: float = _power_display_use
+	var net_val: float = smooth_gen - smooth_use
+	var scale_ref: float = smooth_gen if smooth_gen > 0.0 else maxf(smooth_use, 1.0)
+	var frac: float = clampf(net_val / scale_ref, -1.0, 1.0)
+	var overdraw: bool = net_val < 0.0
+
+	# Label
+	if _power_bar_label and is_instance_valid(_power_bar_label):
+		var sign_prefix: String = "+" if net_val > 0.0 else ""
+		_power_bar_label.text = "%s%.0f / %.0f" % [sign_prefix, net_val, smooth_gen]
+		_power_bar_label.add_theme_color_override("font_color",
+			Color(0.95, 0.55, 0.5) if overdraw else Color(0.7, 0.8, 1.0))
+
+	# Fill rect
+	if _power_bar_fill and is_instance_valid(_power_bar_fill):
+		var fill_color: Color
+		if overdraw:
+			fill_color = Color(0.95, 0.3, 0.2)
+		elif smooth_gen > 0.0 and smooth_use / smooth_gen >= 0.8:
+			fill_color = Color(1.0, 0.85, 0.25)
+		else:
+			fill_color = Color(0.35, 0.7, 1.0)
+		_power_bar_fill.color = fill_color
+		if frac == 0.0:
+			_power_bar_fill.position = Vector2(_power_bar_half_w, 0.0)
+			_power_bar_fill.size = Vector2(0.0, _power_bar_height)
+		else:
+			var fill_len: float = _power_bar_half_w * absf(frac)
+			if frac > 0.0:
+				_power_bar_fill.position = Vector2(_power_bar_half_w, 0.0)
+			else:
+				_power_bar_fill.position = Vector2(_power_bar_half_w - fill_len, 0.0)
+			_power_bar_fill.size = Vector2(fill_len, _power_bar_height)
 
 
 func _add_tooltip_progress_bar(current: int, max_val: int, label_text: String, bar_color: Color) -> void:
@@ -2366,6 +2566,824 @@ func _update_objective_panel() -> void:
 		lbl.add_theme_color_override("font_color", Color(0.5, 0.8, 0.5) if done else Color(0.85, 0.88, 0.92))
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		hbox.add_child(lbl)
+
+
+# =========================
+# HINT PANEL (sector tutorial bubbles)
+# =========================
+
+func _create_hint_panel() -> void:
+	hint_panel = PanelContainer.new()
+	# Anchored on the mid-left edge. Width/height are recomputed in
+	# _resize_hint_panel from the current text so short hints stay
+	# compact and long hints stretch horizontally up to a cap before
+	# wrapping.
+	hint_panel.anchor_left = 0.0
+	hint_panel.anchor_right = 0.0
+	hint_panel.anchor_top = 0.5
+	hint_panel.anchor_bottom = 0.5
+	hint_panel.offset_left = 16
+	hint_panel.offset_right = 16
+	hint_panel.offset_top = 0
+	hint_panel.offset_bottom = 0
+	hint_panel.grow_horizontal = Control.GROW_DIRECTION_END
+	hint_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	hint_panel.mouse_filter = Control.MOUSE_FILTER_PASS
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.02, 0.03, 0.05, 0.88)
+	style.border_color = Color(0.55, 0.7, 0.95, 0.9)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(8)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 10
+	style.content_margin_bottom = 10
+	hint_panel.add_theme_stylebox_override("panel", style)
+	hint_panel.visible = false
+	hint_panel.modulate = Color(1, 1, 1, 0)
+	add_child(hint_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hint_panel.add_child(vbox)
+
+	hint_text_label = RichTextLabel.new()
+	hint_text_label.bbcode_enabled = true
+	hint_text_label.fit_content = true
+	hint_text_label.scroll_active = false
+	hint_text_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	hint_text_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hint_text_label.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	hint_text_label.add_theme_font_size_override("normal_font_size", 13)
+	hint_text_label.add_theme_color_override("default_color", Color(0.92, 0.95, 1.0))
+	hint_text_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(hint_text_label)
+
+	# OK button row — right-aligned via a spacer.
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 4)
+	btn_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn_row.add_child(spacer)
+	hint_ok_button = Button.new()
+	hint_ok_button.text = "OK"
+	hint_ok_button.add_theme_font_size_override("font_size", 12)
+	hint_ok_button.pressed.connect(_on_hint_ok_pressed)
+	btn_row.add_child(hint_ok_button)
+	vbox.add_child(btn_row)
+
+
+## Sizes the hint panel to fit the current text. Picks the narrowest
+## width that doesn't force a wrap (so short hints stay compact) up to
+## `max_w`, then lets the height grow with wrapped lines. Anchored at
+## mid-left, so the panel grows rightward and expands symmetrically
+## up/down around the screen's vertical centre.
+func _resize_hint_panel() -> void:
+	if hint_text_label == null or hint_panel == null:
+		return
+	var font := hint_text_label.get_theme_default_font()
+	if font == null:
+		font = ThemeDB.fallback_font
+	var font_size: int = 13
+	var raw: String = String(_hint_current.get("text", "")) if not _hint_current.is_empty() else hint_text_label.text
+	# Convert sector-script-style markup to BBCode first, then strip the
+	# resulting tags so measurement sees only the visible glyph run.
+	var plain: String = _strip_bbcode(_hint_to_bbcode(raw))
+	var max_w: float = 600.0
+	var min_w: float = 200.0
+	# Single-line width of the longest run of text without forced breaks.
+	var single_w: float = 0.0
+	for line in plain.split("\n"):
+		single_w = maxf(single_w, font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x)
+	# Pick the narrowest width that fits the text on one line, capped by
+	# max_w. The +24 absorbs the panel/vbox content margins; below max_w
+	# the label won't wrap, above it the autowrap kicks in and height
+	# grows to accommodate the wrapped lines.
+	var w: float = clampf(single_w + 24.0, min_w, max_w)
+	hint_text_label.custom_minimum_size = Vector2(w, 0)
+	# Force a layout pass before reading the wrapped content height.
+	hint_text_label.queue_redraw()
+	# RichTextLabel.fit_content sizes height once the layout settles.
+	# Defer the panel offset update to next frame so we read the
+	# post-wrap height.
+	call_deferred("_apply_hint_panel_size")
+
+
+func _apply_hint_panel_size() -> void:
+	if hint_panel == null or hint_text_label == null:
+		return
+	# Sum content height: label height + button row height (if visible)
+	# + margins/separation on the wrapping containers. The constants
+	# match the styles configured in _create_hint_panel.
+	var label_h: float = hint_text_label.get_minimum_size().y
+	var btn_h: float = (hint_ok_button.get_minimum_size().y if hint_ok_button.visible else 0.0)
+	var sep: float = 8.0  # vbox separation
+	var pad_v: float = 20.0  # 10 top + 10 bottom content margins
+	var total_h: float = label_h + btn_h + (sep if btn_h > 0.0 else 0.0) + pad_v
+	var label_w: float = hint_text_label.custom_minimum_size.x
+	var pad_h: float = 24.0  # 12 left + 12 right content margins
+	var total_w: float = label_w + pad_h
+	hint_panel.offset_left = 16.0
+	hint_panel.offset_right = 16.0 + total_w
+	hint_panel.offset_top = -total_h * 0.5
+	hint_panel.offset_bottom = total_h * 0.5
+
+
+## Named colors recognised in `(-name)` markup. Mirrors the sector script's
+## NAMED_COLORS table so a hint reads the same as a sector text overlay.
+const _HINT_NAMED_COLORS := {
+	"red": "red",
+	"green": "green",
+	"blue": "blue",
+	"yellow": "yellow",
+	"orange": "orange",
+	"white": "white",
+	"cyan": "cyan",
+	"magenta": "magenta",
+	"pink": "hotpink",
+	"gray": "gray",
+	"grey": "gray",
+	"black": "#444",
+	"brown": "saddlebrown",
+	"purple": "darkorchid",
+}
+
+
+## Translates the sector-script overlay markup into BBCode that
+## RichTextLabel understands:
+##   `(-red)foo(-reset)`             → `[color=red]foo[/color]`
+##   `[res://path/icon.png]`        → `[img]res://path/icon.png[/img]`
+## Other characters pass through unchanged. Unknown `(-name)` strings are
+## still tried as raw RichTextLabel colour names so authors can use any
+## CSS-style colour the engine recognises (e.g. `(-aqua)`).
+func _hint_to_bbcode(text: String) -> String:
+	var out: String = ""
+	var color_open: bool = false
+	var i: int = 0
+	while i < text.length():
+		var c: String = text[i]
+		# Color tag: (-name) or (-reset) / (-default).
+		if c == "(" and i + 1 < text.length() and text[i + 1] == "-":
+			var close: int = text.find(")", i + 2)
+			if close != -1:
+				var name: String = text.substr(i + 2, close - i - 2).strip_edges().to_lower()
+				if color_open:
+					out += "[/color]"
+					color_open = false
+				if name != "reset" and name != "default" and name != "":
+					var resolved: String = _HINT_NAMED_COLORS.get(name, name)
+					out += "[color=%s]" % resolved
+					color_open = true
+				i = close + 1
+				continue
+		# Image tag: [path/to/file.png|.jpg|.svg|.tres].
+		if c == "[":
+			var close_b: int = text.find("]", i + 1)
+			if close_b != -1:
+				var path: String = text.substr(i + 1, close_b - i - 1).strip_edges()
+				var lower: String = path.to_lower()
+				if lower.ends_with(".png") or lower.ends_with(".jpg") \
+						or lower.ends_with(".svg") or lower.ends_with(".tres"):
+					out += "[img]%s[/img]" % path
+					i = close_b + 1
+					continue
+		out += c
+		i += 1
+	if color_open:
+		out += "[/color]"
+	return out
+
+
+## Returns `text` with BBCode-style `[tag]` and `[/tag]` markers stripped,
+## for measurement purposes. Handles `[img]…[/img]` by dropping its body
+## entirely so an inline icon doesn't get measured as raw filename pixels.
+func _strip_bbcode(text: String) -> String:
+	var out: String = text
+	# Drop [img] bodies first.
+	var rx_img := RegEx.new()
+	rx_img.compile("\\[img[^\\]]*\\][^\\[]*\\[/img\\]")
+	out = rx_img.sub(out, "  ", true)
+	# Then strip every remaining [tag] / [/tag].
+	var rx_tag := RegEx.new()
+	rx_tag.compile("\\[/?[^\\]]+\\]")
+	out = rx_tag.sub(out, "", true)
+	return out
+
+
+func _on_hint_show(hint: Dictionary) -> void:
+	# Already showing or already queued? Ignore — the runtime can re-emit
+	# when state is restored from a save, and we don't want the same hint
+	# to flash twice.
+	var hid := String(hint.get("id", ""))
+	print("HUD: _on_hint_show id=%s text=%s" % [hid, String(hint.get("text", "")).left(40)])
+	if _hint_seen.has(hid):
+		return
+	_hint_seen[hid] = true
+	_hint_queue.append(hint)
+
+
+func _on_hint_hide(hint_id: String) -> void:
+	# If the hidden hint is the one currently displayed, kick the panel
+	# into a fade-out. Queued copies of the same id are dropped.
+	if not _hint_current.is_empty() and String(_hint_current.get("id", "")) == hint_id:
+		_hint_target_alpha = 0.0
+	for i in range(_hint_queue.size() - 1, -1, -1):
+		if String(_hint_queue[i].get("id", "")) == hint_id:
+			_hint_queue.remove_at(i)
+	# Keep the seen flag so a hint that flips back to "active" (e.g. its
+	# remove condition stops being satisfied) doesn't re-show forever.
+	_hint_seen[hint_id] = true
+
+
+func _on_hints_cleared() -> void:
+	_hint_queue.clear()
+	_hint_current = {}
+	_hint_target_alpha = 0.0
+	_hint_seen.clear()
+
+
+func _on_hint_ok_pressed() -> void:
+	if _hint_current.is_empty():
+		return
+	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	if sector_script and sector_script.has_method("acknowledge_hint"):
+		sector_script.acknowledge_hint(String(_hint_current.get("id", "")))
+
+
+func _tick_hint_panel(delta: float) -> void:
+	# Belt-and-suspenders: poll SectorScript every frame for hints that
+	# became active without our signal listener firing (race during sector
+	# load / signal-connect ordering). _hint_seen ensures we never enqueue
+	# the same id twice, and dismissed hints are excluded by the state
+	# check, so a hint can never visually re-appear after it's been hidden.
+	var sector_script_p = get_node_or_null("/root/Main/SectorScript")
+	if sector_script_p:
+		var hints_arr_p = sector_script_p.get("_hints")
+		var rt_p = sector_script_p.get("_hint_runtime")
+		if hints_arr_p is Array and rt_p is Dictionary:
+			for h in hints_arr_p:
+				var hid := String(h.get("id", ""))
+				if hid == "" or _hint_seen.has(hid):
+					continue
+				if String(rt_p.get(hid, {}).get("state", "")) == "active":
+					_on_hint_show(h)
+			# Mirror dismissal — if the currently-displayed hint flipped to
+			# "dismissed" without a signal reaching us, kick the fade-out.
+			if not _hint_current.is_empty():
+				var cur_id := String(_hint_current.get("id", ""))
+				if String(rt_p.get(cur_id, {}).get("state", "")) == "dismissed":
+					_hint_target_alpha = 0.0
+	# Pull the next hint when nothing is displayed and the panel has
+	# fully faded out.
+	if _hint_current.is_empty() and not _hint_queue.is_empty() and _hint_alpha <= 0.01:
+		_hint_current = _hint_queue.pop_front()
+		hint_text_label.text = _hint_to_bbcode(String(_hint_current.get("text", "")))
+		hint_ok_button.visible = bool(_hint_current.get("can_be_ignored", true))
+		_resize_hint_panel()
+		hint_panel.visible = true
+		_hint_target_alpha = 1.0
+	# Drive the alpha toward the target.
+	var step: float = _hint_fade_speed * delta
+	if _hint_alpha < _hint_target_alpha:
+		_hint_alpha = minf(_hint_alpha + step, _hint_target_alpha)
+	elif _hint_alpha > _hint_target_alpha:
+		_hint_alpha = maxf(_hint_alpha - step, _hint_target_alpha)
+	if hint_panel:
+		hint_panel.modulate.a = _hint_alpha
+		hint_panel.visible = _hint_alpha > 0.001 or not _hint_current.is_empty()
+	# When fully faded out, retire the current hint so the next queued
+	# one can take its place on a future tick.
+	if _hint_alpha <= 0.001 and _hint_target_alpha <= 0.001 and not _hint_current.is_empty():
+		_hint_current = {}
+
+
+# =========================
+# NETWORK INFO PANEL (P toggle)
+# =========================
+
+func _create_network_info_panel() -> void:
+	network_info_panel = PanelContainer.new()
+	# Bottom-centre, fixed minimum size so the layout doesn't jiggle as
+	# the icon list grows / shrinks.
+	network_info_panel.anchor_left = 0.5
+	network_info_panel.anchor_right = 0.5
+	network_info_panel.anchor_top = 1.0
+	network_info_panel.anchor_bottom = 1.0
+	network_info_panel.offset_left = -320
+	network_info_panel.offset_right = 320
+	network_info_panel.offset_top = -210
+	network_info_panel.offset_bottom = -10
+	network_info_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	network_info_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	network_info_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.02, 0.03, 0.06, 0.9)
+	style.border_color = Color(0.2, 0.4, 0.6, 0.7)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(8)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 10
+	style.content_margin_bottom = 10
+	network_info_panel.add_theme_stylebox_override("panel", style)
+	network_info_panel.visible = false
+	add_child(network_info_panel)
+
+	# Placeholder shown when not hovering a powered block.
+	network_info_placeholder = Label.new()
+	network_info_placeholder.text = "hover over a power network to start"
+	network_info_placeholder.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	network_info_placeholder.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	network_info_placeholder.add_theme_color_override("font_color", Color(0.7, 0.75, 0.8))
+	network_info_placeholder.add_theme_font_size_override("font_size", 14)
+	network_info_placeholder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	network_info_placeholder.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	network_info_placeholder.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	network_info_panel.add_child(network_info_placeholder)
+
+	network_info_root = HBoxContainer.new()
+	network_info_root.add_theme_constant_override("separation", 12)
+	network_info_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	network_info_root.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	network_info_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	network_info_root.visible = false
+	network_info_panel.add_child(network_info_root)
+
+	# Left: gen / use totals.
+	network_info_left = VBoxContainer.new()
+	network_info_left.add_theme_constant_override("separation", 4)
+	network_info_left.custom_minimum_size = Vector2(170, 0)
+	network_info_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	network_info_root.add_child(network_info_left)
+
+	var sep := VSeparator.new()
+	sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	network_info_root.add_child(sep)
+
+	# Right: scrollable list of producer/consumer status rows.
+	network_info_right = ScrollContainer.new()
+	network_info_right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	network_info_right.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	network_info_right.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	network_info_right.mouse_filter = Control.MOUSE_FILTER_PASS
+	network_info_root.add_child(network_info_right)
+
+	network_info_right_vbox = VBoxContainer.new()
+	network_info_right_vbox.add_theme_constant_override("separation", 2)
+	network_info_right_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	network_info_right_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	network_info_right.add_child(network_info_right_vbox)
+
+
+## Returns the network index of the block at `grid_pos` if it generates or
+## consumes power, else -1. Cable nodes are considered "transport" and are
+## not treated as a network anchor here — but if the player happens to
+## hover one and it has neighbours that participate, the network they
+## belong to is still resolvable via the cell map.
+func _network_index_for(grid_pos: Vector2i) -> int:
+	if not main.placed_buildings.has(grid_pos):
+		return -1
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null:
+		return -1
+	# Only resolve a network when the hovered block is itself a producer
+	# or a consumer (per the user spec). Cable nodes / empty cables don't
+	# count as a "power-using block" for the trigger.
+	var participates: bool = data.electrical_power_use > 0.0 or data.electrical_power_gen > 0.0
+	if not participates:
+		return -1
+	var ps = _power_sys_ref()
+	if ps == null:
+		return -1
+	if not ps.elec_cell_to_net.has(grid_pos):
+		return -1
+	return int(ps.elec_cell_to_net[grid_pos])
+
+
+func _update_network_info_panel(hovered_grid: Vector2i) -> void:
+	# A locked cell (set via "N") wins over live hover. If the locked
+	# cell's network has since been destroyed, silently fall back to the
+	# hovered cell — pressing N again repins or clears.
+	var effective_cell: Vector2i = hovered_grid
+	if _network_info_locked_cell != Vector2i(-9999, -9999) \
+			and _network_index_for(_network_info_locked_cell) >= 0:
+		effective_cell = _network_info_locked_cell
+	var net_idx := _network_index_for(effective_cell)
+	if net_idx < 0:
+		if _network_info_last_net != -1:
+			_network_info_last_net = -1
+			network_info_root.visible = false
+			network_info_placeholder.visible = true
+		return
+	# Always refresh the totals (they tick) but only rebuild the icon list
+	# when the hovered network changes — avoids re-instancing label nodes
+	# every frame.
+	var ps = _power_sys_ref()
+	if ps == null or net_idx >= ps.elec_networks.size():
+		return
+	var net: Dictionary = ps.elec_networks[net_idx]
+	var rebuilding: bool = net_idx != _network_info_last_net
+	# Remember the cell we're showing data for so the graph overlay can
+	# pin to the same network even if the user hovers away later.
+	_network_info_pinned_cell = effective_cell
+	if rebuilding:
+		_network_info_last_net = net_idx
+		network_info_placeholder.visible = false
+		network_info_root.visible = true
+		# Rebuild left column.
+		for c in network_info_left.get_children():
+			c.queue_free()
+		_network_info_avg_lbl = null
+		var gen_lbl := Label.new()
+		gen_lbl.add_theme_font_size_override("font_size", 13)
+		gen_lbl.add_theme_color_override("font_color", Color(0.5, 0.85, 1.0))
+		gen_lbl.text = "Production: %.0f" % float(net.get("gen", 0.0))
+		gen_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		network_info_left.add_child(gen_lbl)
+		var use_lbl := Label.new()
+		use_lbl.add_theme_font_size_override("font_size", 13)
+		use_lbl.add_theme_color_override("font_color", Color(1.0, 0.75, 0.4))
+		use_lbl.text = "Consumption: %.0f" % float(net.get("use", 0.0))
+		use_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		network_info_left.add_child(use_lbl)
+		# Rolling 1-minute average power use.
+		var avg_lbl := Label.new()
+		avg_lbl.add_theme_font_size_override("font_size", 12)
+		avg_lbl.add_theme_color_override("font_color", Color(0.85, 0.7, 0.95))
+		avg_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var avg_use_now: float = 0.0
+		if ps.has_method("get_network_avg_use"):
+			avg_use_now = float(ps.get_network_avg_use(effective_cell, 60.0))
+		avg_lbl.text = "Average Consumption: %.0f" % avg_use_now
+		network_info_left.add_child(avg_lbl)
+		_network_info_avg_lbl = avg_lbl
+		# Graph button.
+		var graph_btn := Button.new()
+		graph_btn.text = "Power Graph"
+		graph_btn.add_theme_font_size_override("font_size", 12)
+		graph_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+		graph_btn.pressed.connect(_open_network_graph_overlay)
+		network_info_left.add_child(graph_btn)
+		# Rebuild the icon list.
+		for c in network_info_right_vbox.get_children():
+			c.queue_free()
+		_populate_network_info_rows(net)
+	else:
+		# Same network — just live-update the totals + per-row status.
+		var children := network_info_left.get_children()
+		if children.size() >= 2:
+			(children[0] as Label).text = "Production: %.0f" % float(net.get("gen", 0.0))
+			(children[1] as Label).text = "Consumption: %.0f" % float(net.get("use", 0.0))
+		if _network_info_avg_lbl != null and is_instance_valid(_network_info_avg_lbl) \
+				and ps.has_method("get_network_avg_use"):
+			_network_info_avg_lbl.text = "Average Consumption: %.0f" % float(ps.get_network_avg_use(effective_cell, 60.0))
+		_refresh_network_info_status(net)
+
+
+## Builds one row per non-cable producer/consumer in the network.
+func _populate_network_info_rows(net: Dictionary) -> void:
+	var ps = _power_sys_ref()
+	var seen_anchors: Dictionary = {}
+	var rows: Array = []
+	for cell in net.get("cells", []):
+		var bid: StringName = main.placed_buildings.get(cell, &"")
+		if bid == &"":
+			continue
+		var d = Registry.get_block(bid)
+		if d == null:
+			continue
+		# Cable nodes / cable towers don't show in the list.
+		if d.tags.has("cable_node"):
+			continue
+		# Only producers / consumers (the spec).
+		if d.electrical_power_use <= 0.0 and d.electrical_power_gen <= 0.0:
+			continue
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen_anchors.has(anchor):
+			continue
+		seen_anchors[anchor] = true
+		rows.append({"anchor": anchor, "data": d})
+	# Stable order: producers first, then consumers, alphabetical within each group.
+	rows.sort_custom(func(a, b):
+		var ag: bool = a["data"].electrical_power_gen > 0.0
+		var bg: bool = b["data"].electrical_power_gen > 0.0
+		if ag != bg:
+			return ag
+		return String(a["data"].display_name) < String(b["data"].display_name)
+	)
+	for r in rows:
+		network_info_right_vbox.add_child(_build_network_info_row(r["anchor"], r["data"], ps))
+
+
+func _build_network_info_row(anchor: Vector2i, d: BlockData, ps: Node) -> HBoxContainer:
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 6)
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.set_meta("anchor", anchor)
+	if d.icon:
+		var tex := TextureRect.new()
+		tex.texture = d.icon
+		tex.custom_minimum_size = Vector2(20, 20)
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hbox.add_child(tex)
+	var name_lbl := Label.new()
+	name_lbl.text = d.display_name
+	name_lbl.add_theme_font_size_override("font_size", 12)
+	name_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hbox.add_child(name_lbl)
+
+	var sep1 := VSeparator.new()
+	sep1.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(sep1)
+
+	var status_lbl := Label.new()
+	status_lbl.add_theme_font_size_override("font_size", 12)
+	status_lbl.custom_minimum_size = Vector2(54, 0)
+	status_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(status_lbl)
+
+	var sep2 := VSeparator.new()
+	sep2.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(sep2)
+
+	# Power column: red usage for consumers, green generation for producers.
+	var power_lbl := Label.new()
+	power_lbl.add_theme_font_size_override("font_size", 12)
+	power_lbl.custom_minimum_size = Vector2(64, 0)
+	power_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	power_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if d.electrical_power_gen > 0.0:
+		power_lbl.add_theme_color_override("font_color", Color(0.4, 0.95, 0.4))
+	else:
+		power_lbl.add_theme_color_override("font_color", Color(1.0, 0.45, 0.45))
+	hbox.add_child(power_lbl)
+
+	var sep3 := VSeparator.new()
+	sep3.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(sep3)
+
+	# Efficiency column: tier-coloured percentage.
+	var eff_lbl := Label.new()
+	eff_lbl.add_theme_font_size_override("font_size", 12)
+	eff_lbl.custom_minimum_size = Vector2(48, 0)
+	eff_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	eff_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(eff_lbl)
+
+	hbox.set_meta("status_lbl", status_lbl)
+	hbox.set_meta("power_lbl", power_lbl)
+	hbox.set_meta("eff_lbl", eff_lbl)
+	_apply_network_info_status(hbox, anchor, d, ps)
+	return hbox
+
+
+func _apply_network_info_status(hbox: HBoxContainer, anchor: Vector2i, d: BlockData, ps: Node) -> void:
+	var status_lbl: Label = hbox.get_meta("status_lbl")
+	var power_lbl: Label = hbox.get_meta("power_lbl")
+	var eff_lbl: Label = hbox.get_meta("eff_lbl")
+	var active: bool = _is_block_active_for_network(anchor, d, ps)
+	if active:
+		status_lbl.text = "active"
+		status_lbl.add_theme_color_override("font_color", Color(0.4, 0.95, 0.4))
+	else:
+		status_lbl.text = "inactive"
+		status_lbl.add_theme_color_override("font_color", Color(1.0, 0.45, 0.45))
+
+	# Power column — generators show their (effective) generation, consumers
+	# show their draw. Both use the rated value when active, 0 when not.
+	var is_producer: bool = d.electrical_power_gen > 0.0
+	var power_val: float = 0.0
+	if is_producer:
+		if active and ps and ps.has_method("_get_effective_elec_gen"):
+			power_val = float(ps._get_effective_elec_gen(anchor, d))
+		elif active:
+			power_val = d.electrical_power_gen
+		power_lbl.text = "+%.0f" % power_val
+	else:
+		power_val = d.electrical_power_use if active else 0.0
+		power_lbl.text = "-%.0f" % power_val
+
+	# Efficiency column — producers: actual / rated. Consumers: the
+	# network's current gen/use ratio (the same time-dilation everything
+	# downstream uses).
+	var eff_pct: int = 0
+	if is_producer:
+		if d.electrical_power_gen > 0.0:
+			eff_pct = int(round(power_val / d.electrical_power_gen * 100.0))
+	else:
+		if active and ps and ps.has_method("get_electrical_efficiency"):
+			eff_pct = int(round(float(ps.get_electrical_efficiency(anchor)) * 100.0))
+		else:
+			eff_pct = 0
+	eff_pct = clampi(eff_pct, 0, 100)
+	eff_lbl.text = "%d%%" % eff_pct
+	var eff_col: Color
+	if eff_pct >= 75:
+		eff_col = Color(0.4, 0.95, 0.4)
+	elif eff_pct >= 40:
+		eff_col = Color(0.95, 0.85, 0.35)
+	else:
+		eff_col = Color(1.0, 0.45, 0.45)
+	eff_lbl.add_theme_color_override("font_color", eff_col)
+
+
+## Live-update only the per-row status labels (network unchanged).
+func _refresh_network_info_status(_net: Dictionary) -> void:
+	var ps = _power_sys_ref()
+	for child in network_info_right_vbox.get_children():
+		if child is HBoxContainer and child.has_meta("anchor") and child.has_meta("status_lbl"):
+			var anchor: Vector2i = child.get_meta("anchor")
+			var bid: StringName = main.placed_buildings.get(anchor, &"")
+			var d = Registry.get_block(bid)
+			if d == null:
+				continue
+			_apply_network_info_status(child, anchor, d, ps)
+
+
+## Producer is "active" if it's actually contributing gen right now (e.g. a
+## vent_powered turbine on the right tile). Consumer is "active" if it's
+## drawing power right now (delegates to PowerSystem._is_block_drawing_power).
+func _is_block_active_for_network(anchor: Vector2i, d: BlockData, ps: Node) -> bool:
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	if d.electrical_power_gen > 0.0:
+		if ps and ps.has_method("_get_effective_elec_gen"):
+			return float(ps._get_effective_elec_gen(anchor, d)) > 0.0
+		return true
+	if d.electrical_power_use > 0.0:
+		if ps and ps.has_method("_is_block_drawing_power"):
+			return bool(ps._is_block_drawing_power(anchor, d))
+		return true
+	return false
+
+
+## Opens a fullscreen overlay that tints the rest of the HUD black and
+## draws the pinned network's gen/use over the last 10 minutes.
+func _open_network_graph_overlay() -> void:
+	if _network_info_pinned_cell == Vector2i(-9999, -9999):
+		return
+	network_graph_pinned_cell = _network_info_pinned_cell
+	if network_graph_overlay == null or not is_instance_valid(network_graph_overlay):
+		network_graph_overlay = CanvasLayer.new()
+		network_graph_overlay.layer = 150
+		add_child(network_graph_overlay)
+		var bg := ColorRect.new()
+		bg.color = Color(0, 0, 0, 0.78)
+		bg.anchor_right = 1.0
+		bg.anchor_bottom = 1.0
+		bg.mouse_filter = Control.MOUSE_FILTER_STOP
+		bg.gui_input.connect(func(ev: InputEvent):
+			# Click anywhere outside the chart area to dismiss.
+			if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+				_close_network_graph_overlay()
+			elif ev is InputEventKey and ev.pressed and ev.keycode == KEY_ESCAPE:
+				_close_network_graph_overlay()
+		)
+		network_graph_overlay.add_child(bg)
+		network_graph_canvas = Control.new()
+		network_graph_canvas.anchor_left = 0.5
+		network_graph_canvas.anchor_top = 0.5
+		network_graph_canvas.anchor_right = 0.5
+		network_graph_canvas.anchor_bottom = 0.5
+		network_graph_canvas.offset_left = -460
+		network_graph_canvas.offset_right = 460
+		network_graph_canvas.offset_top = -240
+		network_graph_canvas.offset_bottom = 240
+		network_graph_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		network_graph_canvas.draw.connect(_draw_network_graph)
+		network_graph_overlay.add_child(network_graph_canvas)
+		var hint := Label.new()
+		hint.text = "click anywhere to close"
+		hint.add_theme_font_size_override("font_size", 11)
+		hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.75))
+		hint.anchor_left = 0.5
+		hint.anchor_right = 0.5
+		hint.anchor_top = 1.0
+		hint.anchor_bottom = 1.0
+		hint.offset_left = -100
+		hint.offset_right = 100
+		hint.offset_top = -28
+		hint.offset_bottom = -10
+		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		network_graph_overlay.add_child(hint)
+	network_graph_overlay.visible = true
+	network_graph_canvas.queue_redraw()
+
+
+func _close_network_graph_overlay() -> void:
+	if network_graph_overlay and is_instance_valid(network_graph_overlay):
+		network_graph_overlay.visible = false
+
+
+func _draw_network_graph() -> void:
+	var canvas := network_graph_canvas
+	if canvas == null or not is_instance_valid(canvas):
+		return
+	var size := canvas.size
+	# Frame
+	canvas.draw_rect(Rect2(Vector2.ZERO, size), Color(0.04, 0.05, 0.08, 0.95), true)
+	canvas.draw_rect(Rect2(Vector2.ZERO, size), Color(0.25, 0.4, 0.55, 0.9), false, 1.5)
+	var font := ThemeDB.fallback_font
+	canvas.draw_string(font, Vector2(12, 22), "Power — last 10 minutes",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.85, 0.9, 1.0))
+
+	var ps = _power_sys_ref()
+	if ps == null or not ps.has_method("get_network_history"):
+		canvas.draw_string(font, Vector2(12, 60), "no history available",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.8, 0.4, 0.4))
+		return
+	var samples: Array = ps.get_network_history(network_graph_pinned_cell)
+	# Plot area (leave margins for axes/labels)
+	var ml := 56.0
+	var mr := 16.0
+	var mt := 36.0
+	var mb := 28.0
+	var plot_rect := Rect2(Vector2(ml, mt), Vector2(size.x - ml - mr, size.y - mt - mb))
+	canvas.draw_rect(plot_rect, Color(0.06, 0.08, 0.11, 1.0), true)
+	canvas.draw_rect(plot_rect, Color(0.2, 0.3, 0.4, 0.8), false, 1.0)
+
+	if samples.is_empty():
+		canvas.draw_string(font, plot_rect.position + Vector2(plot_rect.size.x * 0.5 - 60, plot_rect.size.y * 0.5),
+			"collecting data...", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.7, 0.75, 0.8))
+		return
+
+	# Axes domain: 10 minutes ending now.
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var t_start: float = now - 600.0
+	# Find max y for scaling: use whichever of gen/use is larger.
+	var y_max: float = 1.0
+	for s in samples:
+		y_max = maxf(y_max, float(s["gen"]))
+		y_max = maxf(y_max, float(s["use"]))
+	# Round up to a nice step.
+	var step: float = pow(10.0, floor(log(y_max) / log(10.0)))
+	if step < 1.0:
+		step = 1.0
+	y_max = ceil(y_max / step) * step
+
+	# Gridlines + y labels (4 horizontal divisions)
+	for i in range(5):
+		var f: float = float(i) / 4.0
+		var y: float = plot_rect.position.y + plot_rect.size.y * (1.0 - f)
+		canvas.draw_line(Vector2(plot_rect.position.x, y),
+			Vector2(plot_rect.position.x + plot_rect.size.x, y),
+			Color(0.18, 0.22, 0.28, 0.7), 1.0)
+		var v: float = y_max * f
+		canvas.draw_string(font, Vector2(8, y + 4), "%.0f" % v,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.7, 0.75, 0.8))
+	# X labels (every 2 minutes)
+	for i in range(6):
+		var f2: float = float(i) / 5.0
+		var x: float = plot_rect.position.x + plot_rect.size.x * f2
+		canvas.draw_line(Vector2(x, plot_rect.position.y),
+			Vector2(x, plot_rect.position.y + plot_rect.size.y),
+			Color(0.18, 0.22, 0.28, 0.5), 1.0)
+		var minutes_back: float = (1.0 - f2) * 10.0
+		var lbl: String = "now" if minutes_back == 0.0 else ("-%dm" % int(round(minutes_back)))
+		canvas.draw_string(font, Vector2(x - 12, plot_rect.position.y + plot_rect.size.y + 16),
+			lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.7, 0.75, 0.8))
+
+	# Build polylines.
+	var gen_pts: PackedVector2Array = []
+	var use_pts: PackedVector2Array = []
+	for s in samples:
+		var t: float = float(s["t"])
+		if t < t_start:
+			continue
+		var fx: float = clampf((t - t_start) / 600.0, 0.0, 1.0)
+		var x: float = plot_rect.position.x + plot_rect.size.x * fx
+		var fy_g: float = clampf(float(s["gen"]) / y_max, 0.0, 1.0)
+		var fy_u: float = clampf(float(s["use"]) / y_max, 0.0, 1.0)
+		gen_pts.append(Vector2(x, plot_rect.position.y + plot_rect.size.y * (1.0 - fy_g)))
+		use_pts.append(Vector2(x, plot_rect.position.y + plot_rect.size.y * (1.0 - fy_u)))
+	if gen_pts.size() >= 2:
+		canvas.draw_polyline(gen_pts, Color(0.5, 0.85, 1.0, 0.95), 2.0, true)
+	if use_pts.size() >= 2:
+		canvas.draw_polyline(use_pts, Color(1.0, 0.75, 0.4, 0.95), 2.0, true)
+
+	# Legend
+	var lx: float = plot_rect.position.x + plot_rect.size.x - 130
+	var ly: float = plot_rect.position.y + 14
+	canvas.draw_line(Vector2(lx, ly), Vector2(lx + 18, ly), Color(0.5, 0.85, 1.0), 2.0)
+	canvas.draw_string(font, Vector2(lx + 24, ly + 4), "Production",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.9, 1.0))
+	canvas.draw_line(Vector2(lx, ly + 16), Vector2(lx + 18, ly + 16), Color(1.0, 0.75, 0.4), 2.0)
+	canvas.draw_string(font, Vector2(lx + 24, ly + 20), "Consumption",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(1.0, 0.85, 0.7))
 
 
 # =========================

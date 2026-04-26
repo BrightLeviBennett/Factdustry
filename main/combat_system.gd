@@ -91,6 +91,46 @@ var drone_is_shooting := false
 ## How many past positions to store for each projectile's trail
 const TRAIL_LENGTH := 4
 
+# --- SHOT GROUPING ---
+# Multi-pellet salvos (shotgun-style turrets like the Diffuse) tag every
+# pellet with a shared shot_id. When two pellets from the same salvo hit
+# the same target, the second one deals half damage, the third a quarter,
+# and so on. _shot_hits[sid][target_key] = number of prior hits applied.
+# _shot_active[sid] tracks how many of the salvo's pellets are still
+# alive so we can free the bucket once they've all landed/expired.
+var _shot_id_counter: int = 0
+var _shot_hits: Dictionary = {}
+var _shot_active: Dictionary = {}
+
+func _next_shot_id() -> int:
+	_shot_id_counter += 1
+	return _shot_id_counter
+
+## Returns the damage to apply for `proj` against `target_key`, halving it
+## per prior hit from the same shot. Records the hit so the next pellet of
+## the salvo sees an incremented count.
+func _shot_damage(proj: Dictionary, target_key: Variant, base: float) -> float:
+	var sid: int = int(proj.get("shot_id", 0))
+	if sid == 0:
+		return base
+	var bucket: Dictionary = _shot_hits.get(sid, {})
+	var prior: int = int(bucket.get(target_key, 0))
+	bucket[target_key] = prior + 1
+	_shot_hits[sid] = bucket
+	if prior <= 0:
+		return base
+	return base / pow(2.0, prior)
+
+func _release_shot_id(sid: int) -> void:
+	if sid == 0:
+		return
+	var n: int = int(_shot_active.get(sid, 0)) - 1
+	if n <= 0:
+		_shot_active.erase(sid)
+		_shot_hits.erase(sid)
+	else:
+		_shot_active[sid] = n
+
 # --- THREADING ---
 var _targeting_worker: TargetingWorker
 ## Cached turret scan results from the worker thread (keyed by grid_pos)
@@ -536,9 +576,24 @@ func _update_turrets(delta: float) -> void:
 		if lateral_offset == 0.0 and (target_world - fire_pos).length() > 0.001:
 			base_shot_dir = (target_world - fire_pos).normalized()
 		var shot_distance: float = maxf((target_world - fire_pos).length(), 1.0)
-		for pellet_i in range(maxi(fire_pellets, 1)):
+		var pellet_total: int = maxi(fire_pellets, 1)
+		# Multi-pellet salvos share a shot_id so repeat hits on the same
+		# target halve damage per extra pellet.
+		var salvo_shot_id: int = _next_shot_id() if pellet_total > 1 else 0
+		for pellet_i in range(pellet_total):
+			# Evenly distribute pellets across the inaccuracy cone instead
+			# of pure random spread. Each pellet gets its own slot of the
+			# cone (1/N of the total width) and we only jitter inside that
+			# slot, so 6 pellets always come out as a fan rather than
+			# clustering near the centre by chance.
 			var spread_rad: float = 0.0
-			if fire_inaccuracy > 0.0:
+			if fire_inaccuracy > 0.0 and pellet_total > 1:
+				var t: float = float(pellet_i) / float(pellet_total - 1)  # 0..1
+				var slot_w: float = (2.0 * fire_inaccuracy) / float(pellet_total)
+				var center_deg: float = lerp(-fire_inaccuracy, fire_inaccuracy, t)
+				var jitter_deg: float = randf_range(-slot_w * 0.5, slot_w * 0.5)
+				spread_rad = deg_to_rad(center_deg + jitter_deg)
+			elif fire_inaccuracy > 0.0:
 				spread_rad = deg_to_rad(randf_range(-fire_inaccuracy, fire_inaccuracy))
 			var pellet_angle: float = base_shot_dir.angle() + spread_rad
 			var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * shot_distance
@@ -581,6 +636,7 @@ func _update_turrets(delta: float) -> void:
 						"status": fire_status,
 						"splash_mult": fire_splash_mult,
 						"max_range": fire_max_range,
+						"shot_id": salvo_shot_id,
 					},
 				)
 			else:
@@ -610,6 +666,7 @@ func _update_turrets(delta: float) -> void:
 						"status": fire_status,
 						"splash_mult": fire_splash_mult,
 						"max_range": fire_max_range,
+						"shot_id": salvo_shot_id,
 					},
 				)
 
@@ -782,7 +839,11 @@ func _spawn_projectile(
 		"collides_ground": bool(extras.get("collides_ground", true)),
 		"status": extras.get("status", null),
 		"splash_mult": float(extras.get("splash_mult", 1.0)),
+		"shot_id": int(extras.get("shot_id", 0)),
 	}
+	var sid: int = int(proj["shot_id"])
+	if sid != 0:
+		_shot_active[sid] = int(_shot_active.get(sid, 0)) + 1
 	projectiles.append(proj)
 
 
@@ -837,14 +898,14 @@ func _update_projectiles(delta: float) -> void:
 			var new_pos = proj["pos"] + direction * step
 			var hit_enemy = _check_bullet_hit_enemy(new_pos, proj["pos"], unit_mgr)
 			if hit_enemy:
-				hit_enemy.take_damage(proj["damage"])
+				hit_enemy.take_damage(_shot_damage(proj, hit_enemy.get_instance_id(), proj["damage"]))
 				to_remove.append(i)
 				continue
 			# Check if the bullet hits an opposing-faction building
 			var source_faction: int = proj.get("source_faction", 0)
 			var hit_bldg: Vector2i = _check_bullet_hit_building(new_pos, proj["pos"], source_faction)
 			if hit_bldg != Vector2i(-1, -1):
-				main.damage_building(hit_bldg, proj["damage"])
+				main.damage_building(hit_bldg, _shot_damage(proj, hit_bldg, proj["damage"]))
 				to_remove.append(i)
 				continue
 
@@ -857,6 +918,8 @@ func _update_projectiles(delta: float) -> void:
 
 	# Remove hit projectiles (iterate in reverse to keep indices valid)
 	for i in range(to_remove.size() - 1, -1, -1):
+		var dead_proj: Dictionary = projectiles[to_remove[i]]
+		_release_shot_id(int(dead_proj.get("shot_id", 0)))
 		projectiles.remove_at(to_remove[i])
 
 
@@ -913,7 +976,7 @@ func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 				# Single target
 				var enemy = proj["target_ref"]
 				if is_instance_valid(enemy) and not enemy.is_dead and _can_hit_unit(proj, enemy):
-					enemy.take_damage(proj["damage"])
+					enemy.take_damage(_shot_damage(proj, enemy.get_instance_id(), proj["damage"]))
 					_apply_knockback(enemy, proj["pos"], knockback)
 					_apply_status(enemy, status)
 
@@ -935,7 +998,7 @@ func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 			else:
 				var grid_pos = proj["target_ref"] as Vector2i
 				if main.placed_buildings.has(grid_pos):
-					main.damage_building(grid_pos, proj["damage"])
+					main.damage_building(grid_pos, _shot_damage(proj, grid_pos, proj["damage"]))
 
 		"drone":
 			var drone = _drone_ref()

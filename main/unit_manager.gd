@@ -901,10 +901,32 @@ func _update_controlled_turret(_delta: float) -> void:
 					return
 				var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 				var logistics = _logistics_ref()
+				# Pull every relevant field off the AmmoType so manual-fire
+				# behaves identically to auto-fire — including pellet count,
+				# inaccuracy spread, knockback, lifetime, pierce, status, and
+				# trail/colour. Otherwise scattershot turrets like the Diffuse
+				# only fire a single bullet under manual control.
 				var fire_damage: float = bdata.attack_damage
 				var fire_color: Color = bdata.color.lightened(0.3)
 				var fire_reload_mult: float = 1.0
 				var fire_speed: float = combat.default_projectile_speed
+				var fire_lifetime: float = 2.0
+				var fire_radius: float = 4.0
+				var fire_pierce: int = 0
+				var fire_homing: float = 0.0
+				var fire_knockback: float = 0.0
+				var fire_inaccuracy: float = 0.0
+				var fire_pellets: int = 1
+				var fire_range_bonus: float = 0.0
+				var fire_status: Resource = null
+				var fire_trail_color: Color = fire_color
+				var fire_collides_air: bool = true
+				var fire_collides_ground: bool = true
+				var fire_bldg_mult: float = 1.0
+				var fire_unit_mult: float = 1.0
+				var fire_aoe: bool = bdata.is_aoe
+				var fire_aoe_radius: float = bdata.aoe_radius
+				var fire_splash_mult: float = 1.0
 				var ammo_found := false
 				for ammo in bdata.ammo_types:
 					if ammo == null or not (ammo is AmmoType):
@@ -919,6 +941,24 @@ func _update_controlled_turret(_delta: float) -> void:
 							fire_color = ammo_data.projectile_color
 							fire_reload_mult = ammo_data.reload_multiplier
 							fire_speed = ammo_data.projectile_speed
+							fire_lifetime = ammo_data.projectile_lifetime
+							fire_radius = ammo_data.projectile_radius
+							fire_pierce = ammo_data.pierce_count
+							fire_homing = ammo_data.homing
+							fire_knockback = ammo_data.knockback
+							fire_inaccuracy = ammo_data.inaccuracy
+							fire_pellets = ammo_data.projectiles_per_shot
+							fire_range_bonus = ammo_data.range_bonus
+							fire_status = ammo_data.status_effect
+							fire_trail_color = ammo_data.get_trail_color()
+							fire_collides_air = ammo_data.collides_air
+							fire_collides_ground = ammo_data.collides_ground
+							fire_bldg_mult = ammo_data.building_damage_mult
+							fire_unit_mult = ammo_data.unit_damage_mult
+							if ammo_data.is_splash:
+								fire_aoe = true
+								fire_aoe_radius = ammo_data.splash_radius
+								fire_splash_mult = ammo_data.splash_damage_mult
 							ammo_found = true
 							break
 				if not ammo_found:
@@ -954,30 +994,68 @@ func _update_controlled_turret(_delta: float) -> void:
 							bcd[idx] = bdata.attack_speed * fire_reload_mult
 					_control_barrel_idx[grid_pos] = (idx + 1) % bcount
 				var fire_pos: Vector2 = turret_world + aim_dir_ctrl * barrel_length + aim_perp_ctrl * lateral_ctrl
-				var fire_range: float = bdata.attack_range * main.GRID_SIZE
-				# For multi-barrel turrets travel along the aim axis from
-				# the barrel muzzle so each bullet visibly exits its own
-				# barrel instead of snapping back toward the mouse. Single-
-				# barrel keeps the mouse-aim behaviour for pixel precision.
-				var shot_dir: Vector2
-				if bcount > 1:
-					shot_dir = aim_dir_ctrl
-				else:
-					shot_dir = (mouse_pos - fire_pos).normalized()
-				var target_pos: Vector2 = fire_pos + shot_dir * fire_range
-				combat._spawn_projectile(
-					fire_pos,
-					null,
-					target_pos,
-					"none",
-					fire_speed,
-					fire_damage,
-					fire_color,
-					"turret",
-					bdata.is_aoe,
-					bdata.aoe_radius,
-					main.Faction.LUMINA,
-				)
+				var fire_max_range: float = bdata.attack_range * main.GRID_SIZE + fire_range_bonus
+				# Always travel along the head's aim axis so bullets visibly
+				# exit the muzzle in the direction the head is pointing,
+				# regardless of where the mouse is (especially when the
+				# cursor is close to the turret, where mouse-aim from the
+				# offset muzzle would skew the shot line).
+				var shot_dir: Vector2 = aim_dir_ctrl
+				# Projectiles travel toward `target_pos` and detonate when
+				# they arrive — so we have to aim PAST the mouse to the
+				# turret's full range. Using mouse-distance directly made
+				# bullets vanish the moment they crossed the cursor even
+				# though their `max_range` was higher.
+				var shot_distance: float = maxf(fire_max_range, 1.0)
+				# One projectile per pellet, with per-pellet random spread
+				# inside the AmmoType's inaccuracy cone. Mirrors the auto-
+				# fire loop in CombatSystem (including the even-fan
+				# distribution) so multi-pellet turrets behave the same
+				# when manually controlled.
+				var pellet_total: int = maxi(fire_pellets, 1)
+				# Multi-pellet salvos share a shot_id so repeat hits on the
+				# same target halve damage per extra pellet (matches the
+				# auto-fire diminishing rule in CombatSystem).
+				var salvo_shot_id: int = combat._next_shot_id() if pellet_total > 1 else 0
+				for pellet_i in range(pellet_total):
+					var spread_rad: float = 0.0
+					if fire_inaccuracy > 0.0 and pellet_total > 1:
+						var t: float = float(pellet_i) / float(pellet_total - 1)
+						var slot_w: float = (2.0 * fire_inaccuracy) / float(pellet_total)
+						var center_deg: float = lerp(-fire_inaccuracy, fire_inaccuracy, t)
+						var jitter_deg: float = randf_range(-slot_w * 0.5, slot_w * 0.5)
+						spread_rad = deg_to_rad(center_deg + jitter_deg)
+					elif fire_inaccuracy > 0.0:
+						spread_rad = deg_to_rad(randf_range(-fire_inaccuracy, fire_inaccuracy))
+					var pellet_angle: float = shot_dir.angle() + spread_rad
+					var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * shot_distance
+					combat._spawn_projectile(
+						fire_pos,
+						null,
+						pellet_target,
+						"none",
+						fire_speed,
+						fire_damage * fire_unit_mult,
+						fire_color,
+						"turret",
+						fire_aoe,
+						fire_aoe_radius,
+						main.Faction.LUMINA,
+						{
+							"lifetime": fire_lifetime,
+							"radius": fire_radius,
+							"pierce": fire_pierce,
+							"homing": fire_homing,
+							"knockback": fire_knockback,
+							"trail_color": fire_trail_color,
+							"collides_air": fire_collides_air,
+							"collides_ground": fire_collides_ground,
+							"status": fire_status,
+							"splash_mult": fire_splash_mult,
+							"max_range": fire_max_range,
+							"shot_id": salvo_shot_id,
+						},
+					)
 
 
 # =========================

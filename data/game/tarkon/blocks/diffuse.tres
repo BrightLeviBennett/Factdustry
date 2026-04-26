@@ -1,20 +1,44 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://brhvtbgpfrefk"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_ammo"]
+
+[sub_resource type="Resource" id="Resource_diffuse_graphite"]
+script = ExtResource("1_ammo")
+item_id = &"mat_graphite"
+amount_per_shot = 2
+damage = 8.0
+building_damage_mult = 0.6
+inaccuracy = 30.0
+projectiles_per_shot = 15
+projectile_speed = 520.0
+projectile_lifetime = 0.6
+projectile_radius = 2.5
+knockback = 192.0
+projectile_color = Color(1, 0.85, 0.55, 1)
+trail_color = Color(1, 0.55, 0.25, 1)
+trail_length = 14.0
+muzzle_flash_scale = 1.4
+impact_effect_scale = 0.8
+metadata/_custom_type_script = "uid://mlvivi0chx0p"
 
 [resource]
 script = ExtResource("1")
 id = &"diffuse"
 display_name = "Diffuse"
-description = "Scattershot turret hitting multiple targets at close range."
+description = "Close-range scattershot turret. Each shot fires a cone of small pellets that knock targets back. Consumes 2 graphite per shot."
 category = 4
+tags = PackedStringArray("turret", "defense")
 color = Color(0.9, 0.3, 0.3, 1)
 max_health = 260.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 3.0
 requires_power = true
 power_consumption = 3.0
-attack_damage = 10.0
+attack_damage = 8.0
 attack_speed = 0.8
-attack_range = 4.0
-tags = PackedStringArray("turret", "defense")
+attack_range = 6.5
+ammo_types = Array[Resource]([SubResource("Resource_diffuse_graphite")])

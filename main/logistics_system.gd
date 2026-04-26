@@ -2129,6 +2129,11 @@ func _update_belt_unloaders(_delta: float) -> void:
 ## Ferox cores feed the ferox pool; Lumina cores feed the player pool.
 ## Tries to absorb an item into core storage. Returns true if accepted, false if full.
 func _absorb_item(item_id: StringName, core_grid_pos: Vector2i = Vector2i(-1, -1)) -> bool:
+	# Sand isn't a real resource — cores incinerate it instead of adding
+	# it to the pool. Returning true tells the conveyor/drone the deposit
+	# succeeded so the item is consumed rather than backing up the belt.
+	if item_id == &"mat_sand":
+		return true
 	var is_ferox := false
 	if core_grid_pos != Vector2i(-1, -1):
 		is_ferox = main.get_building_faction(core_grid_pos) == main.Faction.FEROX
@@ -2891,8 +2896,9 @@ func _update_refabricators(delta: float) -> void:
 					# processing immediately; otherwise wait for them.
 					var recipe_idle: Dictionary = _refab_effective_recipe(data, selected_t2)
 					if _refab_has_all_inputs_dict(recipe_idle, item_buf):
-						_refab_consume_inputs_dict(recipe_idle, item_buf)
 						state["timer"] = data.production_time if data.production_time > 0 else 5.0
+						state["timer_total"] = state["timer"]
+						state["recipe_consumed"] = {}
 						state["phase"] = "processing"
 					else:
 						state["phase"] = "collecting"
@@ -2903,13 +2909,26 @@ func _update_refabricators(delta: float) -> void:
 				var recipe_c: Dictionary = _refab_effective_recipe(data, selected_t2_c)
 				# We have a unit — wait for input_items to accumulate.
 				if _refab_has_all_inputs_dict(recipe_c, item_buf):
-					_refab_consume_inputs_dict(recipe_c, item_buf)
 					state["timer"] = data.production_time if data.production_time > 0 else 5.0
+					state["timer_total"] = state["timer"]
+					state["recipe_consumed"] = {}
 					state["phase"] = "processing"
 
 			"processing":
 				state["timer"] -= delta * refab_eff
+				# Drain materials gradually so the buffer visibly empties
+				# while the upgrade runs.
+				var _sel_t2_p: StringName = StringName(state.get("selected_t2", &""))
+				var _recipe_p: Dictionary = _refab_effective_recipe(data, _sel_t2_p)
+				var _t_total_r: float = float(state.get("timer_total", state["timer"] + 0.0001))
+				if _t_total_r <= 0.0:
+					_t_total_r = 0.0001
+				var _prog_r: float = clampf(1.0 - state["timer"] / _t_total_r, 0.0, 1.0)
+				if not state.has("recipe_consumed"):
+					state["recipe_consumed"] = {}
+				_consume_progressive(item_buf, _recipe_p, state["recipe_consumed"], _prog_r)
 				if state["timer"] <= 0.0:
+					_consume_progressive(item_buf, _recipe_p, state["recipe_consumed"], 1.0)
 					# Prefer the explicit selection; fall back to the
 					# tech-tree lookup if the selection is somehow empty.
 					var t2_out: StringName = StringName(state.get("selected_t2", &""))
@@ -4156,28 +4175,27 @@ func _update_factories(delta: float) -> void:
 				# Don't start production if storage is full (skip for unit fabricators)
 				if not is_unit_fabricator and _is_storage_full(origin, data):
 					continue
+				# FEROX (enemy) fabricators ignore both the player's tech
+				# tree and the player's per-unit cap — those gates are
+				# about player progression, not enemy spawning.
+				var fab_faction: int = main.get_building_faction(origin)
+				var is_player_fab: bool = fab_faction != main.Faction.FEROX
 				# Don't start unit production if the unit isn't researched
 				# yet. The require_research toggle only governs block
 				# placement — producing a unit you haven't unlocked would
 				# bypass the tech tree's intent regardless of that flag.
 				# Sandbox mode (TechTree.unlock_all) still short-circuits
 				# is_researched to true, so that mode keeps working.
-				if is_unit_fabricator and TechTree.nodes.has(data.produced_unit) and not TechTree.is_researched(data.produced_unit):
+				if is_player_fab and is_unit_fabricator and TechTree.nodes.has(data.produced_unit) and not TechTree.is_researched(data.produced_unit):
 					continue
 				# Don't start unit production if at unit cap for this type
-				if is_unit_fabricator and main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
+				if is_player_fab and is_unit_fabricator and main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
 					continue
 				# Check if all required inputs are met
 				if _factory_has_all_inputs(state, data):
-					# Consume inputs and start processing
-					var effective_inputs := _get_effective_inputs(data)
-					for raw_id in effective_inputs:
-						var sn_id := StringName(raw_id)
-						var needed: int = int(effective_inputs[raw_id])
-						var have: int = state["inputs"].get(sn_id, 0)
-						state["inputs"][sn_id] = have - needed
-						if state["inputs"][sn_id] <= 0:
-							state["inputs"].erase(sn_id)
+					# Don't deduct upfront — _consume_progressive drains
+					# the buffer in step with the timer below so the
+					# tooltip's "have/needed" bars visibly tick down.
 					state["phase"] = "processing"
 					# Unit fabricators use the unit's build_time
 					if is_unit_fabricator:
@@ -4185,10 +4203,24 @@ func _update_factories(delta: float) -> void:
 						state["timer"] = unit_data.build_time if unit_data else 5.0
 					else:
 						state["timer"] = data.production_time
+					state["timer_total"] = state["timer"]
+					state["recipe_consumed"] = {}
 
 			"processing":
 				state["timer"] -= delta * factory_power_eff
+				# Spread the recipe cost evenly across the build timer.
+				var _recipe := _get_effective_inputs(data)
+				var _t_total: float = float(state.get("timer_total", state["timer"] + 0.0001))
+				if _t_total <= 0.0:
+					_t_total = 0.0001
+				var _prog: float = clampf(1.0 - state["timer"] / _t_total, 0.0, 1.0)
+				if not state.has("recipe_consumed"):
+					state["recipe_consumed"] = {}
+				_consume_progressive(state["inputs"], _recipe, state["recipe_consumed"], _prog)
 				if state["timer"] <= 0:
+					# Final flush — guarantee the full recipe has been
+					# deducted by the time output begins.
+					_consume_progressive(state["inputs"], _recipe, state["recipe_consumed"], 1.0)
 					if is_unit_fabricator:
 						# Enter the ejection animation phase. Actual placement/
 						# payload-push happens when the animation finishes.
@@ -4294,6 +4326,37 @@ func _normalize_item_keys(d: Dictionary) -> Dictionary:
 			normalized = s
 		out[normalized] = d[raw_id]
 	return out
+
+
+## Drains items from `inputs` to match the per-recipe consumption ratio
+## `progress` (0..1). `consumed` tracks the cumulative per-item amount
+## already deducted across previous ticks so each call only takes the
+## delta. Used by factories and refabricators to spread the build cost
+## evenly over the production timer instead of charging it all upfront —
+## the buffer visibly drains as the unit/item is being constructed.
+func _consume_progressive(inputs: Dictionary, recipe: Dictionary, consumed: Dictionary, progress: float) -> void:
+	progress = clampf(progress, 0.0, 1.0)
+	for raw_id in recipe:
+		var sn := StringName(raw_id)
+		var needed: int = int(recipe[raw_id])
+		# Floor so we never deduct more than the linear ratio at the
+		# current progress; the final flush at progress=1.0 picks up the
+		# remainder.
+		var target: int = int(progress * float(needed))
+		var already: int = int(consumed.get(sn, 0))
+		if target <= already:
+			continue
+		var diff: int = target - already
+		var have: int = int(inputs.get(sn, 0))
+		var take: int = mini(diff, have)
+		if take <= 0:
+			continue
+		var rem: int = have - take
+		if rem <= 0:
+			inputs.erase(sn)
+		else:
+			inputs[sn] = rem
+		consumed[sn] = already + take
 
 
 ## Returns true if the factory's input buffer has all required items.

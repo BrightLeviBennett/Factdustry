@@ -64,6 +64,37 @@ var _current_step: int = -1  # -1 = not running
 var _step_wait_timer: float = 0.0
 var _script_running := false
 
+# --- HINTS ---
+## Authored hint definitions, see HINT FORMAT comment below.
+var _hints: Array = []
+## Per-hint runtime: id -> {state, baselines, activated_at, sentinel}.
+##   state ∈ {"pending", "active", "dismissed"}
+##   baselines = snapshot of relevant counters at activation
+##   activated_at = seconds since sector load
+##   sentinel = block_id at the watched cell when remove_when=block_changed
+var _hint_runtime: Dictionary = {}
+var _hint_clock: float = 0.0
+var _hint_landing_fired: bool = false
+
+# HINT FORMAT (Dictionary):
+#   {
+#     "id": String — unique within the sector,
+#     "text": String — what to show in the panel,
+#     "condition": { "type": "landing" | "block_placed" | "item_produced"
+#                                | "units_produced" | "time_after",
+#                    "block_id": StringName, "item_id": StringName,
+#                    "unit_id": StringName, "amount": int, "seconds": float },
+#     "remove_when": { "type": "user_pressed_ok" | "block_placed"
+#                              | "block_changed" | "item_produced"
+#                              | "units_produced",
+#                      ...same arg shape... },
+#     "can_be_ignored": bool — when true the panel renders an "OK" button
+#                              the player can click to dismiss it manually,
+#   }
+signal hint_show(hint: Dictionary)
+signal hint_hide(hint_id: String)
+signal hints_cleared()
+
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -89,6 +120,8 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	_hint_clock += delta
+	_tick_hints()
 	if not _script_running or _current_step < 0 or _current_step >= _script_steps.size():
 		return
 
@@ -795,6 +828,11 @@ func reset_runtime_state() -> void:
 	var had_hidden := not _hidden_tiles.is_empty()
 	_hidden_tiles.clear()
 	_disabled_buildings.clear()
+	# Hints reset to "pending" so a re-launch fires their conditions afresh.
+	_hint_runtime.clear()
+	_hint_landing_fired = false
+	_hint_clock = 0.0
+	hints_cleared.emit()
 	if had_hidden:
 		_invalidate_caches()
 	queue_redraw()
@@ -1215,3 +1253,180 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 			_ferox_blocks_destroyed_counts[block_id] = _ferox_blocks_destroyed_counts.get(block_id, 0) + 1
 			var key := "%s:%d:%d" % [block_id, grid_pos.x, grid_pos.y]
 			_ferox_specific_destroyed[key] = true
+
+
+# =========================
+# HINTS
+# =========================
+
+## Replaces the current hint set. Resets per-hint runtime so a re-launch
+## starts every pending hint waiting for its trigger again.
+func load_hints(hints: Array) -> void:
+	_hints = hints.duplicate(true)
+	_hint_runtime.clear()
+	_hint_landing_fired = false
+	_hint_clock = 0.0
+	hints_cleared.emit()
+
+
+func get_hints() -> Array:
+	return _hints.duplicate(true)
+
+
+## Called by the HUD when the player clicks the hint's OK button. Only
+## dismisses hints whose `remove_when` is `user_pressed_ok` — for any
+## other remove condition the click is ignored, mirroring how the panel
+## hides its OK button when `can_be_ignored` is false.
+func acknowledge_hint(hint_id: String) -> void:
+	for h in _hints:
+		if String(h.get("id", "")) != hint_id:
+			continue
+		var rw_type: String = String(h.get("remove_when", {}).get("type", "user_pressed_ok"))
+		if rw_type != "user_pressed_ok":
+			return
+		_finish_hint(h)
+		return
+
+
+func _hint_state(id: String) -> String:
+	return String(_hint_runtime.get(id, {}).get("state", "pending"))
+
+
+func _set_hint_state(id: String, st: String) -> void:
+	if not _hint_runtime.has(id):
+		_hint_runtime[id] = {}
+	_hint_runtime[id]["state"] = st
+
+
+func _activate_hint(h: Dictionary) -> void:
+	var id := String(h.get("id", ""))
+	print("SectorScript: activating hint '%s' (text=%s)" % [id, String(h.get("text", "")).left(40)])
+	# Snapshot the relevant counters so the remove condition only fires
+	# for events that happen *after* the hint became visible.
+	var rw: Dictionary = h.get("remove_when", {})
+	var baselines: Dictionary = {}
+	var sentinel = null
+	match String(rw.get("type", "")):
+		"block_placed":
+			var bid := StringName(rw.get("block_id", ""))
+			baselines[bid] = int(_placed_counts.get(bid, 0))
+		"item_produced":
+			var iid := StringName(rw.get("item_id", ""))
+			baselines[iid] = int(_produced_counts.get(iid, 0))
+		"units_produced":
+			var uid := StringName(rw.get("unit_id", ""))
+			baselines[uid] = int(_units_produced_counts.get(uid, 0))
+		"block_changed":
+			var pos: Vector2i = _parse_vec2i_arg(rw.get("position", Vector2i.ZERO))
+			sentinel = main.placed_buildings.get(pos, &"") if main else &""
+	_hint_runtime[id] = {
+		"state": "active",
+		"baselines": baselines,
+		"activated_at": _hint_clock,
+		"sentinel": sentinel,
+	}
+	hint_show.emit(h)
+
+
+func _finish_hint(h: Dictionary) -> void:
+	var id := String(h.get("id", ""))
+	_set_hint_state(id, "dismissed")
+	hint_hide.emit(id)
+
+
+func _check_hint_condition(c: Dictionary) -> bool:
+	match String(c.get("type", "")):
+		"landing":
+			return _hint_landing_fired
+		"time_after":
+			return _hint_clock >= float(c.get("seconds", 0.0))
+		"block_placed":
+			return int(_placed_counts.get(StringName(c.get("block_id", "")), 0)) \
+				>= int(c.get("amount", 1))
+		"item_produced":
+			return int(_produced_counts.get(StringName(c.get("item_id", "")), 0)) \
+				>= int(c.get("amount", 1))
+		"units_produced":
+			return int(_units_produced_counts.get(StringName(c.get("unit_id", "")), 0)) \
+				>= int(c.get("amount", 1))
+	return false
+
+
+func _check_hint_remove(h: Dictionary, runtime: Dictionary) -> bool:
+	var rw: Dictionary = h.get("remove_when", {})
+	match String(rw.get("type", "")):
+		"user_pressed_ok":
+			# Only the HUD dismisses these (via acknowledge_hint).
+			return false
+		"block_placed":
+			var bid := StringName(rw.get("block_id", ""))
+			var base: int = int(runtime.get("baselines", {}).get(bid, 0))
+			return int(_placed_counts.get(bid, 0)) >= base + int(rw.get("amount", 1))
+		"item_produced":
+			var iid := StringName(rw.get("item_id", ""))
+			var base_i: int = int(runtime.get("baselines", {}).get(iid, 0))
+			return int(_produced_counts.get(iid, 0)) >= base_i + int(rw.get("amount", 1))
+		"units_produced":
+			var uid := StringName(rw.get("unit_id", ""))
+			var base_u: int = int(runtime.get("baselines", {}).get(uid, 0))
+			return int(_units_produced_counts.get(uid, 0)) >= base_u + int(rw.get("amount", 1))
+		"block_changed":
+			var pos: Vector2i = _parse_vec2i_arg(rw.get("position", Vector2i.ZERO))
+			var current: StringName = main.placed_buildings.get(pos, &"") if main else &""
+			return current != runtime.get("sentinel", &"")
+	return false
+
+
+func _tick_hints() -> void:
+	if not _hint_landing_fired:
+		_hint_landing_fired = true
+	if _hints.is_empty():
+		return
+	for h in _hints:
+		var id := String(h.get("id", ""))
+		if id == "":
+			continue
+		var st := _hint_state(id)
+		if st == "dismissed":
+			continue
+		if st == "pending":
+			if _check_hint_condition(h.get("condition", {})):
+				_activate_hint(h)
+			continue
+		# active
+		if _check_hint_remove(h, _hint_runtime.get(id, {})):
+			_finish_hint(h)
+
+
+func _parse_vec2i_arg(raw: Variant) -> Vector2i:
+	if raw is Vector2i:
+		return raw
+	if raw is Array and raw.size() >= 2:
+		return Vector2i(int(raw[0]), int(raw[1]))
+	if raw is Dictionary:
+		return Vector2i(int(raw.get("x", 0)), int(raw.get("y", 0)))
+	if raw is String:
+		var parts = raw.split(",")
+		if parts.size() >= 2:
+			return Vector2i(int(parts[0]), int(parts[1]))
+	return Vector2i.ZERO
+
+
+## Returns hint runtime for save/load.
+func get_hints_runtime_state() -> Dictionary:
+	return {
+		"runtime": _hint_runtime.duplicate(true),
+		"clock": _hint_clock,
+		"landing_fired": _hint_landing_fired,
+	}
+
+
+func load_hints_runtime_state(state: Dictionary) -> void:
+	_hint_runtime = state.get("runtime", {}).duplicate(true) if state.get("runtime") is Dictionary else {}
+	_hint_clock = float(state.get("clock", 0.0))
+	_hint_landing_fired = bool(state.get("landing_fired", false))
+	# Re-emit show events for any active hints so the HUD re-displays them.
+	for h in _hints:
+		var id := String(h.get("id", ""))
+		if _hint_state(id) == "active":
+			hint_show.emit(h)

@@ -622,6 +622,7 @@ func save_sector(sector_name: String) -> bool:
 		"linked_pairs": _serialize_links(links),
 		"sorter_filters": _serialize_sorter_filters(),
 		"script_steps": _serialize_script_steps(),
+		"hints": _serialize_hints(),
 		"resources": res_save,
 		"drone_position": drone_pos,
 		"build_progress": build_progress_save,
@@ -648,6 +649,8 @@ func save_sector(sector_name: String) -> bool:
 	var sector_script = get_node_or_null("/root/Main/SectorScript")
 	if sector_script and sector_script.has_method("get_runtime_state"):
 		data["script_runtime"] = sector_script.get_runtime_state()
+	if sector_script and sector_script.has_method("get_hints_runtime_state"):
+		data["hints_runtime"] = sector_script.get_hints_runtime_state()
 
 	# Authored enemy-wave bundle: global config + spawn points + either
 	# manual waves or an auto-generation template set. Pull from the
@@ -781,6 +784,22 @@ func load_sector_from_path(path: String) -> bool:
 				var raw = rs_data[key]
 				var sel2: StringName = StringName(raw.get("selected_t2", "")) if raw is Dictionary else &""
 				building_sys_early.editor_refabricator_state[_str_to_vec2i(key)] = {"selected_t2": sel2}
+
+	# --- Load hints ---
+	var hints_data = data.get("hints", [])
+	print("SaveManager: loading %d hint(s) from %s" % [hints_data.size() if hints_data is Array else -1, path])
+	if hints_data is Array:
+		var se_h = main.get("script_editor")
+		if se_h and se_h.has_method("set_hints_data"):
+			se_h.set_hints_data(hints_data)
+		var sector_script_h = get_node_or_null("/root/Main/SectorScript")
+		if sector_script_h and sector_script_h.has_method("load_hints"):
+			sector_script_h.load_hints(hints_data)
+			print("SaveManager: SectorScript now has %d hints" % sector_script_h._hints.size())
+			var is_user_save_h: bool = path.begins_with(SAVE_DIR) or path.begins_with("user://")
+			if is_user_save_h and data.has("hints_runtime") and data["hints_runtime"] is Dictionary \
+					and sector_script_h.has_method("load_hints_runtime_state"):
+				sector_script_h.call_deferred("load_hints_runtime_state", data["hints_runtime"])
 
 	# --- Load script steps ---
 	var script_steps_data = data.get("script_steps", [])
@@ -1448,6 +1467,22 @@ func _deserialize_script_steps(main_node: Node2D, steps_data: Array) -> void:
 	var se = main_node.get("script_editor")
 	if se and se.has_method("set_script_data"):
 		se.set_script_data(steps_data)
+
+
+func _serialize_hints() -> Array:
+	# Prefer in-game hints (live SectorScript) over editor staging.
+	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	if sector_script and sector_script.has_method("get_hints"):
+		var live: Array = sector_script.get_hints()
+		if live.size() > 0:
+			return live
+	var main_node = get_node_or_null("/root/Main")
+	if main_node == null:
+		return []
+	var se = main_node.get("script_editor")
+	if se and se.has_method("get_hints_data"):
+		return se.get_hints_data()
+	return []
 
 
 # =========================
