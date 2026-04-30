@@ -1,4 +1,5 @@
-# Factdustry
+<img width="768" height="128" alt="factdustry-pixilart-4" src="https://github.com/user-attachments/assets/40297077-eafc-4a90-90b6-0dbd8eef1c17" />
+
 
 Have you ever played mindustry?
 
@@ -24,8 +25,11 @@ So TLDR:
 - 10% factorio
 - 10% *whatever this is*
 
-## How To Download And Play
+## Easy Install
 
-Go to the relases section and find the relase with the highest number and leter, find the version labeled for your os type then download it.
+Open terminal then copy + paste the following command:
 
-If on mac you will have to go to where you installed it in terminal then run xattr -rd com.apple.quarantine "Factdustry.app"
+cd ~/Downloads && \
+curl -L -o Factdustry.zip "https://github.com/BrightLeviBennett/Factdustry/releases/latest/download/Factdustry.zip" && \
+unzip -o Factdustry.zip && \
+find . -name "Factdustry.app" -type d -exec xattr -rd com.apple.quarantine {} \; -exec open {} \;
