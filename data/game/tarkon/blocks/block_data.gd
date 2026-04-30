@@ -56,6 +56,11 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export_subgroup("Turret")
 ## Rotating head drawn on top of the base, aimed at the target.
 @export var turret_head_sprite: Texture2D
+## Optional support plate drawn UNDER the heads, rotated by the chassis
+## angle only (so it stays rigid while the heads toe in independently).
+## Multi-barrel turrets typically use this for a shared mounting plate
+## the barrels visibly sit on.
+@export var turret_chassis_sprite: Texture2D
 ## How many heads (barrels) this turret has. Multi-barrel turrets fire
 ## their barrels in sequence with staggered cooldowns so total rate
 ## scales with count: two barrels → double fire rate alternating left/
@@ -93,7 +98,6 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 
 
 @export_group("Combat")
-@export var attack_damage: float = 0.0
 ## Seconds between shots.
 @export var attack_speed: float = 1.0
 ## Range in grid tiles.
@@ -181,7 +185,12 @@ func can_afford(available_resources: Dictionary) -> bool:
 
 
 func is_turret() -> bool:
-	return attack_damage > 0 and attack_range > 0
+	# A block is a turret iff it has at least one configured ammo type.
+	# `Array.count(value)` was being misused here (passing the array
+	# itself as the value), which made every block fall back to "not a
+	# turret" once the per-block `damage` field was removed and damage
+	# moved onto AmmoType entries.
+	return ammo_types.size() > 0 and attack_range > 0
 
 
 func is_transport() -> bool:

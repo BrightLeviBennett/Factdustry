@@ -909,14 +909,65 @@ func load_runtime_state(state: Dictionary) -> void:
 	_step_deposited_baselines = _dict_str_to_sname(state.get("deposited_baselines", {}))
 	_step_placed_baselines = _dict_str_to_sname(state.get("placed_baselines", {}))
 	# Replay on_enter actions for current step to restore visual state (draw_box, draw_text, pause, etc.)
+	# Side-effect actions like start_waves/stop_waves must NOT be replayed
+	# here — the WaveManager runtime has already been restored from the
+	# save by this point, and re-running start_waves calls `wm.start()`
+	# which resets _idx, _timer, and _expanded_waves. Same logic for
+	# stop_waves: it'd halt a wave run that the save said was running.
 	if _script_running and _current_step >= 0 and _current_step < _script_steps.size():
 		var step: Dictionary = _script_steps[_current_step]
 		var actions: Array = step.get("actions", [])
 		for action in actions:
+			var atype: String = String(action.get("type", ""))
+			if atype == "start_waves" or atype == "stop_waves":
+				continue
 			_execute_action(action)
 	# Invalidate rendering caches for hidden tiles
 	_invalidate_caches()
 	print("SectorScript: Restored runtime state at step %d, running=%s" % [_current_step, _script_running])
+	# Rescue path for legacy saves that don't carry waves_runtime: if a
+	# past step contained a `start_waves` action, kick the WaveManager
+	# now (script-mode sectors otherwise come up cold because the
+	# script has already advanced past the trigger). Defer one frame so
+	# the WaveManager's own deferred `load_runtime` (queued from
+	# SaveManager) lands first — otherwise we'd kick start() on a
+	# WaveManager that hasn't yet had its saved state restored, and
+	# wm.start() would clobber the restore.
+	call_deferred("_rescue_wave_manager_after_load")
+
+
+func _rescue_wave_manager_after_load() -> void:
+	var wm = get_node_or_null("/root/Main/WaveManager")
+	if wm == null:
+		return
+	# If runtime restore already armed it (or it never auto-stopped),
+	# leave it alone. The `_runtime_loaded` flag covers legitimate
+	# "running = false" states from the save (e.g. a sector saved AFTER
+	# all waves were defeated) — without this gate, rescue would re-arm
+	# wave 1 on every reload and the user would see a fresh countdown.
+	if bool(wm.get("_runtime_loaded")):
+		return
+	if bool(wm.get("_running")):
+		return
+	# Sectors that haven't reached the start_waves step yet should keep
+	# waves dormant — only retroactively start once we're past it.
+	var trigger_passed := false
+	var stop_after_trigger := false
+	var upper: int = _current_step
+	if upper > _script_steps.size():
+		upper = _script_steps.size()
+	for i in range(0, upper):
+		var step: Dictionary = _script_steps[i]
+		for action in step.get("actions", []):
+			match String(action.get("type", "")):
+				"start_waves":
+					trigger_passed = true
+					stop_after_trigger = false
+				"stop_waves":
+					stop_after_trigger = true
+	if trigger_passed and not stop_after_trigger and wm.has_method("start"):
+		wm.call_deferred("start")
+		print("SectorScript: Re-armed WaveManager (legacy save without waves_runtime).")
 
 
 ## Helper: convert StringName-keyed dict to String-keyed for JSON.
@@ -1267,11 +1318,44 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 
 ## Replaces the current hint set. Resets per-hint runtime so a re-launch
 ## starts every pending hint waiting for its trigger again.
+##
+## Sector hints come from the per-sector save / editor; global hints are
+## merged in from SaveManager so a hint authored once activates on every
+## sector. Dismissed-state for globals is seeded from
+## SaveManager.global_hints_runtime so a global hint that was already
+## acknowledged in another sector / session stays dismissed here.
 func load_hints(hints: Array) -> void:
 	_hints = hints.duplicate(true)
 	_hint_runtime.clear()
 	_hint_landing_fired = false
 	_hint_clock = 0.0
+
+	# Strip any stale globals that may have leaked into the sector save
+	# (older builds didn't filter them out on serialize), then re-merge
+	# the canonical list from SaveManager.
+	var filtered: Array = []
+	for h in _hints:
+		if h is Dictionary and bool(h.get("global", false)):
+			continue
+		filtered.append(h)
+	_hints = filtered
+
+	var sm = get_node_or_null("/root/SaveManager")
+	if sm and sm.get("global_hints") is Array:
+		for gh in sm.global_hints:
+			if not (gh is Dictionary):
+				continue
+			var entry: Dictionary = gh.duplicate(true)
+			entry["global"] = true
+			_hints.append(entry)
+			# Seed dismissed state from the campaign-level runtime so a
+			# previously-acknowledged global stays acknowledged here.
+			var gid := String(entry.get("id", ""))
+			if gid != "":
+				var rt: Dictionary = sm.get_global_hint_runtime(gid)
+				if not rt.is_empty():
+					_hint_runtime[gid] = rt
+
 	hints_cleared.emit()
 
 
@@ -1331,12 +1415,24 @@ func _activate_hint(h: Dictionary) -> void:
 		"activated_at": _hint_clock,
 		"sentinel": sentinel,
 	}
+	# Mirror runtime to SaveManager for global hints so re-landing this
+	# (or any other) sector picks up where the activation left off.
+	if bool(h.get("global", false)):
+		var sm = get_node_or_null("/root/SaveManager")
+		if sm and sm.has_method("set_global_hint_runtime"):
+			sm.set_global_hint_runtime(id, _hint_runtime[id])
 	hint_show.emit(h)
 
 
 func _finish_hint(h: Dictionary) -> void:
 	var id := String(h.get("id", ""))
 	_set_hint_state(id, "dismissed")
+	# Globals: persist the dismissal at campaign level so this hint won't
+	# reactivate when the player lands on a different sector.
+	if bool(h.get("global", false)):
+		var sm = get_node_or_null("/root/SaveManager")
+		if sm and sm.has_method("set_global_hint_runtime"):
+			sm.set_global_hint_runtime(id, _hint_runtime.get(id, {"state": "dismissed"}))
 	hint_hide.emit(id)
 
 

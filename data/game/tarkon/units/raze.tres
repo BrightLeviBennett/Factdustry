@@ -1,0 +1,22 @@
+[gd_resource type="Resource" script_class="UnitData" format=3]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"raze"
+display_name = "Raze"
+description = "Extremely tough but slow. Mobile shield."
+team = 0
+category = 2
+color = Color(0.4, 0.7, 0.2, 1)
+visual_size = 11.0
+max_health = 200.0
+move_speed = 0.625
+attack_damage = 10.0
+attack_speed = 1.0
+attack_range = 32.0
+armor = 10.0
+detection_range = 500.0
+spawn_count = 1
+threat_value = 5.0

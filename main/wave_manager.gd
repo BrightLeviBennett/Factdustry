@@ -47,15 +47,25 @@ var _running: bool = false
 var _last_wave_units: Array = []
 var _all_waves_units: Array = []   # WeakRefs across every spawned wave
 var waves_all_defeated: bool = false
+## Set by load_runtime so the deferred auto-arm in `_ready` doesn't
+## re-run start() and clobber the restored wave index/timer/expansion.
+var _runtime_loaded: bool = false
 
 
 func _ready() -> void:
 	await get_tree().process_frame
 	main = get_node_or_null("/root/Main")
 	unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	print("WaveManager._ready: start_mode=%s waves=%d auto_templates=%d" \
+		% [String(config.get("start_mode", "landing")), waves.size(), \
+		(config.get("auto_unit_templates", []) as Array).size()])
 	# Auto-arm if the config says "landing". Script mode waits for an
-	# explicit start() call from the sector script.
-	if String(config.get("start_mode", "landing")) == "landing":
+	# explicit start() call from the sector script. Skip when a save
+	# has already restored the runtime — start() would reset _idx and
+	# _timer and re-expand the wave list from scratch.
+	if _runtime_loaded:
+		print("WaveManager._ready: skipping auto-arm — runtime restored from save")
+	elif String(config.get("start_mode", "landing")) == "landing":
 		start()
 
 
@@ -73,6 +83,9 @@ func start() -> void:
 	# Running as long as we either have an expanded list ready OR are
 	# in an infinite auto loop (which generates waves lazily).
 	_running = not _expanded_waves.is_empty() or _is_infinite_auto()
+	print("WaveManager.start(): running=%s expanded=%d infinite_auto=%s start_mode=%s initial_delay=%.1f" \
+		% [str(_running), _expanded_waves.size(), str(_is_infinite_auto()), \
+		String(config.get("start_mode", "?")), _timer])
 
 
 func _is_infinite_auto() -> bool:
@@ -83,6 +96,63 @@ func _is_infinite_auto() -> bool:
 
 func stop() -> void:
 	_running = false
+
+
+## Returns a dict the SaveManager can stash alongside the sector save.
+## Captures only the runtime fields — the authored config / waves /
+## spawn_points are saved separately via the waves_bundle path.
+##
+## `_last_wave_units` and `_all_waves_units` are intentionally omitted:
+## they're WeakRefs into UnitManager.enemies, which will be re-spawned
+## fresh on load anyway, so the references would all dangle.
+func serialize_runtime() -> Dictionary:
+	var expanded_copy: Array = []
+	for w in _expanded_waves:
+		var units_copy: Array = []
+		for u in w.get("units", []):
+			units_copy.append({
+				"unit_id": String(u.get("unit_id", &"")),
+				"count": int(u.get("count", 1)),
+				"spawn_point": String(u.get("spawn_point", "")),
+			})
+		expanded_copy.append({"units": units_copy})
+	return {
+		"running": _running,
+		"idx": _idx,
+		"timer": _timer,
+		"waves_all_defeated": waves_all_defeated,
+		"expanded_waves": expanded_copy,
+	}
+
+
+## Restores the runtime fields produced by `serialize_runtime`. Safe to
+## call before or after _ready — `start()`-style auto-arm runs from
+## _ready first, and a subsequent load_runtime overrides whatever
+## `start()` set.
+func load_runtime(data: Dictionary) -> void:
+	if data == null or data.is_empty():
+		return
+	_runtime_loaded = true
+	_running = bool(data.get("running", false))
+	_idx = int(data.get("idx", 0))
+	_timer = float(data.get("timer", 0.0))
+	waves_all_defeated = bool(data.get("waves_all_defeated", false))
+	_expanded_waves.clear()
+	for w in data.get("expanded_waves", []):
+		var units_copy: Array = []
+		for u in (w as Dictionary).get("units", []):
+			units_copy.append({
+				"unit_id": StringName(u.get("unit_id", "")),
+				"count": int(u.get("count", 1)),
+				"spawn_point": String(u.get("spawn_point", "")),
+			})
+		_expanded_waves.append({"units": units_copy})
+	# Drop dangling WeakRefs from the previous run; UnitManager rebuilds
+	# its enemy list from the sector save on its own.
+	_last_wave_units.clear()
+	_all_waves_units.clear()
+	print("WaveManager.load_runtime: running=%s idx=%d expanded=%d timer=%.1f" \
+		% [str(_running), _idx, _expanded_waves.size(), _timer])
 
 
 func _process(delta: float) -> void:

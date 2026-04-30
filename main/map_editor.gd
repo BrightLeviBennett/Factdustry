@@ -15,7 +15,11 @@ extends Node2D
 # ============================================================
 
 # --- GRID CONSTANTS (must match main.gd) ---
-const GRID_SIZE := 64
+const GRID_SIZE := 128
+## Mirrors `main.gd` so BuildingSystem's `_ready` can scale sprite-pixel
+## constants through `main.SPRITE_SCALE_FACTOR` regardless of which scene
+## owns it (Main vs MapEditor).
+const SPRITE_SCALE_FACTOR := float(GRID_SIZE) / 64.0
 var GRID_WIDTH := 100
 var GRID_HEIGHT := 100
 

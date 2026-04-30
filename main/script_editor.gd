@@ -153,9 +153,35 @@ func _ready() -> void:
 
 func show_panel() -> void:
 	visible = true
+	# Pull the latest global-hints set off disk (in case another tool
+	# wrote it) and merge into the editor's working list.
+	_merge_globals_into_hints()
 	_refresh_step_list()
 	_refresh_hint_list()
 	_refresh_hint_detail()
+
+
+## De-duplicates against current `hints` by id and appends any global
+## hints that aren't already represented. Called from `show_panel` so
+## opening the editor with a partially-loaded sector still surfaces the
+## global set.
+func _merge_globals_into_hints() -> void:
+	var sm = get_node_or_null("/root/SaveManager")
+	if sm == null or not (sm.get("global_hints") is Array):
+		return
+	var existing_ids := {}
+	for h in hints:
+		if h is Dictionary:
+			existing_ids[String(h.get("id", ""))] = true
+	for gh in sm.global_hints:
+		if not (gh is Dictionary):
+			continue
+		var gid := String(gh.get("id", ""))
+		if existing_ids.has(gid):
+			continue
+		var entry: Dictionary = gh.duplicate(true)
+		entry["global"] = true
+		hints.append(entry)
 
 
 func hide_panel() -> void:
@@ -432,6 +458,10 @@ func _refresh_hint_detail() -> void:
 	_add_multiline_field(hint_detail, hint, "text", "Hint Text:")
 	# can_be_ignored
 	_add_checkbox(hint_detail, hint, "can_be_ignored", "Show OK button (ignorable)")
+	# global — when ticked the hint is stored in user://global_hints.json
+	# and merged into every sector's hint list at landing. Dismissals
+	# carry across sectors via campaign.json.
+	_add_checkbox(hint_detail, hint, "global", "Global (cross-sector)")
 
 	# Condition group
 	hint_detail.add_child(HSeparator.new())
@@ -1281,6 +1311,24 @@ func _notify_change() -> void:
 	# SectorScript on every edit so authoring → display works without
 	# round-tripping through save/load.
 	_push_hints_to_runtime()
+	# Always rewrite the global-hints file so a flipped checkbox or text
+	# edit on a global hint persists immediately. Cheap — only writes
+	# entries flagged `global=true`.
+	_persist_global_hints()
+
+
+## Splits the editor's `hints` list into sector vs global, writing the
+## global subset to SaveManager.global_hints_file. Called whenever the
+## list / detail changes (add, remove, edit, global-toggle).
+func _persist_global_hints() -> void:
+	var sm = get_node_or_null("/root/SaveManager")
+	if sm == null or not sm.has_method("save_global_hints_file"):
+		return
+	var globals: Array = []
+	for h in hints:
+		if h is Dictionary and bool(h.get("global", false)):
+			globals.append(h.duplicate(true))
+	sm.save_global_hints_file(globals)
 
 
 ## Mirrors the authored hints into the live SectorScript so the HUD's
@@ -1410,6 +1458,33 @@ func get_hints_data() -> Array:
 
 func set_hints_data(data: Array) -> void:
 	hints = data.duplicate(true) if data is Array else []
+	# Strip any stale globals out of the per-sector list (older saves
+	# may have stored them inline) and re-merge from the canonical
+	# global-hints file so editing one sector shows the same global set
+	# as every other.
+	var sector_only: Array = []
+	for h in hints:
+		if h is Dictionary and bool(h.get("global", false)):
+			continue
+		sector_only.append(h)
+	hints = sector_only
+	var sm = get_node_or_null("/root/SaveManager")
+	if sm and sm.get("global_hints") is Array:
+		var existing_ids := {}
+		for h in hints:
+			if h is Dictionary:
+				existing_ids[String(h.get("id", ""))] = true
+		for gh in sm.global_hints:
+			if not (gh is Dictionary):
+				continue
+			var gid := String(gh.get("id", ""))
+			# Skip if a sector hint with the same id already lives here
+			# (defensive — id collisions shouldn't normally happen).
+			if existing_ids.has(gid):
+				continue
+			var entry: Dictionary = gh.duplicate(true)
+			entry["global"] = true
+			hints.append(entry)
 	selected_hint_index = -1
 	if visible and hint_list != null:
 		_refresh_hint_list()

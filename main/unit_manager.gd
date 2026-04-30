@@ -886,6 +886,12 @@ func _update_controlled_turret(_delta: float) -> void:
 	var mouse_pos: Vector2 = get_global_mouse_position()
 	var target_angle: float = (mouse_pos - turret_world).angle()
 	combat.turret_angles[grid_pos] = target_angle
+	# Per-barrel toe-in toward the mouse from each muzzle pivot. Mirrors
+	# the auto-fire logic so manually-controlled multi-barrel turrets
+	# converge on close targets the same way.
+	var bdata_aim = Registry.get_block(main.placed_buildings[grid_pos])
+	if bdata_aim and combat.has_method("_update_barrel_toe_in"):
+		combat._update_barrel_toe_in(grid_pos, bdata_aim, turret_world, mouse_pos, _delta)
 
 	# Fire on left mouse held
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &"":
@@ -906,7 +912,9 @@ func _update_controlled_turret(_delta: float) -> void:
 				# inaccuracy spread, knockback, lifetime, pierce, status, and
 				# trail/colour. Otherwise scattershot turrets like the Diffuse
 				# only fire a single bullet under manual control.
-				var fire_damage: float = bdata.attack_damage
+				# Damage lives on AmmoType — overwritten in the ammo
+				# branch below; the no-ammo path returns earlier.
+				var fire_damage: float = 0.0
 				var fire_color: Color = bdata.color.lightened(0.3)
 				var fire_reload_mult: float = 1.0
 				var fire_speed: float = combat.default_projectile_speed
@@ -973,26 +981,41 @@ func _update_controlled_turret(_delta: float) -> void:
 				# alternating auto-fire cadence.
 				var barrel_length: float = main.GRID_SIZE * 0.4
 				if bdata.turret_head_sprite:
-					var head_tex_size: Vector2 = bdata.turret_head_sprite.get_size() * 0.3
-					barrel_length = maxf(head_tex_size.y - 14.0, 0.0)
+					var head_tex_size: Vector2 = bdata.turret_head_sprite.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+					barrel_length = maxf(head_tex_size.y - 14.0 * main.SPRITE_SCALE_FACTOR, 0.0)
 				var bcount: int = maxi(bdata.barrel_count, 1)
-				var aim_dir_ctrl := Vector2.from_angle(target_angle)
-				var aim_perp_ctrl := Vector2(-aim_dir_ctrl.y, aim_dir_ctrl.x)
-				var lateral_ctrl: float = 0.0
+				# Round-robin which barrel fires; use that barrel's own
+				# (toed-in) angle for the bullet path, while the muzzle
+				# pivot still mounts perpendicular to the chassis aim.
+				var fire_barrel_idx: int = 0
 				if bcount > 1:
-					var idx: int = int(_control_barrel_idx.get(grid_pos, 0)) % bcount
-					lateral_ctrl = (float(idx) - (float(bcount) - 1.0) * 0.5) * bdata.barrel_spacing
+					fire_barrel_idx = int(_control_barrel_idx.get(grid_pos, 0)) % bcount
+				var chassis_dir_ctrl := Vector2.from_angle(target_angle)
+				var aim_perp_ctrl := Vector2(-chassis_dir_ctrl.y, chassis_dir_ctrl.x)
+				var aim_dir_ctrl := chassis_dir_ctrl
+				if combat.turret_barrel_angles.has(grid_pos):
+					var bang: Array = combat.turret_barrel_angles[grid_pos]
+					if fire_barrel_idx < bang.size():
+						aim_dir_ctrl = Vector2.from_angle(float(bang[fire_barrel_idx]))
+				var lateral_ctrl: float = 0.0
+				# Recoil: kick the firing barrel back.
+				if combat.turret_barrel_recoil.has(grid_pos):
+					var brc_m: Array = combat.turret_barrel_recoil[grid_pos]
+					if fire_barrel_idx < brc_m.size():
+						brc_m[fire_barrel_idx] = 1.0
+				if bcount > 1:
+					lateral_ctrl = (float(fire_barrel_idx) - (float(bcount) - 1.0) * 0.5) * bdata.barrel_spacing
 					# Flash the firing head and reset its per-barrel cooldown
 					# (if tracked) so the auto-fire branch stays in sync.
 					if combat.turret_barrel_fire_flash.has(grid_pos):
 						var bff: Array = combat.turret_barrel_fire_flash[grid_pos]
-						if idx < bff.size():
-							bff[idx] = 0.1
+						if fire_barrel_idx < bff.size():
+							bff[fire_barrel_idx] = 0.1
 					if combat.turret_barrel_cooldowns.has(grid_pos):
 						var bcd: Array = combat.turret_barrel_cooldowns[grid_pos]
-						if idx < bcd.size():
-							bcd[idx] = bdata.attack_speed * fire_reload_mult
-					_control_barrel_idx[grid_pos] = (idx + 1) % bcount
+						if fire_barrel_idx < bcd.size():
+							bcd[fire_barrel_idx] = bdata.attack_speed * fire_reload_mult
+					_control_barrel_idx[grid_pos] = (fire_barrel_idx + 1) % bcount
 				var fire_pos: Vector2 = turret_world + aim_dir_ctrl * barrel_length + aim_perp_ctrl * lateral_ctrl
 				var fire_max_range: float = bdata.attack_range * main.GRID_SIZE + fire_range_bonus
 				# Always travel along the head's aim axis so bullets visibly
@@ -1387,13 +1410,14 @@ func _assign_path_to_enemy(enemy: Node2D) -> void:
 	enemy_grid.x = clampi(enemy_grid.x, 0, main.GRID_WIDTH - 1)
 	enemy_grid.y = clampi(enemy_grid.y, 0, main.GRID_HEIGHT - 1)
 
-	# Units should only target opposing-faction buildings, not their own
-	var exclude_faction: int = -1
+	# Units should only target opposing-faction buildings. DERELICT is
+	# neutral — neither side should chase abandoned blocks.
+	var target_faction: int = -1
 	if enemy.team == UnitData.Team.ENEMY:
-		exclude_faction = main.Faction.FEROX
+		target_faction = main.Faction.LUMINA
 	elif enemy.team == UnitData.Team.PLAYER:
-		exclude_faction = main.Faction.LUMINA
-	var nearest_building = _find_nearest_building(enemy_grid, exclude_faction)
+		target_faction = main.Faction.FEROX
+	var nearest_building = _find_nearest_building(enemy_grid, target_faction)
 	if nearest_building == null:
 		enemy.set_path(PackedVector2Array(), null)
 		return
@@ -1411,12 +1435,12 @@ func _assign_path_to_enemy(enemy: Node2D) -> void:
 	)
 
 
-func _find_nearest_building(from: Vector2i, exclude_faction: int = -1) -> Variant:
+func _find_nearest_building(from: Vector2i, target_faction: int = -1) -> Variant:
 	var nearest: Variant = null
 	var nearest_dist := 999999.0
 
 	for grid_pos in main.placed_buildings:
-		if exclude_faction >= 0 and main.get_building_faction(grid_pos) == exclude_faction:
+		if target_faction >= 0 and main.get_building_faction(grid_pos) != target_faction:
 			continue
 		var dx = abs(grid_pos.x - from.x)
 		var dy = abs(grid_pos.y - from.y)

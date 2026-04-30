@@ -3,7 +3,10 @@ extends Node
 # ============================================================
 # SAVE_MANAGER.GD - Map Save/Load System (Autoload)
 # ============================================================
-# Saves and loads maps as JSON files in user://maps/.
+# Sector maps live in user://maps/, save games + the campaign roster
+# live in user://saves/. The two used to share user://maps/, but a
+# launch-time migration moves any leftover .save.json / campaign.json
+# into user://saves/ on first run after the split.
 #
 # Two save modes:
 #   1. "Map only" — Just tiles (the terrain layout). Like a
@@ -14,17 +17,28 @@ extends Node
 #      A blank slate map template with enemy/player structures.
 #
 # Files are stored in Godot's user data directory:
-#   - Windows: %APPDATA%\Godot\app_userdata\Bacteriums\maps\
-#   - macOS:   ~/Library/Application Support/Godot/app_userdata/Bacteriums/maps/
-#   - Linux:   ~/.local/share/godot/app_userdata/Bacteriums/maps/
+#   - Windows: %APPDATA%\Godot\app_userdata\Bacteriums\{maps,saves}\
+#   - macOS:   ~/Library/Application Support/Godot/app_userdata/Bacteriums/{maps,saves}/
+#   - Linux:   ~/.local/share/godot/app_userdata/Bacteriums/{maps,saves}/
 #
 # HOW TO SET UP:
 # 1. Go to Project → Project Settings → Autoload
 # 2. Add this script with the name "SaveManager"
 # ============================================================
 
+# `SAVE_DIR` (kept under the historical name for back-compat with
+# external callers like PlanetSelect) holds sector map files only —
+# `<sector_id>.sector.json`. Full-game saves and the campaign roster
+# live separately under `SAVES_DIR`.
 const SAVE_DIR := "user://maps/"
+const SAVES_DIR := "user://saves/"
 const SCHEMATIC_DIR := "res://data/user/Schematics/"
+## Global hints are authored once and active in every sector — stored
+## here so any sector landing can pull the same list. Bundled fallback
+## at `res://data/game/global_hints.json` is consulted when the user
+## file doesn't exist yet.
+const GLOBAL_HINTS_USER_PATH := "user://global_hints.json"
+const GLOBAL_HINTS_BUNDLED_PATH := "res://data/game/global_hints.json"
 
 ## Set to true when navigating to PlanetSelect from an active game.
 ## PlanetSelect checks this to show a "Back to Map" button.
@@ -68,12 +82,134 @@ var _sector_production_fractions: Dictionary = {}
 ## keep filling up past 4K while the player is away. Maps sector_id → int.
 var sector_storage_caps: Dictionary = {}
 
+## Global hint definitions (cross-sector). Loaded from disk on `_ready`,
+## merged into every sector's `_hints` on landing. Authored via the
+## script editor's hint tab — flipping a hint's `global` flag moves it
+## into this list.
+var global_hints: Array = []
+## Per-id runtime state for global hints. Same shape as SectorScript's
+## per-sector `_hint_runtime`, but lives at the campaign level so a hint
+## dismissed in sector A doesn't reactivate in sector B. Saved as part
+## of campaign.json.
+var global_hints_runtime: Dictionary = {}
+
+
+## Wipes every player save while leaving the editor's `/maps` directory
+## untouched. Removes `campaign.json`, every `.save.json`, and every
+## sector autosave (`.sector.json`) under `user://saves/`. Editor sector
+## templates live in `user://maps/` and are never touched.
+func reset_campaign() -> void:
+	# Clear in-memory campaign state so the next save round-trip writes
+	# a clean slate.
+	sector_resources.clear()
+	sector_production_rates.clear()
+	sector_production_timestamps.clear()
+	_sector_production_fractions.clear()
+	sector_storage_caps.clear()
+	active_sector_id = &""
+	pending_sector_id = &""
+	pending_map_path = ""
+	# Wipe everything under /saves.
+	var dir = DirAccess.open(SAVES_DIR)
+	if dir != null:
+		dir.list_dir_begin()
+		var fname = dir.get_next()
+		while fname != "":
+			if fname.ends_with(".save.json") \
+					or fname.ends_with(".sector.json") \
+					or fname == "campaign.json":
+				DirAccess.remove_absolute(SAVES_DIR + fname)
+			fname = dir.get_next()
+		dir.list_dir_end()
+	print("SaveManager: Campaign reset — /saves wiped, /maps preserved.")
+
+
+func _migrate_legacy_saves() -> void:
+	var dir = DirAccess.open(SAVE_DIR)
+	if dir == null:
+		return
+	# Build a lookup of known sector ids. `*.sector.json` filenames
+	# whose stem matches one of these are gameplay autosaves and should
+	# move to /saves; anything else (e.g. WFR.sector.json, the editor's
+	# short-name template) stays in /maps.
+	var known_sector_ids: Dictionary = {}
+	if Registry != null and "sectors" in Registry:
+		for sid in Registry.sectors.keys():
+			known_sector_ids[String(sid)] = true
+	dir.list_dir_begin()
+	var fname := dir.get_next()
+	while fname != "":
+		var legacy_path: String = SAVE_DIR + fname
+		# Wipe the legacy `_default` placeholder file outright — it was
+		# never a real sector, just leakage from the old
+		# sync_active_sector_resources fallback.
+		if fname == "_default.sector.json":
+			DirAccess.remove_absolute(legacy_path)
+			print("SaveManager: removed legacy _default.sector.json placeholder")
+			fname = dir.get_next()
+			continue
+		var should_move := false
+		if fname.ends_with(".save.json"):
+			should_move = true
+		elif fname == "campaign.json":
+			should_move = true
+		elif fname.ends_with(".sector.json"):
+			# Only move sector autosaves (file stem matches a known
+			# sector id). Editor templates with arbitrary names stay
+			# behind in /maps.
+			var stem: String = fname.replace(".sector.json", "")
+			if known_sector_ids.has(stem):
+				should_move = true
+		if should_move:
+			var dest_path: String = SAVES_DIR + fname
+			# `rename_absolute` is atomic on the same filesystem, which
+			# user:// always is. Don't clobber a file that already exists
+			# in the new location — assume the new one is authoritative.
+			if not FileAccess.file_exists(dest_path):
+				DirAccess.rename_absolute(legacy_path, dest_path)
+				print("SaveManager: migrated %s → %s" % [legacy_path, dest_path])
+			else:
+				DirAccess.remove_absolute(legacy_path)
+		fname = dir.get_next()
+	dir.list_dir_end()
+
+
+## Removes any `_default.sector.json` left over from the old fallback
+## key. Runs on launch as a one-time cleanup; safe to call repeatedly.
+func _purge_default_sector_files() -> void:
+	for d in [SAVE_DIR, SAVES_DIR]:
+		var p: String = d + "_default.sector.json"
+		if FileAccess.file_exists(p):
+			DirAccess.remove_absolute(p)
+			print("SaveManager: purged %s" % p)
+
+
+## Auto-wiper cadence: every N seconds, _process re-runs the per-sector
+## storage cap clamp so the global resource pool can never drift over
+## cap regardless of when (or whether) UIs poll it. Mirrors the live
+## `clamp_resources_to_cap` sweep that Main does on the active sector's
+## stockpile.
+const _AUTO_WIPE_INTERVAL: float = 1.0
+var _auto_wipe_timer: float = 0.0
+
 
 func _ready() -> void:
-	# Create the maps directory if it doesn't exist.
+	# Create the maps + saves directories if they don't exist.
 	# DirAccess is Godot's file system API.
 	DirAccess.make_dir_recursive_absolute(SAVE_DIR)
+	DirAccess.make_dir_recursive_absolute(SAVES_DIR)
 	DirAccess.make_dir_recursive_absolute(SCHEMATIC_DIR)
+	# One-time migration: older builds wrote save games + campaign.json
+	# into `user://maps/`. Move them into `user://saves/` so the maps dir
+	# only contains sector files going forward. Skips silently if there's
+	# nothing to move (i.e. fresh install or already migrated).
+	_migrate_legacy_saves()
+	# Purge any leftover `_default.sector.json` files from the legacy
+	# fallback path that's been removed.
+	_purge_default_sector_files()
+	# Pull global hint definitions off disk so any sector landing can
+	# merge them into its hint list synchronously.
+	load_global_hints_file()
 	# Wait for TechTree to finish threaded loading before loading campaign save
 	if TechTree.is_loaded:
 		call_deferred("load_campaign")
@@ -100,6 +236,29 @@ func _notification(what: int) -> void:
 
 func _on_tech_tree_ready() -> void:
 	load_campaign()
+
+
+## Auto-wiper. Ticks every _AUTO_WIPE_INTERVAL seconds and clamps every
+## sector's stockpile back to its recorded core-storage cap. Cheap (one
+## dict scan) so a small interval is fine. Caches with no recorded cap
+## are skipped — see `_clamp_sector_resources_to_caps` for the rule.
+func _process(delta: float) -> void:
+	_auto_wipe_timer += delta
+	if _auto_wipe_timer < _AUTO_WIPE_INTERVAL:
+		return
+	_auto_wipe_timer = 0.0
+	_clamp_sector_resources_to_caps()
+	# Live sector also gets a sync-back: if the in-game stockpile is at
+	# cap and the cache is over (e.g. the legacy save just got trimmed),
+	# main.resources should reflect the trimmed amount immediately.
+	if active_sector_id != &"" and sector_resources.has(active_sector_id):
+		var main = get_node_or_null("/root/Main")
+		if main and main.get("resources"):
+			var bucket: Dictionary = sector_resources[active_sector_id]
+			for key in bucket:
+				if main.resources.has(key) \
+						and int(main.resources[key]) > int(bucket[key]):
+					main.resources[key] = int(bucket[key])
 
 
 ## Check if a sector has fallen while the player was away.
@@ -179,7 +338,7 @@ func save_game(save_name: String) -> bool:
 		"drone_health": drone.health if drone else 100.0,
 	}
 
-	return _write_json(SAVE_DIR + save_name + ".save.json", data)
+	return _write_json(SAVES_DIR + save_name + ".save.json", data)
 
 
 # =========================
@@ -197,7 +356,7 @@ func load_game(save_name: String) -> bool:
 		push_warning("SaveManager: Can't find required nodes!")
 		return false
 
-	var data = _read_json(SAVE_DIR + save_name + ".save.json")
+	var data = _read_json(SAVES_DIR + save_name + ".save.json")
 	if data == null:
 		return false
 
@@ -300,17 +459,17 @@ func load_game(save_name: String) -> bool:
 
 ## Returns an array of available full save names.
 func list_saves() -> PackedStringArray:
-	return _list_files(".save.json")
+	return _list_files(SAVES_DIR, ".save.json")
 
 
 ## Returns an array of available sector names.
 func list_sectors() -> PackedStringArray:
-	return _list_files(".sector.json")
+	return _list_files(SAVE_DIR, ".sector.json")
 
 
-func _list_files(suffix: String) -> PackedStringArray:
+func _list_files(dir_path: String, suffix: String) -> PackedStringArray:
 	var result = PackedStringArray()
-	var dir = DirAccess.open(SAVE_DIR)
+	var dir = DirAccess.open(dir_path)
 	if dir == null:
 		return result
 
@@ -331,7 +490,7 @@ func _list_files(suffix: String) -> PackedStringArray:
 
 ## Deletes a full save file.
 func delete_save(save_name: String) -> bool:
-	var path = SAVE_DIR + save_name + ".save.json"
+	var path = SAVES_DIR + save_name + ".save.json"
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 		return true
@@ -358,7 +517,10 @@ func delete_sector(sector_name: String) -> bool:
 	# Persist the cleared pools so a crash before the next save doesn't
 	# resurrect them from the previous campaign.json.
 	save_campaign()
-	var path = SAVE_DIR + sector_name + ".sector.json"
+	# Only delete the player's autosave — never touch the editor
+	# template under `user://maps/`, which is treated as read-only by
+	# gameplay code.
+	var path = SAVES_DIR + sector_name + ".sector.json"
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 		return true
@@ -370,7 +532,12 @@ func delete_sector(sector_name: String) -> bool:
 # =========================
 
 ## Saves terrain + pre-placed buildings with factions (no resources/drone/health).
-func save_sector(sector_name: String) -> bool:
+## Saves a sector. By default this writes a *gameplay autosave* into
+## `user://saves/` — the file the player's progress lives in. The map
+## editor's "Save Sector" button passes `as_template=true` so its
+## output goes to `user://maps/` instead, where editor-authored
+## templates live alongside the bundled ones.
+func save_sector(sector_name: String, as_template: bool = false) -> bool:
 	var main = get_node_or_null("/root/Main")
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
@@ -533,9 +700,18 @@ func save_sector(sector_name: String) -> bool:
 				var collected_save := {}
 				for k in state.get("collected", {}):
 					collected_save[str(k)] = state["collected"][k]
+				# `paid` accumulates while the constructor is in the
+				# "building" phase — drains items from `collected` as the
+				# build timer advances. Without persisting it, a save in
+				# mid-build would re-pay items the player had already
+				# spent on the in-progress block on next load.
+				var paid_save := {}
+				for k in state.get("paid", {}):
+					paid_save[str(k)] = state["paid"][k]
 				constructor_state_save[_vec2i_to_str(pos)] = {
 					"selected_block": str(state.get("selected_block", &"")),
 					"collected": collected_save,
+					"paid": paid_save,
 					"phase": str(state.get("phase", "idle")),
 					"timer": state.get("timer", 0.0),
 				}
@@ -605,6 +781,92 @@ func save_sector(sector_name: String) -> bool:
 					"phase": str(state.get("phase", "idle")),
 				}
 
+	# --- Save mass driver state (per-anchor) + in-flight projectiles ---
+	# Without this, a launcher mid-cycle resets to idle on load: held
+	# payloads vanish, the head snaps back to 0°, and projectiles in
+	# the air disappear with whatever they were carrying.
+	var mass_driver_state_save := {}
+	var mass_driver_projectiles_save: Array = []
+	if logistics:
+		if "mass_driver_state" in logistics:
+			for pos in logistics.mass_driver_state:
+				var ms: Dictionary = logistics.mass_driver_state[pos]
+				var payload_save = null
+				if ms.get("payload") != null:
+					payload_save = {}
+					for k in ms["payload"]:
+						# Recurse one level for stored_items / stored_fluids so
+						# StringName item ids serialise correctly in JSON.
+						if k == "stored_items" or k == "stored_fluids":
+							var inner := {}
+							for ik in ms["payload"][k]:
+								inner[str(ik)] = ms["payload"][k][ik]
+							payload_save[str(k)] = inner
+						else:
+							payload_save[str(k)] = ms["payload"][k]
+				mass_driver_state_save[_vec2i_to_str(pos)] = {
+					"payload": payload_save,
+					"head_angle": float(ms.get("head_angle", 0.0)),
+					"target_angle": float(ms.get("target_angle", 0.0)),
+					"recoil": float(ms.get("recoil", 0.0)),
+					"phase": str(ms.get("phase", "idle")),
+					"cooldown": float(ms.get("cooldown", 0.0)),
+					"input_pos": _vec2i_to_str(ms.get("input_pos", Vector2i.ZERO)),
+				}
+		if "mass_driver_projectiles" in logistics:
+			for proj in logistics.mass_driver_projectiles:
+				var pd_raw: Dictionary = proj.get("payload_data", {})
+				var pd_save := {}
+				for k in pd_raw:
+					if k == "stored_items" or k == "stored_fluids":
+						var inner := {}
+						for ik in pd_raw[k]:
+							inner[str(ik)] = pd_raw[k][ik]
+						pd_save[str(k)] = inner
+					else:
+						pd_save[str(k)] = pd_raw[k]
+				mass_driver_projectiles_save.append({
+					"from_x": float(proj.get("from", Vector2.ZERO).x),
+					"from_y": float(proj.get("from", Vector2.ZERO).y),
+					"to_x": float(proj.get("to", Vector2.ZERO).x),
+					"to_y": float(proj.get("to", Vector2.ZERO).y),
+					"payload_data": pd_save,
+					"progress": float(proj.get("progress", 0.0)),
+					"source_origin": _vec2i_to_str(proj.get("source_origin", Vector2i.ZERO)),
+					"target_origin": _vec2i_to_str(proj.get("target_origin", Vector2i.ZERO)),
+				})
+
+	# --- Pipe contents (fluid amounts per cell) ---
+	var pipe_contents_save := {}
+	if logistics and "pipe_contents" in logistics:
+		for pos in logistics.pipe_contents:
+			var pipe: Dictionary = logistics.pipe_contents[pos]
+			pipe_contents_save[_vec2i_to_str(pos)] = {
+				"fluid_id": str(pipe.get("fluid_id", &"")),
+				"amount": float(pipe.get("amount", 0.0)),
+			}
+
+	# --- Junction items (items routing through 2-axis junctions) ---
+	var junction_items_save := {}
+	if logistics and "junction_items" in logistics:
+		for pos in logistics.junction_items:
+			var entry: Dictionary = logistics.junction_items[pos]
+			junction_items_save[_vec2i_to_str(pos)] = {
+				"item_id": str(entry.get("item_id", &"")),
+				"progress": float(entry.get("progress", 0.0)),
+				"entry_dir": int(entry.get("entry_dir", -1)),
+			}
+
+	# --- Belt unloader timer / round-robin pointer ---
+	var belt_unloader_state_save := {}
+	if logistics and "belt_unloader_state" in logistics:
+		for pos in logistics.belt_unloader_state:
+			var st: Dictionary = logistics.belt_unloader_state[pos]
+			belt_unloader_state_save[_vec2i_to_str(pos)] = {
+				"timer": float(st.get("timer", 0.0)),
+				"round_robin": int(st.get("round_robin", 0)),
+			}
+
 	# Save crane states from BuildingSystem
 	var crane_states_save := {}
 	if building_sys and "crane_states" in building_sys:
@@ -661,6 +923,11 @@ func save_sector(sector_name: String) -> bool:
 		"crane_states": crane_states_save,
 		"archive_holdings": _serialize_archive_holdings(),
 		"archive_decoder_state": _serialize_archive_decoder_state(),
+		"mass_driver_state": mass_driver_state_save,
+		"mass_driver_projectiles": mass_driver_projectiles_save,
+		"pipe_contents": pipe_contents_save,
+		"junction_items": junction_items_save,
+		"belt_unloader_state": belt_unloader_state_save,
 	}
 
 	# Save script runtime state if sector script exists
@@ -689,6 +956,13 @@ func save_sector(sector_name: String) -> bool:
 		waves_src = main.editor_waves
 	if not cfg_src.is_empty() or not spawns_src.is_empty() or not waves_src.is_empty():
 		data["waves_bundle"] = wm_script.serialize_all(cfg_src, spawns_src, waves_src)
+	# Persist the WaveManager runtime (`_running`, `_idx`, `_timer`,
+	# the baked `_expanded_waves`) so script-mode sectors keep ticking
+	# their wave timer across save/load — without this, returning to a
+	# sector that was mid-wave came up cold and the HUD wave panel
+	# never re-armed.
+	if wm_live and wm_live.has_method("serialize_runtime"):
+		data["waves_runtime"] = wm_live.serialize_runtime()
 
 	# Compute offline defense simulation (time before sector falls)
 	var sim_result = SectorDefenseSim.calculate_time_to_fall(main)
@@ -703,7 +977,8 @@ func save_sector(sector_name: String) -> bool:
 	# player is on the planet menu / in another sector / the game is closed.
 	capture_production_snapshot(StringName(sector_name), main)
 
-	return _write_json(SAVE_DIR + sector_name + ".sector.json", data)
+	var dir: String = SAVE_DIR if as_template else SAVES_DIR
+	return _write_json(dir + sector_name + ".sector.json", data)
 
 
 # =========================
@@ -863,22 +1138,37 @@ func load_sector_from_path(path: String) -> bool:
 		if String(wave_mgr_l.config.get("start_mode", "landing")) == "landing":
 			if wave_mgr_l.has_method("start"):
 				wave_mgr_l.call_deferred("start")
+		# Restore the live WaveManager runtime (running flag, current
+		# wave index, countdown, baked-out wave list) when loading from
+		# a USER autosave. Bundled res:// sectors ship with config but
+		# never with runtime state, so this only fires on user://maps/
+		# loads — same gate the script_runtime / hints_runtime paths use.
+		var is_user_save_w: bool = path.begins_with(SAVE_DIR) or path.begins_with("user://")
+		if is_user_save_w and data.has("waves_runtime") and data["waves_runtime"] is Dictionary \
+				and wave_mgr_l.has_method("load_runtime"):
+			wave_mgr_l.call_deferred("load_runtime", data["waves_runtime"])
 	elif main.get("editor_wave_config") != null:
 		main.editor_wave_config = bundle.get("config", {})
 		main.editor_wave_spawns = bundle.get("spawn_points", [])
 		main.editor_waves = bundle.get("waves", [])
 
+	# --- Rebuild building_origins from grid_size FIRST so health restore
+	# can normalise per-anchor (one HP entry per building, not per tile).
+	_rebuild_building_origins(main)
+
 	# --- Restore building health (use saved values if present, else max_health) ---
 	if data.has("building_health") and data["building_health"] is Dictionary:
 		_deserialize_building_health(main, data["building_health"])
 	else:
+		var seen_anchors: Dictionary = {}
 		for grid_pos in main.placed_buildings:
-			var block_data = Registry.get_block(main.placed_buildings[grid_pos])
+			var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+			if seen_anchors.has(anchor):
+				continue
+			seen_anchors[anchor] = true
+			var block_data = Registry.get_block(main.placed_buildings[anchor])
 			if block_data:
-				main.building_health[grid_pos] = block_data.max_health
-
-	# --- Rebuild building_origins from grid_size ---
-	_rebuild_building_origins(main)
+				main.building_health[anchor] = block_data.max_health
 
 	# --- Restore resources (if saved, e.g. from autosave) ---
 	# Bundled res:// sectors can ship with a `resources` block baked in
@@ -1066,9 +1356,13 @@ func load_sector_from_path(path: String) -> bool:
 				var collected := {}
 				for k in saved.get("collected", {}):
 					collected[StringName(k)] = int(saved["collected"][k])
+				var paid := {}
+				for k in saved.get("paid", {}):
+					paid[StringName(k)] = int(saved["paid"][k])
 				load_logistics.constructor_state[pos] = {
 					"selected_block": StringName(saved.get("selected_block", "")),
 					"collected": collected,
+					"paid": paid,
 					"phase": str(saved.get("phase", "idle")),
 					"timer": float(saved.get("timer", 0.0)),
 				}
@@ -1118,6 +1412,87 @@ func load_sector_from_path(path: String) -> bool:
 				load_logistics.unloader_state[pos] = {
 					"payload": payload,
 					"phase": str(saved.get("phase", "idle")),
+				}
+		# --- Mass driver state ---
+		if "mass_driver_state" in load_logistics and data.has("mass_driver_state") and data["mass_driver_state"] is Dictionary:
+			load_logistics.mass_driver_state.clear()
+			for key in data["mass_driver_state"]:
+				var pos: Vector2i = _str_to_vec2i(key)
+				var saved = data["mass_driver_state"][key]
+				var payload = null
+				if saved.get("payload") != null:
+					payload = {}
+					for k in saved["payload"]:
+						if k == "stored_items" or k == "stored_fluids":
+							var inner := {}
+							for ik in saved["payload"][k]:
+								inner[StringName(ik)] = saved["payload"][k][ik]
+							payload[k] = inner
+						else:
+							payload[k] = saved["payload"][k]
+				load_logistics.mass_driver_state[pos] = {
+					"payload": payload,
+					"head_angle": float(saved.get("head_angle", 0.0)),
+					"target_angle": float(saved.get("target_angle", 0.0)),
+					"recoil": float(saved.get("recoil", 0.0)),
+					"phase": str(saved.get("phase", "idle")),
+					"cooldown": float(saved.get("cooldown", 0.0)),
+					"input_pos": _str_to_vec2i(str(saved.get("input_pos", "0,0"))),
+				}
+		if "mass_driver_projectiles" in load_logistics and data.has("mass_driver_projectiles") and data["mass_driver_projectiles"] is Array:
+			load_logistics.mass_driver_projectiles.clear()
+			for proj_raw in data["mass_driver_projectiles"]:
+				if not (proj_raw is Dictionary):
+					continue
+				var saved: Dictionary = proj_raw
+				var pd_raw: Dictionary = saved.get("payload_data", {})
+				var pd := {}
+				for k in pd_raw:
+					if k == "stored_items" or k == "stored_fluids":
+						var inner := {}
+						for ik in pd_raw[k]:
+							inner[StringName(ik)] = pd_raw[k][ik]
+						pd[k] = inner
+					else:
+						pd[k] = pd_raw[k]
+				load_logistics.mass_driver_projectiles.append({
+					"from": Vector2(float(saved.get("from_x", 0.0)), float(saved.get("from_y", 0.0))),
+					"to": Vector2(float(saved.get("to_x", 0.0)), float(saved.get("to_y", 0.0))),
+					"payload_data": pd,
+					"progress": float(saved.get("progress", 0.0)),
+					"source_origin": _str_to_vec2i(str(saved.get("source_origin", "0,0"))),
+					"target_origin": _str_to_vec2i(str(saved.get("target_origin", "0,0"))),
+				})
+		# --- Pipe fluid contents ---
+		if "pipe_contents" in load_logistics and data.has("pipe_contents") and data["pipe_contents"] is Dictionary:
+			load_logistics.pipe_contents.clear()
+			for key in data["pipe_contents"]:
+				var pos: Vector2i = _str_to_vec2i(key)
+				var saved = data["pipe_contents"][key]
+				load_logistics.pipe_contents[pos] = {
+					"fluid_id": StringName(saved.get("fluid_id", "")),
+					"amount": float(saved.get("amount", 0.0)),
+				}
+		# --- Junction-routed items ---
+		if "junction_items" in load_logistics and data.has("junction_items") and data["junction_items"] is Dictionary:
+			load_logistics.junction_items.clear()
+			for key in data["junction_items"]:
+				var pos: Vector2i = _str_to_vec2i(key)
+				var saved = data["junction_items"][key]
+				load_logistics.junction_items[pos] = {
+					"item_id": StringName(saved.get("item_id", "")),
+					"progress": float(saved.get("progress", 0.0)),
+					"entry_dir": int(saved.get("entry_dir", -1)),
+				}
+		# --- Belt unloader timer / round-robin pointer ---
+		if "belt_unloader_state" in load_logistics and data.has("belt_unloader_state") and data["belt_unloader_state"] is Dictionary:
+			load_logistics.belt_unloader_state.clear()
+			for key in data["belt_unloader_state"]:
+				var pos: Vector2i = _str_to_vec2i(key)
+				var saved = data["belt_unloader_state"][key]
+				load_logistics.belt_unloader_state[pos] = {
+					"timer": float(saved.get("timer", 0.0)),
+					"round_robin": int(saved.get("round_robin", 0)),
 				}
 
 	# --- Restore crane states ---
@@ -1177,8 +1552,13 @@ func load_sector_from_path(path: String) -> bool:
 	return true
 
 
-## Loads a sector from user://maps/ by name.
+## Loads a sector by name. Prefers the player's autosave under
+## `user://saves/` so an in-progress run resumes; falls back to the
+## editor template under `user://maps/` if no autosave exists.
 func load_sector(sector_name: String) -> bool:
+	var save_path: String = SAVES_DIR + sector_name + ".sector.json"
+	if FileAccess.file_exists(save_path):
+		return load_sector_from_path(save_path)
 	return load_sector_from_path(SAVE_DIR + sector_name + ".sector.json")
 
 
@@ -1378,8 +1758,14 @@ func _deserialize_buildings(main: Node2D, buildings_data: Dictionary) -> void:
 
 
 func _deserialize_building_health(main: Node2D, health_data: Dictionary) -> void:
+	# Health is now per-building (anchor only). Modern saves only store
+	# the anchor entry; legacy saves stored one per tile, but they were
+	# all written together at placement so any divergence is small. We
+	# load every entry as-is; anchors get their saved value, non-anchor
+	# tile entries become harmless orphans (reads always look up the
+	# anchor via building_origins).
 	for pos_str in health_data:
-		var grid_pos = _str_to_vec2i(pos_str)
+		var grid_pos: Vector2i = _str_to_vec2i(pos_str)
 		main.building_health[grid_pos] = float(health_data[pos_str])
 
 
@@ -1492,20 +1878,101 @@ func _deserialize_script_steps(main_node: Node2D, steps_data: Array) -> void:
 		se.set_script_data(steps_data)
 
 
+# =========================
+# GLOBAL HINTS
+# =========================
+
+## Reads global hint definitions from `user://global_hints.json`, falling
+## back to the bundled `res://data/game/global_hints.json` (which lets a
+## fresh install ship with a default global-hints set, no save required).
+## Result lives in `global_hints` and is merged into every sector's hint
+## list at landing time.
+func load_global_hints_file() -> void:
+	global_hints.clear()
+	var path: String = ""
+	if FileAccess.file_exists(GLOBAL_HINTS_USER_PATH):
+		path = GLOBAL_HINTS_USER_PATH
+	elif FileAccess.file_exists(GLOBAL_HINTS_BUNDLED_PATH):
+		path = GLOBAL_HINTS_BUNDLED_PATH
+	if path == "":
+		return
+	var f = FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return
+	var txt: String = f.get_as_text()
+	f.close()
+	var d = JSON.parse_string(txt)
+	if d is Array:
+		for h in d:
+			if h is Dictionary:
+				# Force the global flag on every entry — defensive in case
+				# a file was hand-edited and forgot to set it.
+				h["global"] = true
+				global_hints.append(h)
+
+
+## Writes the given hints array to the user-side global file. Called by
+## the script editor whenever the global-hints set changes; replaces the
+## in-memory `global_hints` so subsequent merges pick up the latest list.
+func save_global_hints_file(hints: Array) -> bool:
+	global_hints = hints.duplicate(true)
+	for h in global_hints:
+		if h is Dictionary:
+			h["global"] = true
+	var f = FileAccess.open(GLOBAL_HINTS_USER_PATH, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_string(JSON.stringify(global_hints, "\t"))
+	f.close()
+	return true
+
+
+## Returns "pending", "active", or "dismissed" for a global hint id —
+## same vocabulary SectorScript uses for per-sector hint runtime.
+func get_global_hint_state(id: String) -> String:
+	return String(global_hints_runtime.get(id, {}).get("state", "pending"))
+
+
+## Records a global hint's runtime state. Persists to disk via
+## `save_campaign` so the dismissal carries across sectors / sessions.
+func set_global_hint_runtime(id: String, runtime: Dictionary) -> void:
+	global_hints_runtime[id] = runtime.duplicate(true)
+	save_campaign()
+
+
+## Returns the runtime entry for a global hint, or an empty Dictionary if
+## none exists yet. Used by SectorScript when seeding `_hint_runtime` for
+## merged-in globals so a previously-active hint resumes mid-flight.
+func get_global_hint_runtime(id: String) -> Dictionary:
+	var v = global_hints_runtime.get(id, {})
+	if v is Dictionary:
+		return v.duplicate(true)
+	return {}
+
+
 func _serialize_hints() -> Array:
 	# Prefer in-game hints (live SectorScript) over editor staging.
+	# Global hints are stored in the global file — strip them out of the
+	# per-sector save so we don't double-persist (and so stale copies can't
+	# resurrect a deleted/edited global hint).
+	var raw: Array = []
 	var sector_script = get_node_or_null("/root/Main/SectorScript")
 	if sector_script and sector_script.has_method("get_hints"):
 		var live: Array = sector_script.get_hints()
 		if live.size() > 0:
-			return live
-	var main_node = get_node_or_null("/root/Main")
-	if main_node == null:
-		return []
-	var se = main_node.get("script_editor")
-	if se and se.has_method("get_hints_data"):
-		return se.get_hints_data()
-	return []
+			raw = live
+	if raw.is_empty():
+		var main_node = get_node_or_null("/root/Main")
+		if main_node != null:
+			var se = main_node.get("script_editor")
+			if se and se.has_method("get_hints_data"):
+				raw = se.get_hints_data()
+	var sector_only: Array = []
+	for h in raw:
+		if h is Dictionary and bool(h.get("global", false)):
+			continue
+		sector_only.append(h)
+	return sector_only
 
 
 # =========================
@@ -1564,8 +2031,12 @@ func sync_active_sector_resources() -> void:
 	if main == null or not main.get("resources"):
 		return
 	if active_sector_id == &"":
-		# No sector ID set — use a fallback key so resources are still accessible
-		active_sector_id = &"_default"
+		# No sector is active (map editor, planet select, pre-landing).
+		# Don't invent a `_default` placeholder — the legacy fallback
+		# leaked an `_default.sector.json` file every time an autosave
+		# fired without a real sector id, and downstream code already
+		# defends against that key. Just bail.
+		return
 	# Refresh the live cap every sync so placing/losing cores while
 	# playing keeps the offline accrual ceiling accurate.
 	if main.has_method("get_storage_cap_per_resource"):
@@ -1578,6 +2049,13 @@ func get_global_resources() -> Dictionary:
 	# Apply offline accrual so UIs that poll this see live-updating totals
 	# while the player is on the planet menu.
 	advance_offline_production()
+	# Defensive: re-clamp every sector against its recorded cap on each
+	# poll. The accrual loop already clamps as it adds, but in-place
+	# values can drift over cap from legacy saves, save-format changes,
+	# or a core being destroyed — and previously the clamp only ran at
+	# campaign-load time, so stale over-cap totals leaked into the pool
+	# for the rest of the session.
+	_clamp_sector_resources_to_caps()
 	var pool: Dictionary = {}
 	for sector_id in sector_resources:
 		for item_id in sector_resources[sector_id]:
@@ -1627,6 +2105,10 @@ func take_from_global_pool(item_id: StringName, amount: int) -> int:
 
 ## Saves campaign-level state: tech tree progress + per-sector resources.
 func save_campaign() -> bool:
+	# Trim before serialising so the on-disk pool can never persist an
+	# over-cap value. Pairs with the auto-wiper / get_global_resources
+	# clamps so every read AND write path enforces the cap.
+	_clamp_sector_resources_to_caps()
 	var data := {
 		"version": 1,
 		"type": "campaign",
@@ -1635,8 +2117,9 @@ func save_campaign() -> bool:
 		"sector_production_rates": _serialize_production_rates(),
 		"sector_production_timestamps": _serialize_production_timestamps(),
 		"sector_storage_caps": _serialize_storage_caps(),
+		"global_hints_runtime": global_hints_runtime.duplicate(true),
 	}
-	return _write_json(SAVE_DIR + "campaign.json", data)
+	return _write_json(SAVES_DIR + "campaign.json", data)
 
 
 func _serialize_storage_caps() -> Dictionary:
@@ -1703,13 +2186,23 @@ func advance_offline_production() -> void:
 		var elapsed: float = now - last
 		if elapsed <= 0.0:
 			continue
+		var cap: int = int(sector_storage_caps.get(sid, 0))
+		# No recorded storage cap for this sector means we have no idea
+		# what its core stockpile can actually hold — usually a legacy
+		# save written before the cap was tracked. Refusing to accrue
+		# (instead of accruing unbounded) prevents stale timestamps × a
+		# non-zero rate from generating millions of items on first load.
+		# The next save of this sector will record a cap and accrual
+		# resumes normally.
+		if cap <= 0:
+			sector_production_timestamps[sid] = now
+			continue
 		if not sector_resources.has(sid):
 			sector_resources[sid] = {}
 		if not _sector_production_fractions.has(sid):
 			_sector_production_fractions[sid] = {}
 		var bucket: Dictionary = sector_resources[sid]
 		var fracs: Dictionary = _sector_production_fractions[sid]
-		var cap: int = int(sector_storage_caps.get(sid, 0))
 		for item_id in rates:
 			var rate: float = float(rates[item_id])
 			if rate == 0.0:
@@ -1780,7 +2273,7 @@ func _deserialize_production_timestamps(data: Dictionary) -> void:
 
 ## Loads campaign-level state. Called automatically on startup.
 func load_campaign() -> bool:
-	var path = SAVE_DIR + "campaign.json"
+	var path = SAVES_DIR + "campaign.json"
 	if not FileAccess.file_exists(path):
 		return false
 	var data = _read_json(path)
@@ -1802,6 +2295,8 @@ func load_campaign() -> bool:
 		_deserialize_production_timestamps(data["sector_production_timestamps"])
 	if data.has("sector_storage_caps"):
 		_deserialize_storage_caps(data["sector_storage_caps"])
+	if data.has("global_hints_runtime") and data["global_hints_runtime"] is Dictionary:
+		global_hints_runtime = (data["global_hints_runtime"] as Dictionary).duplicate(true)
 	# Clamp any existing stockpile against its saved cap before the
 	# accrual pass — handles the "a core was destroyed last session"
 	# case, old saves that pre-date the cap, and any other over-cap

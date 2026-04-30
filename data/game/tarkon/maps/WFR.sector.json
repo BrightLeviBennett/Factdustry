@@ -11,10 +11,13 @@
 	},
 	"archive_holdings": {
 		"10,78": "archive_better_turrets",
-		"15,12": "archive_better_units",
+		"15,12": "archive_naval_units",
 		"168,12": "archive_payload_systems",
 		"68,12": "",
 		"9,78": ""
+	},
+	"belt_unloader_state": {
+
 	},
 	"block_storage": {
 
@@ -2598,7 +2601,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777075825.19629
+		"timestamp": 1777585458.50439
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -22608,8 +22611,16 @@
 	},
 	"grid_height": 100,
 	"grid_width": 200,
+	"hints": [],
+	"junction_items": {
+
+	},
 	"linked_pairs": [],
 	"loader_state": {
+
+	},
+	"mass_driver_projectiles": [],
+	"mass_driver_state": {
 
 	},
 	"ore_tiles": {
@@ -22692,51 +22703,18 @@
 	"payload_items": {
 
 	},
+	"pipe_contents": {
+
+	},
 	"player_units": [],
 	"refabricator_state": {
 
 	},
 	"resources": {
-	},
-	"script_runtime": {
-		"core_counts": {
-
-		},
-		"core_unit_mined_counts": {
-
-		},
-		"current_step": -1,
-		"decoded_archive_counts": {
-
-		},
-		"deposited_baselines": {
-
-		},
-		"disabled_buildings": [],
-		"ferox_blocks_destroyed_counts": {
-
-		},
-		"hidden_tiles": [],
-		"mined_counts": {
-
-		},
-		"placed_baselines": {
-
-		},
-		"placed_counts": {
-
-		},
-		"produced_counts": {
-
-		},
-		"script_running": false,
-		"step_wait_timer": 0.0,
-		"units_destroyed_counts": {
-
-		},
-		"units_produced_counts": {
-
-		}
+		"mat_copper": 994,
+		"mat_graphite": 574,
+		"mat_silicon": 379,
+		"mat_steel": 232
 	},
 	"script_steps": [
 		{

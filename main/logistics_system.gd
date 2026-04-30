@@ -173,6 +173,12 @@ var unloader_state := {}
 #   "payload": Dictionary or null — payload waiting to be launched
 #   "charge": float — charge progress (0.0 to 1.0)
 var mass_driver_state := {}
+# Per-origin last-print timestamp (ms) for the throttled MD diagnostic
+# logger added during the "MDs not accepting payloads" investigation.
+# Each line keys on origin so two MDs can both log without one starving
+# the other; the throttle window keeps the console readable.
+var _md_dbg_last: Dictionary = {}
+const _MD_DBG_THROTTLE_MS: int = 1000
 
 # --- BELT UNLOADER STATE ---
 # Key = Vector2i (unloader origin)
@@ -201,8 +207,9 @@ const PIPE_PUSH_AMOUNT := 25.0
 const PIPE_LEAK_RATE := 5.0
 
 # --- VISUAL ---
+## Tuned at the 64-px baseline grid. Actual drawn size = constant *
+## main.SPRITE_SCALE_FACTOR so items scale with GRID_SIZE.
 const ITEM_RADIUS := 8.0
-## Size in pixels to draw item textures on conveyors (width & height)
 const ITEM_TEXTURE_SIZE := 20.0
 
 
@@ -541,12 +548,20 @@ func _get_entry_dir_from_building(out_pos: Vector2i, origin: Vector2i, grid_size
 # FLUID PUMP LOGIC
 # =========================
 
+## Pumps now produce continuously (instead of one big batch per cycle).
+## The output rate per second is:
+##   rate = PUMP_BASE_RATE_PER_SEC × (water_depth / 2.0) × power_efficiency
+## Shallower water (depth 1) → half rate, medium (2) → full rate, deep
+## (3) → 1.5×. Power efficiency comes from PowerSystem so a brownout
+## slows the pump linearly the same way drills / factories do.
+const PUMP_BASE_RATE_PER_SEC: float = 12.5
 func _update_pumps(delta: float) -> void:
 	var processed_pumps := {}
 	var terrain = _terrain_ref()
 	if terrain == null:
 		return
 	var sector_script = _sector_script_ref()
+	var power_sys = _power_sys_ref()
 
 	for grid_pos in main.placed_buildings:
 		var block_id = main.placed_buildings[grid_pos]
@@ -568,60 +583,75 @@ func _update_pumps(delta: float) -> void:
 		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
 			continue
 
-		if not pump_timers.has(anchor):
-			var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
-			pump_timers[anchor] = cycle_time
-
-		# Check for liquid underneath any tile of the pump
+		# Check for liquid underneath any tile of the pump and pick the
+		# DEEPEST tile beneath the footprint — pumps with one tile in
+		# shallows and another in deep water output at the deep rate.
 		var liquid_tile: Variant = null
+		var max_depth: int = 0
 		for x in range(data.grid_size.x):
 			for y in range(data.grid_size.y):
 				var check_pos: Vector2i = anchor + Vector2i(x, y)
 				var lt = terrain.get_liquid_at(check_pos)
 				if lt != null and lt.extracted_liquid != &"":
-					liquid_tile = lt
-					break
-			if liquid_tile != null:
-				break
+					if liquid_tile == null:
+						liquid_tile = lt
+					if terrain.has_method("get_water_depth_at"):
+						var d_here: int = int(terrain.get_water_depth_at(check_pos))
+						if d_here > max_depth:
+							max_depth = d_here
 
 		if liquid_tile == null or liquid_tile.extracted_liquid == &"":
 			continue
 
-		pump_timers[anchor] -= delta
-		if pump_timers[anchor] > 0:
-			continue
+		# A floor tile with `is_liquid` but no depth reading (e.g. lava
+		# or a custom tile with no BFS depth entry) defaults to medium
+		# depth so it still produces something.
+		if max_depth <= 0:
+			max_depth = 2
 
-		var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
-		pump_timers[anchor] = cycle_time
+		# Power efficiency.
+		var net_eff: float = 1.0
+		if power_sys and power_sys.has_method("get_electrical_efficiency"):
+			net_eff = clampf(float(power_sys.get_electrical_efficiency(anchor)), 0.0, 1.0)
 
-		# Don't produce if storage is full
+		# Don't waste production into a full storage.
 		if _is_storage_full(anchor, data):
 			continue
 
-		# Push to all edge cells of the multi-tile building
-		var rot: int = main.building_rotation.get(anchor, 0)
-		var pushed := false
-		# Collect all cells adjacent to the building's edge
-		var edge_neighbors: Array[Dictionary] = []
+		# Continuous flow: amount to push this frame, scaled by depth
+		# (shallow → 0.5×, medium → 1×, deep → 1.5×) and power.
+		var depth_mult: float = float(max_depth) / 2.0
+		var amount: float = PUMP_BASE_RATE_PER_SEC * depth_mult * net_eff * delta
+		if amount <= 0.0:
+			continue
+
+		# Try every edge cell once; push as much as each pipe accepts
+		# until either we run out of amount or no pipe will take more.
+		var fluid_id: StringName = liquid_tile.extracted_liquid
+		var pushed_any := false
 		for x in range(data.grid_size.x):
 			for y in range(data.grid_size.y):
 				var tile: Vector2i = anchor + Vector2i(x, y)
 				for dir in range(4):
 					var neighbor: Vector2i = tile + DIR_VECTORS[dir]
-					# Only push to cells outside the building
-					if main.building_origins.get(neighbor, neighbor) != anchor:
-						if _is_cross_faction(tile, neighbor):
-							continue
-						edge_neighbors.append({"pos": neighbor, "dir": dir})
-
-		for edge in edge_neighbors:
-			var pump_entry_dir: int = (edge["dir"] + 2) % 4
-			if _try_push_item(edge["pos"], liquid_tile.extracted_liquid, pump_entry_dir):
-				pushed = true
+					if main.building_origins.get(neighbor, neighbor) == anchor:
+						continue
+					if _is_cross_faction(tile, neighbor):
+						continue
+					if not _is_pipe_cell(neighbor):
+						continue
+					if _add_fluid_to_pipe(neighbor, fluid_id, amount):
+						pushed_any = true
+					if pushed_any:
+						break
+				if pushed_any:
+					break
+			if pushed_any:
 				break
-		# If couldn't push to any output, try storing
-		if not pushed:
-			_add_to_storage(anchor, liquid_tile.extracted_liquid, data)
+		# If no pipe was available, accumulate into the pump's own
+		# fluid storage so the production doesn't just evaporate.
+		if not pushed_any:
+			_add_to_storage(anchor, fluid_id, data)
 
 
 ## Attempts to place an item or fluid onto a cell.
@@ -665,7 +695,34 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 	if _try_accept_turret_ammo(grid_pos, item_id):
 		return true
 
+	# Accept into a "storage"-tagged container (e.g. small_container)
+	# from any side — same conveyor-fed semantics as factory inputs,
+	# but it just stockpiles into the block's internal storage. Lets
+	# players fill containers directly off a belt instead of needing
+	# a payload loader.
+	if _try_accept_storage_block(grid_pos, item_id):
+		return true
+
 	return false
+
+
+## Routes a conveyor-fed item into a storage-tagged block's internal
+## storage, respecting the block's `max_stored_items` cap. Returns true
+## on success so the conveyor consumes the item.
+func _try_accept_storage_block(grid_pos: Vector2i, item_id: StringName) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or not data.tags.has("storage"):
+		return false
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	# Items only — fluids would need a fluid-storage container variant
+	# and a different cap field.
+	if Registry.get_fluid(item_id) != null:
+		return false
+	return _add_to_storage(anchor, item_id, data)
 
 
 # =========================
@@ -806,15 +863,35 @@ func _update_conveyors(delta: float) -> void:
 					speed = data.transport_speed
 			item["progress"] = minf(item["progress"] + speed * delta, 1.0)
 
-	# Pre-decide exit direction for router items so they animate correctly
+	# Pre-decide exit direction for router items so they animate correctly.
+	# Items keep their cached exit_dir as long as that direction still has
+	# an accepting destination — but if the chosen output gets blocked
+	# while the item is still traversing the router AND a different
+	# output is now valid, we re-pick so the animation matches where the
+	# item is actually going to end up. A fully-blocked router still
+	# keeps its current exit_dir so a stalled item doesn't visually
+	# flicker between edges.
 	for grid_pos in conveyor_items:
 		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
 			continue
+		if not _is_router_cell(grid_pos):
+			continue
 		var item = conveyor_items[grid_pos]
-		if _is_router_cell(grid_pos) and not item.has("exit_dir"):
-			var exit_dir: int = _pick_router_exit(grid_pos, item)
-			if exit_dir >= 0:
-				item["exit_dir"] = exit_dir
+		var current_exit: int = item.get("exit_dir", -1)
+		if current_exit >= 0 and _router_exit_accepts(grid_pos, current_exit, item["item_id"]):
+			continue
+		var picked: int = _pick_router_exit(grid_pos, item)
+		if picked < 0:
+			continue
+		# Only overwrite a previously chosen exit when the new direction is
+		# *actually* accepting. Otherwise the picker's fallback (rr_start
+		# when all blocked) would silently flip the animation while still
+		# being unable to deliver — leaving the item to oscillate between
+		# edges every frame.
+		if current_exit < 0:
+			item["exit_dir"] = picked
+		elif _router_exit_accepts(grid_pos, picked, item["item_id"]):
+			item["exit_dir"] = picked
 
 	# Advance junction perpendicular-axis items too
 	for grid_pos in junction_items:
@@ -899,6 +976,13 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 
 	# Turret accepts matching ammo from any side
 	if _try_accept_turret_ammo(to, item_id):
+		return true
+
+	# Storage container accepts any non-fluid item from any side
+	# (small_container et al). Same fallback the drill / drone push
+	# path uses; without this, items riding a conveyor INTO the
+	# container's footprint never get consumed by the container.
+	if _try_accept_storage_block(to, item_id):
 		return true
 
 	return false
@@ -1127,6 +1211,25 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 ## Picks the exit direction for a router item without transferring it.
 ## Advances the round-robin index so subsequent items go different ways.
 ## Returns -1 if no output is available.
+## True if the cell `grid_pos + DIR_VECTORS[dir]` will currently accept
+## `item_id` via the router's animation contract — i.e. either an empty
+## same-faction conveyor cell, or a non-conveyor block whose input side
+## faces back toward the router and accepts this item. Used by the
+## pre-decide pass to decide whether the cached exit_dir is still valid.
+func _router_exit_accepts(grid_pos: Vector2i, dir: int, item_id: StringName) -> bool:
+	if dir < 0 or dir > 3:
+		return false
+	var next_pos: Vector2i = grid_pos + DIR_VECTORS[dir]
+	if _is_cross_faction(grid_pos, next_pos):
+		return false
+	if _is_conveyor_cell(next_pos) and not conveyor_items.has(next_pos):
+		return true
+	if main.placed_buildings.has(next_pos) and not _is_conveyor_cell(next_pos):
+		var entry_dir: int = (dir + 2) % 4
+		return _could_block_accept_item(next_pos, item_id, entry_dir)
+	return false
+
+
 func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
 	var item_entry_dir: int = item.get("entry_dir", -1)
 	var exclude_dir: int = item_entry_dir
@@ -1580,6 +1683,136 @@ func _try_transfer_payload(to: Vector2i, payload_data: Dictionary, entry_dir: in
 	return true
 
 
+## Hands a payload directly into an adjacent loader / unloader / mass driver
+## / deconstructor, bypassing payload conveyors. Used by every block that
+## outputs payloads so two of these blocks placed next to each other can
+## hand off without an intermediate belt.
+##
+## Returns true iff the neighbour at `out_pos` accepted the payload.
+## `source_origin` is the anchor of the block doing the handoff — used to
+## reject handing back into yourself (multi-tile blocks have multiple
+## perimeter cells that all map to the same anchor).
+func _try_handoff_payload_to_block(out_pos: Vector2i, payload_data: Dictionary, source_origin: Vector2i) -> bool:
+	var anchor: Vector2i = main.building_origins.get(out_pos, out_pos)
+	if anchor == source_origin:
+		return false
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	if _is_cross_faction(source_origin, anchor):
+		return false
+	var block_id: StringName = main.placed_buildings.get(anchor, &"")
+	if block_id == &"":
+		return false
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return false
+
+	var sector_script = _sector_script_ref()
+	if sector_script and sector_script.is_building_disabled(anchor):
+		return false
+
+	var rot: int = main.building_rotation.get(anchor, 0)
+
+	# --- LOADER input — accepts a storage-tagged building payload from
+	# any adjacent face. The belt-fed pickup path still enforces "back
+	# face only" so a payload conveyor can't dump into the loader's
+	# output side, but a direct hand-off from another block (MD,
+	# unloader, etc.) can come from any adjacent perimeter cell.
+	if data.tags.has("payload_loader") or data.tags.has("freight_loader"):
+		if payload_data.get("type", "") != "building":
+			return false
+		var t_id := StringName(payload_data.get("block_id", ""))
+		var t_data = Registry.get_block(t_id)
+		if t_data == null or not t_data.tags.has("storage"):
+			return false
+		# Don't accept hand-offs through the loader's own FRONT face —
+		# that's where it OUTPUTS filled containers, so a producer
+		# placed directly in front would race the loader's own push.
+		var front_rot: int = rot
+		var front_cells: Array[Vector2i] = _get_front_edge(anchor, data.grid_size, front_rot)
+		if front_cells.has(out_pos):
+			return false
+		if not loader_state.has(anchor):
+			loader_state[anchor] = {"payload": null, "phase": "idle", "fill_target": {}}
+		var st: Dictionary = loader_state[anchor]
+		if st.get("payload") != null:
+			return false
+		st["payload"] = payload_data
+		st["phase"] = "filling"
+		var stored: Dictionary = payload_data.get("stored_items", {})
+		var total_stored := 0
+		for sid in stored:
+			total_stored += int(stored[sid])
+		var capacity: int = t_data.max_stored_items if t_data.max_stored_items > 0 else 0
+		st["fill_target"] = {"_capacity": capacity, "_current": total_stored}
+		return true
+
+	# --- UNLOADER input — any perimeter cell, only storage-tagged buildings,
+	# only when the unloader has no held payload.
+	if data.tags.has("payload_unloader") or data.tags.has("freight_unloader"):
+		if payload_data.get("type", "") != "building":
+			return false
+		var t_id := StringName(payload_data.get("block_id", ""))
+		var t_data = Registry.get_block(t_id)
+		if t_data == null or not t_data.tags.has("storage"):
+			return false
+		if not unloader_state.has(anchor):
+			unloader_state[anchor] = {"payload": null, "phase": "idle", "internal_storage": {}}
+		var st: Dictionary = unloader_state[anchor]
+		if st.get("payload") != null:
+			return false
+		st["payload"] = payload_data
+		st["phase"] = "transferring"
+		return true
+
+	# --- MASS DRIVER input — any perimeter cell EXCEPT the front (which is
+	# the launch face). Skips MDs that already hold a payload. Bumps the
+	# state straight to `rotating_to_output` so `_update_mass_drivers` will
+	# pick it up next tick (matches what the regular pickup branch does).
+	if data.tags.has("mass_driver"):
+		var front_cells: Array[Vector2i] = _get_front_edge(anchor, data.grid_size, rot)
+		if front_cells.has(out_pos):
+			return false
+		if not mass_driver_state.has(anchor):
+			mass_driver_state[anchor] = {
+				"payload": null, "head_angle": 0.0, "target_angle": 0.0,
+				"recoil": 0.0, "phase": "idle", "cooldown": 0.0,
+				"input_pos": Vector2i.ZERO,
+			}
+		var st: Dictionary = mass_driver_state[anchor]
+		if st.get("payload") != null:
+			return false
+		st["payload"] = payload_data
+		st["phase"] = "rotating_to_output"
+		return true
+
+	# --- DECONSTRUCTOR input — accepts on any adjacent perimeter for
+	# direct hand-offs. Belt-fed pickup still uses front face only (see
+	# `_update_deconstructors`) so output items don't collide with the
+	# input belt, but a direct neighbour-to-neighbour drop is fine.
+	if data.tags.has("deconstructor"):
+		if not deconstructor_state.has(anchor):
+			deconstructor_state[anchor] = {
+				"payload": null, "phase": "idle",
+				"timer": 0.0, "pending_items": {},
+			}
+		var st: Dictionary = deconstructor_state[anchor]
+		if st.get("payload") != null:
+			return false
+		var decon_time := 2.0
+		if payload_data.get("type", "") == "building":
+			var t_id := StringName(payload_data.get("block_id", ""))
+			var t_data = Registry.get_block(t_id)
+			if t_data != null and t_data.build_time > 0:
+				decon_time = t_data.build_time
+		st["payload"] = payload_data
+		st["phase"] = "deconstructing"
+		st["timer"] = decon_time
+		return true
+
+	return false
+
+
 # =========================
 # PIPE LOGIC
 # =========================
@@ -1787,7 +2020,8 @@ func _block_uses_storage(data: BlockData) -> bool:
 		or not data.side_outputs.is_empty() \
 		or not data.output_items.is_empty() \
 		or data.tags.has("pump") \
-		or data.tags.has("omnidirectional")
+		or data.tags.has("omnidirectional") \
+		or data.tags.has("storage")
 
 
 ## Adds an item or fluid to a building's internal storage.
@@ -2577,13 +2811,54 @@ func _update_constructors(delta: float) -> void:
 						break
 
 				if all_met:
-					# Consume collected items and start building
-					state["collected"] = {}
+					# Don't pre-consume — items drain gradually during the
+					# building phase so the player can see materials being
+					# spent in step with the on-block reveal animation.
 					state["phase"] = "building"
 					state["timer"] = target_data.build_time if target_data.build_time > 0 else 2.0
+					state["paid"] = {}
 
 			"building":
+				var selected_b: StringName = state["selected_block"]
+				var target_data_b = Registry.get_block(selected_b)
+				if target_data_b == null:
+					state["phase"] = "waiting"
+					state["selected_block"] = &""
+					continue
+				var bt: float = target_data_b.build_time if target_data_b.build_time > 0 else 2.0
+				if not state.has("paid") or not (state["paid"] is Dictionary):
+					state["paid"] = {}
+				# Compute how many of each item should have been paid by
+				# the time the next tick lands. If we can pay the delta,
+				# advance the timer and decrement `collected`. Otherwise
+				# stall — the player gets a stalled-build visual without
+				# losing any items they haven't covered yet.
+				var bt_safe: float = maxf(bt, 0.0001)
+				var done_pct_next: float = clampf((bt - (state["timer"] - delta)) / bt_safe, 0.0, 1.0)
+				var to_pay: Dictionary = {}
+				var enough := true
+				for raw_id_b in target_data_b.build_cost:
+					var sn_id_b := StringName(raw_id_b)
+					var total_b: int = int(target_data_b.build_cost[raw_id_b])
+					var need_b: int = int(ceil(float(total_b) * done_pct_next))
+					var paid_b: int = int(state["paid"].get(sn_id_b, 0))
+					var delta_pay: int = need_b - paid_b
+					if delta_pay <= 0:
+						continue
+					var have_b: int = int(state["collected"].get(sn_id_b, 0))
+					if have_b < delta_pay:
+						enough = false
+						break
+					to_pay[sn_id_b] = delta_pay
+				if not enough:
+					# Hold the timer here — wait for the missing items.
+					continue
 				state["timer"] -= delta
+				for sn_pay in to_pay:
+					state["collected"][sn_pay] = int(state["collected"][sn_pay]) - int(to_pay[sn_pay])
+					if int(state["collected"][sn_pay]) <= 0:
+						state["collected"].erase(sn_pay)
+					state["paid"][sn_pay] = int(state["paid"].get(sn_pay, 0)) + int(to_pay[sn_pay])
 				if state["timer"] <= 0:
 					# Build complete — try to output a building payload
 					var selected: StringName = state["selected_block"]
@@ -2621,6 +2896,7 @@ func _update_constructors(delta: float) -> void:
 					if pushed:
 						# Return to collecting — keep selected block for continuous production
 						state["phase"] = "collecting"
+						state["paid"] = {}
 					# else: stall — payload conveyor is full, try again next frame
 
 
@@ -3388,12 +3664,19 @@ func _update_loaders(_delta: float) -> void:
 				var capacity: int = target_data.max_stored_items if target_data.max_stored_items > 0 else 0
 
 				if capacity > 0 and total_stored >= capacity:
-					# Full — output the payload from front face only
+					# Full — output the payload from front face only.
+					# Try a direct hand-off into an adjacent unloader / MD /
+					# deconstructor first, then fall back to dropping onto a
+					# payload conveyor.
 					var rot: int = main.building_rotation.get(origin, 0)
 					var front_cells: Array[Vector2i] = _get_front_edge(origin, data.grid_size, rot)
 					for out_pos in front_cells:
 						if _is_cross_faction(origin, out_pos):
 							continue
+						if _try_handoff_payload_to_block(out_pos, payload_data, origin):
+							state["payload"] = null
+							state["phase"] = "idle"
+							break
 						var entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
 						if _try_push_payload(out_pos, payload_data, entry_dir):
 							state["payload"] = null
@@ -3462,9 +3745,15 @@ func _update_unloaders(_delta: float) -> void:
 
 		match state["phase"]:
 			"idle":
-				# Try to accept a storage-tagged building payload from ALL adjacent cells
-				# (the conveyor system blocks transfers INTO the unloader, so payloads
-				# stay on the conveyor and the unloader pulls them)
+				# Try to accept a storage-tagged building payload from
+				# adjacent cells where the conveyor is actually flowing
+				# INTO the unloader. Without the flow-direction check,
+				# the unloader would grab a payload sitting on a
+				# payload conveyor flowing AWAY from it (treating its
+				# own output side as an input). Compute each candidate
+				# conveyor's downstream cell — if that cell falls
+				# inside the unloader's footprint, this conveyor is
+				# feeding the unloader and we can grab from it.
 				var perimeter_u := _get_all_perimeter_cells(origin, data.grid_size)
 				for edge_pos in perimeter_u:
 					if _is_cross_faction(origin, edge_pos):
@@ -3474,6 +3763,17 @@ func _update_unloaders(_delta: float) -> void:
 						continue
 					if payload_items[conv_anchor_l]["progress"] < 1.0:
 						continue
+
+					# Skip conveyors whose flow doesn't terminate inside
+					# the unloader. `building_rotation` gives the cell's
+					# direction vector; the next cell along that vector
+					# must be one of our footprint cells.
+					var conv_data = Registry.get_block(main.placed_buildings.get(conv_anchor_l, &""))
+					if conv_data != null and conv_data.tags.has("payload") and conv_data.transport_speed > 0:
+						var conv_rot: int = main.building_rotation.get(conv_anchor_l, 0)
+						var downstream: Vector2i = conv_anchor_l + DIR_VECTORS[conv_rot]
+						if main.building_origins.get(downstream, downstream) != origin:
+							continue
 
 					var payload_data: Dictionary = payload_items[conv_anchor_l]["payload_data"]
 					if payload_data.get("type", "") != "building":
@@ -3534,6 +3834,11 @@ func _update_unloaders(_delta: float) -> void:
 						for out_pos in front_cells_t:
 							if _is_cross_faction(origin, out_pos):
 								continue
+							# Hand off directly to an adjacent loader / MD /
+							# deconstructor before falling back to a belt push.
+							if _try_handoff_payload_to_block(out_pos, payload_data, origin):
+								state["payload"] = null
+								break
 							var entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
 							if _try_push_payload(out_pos, payload_data, entry_dir):
 								state["payload"] = null
@@ -3575,6 +3880,48 @@ func _update_unloaders(_delta: float) -> void:
 # =========================
 
 ## Mass drivers accept payloads from adjacent conveyors, charge up, and launch to a linked partner.
+## No-op stub — was a throttled per-origin debug logger; kept in place so
+## existing call sites compile while staying silent. Args are intentionally
+## unused. Remove the call sites entirely once the logic is settled.
+func _md_dbg(_origin: Vector2i, _tag: String, _msg: String) -> void:
+	pass
+
+
+## Computes the dynamic power-use override (in watts) for a mass driver
+## with the given held payload. Returns 0 when no payload is loaded.
+## Weight model (per spec):
+##   tileWeight  = 8 w per tile of the held block / unit
+##   itemWeight  = 0.5 w per stored item
+##   fluidWeight = 1 w per 1.0 of stored fluid
+## Required power = floor(weight / 2). 1 w → 0, 2 w → 1, etc.
+func _mass_driver_power_for_payload(payload: Variant) -> int:
+	if payload == null:
+		return 0
+	if not (payload is Dictionary):
+		return 0
+	var p: Dictionary = payload
+	var weight: float = 0.0
+	var ptype: String = String(p.get("type", ""))
+	if ptype == "building":
+		var sx: int = int(p.get("grid_size_x", 1))
+		var sy: int = int(p.get("grid_size_y", 1))
+		weight += 8.0 * float(sx) * float(sy)
+	elif ptype == "unit":
+		# Units are flagged as "1 tile equivalent" so the chassis still
+		# costs something to launch even though they have no footprint.
+		weight += 8.0
+	# Items / fluids the held block was carrying when it was lifted
+	# (see Main.pickup_building's "stored_items"/"stored_fluids" fields).
+	var stored_items: Dictionary = p.get("stored_items", {})
+	for it_id in stored_items:
+		weight += 0.5 * float(int(stored_items[it_id]))
+	var stored_fluids: Dictionary = p.get("stored_fluids", {})
+	for fl_id in stored_fluids:
+		weight += float(stored_fluids[fl_id])
+	# floor(weight / 2)
+	return int(floor(weight / 2.0))
+
+
 func _update_mass_drivers(delta: float) -> void:
 	var power_sys = _power_sys_ref()
 	if not power_sys:
@@ -3613,27 +3960,77 @@ func _update_mass_drivers(delta: float) -> void:
 		var cooldown_time: float = data.build_time if data.build_time > 0 else 2.0
 		var rotate_speed: float = 3.0  # radians/sec
 
+		# --- Dynamic power draw based on currently-loaded payload weight.
+		# Formula (per spec):
+		#   tileWeight  = 8 w  per tile
+		#   itemWeight  = 0.5 w per stored item
+		#   fluidWeight = 1 w  per 1.0 stored fluid
+		# Required power = floor(weight / 2) — 2 w costs 1 power, 1 w
+		# rounds down to 0. Idle drivers fall back to the static
+		# `electrical_power_use` from BlockData (no payload, no extra
+		# draw on top of the chassis baseline).
+		var weight_power: int = _mass_driver_power_for_payload(state.get("payload"))
+		if weight_power > 0:
+			power_sys.set_dynamic_power_use(origin, float(weight_power) + data.electrical_power_use)
+		else:
+			power_sys.clear_dynamic_power_use(origin)
+		# Network efficiency drives the MD's cycle speed — same model
+		# the drills / factories use. 1.0 = full speed, 0.5 = half
+		# speed (cooldown takes twice as long, head rotates half as
+		# fast), 0.0 = fully starved (no progression at all). Avoids
+		# the all-or-nothing fire gate we had before, which locked the
+		# whole pair the moment the network tipped slightly into
+		# overdraw from the MDs' own draw.
+		var net_eff: float = 1.0
+		if power_sys.has_method("get_electrical_efficiency"):
+			net_eff = clampf(float(power_sys.get_electrical_efficiency(origin)), 0.0, 1.0)
+		var is_powered: bool = net_eff > 0.0
+
 		# Helper: snap angle to nearest 90° (cardinal direction)
 		var snap_angle = func(a: float) -> float:
 			return roundf(a / (PI / 2.0)) * (PI / 2.0)
 
-		# Find role and partner
+		# Find role and partner. Normalise BOTH pair endpoints to anchors
+		# before comparing so links saved before the link-normalization
+		# fix (where pair endpoints could be any clicked cell of a
+		# multi-tile MD) still match the MD's own anchor here. Without
+		# this, a legacy save's link would fail every comparison and
+		# both drivers would silently sit in "idle" forever.
 		var is_input := false
 		var is_output := false
 		var partner: Variant = null
 		for pair in power_sys.linked_pairs:
-			if pair[0] == origin:
+			var a_anchor: Vector2i = main.building_origins.get(pair[0], pair[0])
+			var b_anchor: Vector2i = main.building_origins.get(pair[1], pair[1])
+			if a_anchor == origin:
 				is_input = true
-				partner = pair[1]
+				partner = b_anchor
 				break
-			elif pair[1] == origin:
+			elif b_anchor == origin:
 				is_output = true
-				partner = pair[0]
+				partner = a_anchor
 				break
+		_md_dbg(origin, "state",
+			"phase=%s payload=%s is_input=%s is_output=%s partner=%s powered=%s weight_pwr=%d cd=%.2f"
+			% [
+				str(state.get("phase", "?")),
+				"yes" if state.get("payload") != null else "no",
+				str(is_input), str(is_output),
+				"none" if partner == null else str(partner),
+				str(is_powered),
+				weight_power,
+				float(state.get("cooldown", 0.0)),
+			])
+
+		# Time-dilated tick — every progression below scales with the
+		# network's efficiency so a 50 %-efficient network produces a
+		# 50 %-speed cycle. `eff_dt` is a single common factor we apply
+		# anywhere we'd otherwise use raw `delta`.
+		var eff_dt: float = delta * net_eff
 
 		# Rotate head toward target at constant speed
 		var angle_diff: float = wrapf(state["target_angle"] - state["head_angle"], -PI, PI)
-		var max_rot: float = rotate_speed * delta
+		var max_rot: float = rotate_speed * eff_dt
 		if absf(angle_diff) <= max_rot:
 			state["head_angle"] = state["target_angle"]
 		else:
@@ -3642,89 +4039,169 @@ func _update_mass_drivers(delta: float) -> void:
 
 		# Decay recoil
 		if state["recoil"] > 0:
-			state["recoil"] = maxf(state["recoil"] - delta / cooldown_time, 0.0)
+			state["recoil"] = maxf(state["recoil"] - eff_dt / cooldown_time, 0.0)
 
 		# Decay cooldown
 		if state["cooldown"] > 0:
-			state["cooldown"] = maxf(state["cooldown"] - delta, 0.0)
+			state["cooldown"] = maxf(state["cooldown"] - eff_dt, 0.0)
 
 		# === INPUT MASS DRIVER ===
 		if is_input:
 			match state["phase"]:
 				"idle":
 					if state["cooldown"] > 0:
+						_md_dbg(origin, "idle-wait", "cooldown=%.2f" % state["cooldown"])
 						continue
 					# Look for payload on adjacent conveyors
 					var perimeter := _get_all_perimeter_cells(origin, data.grid_size)
+					var found_payload := false
+					var perim_payloads := 0
+					var perim_progress_lt1 := 0
+					var perim_cross := 0
 					for edge_pos in perimeter:
 						if _is_cross_faction(origin, edge_pos):
+							perim_cross += 1
 							continue
 						var conv_anchor: Vector2i = main.building_origins.get(edge_pos, edge_pos)
 						if not payload_items.has(conv_anchor):
 							continue
+						perim_payloads += 1
 						if payload_items[conv_anchor]["progress"] < 1.0:
+							perim_progress_lt1 += 1
 							continue
 						# Found payload — rotate toward it
 						var conv_center: Vector2 = main.grid_to_world(conv_anchor) + Vector2(gs_md / 2.0, gs_md / 2.0)
 						state["target_angle"] = snap_angle.call((conv_center - center).angle())
 						state["input_pos"] = conv_anchor
 						state["phase"] = "rotating_to_input"
+						found_payload = true
+						_md_dbg(origin, "pickup",
+							"locked conv_anchor=%s target_angle=%.2f"
+							% [str(conv_anchor), state["target_angle"]])
 						break
+					if not found_payload:
+						_md_dbg(origin, "idle-scan",
+							"perimeter=%d cross=%d payloads_seen=%d progress<1=%d"
+							% [perimeter.size(), perim_cross, perim_payloads, perim_progress_lt1])
 
 				"rotating_to_input":
 					if head_at_target:
-						# Pick up the payload
+						# Pick up the payload. If the conveyor lost the
+						# payload between detection and rotation finish
+						# (e.g. another consumer grabbed it), drop back
+						# to idle instead of advancing to rotating_to_output —
+						# we'd otherwise sit there forever with payload=null.
 						var conv_anchor: Vector2i = state["input_pos"]
 						if payload_items.has(conv_anchor):
 							state["payload"] = payload_items[conv_anchor]["payload_data"]
 							payload_items.erase(conv_anchor)
-						state["phase"] = "rotating_to_output"
-						# Set target to face the partner
-						if partner != null and main.placed_buildings.has(partner):
-							var p_data = Registry.get_block(main.placed_buildings[partner])
-							var p_center: Vector2 = main.grid_to_world(partner) + Vector2(p_data.grid_size.x * gs_md / 2.0, p_data.grid_size.y * gs_md / 2.0) if p_data else main.grid_to_world(partner)
-							state["target_angle"] = snap_angle.call((p_center - center).angle())
+							state["phase"] = "rotating_to_output"
+							# Set target to face the partner
+							if partner != null and main.placed_buildings.has(partner):
+								var p_data = Registry.get_block(main.placed_buildings[partner])
+								var p_center: Vector2 = main.grid_to_world(partner) + Vector2(p_data.grid_size.x * gs_md / 2.0, p_data.grid_size.y * gs_md / 2.0) if p_data else main.grid_to_world(partner)
+								state["target_angle"] = snap_angle.call((p_center - center).angle())
+							_md_dbg(origin, "pickup-ok", "got payload from %s" % str(conv_anchor))
+						else:
+							_md_dbg(origin, "pickup-miss",
+								"conv_anchor=%s no longer has payload — reverting to idle"
+								% str(conv_anchor))
+							state["phase"] = "idle"
 
 				"rotating_to_output":
-					if head_at_target and state["payload"] != null:
+					if state["payload"] == null:
+						# Defensive: can't be in rotating_to_output without
+						# a payload. If somehow we got here, recover by
+						# going back to idle so we can rescan instead of
+						# locking the MD.
+						_md_dbg(origin, "rotating-empty", "no payload — reverting to idle")
+						state["phase"] = "idle"
+					elif head_at_target:
 						state["phase"] = "ready"
 
 				"ready":
-					# Fire — launch projectile
-					if partner != null and state["payload"] != null and main.placed_buildings.has(partner):
-						var partner_data = Registry.get_block(main.placed_buildings[partner])
-						if partner_data == null or not partner_data.tags.has("mass_driver"):
-							continue
-						if not mass_driver_state.has(partner):
-							mass_driver_state[partner] = {
-								"payload": null, "head_angle": 0.0, "target_angle": 0.0,
-								"recoil": 0.0, "phase": "idle", "cooldown": 0.0, "input_pos": Vector2i.ZERO,
-							}
-						var p_state: Dictionary = mass_driver_state[partner]
-						if p_state["payload"] == null:
-							# Make partner face this driver before projectile arrives
-							var p_data = Registry.get_block(main.placed_buildings.get(partner, &""))
-							var p_center: Vector2 = main.grid_to_world(partner) + Vector2(p_data.grid_size.x * gs_md / 2.0, p_data.grid_size.y * gs_md / 2.0) if p_data else main.grid_to_world(partner)
-							p_state["head_angle"] = snap_angle.call((center - p_center).angle())
-							p_state["target_angle"] = p_state["head_angle"]
+					# Fire — launch projectile. Requires enough power on
+					# the network to cover the weight-based draw computed
+					# above; otherwise the driver just sits charged until
+					# the grid catches up.
+					if not is_powered:
+						_md_dbg(origin, "fire-blocked", "no power")
+						continue
+					if partner == null:
+						_md_dbg(origin, "fire-blocked", "no partner")
+						continue
+					if state["payload"] == null:
+						_md_dbg(origin, "fire-blocked", "no payload (state desync)")
+						continue
+					if not main.placed_buildings.has(partner):
+						_md_dbg(origin, "fire-blocked", "partner cell missing in placed_buildings")
+						continue
+					var partner_data = Registry.get_block(main.placed_buildings[partner])
+					if partner_data == null or not partner_data.tags.has("mass_driver"):
+						_md_dbg(origin, "fire-blocked", "partner is not a mass_driver: %s" % str(main.placed_buildings.get(partner, &"")))
+						continue
+					if not mass_driver_state.has(partner):
+						mass_driver_state[partner] = {
+							"payload": null, "head_angle": 0.0, "target_angle": 0.0,
+							"recoil": 0.0, "phase": "idle", "cooldown": 0.0, "input_pos": Vector2i.ZERO,
+						}
+					var p_state: Dictionary = mass_driver_state[partner]
+					if p_state["payload"] != null:
+						_md_dbg(origin, "fire-blocked", "partner already holding payload")
+						continue
+					# Aim the partner at this driver and only fire once it's
+					# rotated all the way around — both MDs have to be
+					# *physically* pointing at each other before a launch
+					# happens, instead of the partner snapping instantly.
+					var p_data = Registry.get_block(main.placed_buildings.get(partner, &""))
+					var p_center: Vector2 = main.grid_to_world(partner) + Vector2(p_data.grid_size.x * gs_md / 2.0, p_data.grid_size.y * gs_md / 2.0) if p_data else main.grid_to_world(partner)
+					var p_face_angle: float = snap_angle.call((center - p_center).angle())
+					p_state["target_angle"] = p_face_angle
+					var p_off: float = absf(wrapf(p_face_angle - float(p_state.get("head_angle", 0.0)), -PI, PI))
+					if p_off >= 0.05:
+						_md_dbg(origin, "fire-wait",
+							"partner not yet aligned (off=%.2f rad)" % p_off)
+						continue
 
-							# Create projectile
-							mass_driver_projectiles.append({
-								"from": center,
-								"to": p_center,
-								"payload_data": state["payload"],
-								"progress": 0.0,
-								"source_origin": origin,
-								"target_origin": partner,
-							})
+					# Create projectile
+					mass_driver_projectiles.append({
+						"from": center,
+						"to": p_center,
+						"payload_data": state["payload"],
+						"progress": 0.0,
+						"source_origin": origin,
+						"target_origin": partner,
+					})
+					_md_dbg(origin, "fire", "→ partner=%s" % str(partner))
 
-							state["payload"] = null
-							state["recoil"] = 1.0
-							state["cooldown"] = cooldown_time
-							state["phase"] = "idle"
+					state["payload"] = null
+					state["recoil"] = 1.0
+					state["cooldown"] = cooldown_time
+					state["phase"] = "idle"
 
 		# === OUTPUT MASS DRIVER ===
 		elif is_output:
+			# Direct hand-off to any adjacent loader / unloader /
+			# deconstructor / MD bypasses the front-face / head-rotation
+			# requirements entirely. The MD's `building_rotation` controls
+			# which side belt-pushes use, but a placed receiver can sit
+			# on ANY side of the chassis. Try this first in every output
+			# phase so the payload doesn't get stuck just because the
+			# placement direction faces an empty tile.
+			if state["payload"] != null:
+				var perim_out: Array[Vector2i] = _get_all_perimeter_cells(origin, data.grid_size)
+				var handoff_done := false
+				for out_pos in perim_out:
+					if _try_handoff_payload_to_block(out_pos, state["payload"], origin):
+						state["payload"] = null
+						state["phase"] = "idle"
+						state["recoil"] = 0.0
+						handoff_done = true
+						_md_dbg(origin, "handoff-ok", "perim → %s" % str(out_pos))
+						break
+				if handoff_done:
+					continue
+
 			match state["phase"]:
 				"idle":
 					pass  # Waiting for input driver to send payload
@@ -3742,20 +4219,35 @@ func _update_mass_drivers(delta: float) -> void:
 
 				"rotating_to_output":
 					if head_at_target and state["payload"] != null:
-						# Try to output payload
+						# Belt push fallback — only the front face works
+						# for payload conveyors (matches the original
+						# placement-direction contract).
 						var rot_md: int = main.building_rotation.get(origin, 0)
 						var front: Array[Vector2i] = _get_front_edge(origin, data.grid_size, rot_md)
+						var pushed_ok := false
 						for out_pos in front:
 							if _try_push_payload(out_pos, state["payload"]):
 								state["payload"] = null
 								state["phase"] = "idle"
+								pushed_ok = true
+								_md_dbg(origin, "push-ok", "→ %s" % str(out_pos))
 								break
+						if not pushed_ok:
+							_md_dbg(origin, "push-fail",
+								"front=%s rot=%d (front cells aren't payload-conveyors / are full)"
+								% [str(front), rot_md])
 
-	# Update in-flight projectiles
+	# Update in-flight projectiles. Travel time scales with the source
+	# network's efficiency so an underpowered launch coasts more slowly
+	# (matches the cycle-speed scaling above).
 	var projectiles_to_remove := []
 	for i in range(mass_driver_projectiles.size()):
 		var proj: Dictionary = mass_driver_projectiles[i]
-		proj["progress"] += delta * 4.0  # Fast flight (0.25 seconds)
+		var src_origin: Vector2i = proj.get("source_origin", Vector2i.ZERO)
+		var proj_eff: float = 1.0
+		if power_sys and power_sys.has_method("get_electrical_efficiency"):
+			proj_eff = clampf(float(power_sys.get_electrical_efficiency(src_origin)), 0.0, 1.0)
+		proj["progress"] += delta * 4.0 * proj_eff  # Fast flight (~0.25 s @ full power)
 		if proj["progress"] >= 1.0:
 			# Deliver to target
 			var target_origin: Vector2i = proj["target_origin"]
@@ -3800,17 +4292,46 @@ func _draw_mass_drivers() -> void:
 		var recoil_offset: Vector2 = -head_dir * recoil * gs_d * 0.4
 		var head_pos: Vector2 = center + recoil_offset
 
-		# Draw head (rotated rectangle)
-		var head_w: float = data.grid_size.x * gs_d * 0.5
-		var head_h: float = data.grid_size.y * gs_d * 0.3
-		draw_set_transform(head_pos, head_angle)
-		draw_rect(Rect2(-head_w / 2.0, -head_h / 2.0, head_w, head_h), Color(data.color.r * 0.8, data.color.g * 0.8, data.color.b * 0.8, 0.9), true)
-		draw_rect(Rect2(-head_w / 2.0, -head_h / 2.0, head_w, head_h), data.color.lightened(0.2), false, 2.0)
-		# Barrel
-		draw_rect(Rect2(head_w * 0.3, -head_h * 0.15, head_w * 0.4, head_h * 0.3), data.color.darkened(0.3), true)
-		draw_set_transform(Vector2.ZERO, 0.0)
+		# Draw head — prefers the block's authored head sprite (drawn at
+		# its native pixel size scaled down, pushed forward along the
+		# aim axis so it sits near the muzzle end of the chassis rather
+		# than dead-centred on the block). Falls back to the procedural
+		# rectangle for blocks without a head texture.
+		if data.turret_head_sprite:
+			var head_tex: Texture2D = data.turret_head_sprite
+			# Smaller, mounted-near-the-muzzle look: scale the native
+			# sprite down and push it ~40 % of a tile forward along the
+			# aim direction. The recoil offset still applies so a fired
+			# shot still kicks the head back.
+			const HEAD_SCALE: float = 0.5
+			const HEAD_FORWARD_TILES: float = 0.7
+			var head_tex_size: Vector2 = head_tex.get_size() * HEAD_SCALE * main.SPRITE_SCALE_FACTOR
+			var forward_offset: Vector2 = head_dir * gs_d * HEAD_FORWARD_TILES
+			# The mass-driver head art points along its local +Y axis
+			# (the barrel runs from the centre of the sprite to its
+			# bottom edge), so the world rotation adds π/2 to map the
+			# texture's natural-up forward onto the +X aim direction.
+			draw_set_transform(head_pos + forward_offset, head_angle + PI / 2.0)
+			draw_texture_rect(
+				head_tex,
+				Rect2(-head_tex_size * 0.5, head_tex_size),
+				false,
+			)
+			draw_set_transform(Vector2.ZERO, 0.0)
+		else:
+			var head_w: float = data.grid_size.x * gs_d * 0.5
+			var head_h: float = data.grid_size.y * gs_d * 0.3
+			draw_set_transform(head_pos, head_angle)
+			draw_rect(Rect2(-head_w / 2.0, -head_h / 2.0, head_w, head_h), Color(data.color.r * 0.8, data.color.g * 0.8, data.color.b * 0.8, 0.9), true)
+			draw_rect(Rect2(-head_w / 2.0, -head_h / 2.0, head_w, head_h), data.color.lightened(0.2), false, 2.0)
+			# Barrel
+			draw_rect(Rect2(head_w * 0.3, -head_h * 0.15, head_w * 0.4, head_h * 0.3), data.color.darkened(0.3), true)
+			draw_set_transform(Vector2.ZERO, 0.0)
 
-		# Draw payload on top of head
+		# Draw payload on top of head — positioned at the muzzle tip,
+		# not the chassis centre. Pushed slightly further forward than
+		# the head sprite itself so it visibly sits at the launch end
+		# of the barrel.
 		if state["payload"] != null:
 			var payload: Dictionary = state["payload"]
 			var icon: Texture2D = null
@@ -3827,10 +4348,23 @@ func _draw_mass_drivers() -> void:
 				if ud:
 					icon = ud.icon
 					if icon:
-						pw = icon.get_width()
-						ph = icon.get_height()
+						# Fit unit icon to a single tile so it stays grid-proportional.
+						pw = gs_d
+						ph = gs_d
 			if icon:
-				draw_texture_rect(icon, Rect2(head_pos.x - pw / 2.0, head_pos.y - ph / 2.0, pw, ph), false, Color(1, 1, 1, 0.7))
+				# Position payload at the head's muzzle tip — same forward
+				# direction as the head sprite, but a bit further out so
+				# it visually sits at the front of the barrel rather than
+				# overlapping the chassis. Tweak `PAYLOAD_TIP_TILES` to
+				# move the icon further toward / further past the tip.
+				const PAYLOAD_TIP_TILES: float = 0.7
+				var payload_pos: Vector2 = head_pos + head_dir * gs_d * PAYLOAD_TIP_TILES
+				draw_texture_rect(
+					icon,
+					Rect2(payload_pos.x - pw / 2.0, payload_pos.y - ph / 2.0, pw, ph),
+					false,
+					Color(1, 1, 1, 0.7),
+				)
 
 	# Draw in-flight projectiles
 	for proj in mass_driver_projectiles:
@@ -3854,7 +4388,7 @@ func _draw_mass_drivers() -> void:
 			draw_circle(pos, gs_d * 0.4, Color(0.5, 0.3, 0.8, 0.8))
 		# Trail effect
 		var trail_start: Vector2 = from.lerp(to, maxf(t - 0.15, 0.0))
-		draw_line(trail_start, pos, Color(0.5, 0.3, 0.9, 0.4), 3.0)
+		draw_line(trail_start, pos, Color(0.5, 0.3, 0.9, 0.4), 3.0 * main.SPRITE_SCALE_FACTOR)
 
 
 func _draw_items() -> void:
@@ -3915,12 +4449,12 @@ func _draw_items() -> void:
 
 		# Draw: item texture if available, otherwise colored circle fallback
 		if item.icon != null:
-			var tex_size = Vector2(ITEM_TEXTURE_SIZE, ITEM_TEXTURE_SIZE)
+			var tex_size = Vector2(ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR, ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR)
 			var tex_rect = Rect2(item_pos - tex_size / 2.0, tex_size)
 			draw_texture_rect(item.icon, tex_rect, false)
 		else:
-			draw_circle(item_pos, ITEM_RADIUS, item.color.darkened(0.15))
-			draw_arc(item_pos, ITEM_RADIUS, 0, TAU, 16, item.color.lightened(0.4), 2.0)
+			draw_circle(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
+			draw_arc(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
 
 	# Draw junction perpendicular-axis items (same rendering logic)
 	for grid_pos in junction_items:
@@ -3953,12 +4487,12 @@ func _draw_items() -> void:
 		var item_pos: Vector2 = cell_center + offset + dir_vec * (progress - 0.5) * main.GRID_SIZE
 
 		if item.icon != null:
-			var tex_size = Vector2(ITEM_TEXTURE_SIZE, ITEM_TEXTURE_SIZE)
+			var tex_size = Vector2(ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR, ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR)
 			var tex_rect = Rect2(item_pos - tex_size / 2.0, tex_size)
 			draw_texture_rect(item.icon, tex_rect, false)
 		else:
-			draw_circle(item_pos, ITEM_RADIUS, item.color.darkened(0.15))
-			draw_arc(item_pos, ITEM_RADIUS, 0, TAU, 16, item.color.lightened(0.4), 2.0)
+			draw_circle(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
+			draw_arc(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
 
 
 ## Draws payloads on payload/freight conveyors.
@@ -4004,7 +4538,7 @@ func _draw_payloads() -> void:
 					# scaled by sprite_scale, same as enemy_unit.gd renders them.
 					# Previously the icon texture was drawn at its raw pixel
 					# size, which on large icon art made payloads look huge.
-					var scale_f: float = unit_data.sprite_scale if unit_data.sprite_scale > 0.0 else 1.0
+					var scale_f: float = (unit_data.sprite_scale if unit_data.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
 					var world_tex: Texture2D = null
 					if unit_data.base_sprite != null:
 						world_tex = unit_data.base_sprite
@@ -4116,46 +4650,59 @@ func _draw_drill_progress_bars() -> void:
 
 
 func _draw_pump_progress_bars() -> void:
+	# Pumps now produce continuously, so the cycle progress bar that
+	# used to fill over `production_time` no longer applies. Instead,
+	# show a static blue bar whose fill = current power-efficiency × depth
+	# multiplier — so the player can see at a glance how productive
+	# each pump is.
 	var building_sys = _building_sys_ref()
-
-	for grid_pos in pump_timers:
-		if not main.placed_buildings.has(grid_pos):
-			continue
-
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return
+	var power_sys = _power_sys_ref()
+	for grid_pos in main.placed_buildings:
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
-		if data == null:
+		if data == null or not data.tags.has("pump"):
 			continue
-
-		# Calculate fill percentage
-		var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
-		var remaining = pump_timers[grid_pos]
-		var pct = clampf(1.0 - (remaining / cycle_time), 0.0, 1.0)
-
-		# Check if there's actually a liquid tile underneath
-		var terrain = _terrain_ref()
-		if terrain == null:
+		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if anchor != grid_pos:
 			continue
-		var liquid_tile = terrain.get_liquid_at(grid_pos)
-		if liquid_tile == null or liquid_tile.extracted_liquid == &"":
+		# Need a liquid underneath at all.
+		var max_depth: int = 0
+		var has_liquid := false
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				var cp: Vector2i = anchor + Vector2i(x, y)
+				var lt = terrain.get_liquid_at(cp)
+				if lt != null and lt.extracted_liquid != &"":
+					has_liquid = true
+					if terrain.has_method("get_water_depth_at"):
+						var d_here: int = int(terrain.get_water_depth_at(cp))
+						if d_here > max_depth:
+							max_depth = d_here
+		if not has_liquid:
 			continue
+		if max_depth <= 0:
+			max_depth = 2
+		var depth_mult: float = float(max_depth) / 2.0
+		var net_eff: float = 1.0
+		if power_sys and power_sys.has_method("get_electrical_efficiency"):
+			net_eff = clampf(float(power_sys.get_electrical_efficiency(anchor)), 0.0, 1.0)
+		var pct: float = clampf(depth_mult * net_eff, 0.0, 1.5) / 1.5
 
-		var world_pos = main.grid_to_world(grid_pos)
+		var world_pos = main.grid_to_world(anchor)
 		var offset = Vector2.ZERO
 		if building_sys:
 			offset = building_sys._get_top_offset(world_pos)
-
-		var bar_w := 40.0
+		var bar_w: float = float(data.grid_size.x) * main.GRID_SIZE * 0.6
 		var bar_h := 3.0
-		var bar_pos = world_pos + offset + Vector2(
-			(main.GRID_SIZE - bar_w) / 2.0,
-			main.GRID_SIZE + 2.0
+		var bar_pos: Vector2 = world_pos + offset + Vector2(
+			(float(data.grid_size.x) * main.GRID_SIZE - bar_w) / 2.0,
+			float(data.grid_size.y) * main.GRID_SIZE + 2.0,
 		)
-
-		# Background
 		draw_rect(Rect2(bar_pos, Vector2(bar_w, bar_h)),
 			Color(0.1, 0.1, 0.1, 0.6), true)
-		# Blue fill (distinguishes from green drill bars)
 		draw_rect(Rect2(bar_pos, Vector2(bar_w * pct, bar_h)),
 			Color(0.3, 0.5, 0.9, 0.8), true)
 

@@ -43,6 +43,13 @@ const DIR_VECTORS := [
 ## { "cells": Array[Vector2i], "gen": float, "use": float,
 ##   "powered": bool, "efficiency": float }
 var elec_networks: Array = []
+# Per-anchor dynamic power-use override. When a block needs a draw that
+# changes at runtime (mass driver weight, future variable-load
+# machines, etc.) the owning system writes a value here and PowerSystem
+# uses it instead of the static `electrical_power_use` for that anchor
+# in every gen/use computation. `null`/missing entries fall back to the
+# static field so most blocks need no extra plumbing.
+var _dynamic_power_use: Dictionary = {}
 ## Maps each cell → its electrical network index for O(1) lookup.
 var elec_cell_to_net: Dictionary = {}
 
@@ -78,6 +85,14 @@ const _HISTORY_WINDOW_SECONDS := 600.0
 const _HISTORY_SAMPLE_INTERVAL := 1.0
 var _history_timer: float = 0.0
 var _network_history: Dictionary = {}  # Vector2i (rep cell) -> Array[{t, gen, use}]
+# Per-block active-power history. Keyed by building anchor; each entry
+# is an Array of `{t: float, p: float}` over the same 10-minute window.
+# `p` is the block's effective draw / output at sample time (0 when
+# inactive). Lets the HUD render a 10-minute icon stack on the
+# network-wide power graph regardless of when the info panel was
+# opened — the rows used to grow their own history only while visible,
+# which is why the stack only went back ~2 min in practice.
+var _block_history: Dictionary = {}  # Vector2i (anchor) -> Array[{t, p}]
 
 
 ## Returns the representative cell for the network containing grid_pos, or
@@ -127,7 +142,10 @@ func _sample_network_history(delta: float) -> void:
 	if _history_timer > 0.0:
 		return
 	_history_timer = _HISTORY_SAMPLE_INTERVAL
-	var now: float = Time.get_ticks_msec() / 1000.0
+	# Use the HUD's pause-aware graph clock (matches the per-row
+	# sparkline samples) so paused time doesn't appear in the X-axis
+	# and a paused-then-unpaused session lines up correctly.
+	var now: float = _graph_clock_now()
 	var cutoff: float = now - _HISTORY_WINDOW_SECONDS
 	var live_keys: Dictionary = {}
 	for net in elec_networks:
@@ -159,12 +177,102 @@ func _sample_network_history(delta: float) -> void:
 		else:
 			_network_history[k] = samples2
 
+	# --- Per-block active-power history (drives the network graph's
+	# hover icon stack). Walks every electrical producer/consumer and
+	# stamps its current output / draw, so the HUD doesn't have to
+	# wait for the panel to be open to start collecting data. ---
+	var live_anchors: Dictionary = {}
+	for grid_pos in main.placed_buildings:
+		if main.building_origins.get(grid_pos, grid_pos) != grid_pos:
+			continue
+		var data = Registry.get_block(main.placed_buildings[grid_pos])
+		if data == null:
+			continue
+		if data.electrical_power_gen <= 0.0 and data.electrical_power_use <= 0.0:
+			continue
+		var anchor: Vector2i = grid_pos
+		live_anchors[anchor] = true
+		var p: float = 0.0
+		if _is_block_active(anchor, data):
+			if data.electrical_power_gen > 0.0:
+				p = _get_effective_elec_gen(anchor, data)
+			else:
+				p = _get_effective_elec_use(anchor, data)
+		var bs: Array = _block_history.get(anchor, [])
+		bs.append({"t": now, "p": p})
+		while bs.size() > 0 and float(bs[0]["t"]) < cutoff:
+			bs.pop_front()
+		_block_history[anchor] = bs
+	# Age out anchors that vanished.
+	for k in _block_history.keys():
+		if live_anchors.has(k):
+			continue
+		var bs2: Array = _block_history[k]
+		while bs2.size() > 0 and float(bs2[0]["t"]) < cutoff:
+			bs2.pop_front()
+		if bs2.is_empty():
+			_block_history.erase(k)
+		else:
+			_block_history[k] = bs2
+
+
+## Returns the rolling per-block power samples (Array of {t, p}) for the
+## building anchored at `anchor`. Empty array when the block isn't
+## participating in any network or hasn't been observed long enough yet.
+func get_block_history(anchor: Vector2i) -> Array:
+	return _block_history.get(anchor, [])
+
+
+## External hook for blocks whose power draw changes with state (e.g.
+## the payload mass driver scales its draw with the loaded payload's
+## weight). Call with the block's anchor + new draw in watts; pass 0
+## or call `clear_dynamic_power_use(anchor)` to revert to the static
+## `electrical_power_use` field. PowerSystem reads this map every time
+## it tallies network usage.
+func set_dynamic_power_use(anchor: Vector2i, watts: float) -> void:
+	if watts <= 0.0:
+		_dynamic_power_use.erase(anchor)
+	else:
+		_dynamic_power_use[anchor] = watts
+
+
+func clear_dynamic_power_use(anchor: Vector2i) -> void:
+	_dynamic_power_use.erase(anchor)
+
+
+## Returns the effective draw for the block at `anchor` — dynamic
+## override when one is registered, otherwise the BlockData baseline.
+func _get_effective_elec_use(anchor: Vector2i, data: BlockData) -> float:
+	if _dynamic_power_use.has(anchor):
+		return float(_dynamic_power_use[anchor])
+	return data.electrical_power_use
+
+
+## Forwards to whatever activity helper the rest of the file uses to
+## decide if a block should be counted in active totals. Falls back to
+## `is_electrical_powered` when no helper is available so the history
+## degrades gracefully instead of throwing.
+func _is_block_active(anchor: Vector2i, data) -> bool:
+	if has_method("_is_block_drawing_power"):
+		return _is_block_drawing_power(anchor, data)
+	return is_electrical_powered(anchor)
+
 
 func _ready() -> void:
 	await get_tree().process_frame
 	main.building_placed.connect(_on_building_changed)
 	main.building_destroyed.connect(_on_building_destroyed)
 	_networks_dirty = true
+
+
+## Returns the HUD's pause-aware graph clock when available so all
+## graph samples share one timeline; falls back to wall-clock seconds
+## (for editor / standalone testing) when no HUD is in the tree.
+func _graph_clock_now() -> float:
+	var hud := get_node_or_null("/root/Main/HUD")
+	if hud and "_network_graph_clock" in hud:
+		return float(hud._network_graph_clock)
+	return Time.get_ticks_msec() / 1000.0
 
 
 func _process(delta: float) -> void:
@@ -180,7 +288,11 @@ func _process(delta: float) -> void:
 	if _activity_timer <= 0.0:
 		_activity_timer = _ACTIVITY_INTERVAL
 		_recompute_active_totals()
-	_sample_network_history(delta)
+	# Freeze the rolling history while the world is paused so the
+	# network-wide power graph / per-row sparklines don't keep marching
+	# forward without any state changes behind them.
+	if not ("world_paused" in main and main.world_paused):
+		_sample_network_history(delta)
 
 
 # =========================
@@ -391,7 +503,7 @@ func _rebuild_electrical_networks() -> void:
 			counted_anchors[anchor_cell] = true
 			var d: BlockData = cell_data[cell]
 			total_gen += _get_effective_elec_gen(cell, d)
-			total_use += d.electrical_power_use
+			total_use += _get_effective_elec_use(anchor_cell, d)
 
 		var net_idx := elec_networks.size()
 		elec_networks.append({
@@ -436,7 +548,7 @@ func _recompute_active_totals() -> void:
 				continue
 			total_gen += _get_effective_elec_gen(cell, d)
 			if _is_block_drawing_power(anchor, d):
-				total_use += d.electrical_power_use
+				total_use += _get_effective_elec_use(anchor, d)
 		net["gen"] = total_gen
 		net["use"] = total_use
 		net["powered"] = total_gen >= total_use
@@ -530,4 +642,6 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 		var pair = linked_pairs[i]
 		if pair[0] == _grid_pos or pair[1] == _grid_pos:
 			linked_pairs.remove_at(i)
+	# Drop any dynamic-power override the block had registered.
+	_dynamic_power_use.erase(_grid_pos)
 	_networks_dirty = true

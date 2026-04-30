@@ -62,21 +62,44 @@ var line_color_researched := Color(0.7, 0.65, 0.2, 0.5)
 func _ready() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
-	main = get_node_or_null("/root/Main")
-	_build_ui()
-	_hide_ui()
-	if main and main.has_signal("resources_changed"):
+	if main == null:
+		main = get_node_or_null("/root/Main")
+	# `_show_ui()` may have already built the UI on demand if a caller
+	# raced ahead of these awaits — skip the rebuild in that case so we
+	# don't end up with two stacked root_panels.
+	if root_panel == null:
+		_build_ui()
+		_hide_ui()
+	if main and main.has_signal("resources_changed") \
+			and not main.resources_changed.is_connected(_on_resources_changed):
 		main.resources_changed.connect(_on_resources_changed)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if Input.is_action_just_pressed("open_tech_tree"):
 		if is_open: _hide_ui()
 		else: _show_ui()
+	# WASD / arrow-key panning. Only ticks while the panel is visible
+	# and the WASD-pan setting is on; uses the same `move_*` actions as
+	# the in-world camera so the player's keybindings carry over.
+	if is_open and wasd_pan and tree_scroll != null:
+		var ax: float = Input.get_axis("move_left", "move_right")
+		var ay: float = Input.get_axis("move_up", "move_down")
+		if ax != 0.0 or ay != 0.0:
+			var step: float = WASD_PAN_PIXELS_PER_SEC * delta
+			tree_scroll.scroll_horizontal += int(ax * step)
+			tree_scroll.scroll_vertical += int(ay * step)
 
 
 var _tree_dragging := false
 var _tree_drag_start := Vector2.ZERO
+
+## Pan mode: false = click-and-drag the tree to move it, true = WASD/
+## arrow keys scroll the viewport. Toggled from Settings → General.
+## SettingsUI.apply_pending_settings writes this on launch and on
+## change, so the tech tree picks the latest value up live.
+var wasd_pan: bool = false
+const WASD_PAN_PIXELS_PER_SEC: float = 900.0
 
 func _input(event: InputEvent) -> void:
 	if not is_open:
@@ -106,18 +129,20 @@ func _input(event: InputEvent) -> void:
 			_zoom_at(local, ZOOM_STEP * absf(event.delta.y) * 0.3)
 		get_viewport().set_input_as_handled()
 
-	# Click+drag to pan
-	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_LEFT:
-			if event.pressed:
-				_tree_dragging = true
-				_tree_drag_start = event.position
-			else:
-				_tree_dragging = false
-	if event is InputEventMouseMotion and _tree_dragging:
-		tree_scroll.scroll_horizontal -= int(event.relative.x)
-		tree_scroll.scroll_vertical -= int(event.relative.y)
-		get_viewport().set_input_as_handled()
+	# Click+drag to pan — only active in drag mode. In WASD mode the
+	# left button is left alone for node clicks / future selection.
+	if not wasd_pan:
+		if event is InputEventMouseButton:
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				if event.pressed:
+					_tree_dragging = true
+					_tree_drag_start = event.position
+				else:
+					_tree_dragging = false
+		if event is InputEventMouseMotion and _tree_dragging:
+			tree_scroll.scroll_horizontal -= int(event.relative.x)
+			tree_scroll.scroll_vertical -= int(event.relative.y)
+			get_viewport().set_input_as_handled()
 
 
 func _build_ui() -> void:
@@ -827,6 +852,15 @@ func _update_resource_panel() -> void:
 # =========================
 
 func _show_ui() -> void:
+	# `_ready` builds the UI after a couple of awaited frames, so a
+	# caller (e.g. planet_select racing to open the tree right after
+	# scene change) can hit this before `_build_ui()` ran. Build it
+	# on demand and grab `main` so the rest of the function has live
+	# refs to `root_panel` / `tree_canvas` / `resource_panel`.
+	if root_panel == null:
+		if main == null:
+			main = get_node_or_null("/root/Main")
+		_build_ui()
 	is_open = true
 	root_panel.visible = true
 	get_tree().paused = true

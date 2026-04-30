@@ -82,11 +82,21 @@ const WATER_DROWN_TIME := 8.0
 
 # --- STUCK DETECTION ---
 # When a unit has a destination but stays nearly stationary for STUCK_TIME seconds,
-# it disperses away from nearby units so groups don't pile up forever.
+# it disperses away from nearby units AND requests a fresh path to its move_target /
+# target_building so an obsolete path (e.g. a building placed across it) gets
+# replaced. Repeated stuck events ramp up to a hard repath even if the unit hasn't
+# fully cleared its origin radius.
 var _stuck_timer := 0.0
 var _stuck_origin := Vector2.ZERO
-const STUCK_TIME := 3.0
-const STUCK_RADIUS := 5.0  # Must move at least this many pixels in STUCK_TIME to not be "stuck"
+var _stuck_streak: int = 0           # Consecutive stuck triggers — escalates rescue
+var _last_repath_time: float = -10.0 # Wall-clock seconds; throttled to REPATH_COOLDOWN
+# Set while a manually-controlled unit runs `_check_wall_overlap` so the
+# rescue can still slide the unit out of a solid cell without firing a
+# repath the player never asked for.
+var _skip_repath_on_unstick: bool = false
+const STUCK_TIME := 1.5
+const STUCK_RADIUS := 4.0    # Pixels — must move > this within STUCK_TIME or we're "stuck"
+const REPATH_COOLDOWN := 1.0 # Per-unit floor on repath spam
 # Throttle for the wall-overlap rescue. Cheap enough we could do it
 # every tick but no need — a unit "phasing" into a wall via a building
 # placement is a rare event.
@@ -169,7 +179,7 @@ func _ready() -> void:
 		elif data.head_sprite != null:
 			tex_for_hitbox = data.head_sprite
 		if tex_for_hitbox != null:
-			var scale_f: float = data.sprite_scale if data.sprite_scale > 0.0 else 1.0
+			var scale_f: float = (data.sprite_scale if data.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
 			var sz: Vector2 = tex_for_hitbox.get_size() * scale_f
 			# Average half-extent: roughly inscribed-circle radius for a square
 			# sprite, and a sensible middle ground for rectangular ones.
@@ -177,7 +187,7 @@ func _ready() -> void:
 		else:
 			unit_size = data.visual_size
 	else:
-		# Fallbacks (1.25 t/s * 64 px/tile = 80 px/s)
+		# Fallbacks (1.25 t/s * GRID_SIZE px/tile)
 		push_warning("EnemyUnit: No UnitData assigned!")
 		max_health = 50.0
 		move_speed = 1.25 * float(main.GRID_SIZE)
@@ -197,7 +207,24 @@ func _process(delta: float) -> void:
 
 	# PLAYER UNIT: allow shooting while moving. Opportunistic fire always ticks,
 	# and manual targets (right-click orders) are pursued persistently.
-	if data and team == UnitData.Team.PLAYER and not is_controlled:
+	if is_controlled:
+		# The player is driving this unit directly — skip every AI
+		# behaviour that would fight or override their input. We don't
+		# follow paths, don't try to attack, don't auto-rebuild, and
+		# don't run stuck-detection (which would otherwise spam repath
+		# requests at the path worker the player isn't using).
+		# `_check_wall_overlap` still runs as a pure safety rescue:
+		# it'll only snap the unit out of a solid cell, and we suppress
+		# its repath side effect via `_skip_repath_on_unstick`.
+		_skip_repath_on_unstick = true
+		_check_wall_overlap(delta)
+		_skip_repath_on_unstick = false
+		_tick_water(delta)
+		_tick_aim_angle(delta)
+		_tick_facing_angle(delta)
+		queue_redraw()
+		return
+	if data and team == UnitData.Team.PLAYER:
 		_player_update(delta)
 	else:
 		if path.size() > 0 and path_index < path.size():
@@ -466,7 +493,7 @@ func _player_update(delta: float) -> void:
 ## Pursues whatever manual target is set: path toward it, stop in range, attack.
 func _pursue_manual_target(delta: float) -> void:
 	var target_pos: Vector2
-	var atk_range: float = data.attack_range if data else 32.0
+	var atk_range: float = data.attack_range if data else main.GRID_SIZE / 2.0
 	var effective_range: float = atk_range
 
 	if manual_target_unit != null:
@@ -601,11 +628,110 @@ func _follow_path(delta: float) -> void:
 		return
 	# -----------------------------------------------------------------------
 
+	# Continuous separation from nearby same-layer units so a clump of
+	# units slides past itself instead of pile-jamming until the 1.5 s
+	# stuck-timer fires. The force is mixed into the path direction and
+	# the resulting position is validated against the movement-layer
+	# walkability map — separation can never push a unit onto a wall or
+	# building.
+	var sep: Vector2 = _compute_separation_force()
+	var move_dir: Vector2 = direction
+	if sep.length_squared() > 0.0001:
+		move_dir = (direction + sep * 0.6).normalized()
+
 	if step >= distance:
 		position = target_pos
 		path_index += 1
 	else:
-		position += direction * step
+		var candidate: Vector2 = position + move_dir * step
+		if move_dir == direction or unit_manager == null \
+				or unit_manager.is_world_pos_walkable(candidate, data.movement_layer if data else 0):
+			position = candidate
+		else:
+			# Separation-modified step would land on a wall — fall back
+			# to the unmodified path step. A wall-overlap check will
+			# still rescue us if even that ends up solid.
+			position += direction * step
+
+
+## Sums a soft repulsion vector from every same-layer unit within
+## `unit_size * 2`. Falloff is quadratic so neighbours right on top
+## push hard while distant ones barely register.
+##
+## When a neighbour is *overlapping* (within `unit_size`), this also
+## directly shoves the other unit outward — the soft per-frame force
+## alone struggles when the path gradient pulls every member of a
+## clump toward the same destination, so we need an active push to
+## break the symmetry. Each pair only shoves once (lower instance id
+## drives the shove) so the work doesn't double up.
+func _compute_separation_force() -> Vector2:
+	if data == null or unit_manager == null:
+		return Vector2.ZERO
+	var ml: int = data.movement_layer
+	var sep_radius: float = unit_size * 2.0
+	if sep_radius <= 0.0:
+		return Vector2.ZERO
+	var force: Vector2 = Vector2.ZERO
+	var overlap_thresh: float = unit_size
+	var my_id: int = get_instance_id()
+	# A moving unit's "intent" — direction toward the next path waypoint.
+	# When set, an overlap with someone in front of us bulldozes them
+	# forward along this axis instead of doing the symmetric pair shove,
+	# so a unit can push through a wall of stationary blockers.
+	var intent_dir: Vector2 = Vector2.ZERO
+	if path.size() > 0 and path_index < path.size():
+		var to_wp: Vector2 = path[path_index] - position
+		if to_wp.length_squared() > 0.01:
+			intent_dir = to_wp.normalized()
+	var all_units: Array = unit_manager.enemies + unit_manager.player_units
+	for other in all_units:
+		if other == self or not is_instance_valid(other) or other.is_dead:
+			continue
+		if other.data == null or other.data.movement_layer != ml:
+			continue
+		var to_other: Vector2 = other.position - position
+		var d: float = to_other.length()
+		if d > sep_radius:
+			continue
+		# Co-located: pick a random direction so we still get a force
+		# (and the active shove below has something to act on).
+		var dir: Vector2
+		if d < 0.001:
+			var ang: float = randf() * TAU
+			dir = Vector2(cos(ang), sin(ang))
+			d = unit_size * 0.25
+		else:
+			dir = to_other / d
+		var t: float = 1.0 - d / sep_radius
+		var weight: float = t * t
+		force -= dir * weight
+		# Active shove on overlap.
+		if d < overlap_thresh:
+			# Push-through: if we're moving and `other` sits between us
+			# and our next waypoint, shove them along our travel direction
+			# without taking a counter-push ourselves. Lets a unit force
+			# its way through a wall of stationary blockers.
+			if intent_dir != Vector2.ZERO and dir.dot(intent_dir) > 0.3:
+				var shove_amt: float = overlap_thresh - d
+				var other_target: Vector2 = other.position + intent_dir * shove_amt
+				var other_ml: int = other.data.movement_layer
+				if other.unit_manager != null \
+						and other.unit_manager.is_world_pos_walkable(other_target, other_ml):
+					other.position = other_target
+				continue
+			# Otherwise fall through to the symmetric pair shove. Lower
+			# instance id drives both halves so the work doesn't double.
+			if my_id < other.get_instance_id():
+				var shove_amt: float = (overlap_thresh - d) * 0.5
+				var other_target: Vector2 = other.position + dir * shove_amt
+				var other_ml: int = other.data.movement_layer
+				if other.unit_manager != null \
+						and other.unit_manager.is_world_pos_walkable(other_target, other_ml):
+					other.position = other_target
+				var my_target: Vector2 = position - dir * shove_amt
+				if unit_manager.is_world_pos_walkable(my_target, ml):
+					position = my_target
+	return force
 
 
 func _try_attack(delta: float) -> void:
@@ -681,7 +807,7 @@ func _try_player_combat(_delta: float) -> void:
 		target_pos = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 
 	var dist := position.distance_to(target_pos)
-	var atk_range: float = data.attack_range if data else 32.0
+	var atk_range: float = data.attack_range if data else main.GRID_SIZE / 2.0
 
 	# Buildings occupy solid cells so units can't stand on them.
 	# Ensure the effective range is at least 1.5 grid cells so units
@@ -916,11 +1042,16 @@ func _finish_rebuild() -> void:
 # =========================
 
 ## Checks if this unit has a destination but hasn't moved significantly.
-## After STUCK_TIME seconds of being stuck near other units, disperses outward.
+## After STUCK_TIME seconds of being stuck, escalates through three rescues:
+##   1st trigger: nudge away from the cluster centroid.
+##   2nd trigger: repath to the original destination — disperse alone can't
+##                fix a path that's been obsoleted by terrain changes.
+##   3rd+:        both, plus a wider search radius for the disperse nudge.
 func _check_stuck(delta: float) -> void:
 	var has_destination: bool = (path.size() > 0 and path_index < path.size()) or move_target != null
 	if not has_destination:
 		_stuck_timer = 0.0
+		_stuck_streak = 0
 		return
 
 	# Start tracking from current position when timer resets
@@ -931,9 +1062,49 @@ func _check_stuck(delta: float) -> void:
 
 	if _stuck_timer >= STUCK_TIME:
 		if position.distance_to(_stuck_origin) < STUCK_RADIUS:
+			_stuck_streak += 1
+			# Always try the cheap, local fix first.
 			_disperse_from_nearby_units()
-		# Reset timer whether we dispersed or not (re-evaluate in another 3s)
+			# If we've been stuck more than once, the path itself is
+			# probably the problem — request a fresh one to whatever
+			# destination we still have.
+			if _stuck_streak >= 2:
+				_request_repath()
+		else:
+			# We did make progress this window — reset the streak.
+			_stuck_streak = 0
+		# Re-evaluate after another STUCK_TIME window regardless.
 		_stuck_timer = 0.0
+
+
+## Requests a fresh path back to the unit's outstanding destination
+## (move_target world pos OR target_building grid cell). Throttled so a
+## stuck unit can't spam the path worker every tick.
+func _request_repath() -> void:
+	if unit_manager == null or main == null:
+		return
+	var now: float = Time.get_ticks_msec() / 1000.0
+	if now - _last_repath_time < REPATH_COOLDOWN:
+		return
+	# Pick the most authoritative destination.
+	var dest: Variant = null
+	if target_building != null and main.placed_buildings.has(target_building):
+		dest = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+	elif move_target != null and move_target is Vector2:
+		dest = move_target
+	elif path.size() > 0:
+		# Fall back to the existing path's final waypoint so a unit with
+		# no remembered destination still tries something.
+		dest = path[path.size() - 1]
+	if dest == null or not (dest is Vector2):
+		return
+	_last_repath_time = now
+	if target_building != null and unit_manager.has_method("request_path_to_position_async_with_target"):
+		unit_manager.request_path_to_position_async_with_target(self, dest, target_building)
+	elif unit_manager.has_method("request_path_to_position_async"):
+		unit_manager.request_path_to_position_async(self, dest)
+	elif unit_manager.has_method("assign_path_to_position"):
+		unit_manager.assign_path_to_position(self, dest)
 
 
 ## Pushes this unit away from the centroid of nearby same-layer units.
@@ -951,6 +1122,15 @@ func _check_wall_overlap(delta: float) -> void:
 		return
 	if data.movement_layer == UnitData.MovementLayer.FLYING:
 		return
+	# If the *next* waypoint we're heading toward is no longer walkable,
+	# the path is stale (typically: a building or wall got placed across
+	# it). Trigger a repath immediately instead of marching into the
+	# obstacle and waiting for stuck-detection to time out. Suppressed
+	# while manually controlled — the player owns movement, not AI.
+	if not _skip_repath_on_unstick and path.size() > 0 and path_index < path.size():
+		var next_wp: Vector2 = path[path_index]
+		if not unit_manager.is_world_pos_walkable(next_wp, data.movement_layer):
+			_request_repath()
 	if unit_manager.is_world_pos_walkable(position, data.movement_layer):
 		return
 	# Spiral outward looking for a free cell.
@@ -964,6 +1144,12 @@ func _check_wall_overlap(delta: float) -> void:
 				var probe_world: Vector2 = main.grid_to_world(probe) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
 				if unit_manager.is_world_pos_walkable(probe_world, data.movement_layer):
 					position = probe_world
+					# Position changed — the existing path is now garbage,
+					# pull a fresh one to wherever we were heading.
+					# Skipped while manually controlled (player owns
+					# movement, not the path worker).
+					if not _skip_repath_on_unstick:
+						_request_repath()
 					return
 
 
@@ -1109,7 +1295,7 @@ func _draw_textured_unit() -> void:
 	var base_tint: Color = Color(1, 1, 1, tint.a)
 	if _water_time > 0.0:
 		base_tint = tint
-	var scale_f: float = data.sprite_scale if data and data.sprite_scale > 0.0 else 1.0
+	var scale_f: float = (data.sprite_scale if data and data.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
 
 	if data.base_sprite:
 		var b_size: Vector2 = data.base_sprite.get_size() * scale_f

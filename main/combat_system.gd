@@ -62,6 +62,25 @@ var turret_barrel_cooldowns := {}
 # Per-barrel fire flash timer, drawn as a brief muzzle highlight so the
 # player can tell which barrel just shot. Value = Array[float].
 var turret_barrel_fire_flash := {}
+# Per-barrel recoil progress in [0, 1]: 1.0 the frame a barrel fires, then
+# decays back to 0 over RECOIL_DECAY_TIME. _draw_turret_heads offsets each
+# head along -aim by recoil * RECOIL_PIXELS so the barrel kicks back.
+# Value = Array[float], one entry per barrel (single-barrel turrets get
+# a 1-element array).
+var turret_barrel_recoil := {}
+const RECOIL_PIXELS := 12.0
+const RECOIL_DECAY_TIME := 0.25
+
+# Per-barrel aim angle. Multi-barrel turrets let each head toe in toward
+# the target from its own muzzle pivot, clamped to ±BARREL_TOE_IN_MAX
+# from the chassis angle so the heads can converge on a close target
+# instead of firing straight forward and missing past it. Single-barrel
+# turrets store one entry that just mirrors `turret_angles[grid_pos]`.
+# Key = Vector2i (anchor). Value = Array[float], one absolute angle per
+# barrel.
+var turret_barrel_angles := {}
+const BARREL_TOE_IN_MAX: float = deg_to_rad(20.0)
+const BARREL_TURN_SPEED: float = 8.0
 
 # --- MANUAL CONTROL ---
 ## Set by UnitManager when the player manually controls a turret (Ctrl+click).
@@ -335,6 +354,31 @@ func _update_turrets(delta: float) -> void:
 		if sector_script_guard and sector_script_guard.is_building_disabled(grid_pos):
 			continue
 
+		var barrel_count: int = maxi(data.barrel_count, 1)
+		# Recoil + per-barrel aim state must tick BEFORE the manual-
+		# control skip below, otherwise neither decays/converges for the
+		# turret the player is driving.
+		if not turret_barrel_recoil.has(grid_pos):
+			var recoil_arr: Array[float] = []
+			for _i in range(barrel_count):
+				recoil_arr.append(0.0)
+			turret_barrel_recoil[grid_pos] = recoil_arr
+		var brc: Array = turret_barrel_recoil[grid_pos]
+		var recoil_step: float = delta / RECOIL_DECAY_TIME
+		for i in range(brc.size()):
+			brc[i] = maxf(float(brc[i]) - recoil_step, 0.0)
+		# Seed per-barrel angles to the chassis angle on first sight so
+		# the heads don't snap from 0° on the first frame they exist.
+		if not turret_barrel_angles.has(grid_pos):
+			var seed_a: float = float(turret_angles.get(grid_pos, 0.0))
+			var ang_arr: Array[float] = []
+			for _i in range(barrel_count):
+				ang_arr.append(seed_a)
+			turret_barrel_angles[grid_pos] = ang_arr
+		# Default: relax barrels back toward the chassis angle each tick.
+		# When a target is acquired later in the loop, toe-in overrides.
+		_relax_barrels_to_chassis(grid_pos, delta)
+
 		# Skip turrets being manually controlled by the player
 		if grid_pos == manually_controlled_turret:
 			continue
@@ -344,7 +388,6 @@ func _update_turrets(delta: float) -> void:
 			turret_cooldowns[grid_pos] = 0.0
 		if not turret_angles.has(grid_pos):
 			turret_angles[grid_pos] = 0.0
-		var barrel_count: int = maxi(data.barrel_count, 1)
 		if barrel_count > 1:
 			if not turret_barrel_cooldowns.has(grid_pos):
 				# Stagger initial cooldowns so barrels fire in sequence:
@@ -444,6 +487,10 @@ func _update_turrets(delta: float) -> void:
 		var target_angle: float = (target_world - turret_world).angle()
 		var current_angle = turret_angles[grid_pos]
 		turret_angles[grid_pos] = lerp_angle(current_angle, target_angle, delta * 8.0)
+		# Per-barrel toe-in: each head aims at the target from its own
+		# muzzle pivot and is clamped to ±BARREL_TOE_IN_MAX from the
+		# chassis angle so the heads can converge on a close target.
+		_update_barrel_toe_in(grid_pos, data, turret_world, target_world, delta)
 
 		# Multi-barrel: any barrel with a cooldown <= 0 is ready to fire.
 		# Single-barrel falls back to the original scalar cooldown.
@@ -458,9 +505,17 @@ func _update_turrets(delta: float) -> void:
 				continue
 		elif turret_cooldowns[grid_pos] > 0:
 			continue
+		else:
+			# Single-barrel: barrel index is implicitly 0 once we pass the
+			# cooldown gate. Used by recoil (and any other per-barrel
+			# bookkeeping that assumes a non-negative index).
+			ready_barrel = 0
 
 		# --- Ammo check: if turret has ammo_types, it needs resources to fire ---
-		var fire_damage: float = data.attack_damage
+		# Damage now lives on AmmoType. The block-level field was removed,
+		# so seed with 0 — the ammo branch below overwrites this before
+		# any shot fires (and the no-ammo path returns early).
+		var fire_damage: float = 0.0
 		var fire_reload_mult: float = 1.0
 		var fire_color: Color = data.color.lightened(0.3)
 		var fire_speed: float = default_projectile_speed
@@ -545,6 +600,10 @@ func _update_turrets(delta: float) -> void:
 			turret_cooldowns[grid_pos] = maxf(min_cd, 0.0)
 		else:
 			turret_cooldowns[grid_pos] = full_cooldown
+		# Kick the firing barrel back. Decay handled by the per-frame loop.
+		var brc_fire: Array = turret_barrel_recoil[grid_pos]
+		if ready_barrel >= 0 and ready_barrel < brc_fire.size():
+			brc_fire[ready_barrel] = 1.0
 
 		# Spawn projectile from the rendered barrel TIP. The head sprite is
 		# drawn with its tip at local (lateral, -tex_size.y + 14) before
@@ -552,17 +611,23 @@ func _update_turrets(delta: float) -> void:
 		# comes out of the actual muzzle no matter which barrel just fired
 		# or how big the head texture is. Fallback to GRID_SIZE*0.4 when
 		# the turret has no head sprite (legacy shape-only turrets).
-		var aim_dir := Vector2.from_angle(turret_angles[grid_pos])
-		var aim_perp := Vector2(-aim_dir.y, aim_dir.x)
+		# Chassis basis = where the barrels are mounted (no toe-in). The
+		# muzzle pivot for barrel i sits perpendicular to the chassis
+		# aim, but the bullet leaves along that barrel's own toe-in
+		# angle so a converged target gets hit head-on.
+		var chassis_dir := Vector2.from_angle(turret_angles[grid_pos])
+		var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
+		var barrel_a: float = float(turret_barrel_angles[grid_pos][ready_barrel])
+		var aim_dir := Vector2.from_angle(barrel_a)
 		var barrel_length: float = main.GRID_SIZE * 0.4
 		if data.turret_head_sprite:
-			var head_tex_size: Vector2 = data.turret_head_sprite.get_size() * 0.3
+			var head_tex_size: Vector2 = data.turret_head_sprite.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
 			# +14 matches the pivot offset used in _draw_turret_heads.
-			barrel_length = maxf(head_tex_size.y - 14.0, 0.0)
+			barrel_length = maxf(head_tex_size.y - 14.0 * main.SPRITE_SCALE_FACTOR, 0.0)
 		var lateral_offset: float = 0.0
 		if barrel_count > 1:
 			lateral_offset = (float(ready_barrel) - (float(barrel_count) - 1.0) * 0.5) * data.barrel_spacing
-		var fire_pos = turret_world + aim_dir * barrel_length + aim_perp * lateral_offset
+		var fire_pos = turret_world + chassis_perp * lateral_offset + aim_dir * barrel_length
 
 		# Spawn one projectile per pellet, applying inaccuracy spread.
 		# Shot direction starts along the aim axis from the firing barrel's
@@ -671,6 +736,53 @@ func _update_turrets(delta: float) -> void:
 				)
 
 
+## Springs every barrel angle back toward the chassis angle. Called each
+## tick so a turret that just lost its target eventually re-centres.
+func _relax_barrels_to_chassis(grid_pos: Vector2i, delta: float) -> void:
+	if not turret_barrel_angles.has(grid_pos):
+		return
+	var arr: Array = turret_barrel_angles[grid_pos]
+	var chassis_a: float = float(turret_angles.get(grid_pos, 0.0))
+	var step: float = delta * BARREL_TURN_SPEED
+	for i in range(arr.size()):
+		arr[i] = lerp_angle(float(arr[i]), chassis_a, step)
+
+
+## Per-barrel toe-in update. Each barrel's pivot is offset perpendicular
+## to the chassis aim by the same lateral mounting math used for drawing
+## and firing. From that pivot, each head wants to look directly at the
+## target; we clamp the deviation to ±BARREL_TOE_IN_MAX from the chassis
+## angle so the heads can converge on close targets without spinning all
+## the way to a side. Single-barrel turrets still call this — the array
+## is length 1 and the pivot equals the centre, so the per-barrel angle
+## just tracks the chassis with no visible difference.
+func _update_barrel_toe_in(grid_pos: Vector2i, data, turret_world: Vector2, target_world: Vector2, delta: float) -> void:
+	if not turret_barrel_angles.has(grid_pos):
+		return
+	var barrel_arr: Array = turret_barrel_angles[grid_pos]
+	var bcount: int = barrel_arr.size()
+	if bcount <= 0:
+		return
+	var chassis_a: float = float(turret_angles.get(grid_pos, 0.0))
+	var chassis_dir := Vector2.from_angle(chassis_a)
+	var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
+	var spacing: float = data.barrel_spacing if data else 10.0
+	var step: float = delta * BARREL_TURN_SPEED
+	for i in range(bcount):
+		var lateral: float = 0.0
+		if bcount > 1:
+			lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * spacing
+		var pivot: Vector2 = turret_world + chassis_perp * lateral
+		var to_target: Vector2 = target_world - pivot
+		var desired: float = chassis_a
+		if to_target.length_squared() > 0.001:
+			desired = to_target.angle()
+		var off: float = wrapf(desired - chassis_a, -PI, PI)
+		off = clampf(off, -BARREL_TOE_IN_MAX, BARREL_TOE_IN_MAX)
+		var clamped: float = chassis_a + off
+		barrel_arr[i] = lerp_angle(float(barrel_arr[i]), clamped, step)
+
+
 # =========================
 # PLAYER DRONE COMBAT
 # =========================
@@ -684,20 +796,6 @@ func _update_drone_combat(delta: float) -> void:
 		drone_is_shooting = false
 		return
 
-	# Check if left mouse is held AND no building is selected
-	drone_is_shooting = (
-		Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and
-		main.selected_building == &""
-	)
-
-	if not drone_is_shooting or drone_cooldown > 0:
-		return
-
-	# Don't shoot when clicking on GUI controls (block menu, HUD buttons, etc.)
-	if get_viewport().gui_get_hovered_control() != null:
-		drone_is_shooting = false
-		return
-
 	var drone = _drone_ref()
 	if drone == null:
 		return
@@ -707,9 +805,78 @@ func _update_drone_combat(delta: float) -> void:
 		drone_is_shooting = false
 		return
 
-	# Check if terrain paint mode is active — don't shoot while painting
+	# Don't shoot while terrain paint mode is active.
 	var terrain = _terrain_ref()
 	if terrain and terrain.paint_mode:
+		drone_is_shooting = false
+		return
+
+	# Manual shoot is active only in default mode AND while LMB is held
+	# (with no GUI hover / no building selected). Outside that window
+	# the drone falls through to the AI auto-shoot branch so it keeps
+	# returning fire while the player is busy manually healing in heal
+	# mode — and so it passively defends in default mode when idle.
+	var heal_active: bool = "heal_mode" in drone and bool(drone.heal_mode)
+	var manual_shoot_active: bool = false
+	if not heal_active:
+		var lmb: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		if main.selected_building != &"":
+			lmb = false
+		if get_viewport().gui_get_hovered_control() != null:
+			lmb = false
+		manual_shoot_active = lmb
+	drone_is_shooting = manual_shoot_active
+
+	if not manual_shoot_active:
+		# AI auto-shoot: nearest enemy in range, on the same cooldown
+		# clock as manual fire. Runs in either mode whenever manual
+		# shooting isn't actively driving. Targets enemy units first,
+		# then falls back to nearest enemy building in range so the
+		# drone helps chip away at FEROX bases when no units are around.
+		if drone_cooldown > 0:
+			return
+		var range_px_a: float = drone_range * main.GRID_SIZE
+		var enemies_a: Array[Node2D] = unit_mgr.enemies if unit_mgr else [] as Array[Node2D]
+		var nearest_a: Node2D = _find_nearest_enemy(drone.position, enemies_a)
+		if nearest_a != null and drone.position.distance_to(nearest_a.position) <= range_px_a:
+			drone_cooldown = drone_attack_speed
+			_spawn_projectile(
+				drone.position,
+				nearest_a,
+				nearest_a.position,
+				"enemy",
+				drone_projectile_speed,
+				drone_damage,
+				Color(0.3, 0.9, 1.0, 1.0),
+				"drone",
+				false,
+				0.0,
+			)
+			return
+
+		# No enemy unit in range — try a hostile building (FEROX, plus
+		# any non-LUMINA-non-DERELICT block). Picks the closest anchor
+		# tile within range.
+		var nearest_bldg: Vector2i = _find_nearest_enemy_building(drone.position, range_px_a)
+		if nearest_bldg == Vector2i(-9999, -9999):
+			return
+		var b_world: Vector2 = main.grid_to_world(nearest_bldg) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		drone_cooldown = drone_attack_speed
+		_spawn_projectile(
+			drone.position,
+			nearest_bldg,
+			b_world,
+			"building",
+			drone_projectile_speed,
+			drone_damage,
+			Color(0.3, 0.9, 1.0, 1.0),
+			"drone",
+			false,
+			0.0,
+		)
+		return
+
+	if drone_cooldown > 0:
 		return
 
 	# Fire!
@@ -893,17 +1060,30 @@ func _update_projectiles(delta: float) -> void:
 		var distance = proj["pos"].distance_to(proj["target_pos"])
 		var step = proj["speed"] * delta
 
+		# --- Wall collision along the flight path ---
+		# Walls block bullets regardless of projectile type — handled
+		# BEFORE unit / building hit checks so a turret shooting at an
+		# enemy building can't sneak its round through a defending wall,
+		# and (per the bug report) so enemies can't shoot through the
+		# diagonal gap between two corner-touching walls. Damages the
+		# wall it stops on; bullets self-destruct on impact.
+		var move_pos: Vector2 = proj["pos"] + direction * step
+		var wall_hit: Vector2i = _check_bullet_hit_wall(move_pos, proj["pos"], int(proj.get("source_faction", -1)))
+		if wall_hit != Vector2i(-1, -1):
+			main.damage_building(wall_hit, _shot_damage(proj, wall_hit, proj["damage"]))
+			to_remove.append(i)
+			continue
+
 		# --- Direct-fire bullets (drone, controlled unit/turret): hit enemies and buildings along path ---
 		if proj["target_type"] == "none" and unit_mgr:
-			var new_pos = proj["pos"] + direction * step
-			var hit_enemy = _check_bullet_hit_enemy(new_pos, proj["pos"], unit_mgr)
+			var hit_enemy = _check_bullet_hit_enemy(move_pos, proj["pos"], unit_mgr)
 			if hit_enemy:
 				hit_enemy.take_damage(_shot_damage(proj, hit_enemy.get_instance_id(), proj["damage"]))
 				to_remove.append(i)
 				continue
 			# Check if the bullet hits an opposing-faction building
 			var source_faction: int = proj.get("source_faction", 0)
-			var hit_bldg: Vector2i = _check_bullet_hit_building(new_pos, proj["pos"], source_faction)
+			var hit_bldg: Vector2i = _check_bullet_hit_building(move_pos, proj["pos"], source_faction)
 			if hit_bldg != Vector2i(-1, -1):
 				main.damage_building(hit_bldg, _shot_damage(proj, hit_bldg, proj["damage"]))
 				to_remove.append(i)
@@ -1058,6 +1238,35 @@ func _find_nearest_enemy(from_pos: Vector2, enemies: Array[Node2D]) -> Node2D:
 			nearest = enemy
 	return nearest
 
+
+## Returns the anchor cell of the nearest hostile (non-LUMINA, non-DERELICT)
+## building within `range_px` of `from_pos`, or Vector2i(-9999, -9999) if
+## none. Used by the drone auto-shooter so the drone helps tear down FEROX
+## bases when no enemy units are around.
+func _find_nearest_enemy_building(from_pos: Vector2, range_px: float) -> Vector2i:
+	var best_anchor: Vector2i = Vector2i(-9999, -9999)
+	var best_dist_sq: float = range_px * range_px
+	var seen := {}
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen.has(anchor):
+			continue
+		seen[anchor] = true
+		var faction: int = main.get_building_faction(anchor) if main.has_method("get_building_faction") else main.Faction.LUMINA
+		# Friendly buildings and abandoned (DERELICT) ones are off-limits.
+		if faction == main.Faction.LUMINA or faction == main.Faction.DERELICT:
+			continue
+		# Skip under-construction / being-deconstructed blocks so the
+		# drone doesn't waste shots on a half-built target ghost.
+		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+			continue
+		var w: Vector2 = main.grid_to_world(anchor) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		var d2: float = from_pos.distance_squared_to(w)
+		if d2 < best_dist_sq:
+			best_dist_sq = d2
+			best_anchor = anchor
+	return best_anchor
+
 ## Checks if a drone bullet is close enough to any enemy to hit it.
 ## Uses line-segment collision so fast bullets can't skip over enemies.
 func _check_bullet_hit_enemy(bullet_pos: Vector2, bullet_prev: Vector2, unit_mgr: Node2D) -> Node2D:
@@ -1073,6 +1282,78 @@ func _check_bullet_hit_enemy(bullet_pos: Vector2, bullet_prev: Vector2, unit_mgr
 
 ## Checks if a direct-fire bullet passes through an opposing-faction building.
 ## Returns the grid position of the hit building, or Vector2i(-1, -1) if none.
+## Returns the grid_pos (anchor) of a wall block intercepting this
+## bullet's flight segment — or (-1, -1) if the path is clear. Handles
+## the diagonally-placed-walls corner case: when the segment steps
+## diagonally between two grid cells whose perpendicular neighbours are
+## both walls, the bullet is treated as hitting one of those walls
+## instead of squeezing through the gap. Walls are identified by the
+## "wall" tag on their BlockData.
+## Returns the anchor of a wall cell that intercepts the bullet path, or
+## (-1, -1) if none. `source_faction` lets a shot pass *through* its own
+## faction's walls — without this, the player drone (LUMINA) shooting
+## past a friendly wall would damage that wall, and FEROX turrets would
+## chip their own wall line.
+func _check_bullet_hit_wall(bullet_pos: Vector2, bullet_prev: Vector2, source_faction: int = -1) -> Vector2i:
+	var seg: Vector2 = bullet_pos - bullet_prev
+	var dist: float = seg.length()
+	if dist < 0.5:
+		var gp: Vector2i = main.world_to_grid(bullet_pos)
+		if _is_wall_cell(gp) and not _is_friendly_wall(gp, source_faction):
+			return main.building_origins.get(gp, gp)
+		return Vector2i(-1, -1)
+	# Step a little finer than half a tile so the path can't skip over a
+	# 1-tile wall on a fast-moving bullet.
+	var step_size: float = main.GRID_SIZE * 0.4
+	var steps: int = int(ceil(dist / step_size)) + 1
+	var prev_cell: Vector2i = main.world_to_grid(bullet_prev)
+	for s in range(steps):
+		var t: float = float(s) / float(maxi(steps - 1, 1))
+		var sample_pos: Vector2 = bullet_prev.lerp(bullet_pos, t)
+		var cell: Vector2i = main.world_to_grid(sample_pos)
+		if _is_wall_cell(cell) and not _is_friendly_wall(cell, source_faction):
+			return main.building_origins.get(cell, cell)
+		# Diagonal-gap detection: when the bullet just stepped from
+		# `prev_cell` to a diagonal neighbour without entering one of
+		# the two perpendicular cells, those cells form a corner that a
+		# bullet shouldn't be able to slip through if both are walls.
+		if cell != prev_cell:
+			var dx: int = cell.x - prev_cell.x
+			var dy: int = cell.y - prev_cell.y
+			if absi(dx) == 1 and absi(dy) == 1:
+				var c1: Vector2i = Vector2i(prev_cell.x + dx, prev_cell.y)
+				var c2: Vector2i = Vector2i(prev_cell.x, prev_cell.y + dy)
+				var c1_blocks: bool = _is_wall_cell(c1) and not _is_friendly_wall(c1, source_faction)
+				var c2_blocks: bool = _is_wall_cell(c2) and not _is_friendly_wall(c2, source_faction)
+				if c1_blocks and c2_blocks:
+					# Take the wall on the side closer to the segment's
+					# end so damage routes consistently per shot.
+					return main.building_origins.get(c1, c1)
+			prev_cell = cell
+	return Vector2i(-1, -1)
+
+
+func _is_wall_cell(grid_pos: Vector2i) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	return data != null and data.tags.has("wall")
+
+
+## True if the wall at `grid_pos` belongs to the same faction as the
+## shooter — used by `_check_bullet_hit_wall` so a friendly wall doesn't
+## intercept a friendly shot. Returns false when source_faction is < 0
+## (i.e. the caller didn't supply one), so legacy callers keep their
+## original blocks-everything behaviour.
+func _is_friendly_wall(grid_pos: Vector2i, source_faction: int) -> bool:
+	if source_faction < 0:
+		return false
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	if main.has_method("get_building_faction"):
+		return int(main.get_building_faction(anchor)) == source_faction
+	return false
+
+
 func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, source_faction: int) -> Vector2i:
 	var opposing_faction: int = main.Faction.FEROX if source_faction == main.Faction.LUMINA else main.Faction.LUMINA
 	var half := Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
@@ -1113,6 +1394,14 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 	var data = Registry.get_block(block_id)
 	if data and data.is_turret():
 		turret_cooldowns[grid_pos] = 0.0
+		# Seed the turret's chassis aim from the rotation it was placed
+		# at, so a player who pre-rotates with Q sees the heads point
+		# that way the moment the build finishes (instead of always
+		# snapping to 0° = right and slowly tracking the first target).
+		# Rotation values: 0=Right, 1=Down, 2=Left, 3=Up — same convention
+		# the placement preview and direction-arrow code use.
+		var rot: int = int(main.building_rotation.get(grid_pos, 0))
+		turret_angles[grid_pos] = float(rot) * (PI / 2.0)
 
 
 func _on_building_destroyed(grid_pos: Vector2i) -> void:
@@ -1120,6 +1409,8 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	turret_angles.erase(grid_pos)
 	turret_barrel_cooldowns.erase(grid_pos)
 	turret_barrel_fire_flash.erase(grid_pos)
+	turret_barrel_recoil.erase(grid_pos)
+	turret_barrel_angles.erase(grid_pos)
 
 
 # =========================
@@ -1164,18 +1455,55 @@ func _draw_turret_heads() -> void:
 		# its own muzzle position.
 		if data.turret_head_sprite:
 			var tex: Texture2D = data.turret_head_sprite
-			var tex_size: Vector2 = tex.get_size() * 0.3
-			var draw_angle: float = angle + PI / 2.0
+			var tex_size: Vector2 = tex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
 			var bcount: int = maxi(data.barrel_count, 1)
+			var brc_d: Array = turret_barrel_recoil.get(grid_pos, [])
+			var bang_d: Array = turret_barrel_angles.get(grid_pos, [])
+			# Chassis basis: barrel pivots are mounted perpendicular to the
+			# chassis aim, NOT to the per-barrel toed-in aim, so the muzzle
+			# mounts stay rigid even when the heads converge.
+			var chassis_dir := Vector2.from_angle(angle)
+			var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
+			# Multi-barrel chassis plate: drawn UNDER the heads, rotated
+			# by the shared chassis angle only so the heads read as
+			# mounted on a common base while still toeing in
+			# independently. Prefers the block's authored chassis
+			# sprite; falls back to a procedural gray rectangle sized
+			# to span the barrel mounts.
+			if bcount > 1:
+				draw_set_transform(center, angle + PI / 2.0)
+				if data.turret_chassis_sprite:
+					var chassis_tex: Texture2D = data.turret_chassis_sprite
+					var chassis_size: Vector2 = chassis_tex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+					var chassis_rect := Rect2(
+						Vector2(-chassis_size.x * 0.5, -chassis_size.y * 0.5),
+						chassis_size,
+					)
+					draw_texture_rect(chassis_tex, chassis_rect, false)
+				else:
+					var plate_w: float = (float(bcount) - 1.0) * data.barrel_spacing + tex_size.x * 0.9
+					var plate_h: float = tex_size.y * 0.35
+					draw_rect(
+						Rect2(Vector2(-plate_w * 0.5, -plate_h * 0.5), Vector2(plate_w, plate_h)),
+						Color(0.32, 0.32, 0.34, 1.0),
+					)
+				draw_set_transform(Vector2.ZERO, 0.0)
 			for i in range(bcount):
 				var lateral: float = 0.0
 				if bcount > 1:
 					lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * data.barrel_spacing
-				draw_set_transform(center, draw_angle)
-				# Translate along the head's local X axis (perpendicular to
-				# barrel) to place this head offset from centre.
+				var pivot_world: Vector2 = center + chassis_perp * lateral
+				var barrel_a: float = float(bang_d[i]) if i < bang_d.size() else angle
+				var draw_angle: float = barrel_a + PI / 2.0
+				# Recoil pushes the head back along the barrel (local +Y in
+				# head space, since the rect's tip is at -tex_size.y + 14).
+				var recoil_amt: float = float(brc_d[i]) if i < brc_d.size() else 0.0
+				var recoil_kick: float = recoil_amt * RECOIL_PIXELS
+				draw_set_transform(pivot_world, draw_angle)
+				# Rect centred on this barrel's pivot — lateral offset is
+				# baked into pivot_world, so x is just -tex/2.
 				var head_rect := Rect2(
-					Vector2(-tex_size.x * 0.5 + lateral, -tex_size.y + 14.0),
+					Vector2(-tex_size.x * 0.5, -tex_size.y + 14.0 * main.SPRITE_SCALE_FACTOR + recoil_kick),
 					tex_size
 				)
 				draw_texture_rect(tex, head_rect, false)

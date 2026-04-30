@@ -610,7 +610,14 @@ func _show_block_details(block: BlockData) -> void:
 	if block.is_turret():
 		_add_separator()
 		_add_section("Combat")
-		_add_stat_bar("Damage", block.attack_damage, 50.0, Color(1.0, 0.4, 0.4))
+		# Damage moved onto AmmoType. Show the highest-damage round so
+		# the bar reflects the turret's peak output; per-ammo rows below
+		# break it down further.
+		var max_dmg: float = 0.0
+		for ammo in block.ammo_types:
+			if ammo is AmmoType:
+				max_dmg = maxf(max_dmg, (ammo as AmmoType).damage)
+		_add_stat_bar("Damage", max_dmg, 50.0, Color(1.0, 0.4, 0.4))
 		_add_stat_bar("Attack Speed", block.attack_speed, 3.0, Color(1.0, 0.8, 0.3))
 		_add_stat_bar("Range", block.attack_range, 10.0, Color(0.4, 0.7, 1.0))
 		if block.is_aoe:

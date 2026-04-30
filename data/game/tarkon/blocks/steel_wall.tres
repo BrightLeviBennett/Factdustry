@@ -1,15 +1,18 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cs7ayhpms8bh7"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://be65ak41yhwvp" path="res://textures/blocks/walls/SteelWall.png" id="1_nxmq3"]
 
 [resource]
 script = ExtResource("1")
 id = &"steel_wall"
 display_name = "Steel Wall"
 description = "A solid steel wall. Blocks enemies and projectiles."
+icon = ExtResource("1_nxmq3")
 category = 5
 tags = PackedStringArray("wall", "defense")
 color = Color(0.4, 0.5, 0.6, 1)
+top_sprite = ExtResource("1_nxmq3")
 max_health = 260.0
 build_cost = {
 "steel": 6

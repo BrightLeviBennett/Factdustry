@@ -213,24 +213,51 @@ func _select_tab(tab_name: String) -> void:
 func _build_game_tab() -> void:
 	_add_section("General")
 	_add_toggle("Show FPS", _get_show_fps(), func(v): _set_show_fps(v))
-	_add_toggle("Autosave", true, func(_v): pass)  # Placeholder
-	_add_toggle("Parallax Effect",
-		true,
+	# Autosave cadence: 5s..120s. HUD reads this every frame, so a change
+	# takes effect on the next tick without restarting the sector.
+	_add_range_slider("Autosave Interval",
+		float(_get_setting("autosave_interval")), 5.0, 120.0, 1.0,
+		func(v: float) -> String:
+			if v >= 60.0:
+				var m: int = int(v) / 60
+				var s: int = int(v) % 60
+				return "%dm %ds" % [m, s] if s > 0 else "%dm" % m
+			return "%ds" % int(v),
 		func(v):
+			_set_setting("autosave_interval", float(v))
+			var hud = get_node_or_null("/root/Main/HUD")
+			if hud and "autosave_interval" in hud:
+				hud.autosave_interval = float(v)
+	)
+	_add_toggle("Parallax Effect",
+		bool(_get_setting("parallax_enabled")),
+		func(v):
+			_set_setting("parallax_enabled", v)
 			var building_sys = get_node_or_null("/root/Main/BuildingSystem")
 			if building_sys and "parallax_enabled" in building_sys:
 				building_sys.parallax_enabled = v
-			_save_settings()
 	)
-	var cam = get_node_or_null("/root/Main/Camera2D")
-	var current_sens: float = cam.pan_rotate_threshold if cam and "pan_rotate_threshold" in cam else 1.5
-	_add_slider("Trackpad Rotation Sensitivity", clampf(1.0 / current_sens, 0.1, 2.0),
+	# Tech tree pan: ON = WASD scrolls the canvas; OFF = click-and-drag
+	# pans it. The tech tree UI reads this every frame so a toggle takes
+	# effect immediately while the panel is open.
+	_add_toggle("Tech Tree: WASD to Move (off = drag)",
+		bool(_get_setting("tech_tree_wasd")),
 		func(v):
+			_set_setting("tech_tree_wasd", bool(v))
+			var tt_ui = get_node_or_null("/root/Main/TechTreeUI")
+			if tt_ui and "wasd_pan" in tt_ui:
+				tt_ui.wasd_pan = bool(v)
+	)
+	# Slider value = user-facing 0.1–2.0 sensitivity. Threshold (what the
+	# camera actually consumes) is its inverse, clamped to 0.5–10.0.
+	var saved_threshold: float = float(_get_setting("pan_rotate_threshold"))
+	_add_slider("Trackpad Rotation Sensitivity", clampf(1.0 / saved_threshold, 0.1, 2.0),
+		func(v):
+			var threshold: float = clampf(1.0 / maxf(v, 0.1), 0.5, 10.0)
+			_set_setting("pan_rotate_threshold", threshold)
 			var c = get_node_or_null("/root/Main/Camera2D")
 			if c and "pan_rotate_threshold" in c:
-				# Higher slider = more sensitive = lower threshold
-				c.pan_rotate_threshold = clampf(1.0 / maxf(v, 0.1), 0.5, 10.0)
-			_save_settings()
+				c.pan_rotate_threshold = threshold
 	)
 
 func _get_show_fps() -> bool:
@@ -247,16 +274,16 @@ func _set_show_fps(_v: bool) -> void:
 func _build_graphics_tab() -> void:
 	_add_section("Display")
 	_add_dropdown("Window Mode", ["Windowed", "Fullscreen", "Borderless Fullscreen"],
-		_get_window_mode_index(), func(idx):
+		int(_get_setting("window_mode")), func(idx):
+			_set_setting("window_mode", int(idx))
 			match idx:
 				0: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 				1: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 				2: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN)
-			_save_settings()
 	)
-	_add_toggle("VSync", DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED, func(v):
+	_add_toggle("VSync", bool(_get_setting("vsync")), func(v):
+		_set_setting("vsync", bool(v))
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if v else DisplayServer.VSYNC_DISABLED)
-		_save_settings()
 	)
 
 func _get_window_mode_index() -> int:
@@ -272,17 +299,17 @@ func _get_window_mode_index() -> int:
 
 func _build_sound_tab() -> void:
 	_add_section("Volume")
-	_add_slider("Master Volume", _get_bus_volume("Master"), func(v):
+	_add_slider("Master Volume", float(_get_setting("volume_master")), func(v):
+		_set_setting("volume_master", float(v))
 		_set_bus_volume("Master", v)
-		_save_settings()
 	)
-	_add_slider("Music Volume", _get_bus_volume("Music"), func(v):
+	_add_slider("Music Volume", float(_get_setting("volume_music")), func(v):
+		_set_setting("volume_music", float(v))
 		_set_bus_volume("Music", v)
-		_save_settings()
 	)
-	_add_slider("SFX Volume", _get_bus_volume("SFX"), func(v):
+	_add_slider("SFX Volume", float(_get_setting("volume_sfx")), func(v):
+		_set_setting("volume_sfx", float(v))
 		_set_bus_volume("SFX", v)
-		_save_settings()
 	)
 
 func _get_bus_volume(bus_name: String) -> float:
@@ -412,45 +439,42 @@ func _save_keybindings() -> void:
 
 
 ## Persists the non-keybinding settings tweakable from the Settings UI
-## (audio bus volumes, graphics mode, a handful of game/UX toggles). Called
-## from every change callback so the on-disk file stays in sync with the
-## running settings. Separate file from keybindings so a bad schema in one
-## can't corrupt the other.
+## (audio bus volumes, graphics mode, a handful of game/UX toggles).
+## Separate file from keybindings so a bad schema in one can't corrupt
+## the other.
+##
+## A single class-level cache `_cache` is the source of truth. The UI
+## reads initial values from it, change callbacks write back into it
+## (and apply to live scene-graph nodes when those exist), and disk
+## writes serialise the cache directly. This means a setting toggled
+## from the main menu — where Main / BuildingSystem / Camera2D don't
+## exist yet — still persists, because the cache write doesn't depend
+## on any node being live.
 const _SETTINGS_PATH := "user://settings.json"
 
-func _save_settings() -> void:
-	var data: Dictionary = {}
-	# Audio.
-	data["volume_master"] = _get_bus_volume("Master")
-	data["volume_music"] = _get_bus_volume("Music")
-	data["volume_sfx"] = _get_bus_volume("SFX")
-	# Graphics.
-	data["window_mode"] = _get_window_mode_index()
-	data["vsync"] = DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED
-	# Game / UX.
-	if main and "require_research" in main:
-		data["require_research"] = bool(main.require_research)
-	if main and "enemies_attack" in main:
-		data["enemies_attack"] = bool(main.enemies_attack)
-	data["unlock_all_tech"] = bool(TechTree.unlock_all)
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
-	if building_sys and "parallax_enabled" in building_sys:
-		data["parallax_enabled"] = bool(building_sys.parallax_enabled)
-	var cam = get_node_or_null("/root/Main/Camera2D")
-	if cam and "pan_rotate_threshold" in cam:
-		data["pan_rotate_threshold"] = float(cam.pan_rotate_threshold)
+const _DEFAULTS := {
+	"volume_master": 1.0,
+	"volume_music": 1.0,
+	"volume_sfx": 1.0,
+	"window_mode": 0,
+	"vsync": true,
+	"require_research": true,
+	"enemies_attack": true,
+	"unlock_all_tech": false,
+	"parallax_enabled": true,
+	"pan_rotate_threshold": 1.5,
+	"autosave_interval": 60.0,
+	"tech_tree_wasd": false,
+}
 
-	var file = FileAccess.open(_SETTINGS_PATH, FileAccess.WRITE)
-	if file:
-		file.store_string(JSON.stringify(data, "\t"))
-		file.close()
+static var _cache: Dictionary = {}
+static var _cache_loaded: bool = false
 
 
-## Loads settings saved by `_save_settings`. Called from the main menu at
-## launch so the running instance reflects the on-disk settings before the
-## settings UI is opened (which otherwise builds its controls against the
-## engine defaults). Silent no-op when the file doesn't exist.
-static func load_settings() -> void:
+static func _ensure_cache_loaded() -> void:
+	if _cache_loaded:
+		return
+	_cache_loaded = true
 	if not FileAccess.file_exists(_SETTINGS_PATH):
 		return
 	var file = FileAccess.open(_SETTINGS_PATH, FileAccess.READ)
@@ -460,55 +484,100 @@ static func load_settings() -> void:
 	file.close()
 	if json == null or not json is Dictionary:
 		return
-	var data: Dictionary = json
-	# Audio.
+	# Only carry across keys we recognise — skips junk and old schema
+	# leftovers without nuking the file.
+	for k in json:
+		if _DEFAULTS.has(k):
+			_cache[k] = json[k]
+
+
+static func _get_setting(key: String, fallback = null):
+	_ensure_cache_loaded()
+	if _cache.has(key):
+		return _cache[key]
+	if _DEFAULTS.has(key):
+		return _DEFAULTS[key]
+	return fallback
+
+
+static func _set_setting(key: String, value) -> void:
+	_ensure_cache_loaded()
+	_cache[key] = value
+	_write_cache_to_disk()
+
+
+static func _write_cache_to_disk() -> void:
+	var file = FileAccess.open(_SETTINGS_PATH, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(_cache, "\t"))
+		file.close()
+
+
+## Back-compat shim: callers that used to call `_save_settings()` after
+## poking live nodes now go through `_set_setting` directly. We keep the
+## method as a no-op so any leftover call site (or future autosave)
+## doesn't break.
+func _save_settings() -> void:
+	_write_cache_to_disk()
+
+
+## Loads settings from disk and applies them everywhere we can right
+## now. Audio buses + window mode + vsync apply unconditionally. Game /
+## UX entries that depend on `/root/Main/*` nodes are applied here too
+## if those nodes exist, otherwise `apply_pending_settings` will pick
+## them up once Main is ready.
+static func load_settings() -> void:
+	_ensure_cache_loaded()
+	# Audio — apply to bus volumes immediately so the main menu reflects
+	# the saved volume.
 	for bus_entry in [["Master", "volume_master"], ["Music", "volume_music"], ["SFX", "volume_sfx"]]:
 		var bus_name: String = bus_entry[0]
 		var key: String = bus_entry[1]
-		if data.has(key):
-			var idx: int = AudioServer.get_bus_index(bus_name)
-			if idx >= 0:
-				AudioServer.set_bus_volume_db(idx, linear_to_db(float(data[key])))
+		var idx: int = AudioServer.get_bus_index(bus_name)
+		if idx >= 0:
+			AudioServer.set_bus_volume_db(idx, linear_to_db(float(_get_setting(key))))
 	# Graphics.
-	if data.has("window_mode"):
-		match int(data["window_mode"]):
-			1: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-			2: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN)
-			_: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-	if data.has("vsync"):
-		DisplayServer.window_set_vsync_mode(
-			DisplayServer.VSYNC_ENABLED if bool(data["vsync"]) else DisplayServer.VSYNC_DISABLED
-		)
-	# Game / UX — scene graph nodes may not exist yet when this runs from
-	# the main menu; defer the ones that depend on `/root/Main/*` so they
-	# apply once the game scene is loaded.
-	if data.has("unlock_all_tech"):
-		TechTree.unlock_all = bool(data["unlock_all_tech"])
-	# Stash the rest on the engine singleton metadata for the game scene
-	# to pick up on load.
-	Engine.set_meta(&"_pending_settings", data)
+	match int(_get_setting("window_mode")):
+		1: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		2: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN)
+		_: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	DisplayServer.window_set_vsync_mode(
+		DisplayServer.VSYNC_ENABLED if bool(_get_setting("vsync")) else DisplayServer.VSYNC_DISABLED
+	)
+	# Game / UX. TechTree.unlock_all is an autoload — always reachable.
+	TechTree.unlock_all = bool(_get_setting("unlock_all_tech"))
+	# The rest depend on the gameplay scene graph; apply now if it's up,
+	# otherwise leave it for apply_pending_settings.
+	apply_pending_settings()
 	print("SettingsUI: Loaded settings from %s" % _SETTINGS_PATH)
 
 
-## Applies settings that depend on scene-graph nodes (require_research on
-## Main, parallax_enabled on BuildingSystem, camera sensitivity). Called
-## from Main._ready() once those nodes exist.
+## Applies settings that depend on scene-graph nodes (require_research
+## on Main, parallax_enabled on BuildingSystem, camera sensitivity).
+## Called from Main._ready() once those nodes exist; safe to call any
+## time — silently skips nodes that aren't live yet.
 static func apply_pending_settings() -> void:
-	if not Engine.has_meta(&"_pending_settings"):
-		return
-	var data: Dictionary = Engine.get_meta(&"_pending_settings")
-	Engine.remove_meta(&"_pending_settings")
-	var main_node = Engine.get_main_loop().root.get_node_or_null("Main") if Engine.get_main_loop() else null
-	if main_node and data.has("require_research") and "require_research" in main_node:
-		main_node.require_research = bool(data["require_research"])
-	if main_node and data.has("enemies_attack") and "enemies_attack" in main_node:
-		main_node.enemies_attack = bool(data["enemies_attack"])
+	_ensure_cache_loaded()
+	var tree = Engine.get_main_loop()
+	var main_node = null
+	if tree and tree.root:
+		main_node = tree.root.get_node_or_null("Main")
+	if main_node and "require_research" in main_node:
+		main_node.require_research = bool(_get_setting("require_research"))
+	if main_node and "enemies_attack" in main_node:
+		main_node.enemies_attack = bool(_get_setting("enemies_attack"))
 	var building_sys = main_node.get_node_or_null("BuildingSystem") if main_node else null
-	if building_sys and data.has("parallax_enabled") and "parallax_enabled" in building_sys:
-		building_sys.parallax_enabled = bool(data["parallax_enabled"])
+	if building_sys and "parallax_enabled" in building_sys:
+		building_sys.parallax_enabled = bool(_get_setting("parallax_enabled"))
 	var cam = main_node.get_node_or_null("Camera2D") if main_node else null
-	if cam and data.has("pan_rotate_threshold") and "pan_rotate_threshold" in cam:
-		cam.pan_rotate_threshold = float(data["pan_rotate_threshold"])
+	if cam and "pan_rotate_threshold" in cam:
+		cam.pan_rotate_threshold = float(_get_setting("pan_rotate_threshold"))
+	var hud = main_node.get_node_or_null("HUD") if main_node else null
+	if hud and "autosave_interval" in hud:
+		hud.autosave_interval = clampf(float(_get_setting("autosave_interval")), 5.0, 120.0)
+	var tt_ui = main_node.get_node_or_null("TechTreeUI") if main_node else null
+	if tt_ui and "wasd_pan" in tt_ui:
+		tt_ui.wasd_pan = bool(_get_setting("tech_tree_wasd"))
 
 
 static func load_keybindings() -> void:
@@ -592,25 +661,26 @@ func _build_game_data_tab() -> void:
 func _build_developer_tab() -> void:
 	_add_section("Cheats")
 	_add_toggle("Require Research to Place Blocks",
-		main.require_research if main else true,
+		bool(_get_setting("require_research")),
 		func(v):
+			_set_setting("require_research", bool(v))
 			if main:
 				main.require_research = v
 				var hud = get_node_or_null("/root/Main/HUD")
 				if hud and hud.has_method("_refresh_block_menu"):
 					hud._refresh_block_menu()
-			_save_settings()
 	)
 	_add_toggle("Enemies Attack",
-		main.enemies_attack if main else true,
+		bool(_get_setting("enemies_attack")),
 		func(v):
+			_set_setting("enemies_attack", bool(v))
 			if main:
 				main.enemies_attack = v
-			_save_settings()
 	)
 	_add_toggle("Unlock All Tech (sandbox)",
-		TechTree.unlock_all,
+		bool(_get_setting("unlock_all_tech")),
 		func(v):
+			_set_setting("unlock_all_tech", bool(v))
 			TechTree.unlock_all = v
 			for nid in TechTree.nodes:
 				TechTree.node_state_changed.emit(nid, TechTree.get_state(nid))
@@ -623,7 +693,6 @@ func _build_developer_tab() -> void:
 					tree_ui.tree_canvas.queue_redraw()
 				if tree_ui.has_method("_update_resource_panel"):
 					tree_ui._update_resource_panel()
-			_save_settings()
 	)
 
 	_add_section("Debug Actions")
@@ -725,6 +794,33 @@ func _add_slider(label_text: String, initial: float, callback: Callable) -> void
 	val_lbl.add_theme_font_size_override("font_size", 12)
 	val_lbl.custom_minimum_size.x = 40
 	slider.value_changed.connect(func(v): val_lbl.text = "%d%%" % int(v * 100))
+	hbox.add_child(val_lbl)
+	content_vbox.add_child(hbox)
+
+
+func _add_range_slider(label_text: String, initial: float, min_v: float, max_v: float, step: float, format_cb: Callable, callback: Callable) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	var lbl = Label.new()
+	lbl.text = label_text
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", Color(0.7, 0.75, 0.8))
+	lbl.custom_minimum_size.x = 140
+	hbox.add_child(lbl)
+	var slider = HSlider.new()
+	slider.min_value = min_v
+	slider.max_value = max_v
+	slider.step = step
+	slider.value = clampf(initial, min_v, max_v)
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.custom_minimum_size.x = 200
+	slider.value_changed.connect(callback)
+	hbox.add_child(slider)
+	var val_lbl = Label.new()
+	val_lbl.text = format_cb.call(slider.value)
+	val_lbl.add_theme_font_size_override("font_size", 12)
+	val_lbl.custom_minimum_size.x = 60
+	slider.value_changed.connect(func(v): val_lbl.text = format_cb.call(v))
 	hbox.add_child(val_lbl)
 	content_vbox.add_child(hbox)
 

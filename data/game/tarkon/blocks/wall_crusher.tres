@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bk4nvjoaaq860"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://dppnrgc3hbeik" path="res://textures/blocks/resource extractors/WallCrusher/WallCrusherComplete.png" id="1_k0j28"]
+[ext_resource type="Texture2D" uid="uid://ciyjvnsv1tjdl" path="res://textures/blocks/resource extractors/WallCrusher/WallCrusherComplete.png" id="1_k0j28"]
 [ext_resource type="Texture2D" uid="uid://bgywh0qohjm65" path="res://textures/blocks/resource extractors/WallCrusher/WallCrusher.png" id="1_uuuo3"]
 
 [resource]

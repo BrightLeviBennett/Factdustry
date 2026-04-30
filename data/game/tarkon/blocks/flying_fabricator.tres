@@ -7,8 +7,8 @@
 
 [resource]
 script = ExtResource("3_crxiu")
-id = &"ship_fabricator"
-display_name = "Ship Fabricator"
+id = &"flying_fabricator"
+display_name = "Flying Fabricator"
 description = "Constructs flying ship-class units."
 icon = ExtResource("2_kkjvs")
 category = 6

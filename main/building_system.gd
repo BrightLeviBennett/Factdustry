@@ -63,17 +63,21 @@ var archive_decoder_state: Dictionary = {}
 
 # --- CRANE STATE ---
 var crane_states: Dictionary = {}  # Vector2i anchor → {arm_angle, arm_extension, grabber_open, held_payload, target_pos}
-const CRANE_ARM3_WIDTH := 14.0    # Innermost segment (extends first)
-const CRANE_ARM2_WIDTH := 20.0    # Middle segment
-const CRANE_ARM1_WIDTH := 26.0    # Outermost segment (base)
-const CRANE_ARM3_MIN := 180.0     # Minimum length of segment 3
-const CRANE_ARM2_MIN := 160.0     # Minimum length of segment 2
-const CRANE_ARM1_MIN := 140.0     # Minimum length of segment 1
-const CRANE_ARM3_MAX := 540.0     # Maximum length of segment 3 (extends first)
-const CRANE_ARM2_MAX := 480.0     # Maximum length of segment 2 (extends second)
-const CRANE_ARM1_MAX := 420.0     # Maximum length of segment 1 (extends last)
-const CRANE_ARM_MIN_TOTAL := 480.0 # Sum of all minimums
-const CRANE_GRABBER_SIZE := 28.0  # Half-length of each cross bar
+# Crane dimensions — defaults tuned at the 64-px grid baseline. Scaled to
+# `main.SPRITE_SCALE_FACTOR` in `_ready` so cranes stay proportional to
+# tiles after grid changes. Stored as `var` (not `const`) so we can mutate
+# them at startup; treat them as read-only after `_ready`.
+var CRANE_ARM3_WIDTH := 14.0    # Innermost segment (extends first)
+var CRANE_ARM2_WIDTH := 20.0    # Middle segment
+var CRANE_ARM1_WIDTH := 26.0    # Outermost segment (base)
+var CRANE_ARM3_MIN := 180.0     # Minimum length of segment 3
+var CRANE_ARM2_MIN := 160.0     # Minimum length of segment 2
+var CRANE_ARM1_MIN := 140.0     # Minimum length of segment 1
+var CRANE_ARM3_MAX := 540.0     # Maximum length of segment 3 (extends first)
+var CRANE_ARM2_MAX := 480.0     # Maximum length of segment 2 (extends second)
+var CRANE_ARM1_MAX := 420.0     # Maximum length of segment 1 (extends last)
+var CRANE_ARM_MIN_TOTAL := 480.0 # Sum of all minimums
+var CRANE_GRABBER_SIZE := 28.0  # Half-length of each cross bar
 
 # --- PREVIEW STATE ---
 var preview_grid_pos := Vector2i.ZERO
@@ -97,6 +101,8 @@ var _payload_conveyor_textures := {}
 # --- PIPE / PUMP TEXTURES ---
 var _pipe_texture: Texture2D
 var _pump_texture: Texture2D
+var _faction_overlay_ferox: Texture2D
+var _faction_overlay_derelict: Texture2D
 
 # --- DRILL HEAD TEXTURES ---
 # Keyed by variant: "N" = both ores directly in front, "A" = both ores +1 ahead,
@@ -122,6 +128,19 @@ const CRUSHER_HEAD_ACCEL := 5.0
 #   {"angle_a": float, "angle_b": float, "vel_a": float, "vel_b": float}
 # Updated in _process when the world is not paused.
 var _crusher_head_state: Dictionary = {}
+
+# Archive-scan reveal-line phase. Advanced in _process when the world
+# isn't paused so the scan line freezes in place during pause. Used as a
+# triangle-wave input so the line ping-pongs across the archive instead
+# of snapping from end → start.
+var _archive_scan_phase: float = 0.0
+const _ARCHIVE_SCAN_PERIOD: float = 2.0
+# Per-archive-anchor fade alpha [0, 1]. Climbs toward 1 while a powered
+# scanner is locked on it, drops toward 0 once that condition lapses
+# (scanner destroyed, lost power, archive decoded). Drawn entries hang
+# around until alpha hits 0, then evict.
+var _archive_scan_fade: Dictionary = {}
+const _ARCHIVE_SCAN_FADE_RATE: float = 4.0  # alpha units / second
 
 # --- CABLE WIRE TEXTURE ---
 var _wire_texture: Texture2D
@@ -160,6 +179,8 @@ var _world_menu_pos := Vector2i.ZERO  # Grid position of the block that opened t
 var _world_menu_type := ""  # "sorter", "constructor", or "archive"
 var _world_menu_items: Array = []  # Array of {id: StringName, icon: Texture2D, name: String}
 var _world_menu_columns := 8
+## Cell size for in-world menus (storage / sorter / constructor pickers).
+## Tuned at 64 px grid (= 44 px); scaled in `_ready` to current GRID_SIZE.
 var _world_menu_cell_size := 44.0
 var _world_menu_hovered := -1  # Index of hovered item, -1 = none
 
@@ -256,14 +277,40 @@ var _demolish_start := Vector2i.ZERO
 var _demolish_end := Vector2i.ZERO
 
 # --- LINKING STATE ---
-## Whether the player is currently linking two blocks.
-var linking_mode := false
-## The first block selected for linking (or Vector2i(-1,-1) if none).
+## Mindustry-style ad-hoc linking: clicking any `linkable` block selects it
+## as `link_source` (yellow highlight). Clicking a second linkable block
+## creates the link and makes THAT block the new source (blue flash on the
+## previous one). RMB / Escape / clicking a non-linkable block clears it.
+## `Vector2i(-1, -1)` = nothing selected.
 var link_source := Vector2i(-1, -1)
+## Set briefly after a link is created so the just-linked partner flashes
+## blue alongside the new source's yellow. Cleared on the next selection
+## change. Anchor of the previous source after a successful link.
+var _link_just_linked := Vector2i(-1, -1)
 
 
 func _ready() -> void:
-	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	# Mindustry-style smooth filtering on every in-world draw. Was
+	# `TEXTURE_FILTER_NEAREST` (strict pixel art) — flipped to
+	# Linear-with-Mipmaps so floor tiles, building bases, faction
+	# overlays, etc. sample from the mip pyramid at any zoom.
+	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	# Scale world-menu cell size to current GRID_SIZE so storage / sorter /
+	# picker panels stay proportional to a tile.
+	_world_menu_cell_size *= main.SPRITE_SCALE_FACTOR
+	# Scale crane dimensions (originally tuned at the 64-px grid baseline).
+	var sf: float = main.SPRITE_SCALE_FACTOR
+	CRANE_ARM3_WIDTH *= sf
+	CRANE_ARM2_WIDTH *= sf
+	CRANE_ARM1_WIDTH *= sf
+	CRANE_ARM3_MIN *= sf
+	CRANE_ARM2_MIN *= sf
+	CRANE_ARM1_MIN *= sf
+	CRANE_ARM3_MAX *= sf
+	CRANE_ARM2_MAX *= sf
+	CRANE_ARM1_MAX *= sf
+	CRANE_ARM_MIN_TOTAL *= sf
+	CRANE_GRABBER_SIZE *= sf
 	# Popup overlay: drawn on a separate Node2D so we can pin a very high
 	# z_index without affecting BuildingSystem's main draw stack. With
 	# z_as_relative = false, this beats every in-world Node2D regardless
@@ -272,7 +319,7 @@ func _ready() -> void:
 	_popup_overlay.owner_sys = self
 	_popup_overlay.z_index = 4096
 	_popup_overlay.z_as_relative = false
-	_popup_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_popup_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	add_child(_popup_overlay)
 	# Kick off all texture loads on background threads so they can overlap
 	# with Registry essentials + main/sector initialization. They're resolved
@@ -561,6 +608,13 @@ const _PIPE_TEX_PATH := "res://textures/blocks/fluid transportation/FluidConduit
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
+# Generic faction-overlay sprites stamped on top of the building's base
+# instead of tinting the whole footprint a flat colour. Centered on the
+# bottom-left tile of multi-tile buildings (and on the only tile of 1×1
+# buildings) so the silhouette is unmistakable without obscuring the
+# rest of the building art.
+const _FACTION_OVERLAY_FEROX_PATH := "res://textures/blocks/cores/FactionOverlayFerox.png"
+const _FACTION_OVERLAY_DERELICT_PATH := "res://textures/blocks/cores/FactionOverlayDerelict.png"
 # Payload conveyor swaps to a merge texture when an upstream payload source
 # feeds it from the left/right side. Default ("PayloadConveyor.png") is used
 # when the back is fed (or nothing is fed).
@@ -583,6 +637,8 @@ func _queue_texture_loads() -> void:
 	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
+	ResourceLoader.load_threaded_request(_FACTION_OVERLAY_FEROX_PATH)
+	ResourceLoader.load_threaded_request(_FACTION_OVERLAY_DERELICT_PATH)
 	for key in _PAYLOAD_CONV_TEX_PATHS:
 		ResourceLoader.load_threaded_request(_PAYLOAD_CONV_TEX_PATHS[key])
 
@@ -601,6 +657,8 @@ func _ensure_textures_loaded() -> void:
 	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
 	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
+	_faction_overlay_ferox = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_FEROX_PATH)
+	_faction_overlay_derelict = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_DERELICT_PATH)
 	for key in _PAYLOAD_CONV_TEX_PATHS:
 		_payload_conveyor_textures[key] = ResourceLoader.load_threaded_get(_PAYLOAD_CONV_TEX_PATHS[key])
 	_textures_ready = true
@@ -763,7 +821,7 @@ func _draw_crusher_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 	# gears sit comfortably inside a single tile — tweak CRUSHER_HEAD_SCALE
 	# at the top of this script (or inline here) if you want them bigger.
 	const CRUSHER_HEAD_SCALE := 0.5
-	var tex_size: Vector2 = _crusher_head_texture.get_size() * CRUSHER_HEAD_SCALE
+	var tex_size: Vector2 = _crusher_head_texture.get_size() * CRUSHER_HEAD_SCALE * main.SPRITE_SCALE_FACTOR
 	var tex_rect := Rect2(-tex_size * 0.5, tex_size)
 
 	# Per-block phase offsets — derived from grid_pos so neighboring crushers
@@ -889,6 +947,10 @@ func _input(event: InputEvent) -> void:
 			_schematic_confirmed = true
 			queue_redraw()
 	if event.is_action_pressed("ui_cancel"):
+		if link_source != Vector2i(-1, -1):
+			link_source = Vector2i(-1, -1)
+			_link_just_linked = Vector2i(-1, -1)
+			queue_redraw()
 		if _world_menu_open:
 			_close_world_menu()
 			get_viewport().set_input_as_handled()
@@ -962,13 +1024,11 @@ func _input(event: InputEvent) -> void:
 		if "build_paused" in main:
 			main.build_paused = not main.build_paused
 	elif event.is_action_pressed("toggle_link_mode"):
-		if linking_mode:
-			linking_mode = false
+		# Legacy "L" key: now just clears any pending link selection.
+		# Linking happens via plain clicks on linkable blocks.
+		if link_source != Vector2i(-1, -1):
 			link_source = Vector2i(-1, -1)
-		else:
-			linking_mode = true
-			link_source = Vector2i(-1, -1)
-			main.select_building(&"")  # Exit build mode
+			_link_just_linked = Vector2i(-1, -1)
 			queue_redraw()
 
 
@@ -1026,6 +1086,10 @@ func _process(_delta: float) -> void:
 	# Tick archive decoders
 	if not ("world_paused" in main and main.world_paused):
 		_tick_archive_decoders(_delta)
+		# Advance the scan-line phase only while the world is running so
+		# the reveal line freezes at its current position during pause.
+		_archive_scan_phase += _delta
+		_tick_archive_scan_fade(_delta)
 
 	# --- The rest of _process (preview, drag, redraw) continues in the
 	# indented block below. The tick helper functions follow after _process ends. ---
@@ -1033,8 +1097,9 @@ func _process(_delta: float) -> void:
 	# Always redraw for parallax (walls + void tiles shift with camera)
 	queue_redraw()
 
-	# Keep redrawing in linking mode so the line-to-mouse updates
-	if linking_mode:
+	# Keep redrawing while a link source is selected so the dashed
+	# line-to-mouse animates with the cursor.
+	if link_source != Vector2i(-1, -1):
 		queue_redraw()
 
 	# Update demolish rectangle preview while dragging
@@ -1090,7 +1155,10 @@ func _process(_delta: float) -> void:
 			# junction/bridge substitution.
 			var skip_crossings: bool = _drag_starts_on_same_transport(_drag_start, tag)
 			_drag_cells = _compute_transport_path(_drag_start, preview_grid_pos, tag, skip_crossings)
-			_compute_path_rotations(_drag_cells)
+			# Pass the cursor cell as a target hint so the trailing belt
+			# faces INTO whatever block the user dragged onto, even when
+			# A* had to reroute to a non-solid neighbour.
+			_compute_path_rotations(_drag_cells, preview_grid_pos)
 		else:
 			# --- Normal axis-locked line ---
 			_pathfind_mode = false
@@ -1101,8 +1169,45 @@ func _process(_delta: float) -> void:
 
 			var dx := preview_grid_pos.x - _drag_start.x
 			var dy := preview_grid_pos.y - _drag_start.y
+			# Walls + Option (Alt on Mac): allow 8-direction drag, so
+			# horizontal / vertical / both diagonals are all valid line
+			# orientations. Snaps to whichever of the 8 cardinal &
+			# diagonal axes the cursor is closest to so a slightly-off
+			# drag still produces a clean line.
+			var allow_diagonal: bool = alt_held \
+				and data and data.tags.has("wall")
+			if allow_diagonal:
+				var sx: int = signi(dx)
+				var sy: int = signi(dy)
+				var ax: int = absi(dx)
+				var ay: int = absi(dy)
+				# If one axis dominates by more than ~2:1 treat the drag
+				# as axis-locked; otherwise it's diagonal. The cutoff
+				# lets the player commit to a single axis intentionally
+				# while still snapping to diag for ~45° drags.
+				if ax >= ay * 2:
+					sy = 0
+				elif ay >= ax * 2:
+					sx = 0
+				if sx == 0 and sy == 0:
+					_drag_cells.append(_drag_start)
+				else:
+					var step_x: int = sx * grid_w
+					var step_y: int = sy * grid_h
+					var max_steps: int
+					if step_x != 0 and step_y != 0:
+						max_steps = maxi(int(ax / float(grid_w)), int(ay / float(grid_h)))
+					elif step_x != 0:
+						max_steps = int(ax / float(grid_w))
+					else:
+						max_steps = int(ay / float(grid_h))
+					for k in range(max_steps + 1):
+						_drag_cells.append(Vector2i(
+							_drag_start.x + step_x * k,
+							_drag_start.y + step_y * k,
+						))
 			# Lock to the axis with the larger delta; step by building size
-			if abs(dx) >= abs(dy):
+			elif abs(dx) >= abs(dy):
 				# Horizontal line — step by building width
 				var step: int = grid_w if dx >= 0 else -grid_w
 				var x := _drag_start.x
@@ -1117,9 +1222,12 @@ func _process(_delta: float) -> void:
 					_drag_cells.append(Vector2i(_drag_start.x, y))
 					y += step
 
-			# Auto-rotate directional blocks (belts, ducts, pipes, shafts) in drag direction
-			if _is_directional(main.selected_building) and _drag_cells.size() > 1:
-				_compute_path_rotations(_drag_cells)
+			# Auto-rotate directional blocks (belts, ducts, pipes, shafts) in drag direction.
+			# Pass `preview_grid_pos` as a hint so a single-cell drag ending
+			# adjacent to a block, or the trailing cell of a multi-cell drag
+			# whose path's last leg was sideways, both face the cursor cell.
+			if _is_directional(main.selected_building) and _drag_cells.size() >= 1:
+				_compute_path_rotations(_drag_cells, preview_grid_pos)
 
 			# Straight-line drags of a transport block also auto-junction
 			# perpendicular crossings and auto-bridge parallel crossings so
@@ -1136,7 +1244,7 @@ func _process(_delta: float) -> void:
 				if not _drag_starts_on_same_transport(_drag_start, tag2):
 					_drag_cells = _apply_transport_crossings(_drag_cells, tag2)
 					if _is_directional(main.selected_building):
-						_compute_path_rotations(_drag_cells)
+						_compute_path_rotations(_drag_cells, preview_grid_pos)
 
 	queue_redraw()
 
@@ -1426,12 +1534,61 @@ func _get_active_work_anchor() -> Vector2i:
 	if not ("work_order" in main) or main.work_order.is_empty():
 		return _NO_ACTIVE_WORK
 	var paused: Dictionary = main.work_paused if "work_paused" in main else {}
+	# First pass: prefer the earliest-queued entry that can actually make
+	# progress this frame. A progressive build whose remaining build_cost
+	# items have zero stock would stall on a regular tick, leaving later
+	# queued work blocked behind it — skip past it so the drone keeps
+	# busy on something it can finish.
+	for a in main.work_order:
+		if paused.has(a):
+			continue
+		if not _is_in_build_range(a):
+			continue
+		if _anchor_can_progress(a):
+			return a
+	# Second pass: nothing could progress, fall back to the original
+	# "first in-range entry" so the active anchor still renders / the
+	# drone visibly waits at the next thing it'll work on.
 	for a in main.work_order:
 		if paused.has(a):
 			continue
 		if _is_in_build_range(a):
 			return a
 	return _NO_ACTIVE_WORK
+
+
+## True if the anchor's build can advance this tick. Deconstructs always
+## can (they produce resources). Builds need either:
+##   - all build_cost items already paid (timer is just ticking), or
+##   - at least one unpaid item that has stock > 0 in main.resources.
+## Otherwise the build is starved and we should yield to a later queue
+## entry that has work it can actually do.
+func _anchor_can_progress(anchor: Vector2i) -> bool:
+	if not main.require_resources:
+		return true
+	# Deconstruct / unknown anchors: not a progressive-build entry, no
+	# resource gating to evaluate.
+	if not ("building_build_progress" in main) or not main.building_build_progress.has(anchor):
+		return true
+	var bid: StringName = main.placed_buildings.get(anchor, &"")
+	var data = Registry.get_block(bid)
+	if data == null or data.build_cost.is_empty():
+		return true
+	var consumed: Dictionary = main.building_resources_consumed.get(anchor, {}) \
+		if "building_resources_consumed" in main else {}
+	var any_remaining := false
+	for item_id in data.build_cost:
+		var rk: StringName = main._resolve_resource_key(str(item_id))
+		var required: int = int(data.build_cost[item_id])
+		var already: int = int(consumed.get(rk, 0))
+		if already < required:
+			any_remaining = true
+			if int(main.resources.get(rk, 0)) > 0:
+				return true
+	# Nothing left to pay for — let the timer tick out.
+	if not any_remaining:
+		return true
+	return false
 
 
 ## Like _get_active_work_anchor but also honors world/build pause flags,
@@ -1685,6 +1842,28 @@ func _get_front_edge(origin: Vector2i, grid_size: Vector2i, rotation: int) -> Ar
 				cells.append(Vector2i(origin.x + x, origin.y - 1))
 	return cells
 
+## Returns every cell on the *outside* perimeter of a rectangular block
+## footprint — i.e. the cells the building would touch if you walked
+## around its outline. Used by multi-tile-aware adjacency checks
+## (archive decoder, etc.) so they don't only see the four cells
+## bordering the anchor.
+func _get_block_perimeter_cells(origin: Vector2i, grid_size: Vector2i) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	# Top edge
+	for x in range(grid_size.x):
+		cells.append(Vector2i(origin.x + x, origin.y - 1))
+	# Bottom edge
+	for x in range(grid_size.x):
+		cells.append(Vector2i(origin.x + x, origin.y + grid_size.y))
+	# Left edge
+	for y in range(grid_size.y):
+		cells.append(Vector2i(origin.x - 1, origin.y + y))
+	# Right edge
+	for y in range(grid_size.y):
+		cells.append(Vector2i(origin.x + grid_size.x, origin.y + y))
+	return cells
+
+
 ## Handles left-click on a cell that has active/pending work attached
 ## (build, deconstruct, or a deferred swap). Returns true when the click
 ## was consumed and no further handling should happen.
@@ -1818,9 +1997,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
-				if linking_mode:
-					_handle_link_click()
-				elif main.selected_building == &"":
+				if main.selected_building == &"":
 					# World menu is open — check for cell click or outside click
 					if _world_menu_open:
 						var mouse_world = get_global_mouse_position()
@@ -1854,36 +2031,61 @@ func _unhandled_input(event: InputEvent) -> void:
 						var click_block_id = main.placed_buildings[click_pos]
 						var click_data = Registry.get_block(click_block_id)
 						var click_anchor: Vector2i = main.building_origins.get(click_pos, click_pos)
-						if click_data and (click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader")):
-							_open_world_menu("sorter", click_anchor)
-							get_viewport().set_input_as_handled()
-							return
-						elif click_data and click_data.tags.has("constructor"):
-							_open_world_menu("constructor", click_anchor)
-							get_viewport().set_input_as_handled()
-							return
-						elif click_data and click_data.tags.has("refabricator"):
-							_open_world_menu("refabricator", click_anchor)
-							get_viewport().set_input_as_handled()
-							return
-						# Archive id is an authoring-only choice — only the map
-						# editor exposes the archive picker. In-game, fall
-						# through to the read-only storage popup if the archive
-						# has anything in it.
-						# Fallback: any block with non-empty storage shows a
-						# read-only inventory popup (Mindustry-style).
-						elif click_data and _block_has_any_stored(click_anchor):
-							_open_world_menu("storage", click_anchor)
-							get_viewport().set_input_as_handled()
-							return
+						# In-world UI (sorter / constructor / refab pickers,
+						# storage popup) is player-only. Clicking an enemy
+						# (FEROX) or DERELICT block in the campaign should
+						# not surface their internals — those are opaque.
+						# The map editor uses its own click handler, so this
+						# guard only affects in-game clicks.
+						var click_faction: int = main.get_building_faction(click_anchor) if main.has_method("get_building_faction") else FACTION_LUMINA
+						if click_faction == FACTION_LUMINA and click_data:
+							# Mindustry-style ad-hoc linking. The same click
+							# also opens any in-world UI the block has — a
+							# linkable storage block (e.g. an MD with a
+							# stored payload) gets BOTH the link selection
+							# AND its resource popup on a single click.
+							var is_linkable: bool = click_data.tags.has("linkable")
+							var link_changed: bool = false
+							if is_linkable:
+								link_changed = _handle_link_click_on_anchor(click_anchor, click_data)
+							else:
+								# Clicking a non-linkable block abandons any
+								# pending link selection — same as clicking
+								# in empty space would feel.
+								if link_source != Vector2i(-1, -1):
+									link_source = Vector2i(-1, -1)
+									_link_just_linked = Vector2i(-1, -1)
+									queue_redraw()
+							if click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader"):
+								_open_world_menu("sorter", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.tags.has("constructor"):
+								_open_world_menu("constructor", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.tags.has("refabricator"):
+								_open_world_menu("refabricator", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							# Fallback: any block with non-empty storage shows a
+							# read-only inventory popup (Mindustry-style).
+							elif _block_has_any_stored(click_anchor):
+								_open_world_menu("storage", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							# No UI to open — but if the click changed the
+							# link selection, still consume so it doesn't
+							# fall through to placement preview.
+							if link_changed:
+								get_viewport().set_input_as_handled()
+								return
 				elif main.selected_building != &"" and not event.ctrl_pressed:
-					# Build is locked while the player is directly controlling
-					# something (a unit / turret / crane) — drone-side
-					# construction would steal focus from whatever they're
-					# piloting. Builder-class units are exempt so a future
-					# builder unit can drop blocks under manual control.
-					if _is_controlling_non_builder():
-						return
+					# Build commit is locked while the player is directly
+					# controlling something (a unit / turret / crane) — but
+					# the drag-place PREVIEW is still allowed so the player
+					# can plan a layout while piloting. The release-side
+					# gate below cancels the actual placement.
 					# Start drag-place: record start, don't place yet
 					# (Ctrl+click is reserved for unit control)
 					_drag_start = preview_grid_pos
@@ -2002,23 +2204,47 @@ func _unhandled_input(event: InputEvent) -> void:
 			# is unavailable while the player is piloting a non-builder
 			# unit / turret / crane. Clear any in-flight drag state so a
 			# drag started before the gate flipped doesn't get committed
-			# the next frame the player releases control.
+			# the next frame the player releases control. Right-click on
+			# an empty cell is still allowed to deselect the current
+			# building so the player can drop the placement preview
+			# without releasing control.
 			if _is_controlling_non_builder():
 				_demolish_dragging = false
+				if event.pressed and main.selected_building != &"":
+					var rmb_world: Vector2 = get_global_mouse_position()
+					var rmb_grid: Vector2i = main.world_to_grid(rmb_world)
+					if not main.placed_buildings.has(rmb_grid):
+						main.select_building(&"")
+						_drag_placing = false
+						_drag_cells.clear()
+						queue_redraw()
 				return
 			if event.pressed:
+				# Two-stage right-click semantics: with a block selected
+				# for placement, RMB clears the selection (drops the
+				# preview) but does NOT demolish on the same press. The
+				# next RMB — now with no selection — falls through to
+				# the demolish path below as normal.
+				if main.selected_building != &"":
+					main.select_building(&"")
+					_drag_placing = false
+					_drag_cells.clear()
+					queue_redraw()
+					return
 				_drag_placing = false
 				_drag_cells.clear()
-				if linking_mode:
-					linking_mode = false
+				# RMB also clears any pending link selection (same as a
+				# non-linkable click would). Then falls through to the
+				# normal demolish-drag start.
+				if link_source != Vector2i(-1, -1):
 					link_source = Vector2i(-1, -1)
+					_link_just_linked = Vector2i(-1, -1)
 					queue_redraw()
-				else:
-					# Start demolish drag
-					var mouse_world = get_global_mouse_position()
-					_demolish_start = main.world_to_grid(mouse_world)
-					_demolish_end = _demolish_start
-					_demolish_dragging = true
+				# Start demolish drag
+				var mouse_world = get_global_mouse_position()
+				_demolish_start = main.world_to_grid(mouse_world)
+				_demolish_end = _demolish_start
+				_demolish_dragging = true
 			else:
 				# Right mouse released — finish demolish drag
 				if _demolish_dragging:
@@ -2070,53 +2296,80 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 ## Handles a left-click while in linking mode.
-func _handle_link_click() -> void:
-	var mouse_world = get_global_mouse_position()
-	var grid_pos = main.world_to_grid(mouse_world)
-
-	if not main.placed_buildings.has(grid_pos):
-		return
-
-	# Resolve to anchor for multi-tile blocks
-	grid_pos = main.building_origins.get(grid_pos, grid_pos)
-
-	var block_id = main.placed_buildings[grid_pos]
-	var data = Registry.get_block(block_id)
+## Mindustry-style ad-hoc link click: called inline from the regular
+## block-click flow (NOT a separate mode). Toggles / chains the link
+## source on each click of a `linkable` block. Returns true iff a link
+## was created or the selection changed (caller uses this to decide
+## whether to consume the click).
+func _handle_link_click_on_anchor(anchor: Vector2i, data: BlockData) -> bool:
 	if data == null or not data.tags.has("linkable"):
-		return  # Can only link blocks tagged "linkable"
+		return false
 
-	if link_source == Vector2i(-1, -1):
-		# First selection — remember source (anchor)
-		link_source = grid_pos
-	else:
-		# Second selection — enforce type matching (bridges only link to bridges)
-		if grid_pos != link_source:
-			var source_id = main.placed_buildings[link_source]
-			var source_data = Registry.get_block(source_id)
-			if source_data != null:
-				var source_is_bridge = source_data.tags.has("bridge")
-				var target_is_bridge = data.tags.has("bridge")
-				if source_is_bridge != target_is_bridge:
-					# Can't link bridge to non-bridge or vice versa
-					linking_mode = false
-					link_source = Vector2i(-1, -1)
-					return
-		# Create the link
-		if grid_pos != link_source:
-			var power_sys = get_node_or_null("/root/Main/PowerSystem")
-			if power_sys:
-				# Check if source already has a link — remove it first (1:1 links)
-				var existing = power_sys.get_linked_partner(link_source)
-				if existing != null:
-					power_sys.unlink_blocks(link_source, existing)
-				existing = power_sys.get_linked_partner(grid_pos)
-				if existing != null:
-					power_sys.unlink_blocks(grid_pos, existing)
-				power_sys.link_blocks(link_source, grid_pos)
-		# Done linking
-		linking_mode = false
+	# Click on the current source — deselect.
+	if anchor == link_source:
 		link_source = Vector2i(-1, -1)
+		_link_just_linked = Vector2i(-1, -1)
+		queue_redraw()
+		return true
+
+	# Nothing selected yet — make this the source.
+	if link_source == Vector2i(-1, -1):
+		link_source = anchor
+		_link_just_linked = Vector2i(-1, -1)
+		queue_redraw()
+		return true
+
+	# Source already set: validate compatibility, then link.
+	var source_id: StringName = main.placed_buildings.get(link_source, &"")
+	var source_data: BlockData = Registry.get_block(source_id)
+	if source_data == null:
+		# Source vanished (e.g. demolished mid-flow). Treat this click as
+		# the new source.
+		link_source = anchor
+		_link_just_linked = Vector2i(-1, -1)
+		queue_redraw()
+		return true
+
+	var source_is_bridge: bool = source_data.tags.has("bridge")
+	var target_is_bridge: bool = data.tags.has("bridge")
+	if source_is_bridge != target_is_bridge:
+		# Bridge ↔ bridge only (and non-bridge ↔ non-bridge). Don't
+		# silently fail — make the clicked block the new source so the
+		# player can keep going.
+		link_source = anchor
+		_link_just_linked = Vector2i(-1, -1)
+		queue_redraw()
+		return true
+
+	# Bridge ↔ bridge AND mass-driver ↔ mass-driver pairs share the
+	# `linkable` tag, but cross-type pairs (bridge ↔ mass driver) are
+	# meaningless. Block them.
+	var source_is_md: bool = source_data.tags.has("mass_driver")
+	var target_is_md: bool = data.tags.has("mass_driver")
+	if source_is_md != target_is_md:
+		link_source = anchor
+		_link_just_linked = Vector2i(-1, -1)
+		queue_redraw()
+		return true
+
+	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	if power_sys:
+		# 1:1 — drop any existing partner on either endpoint first.
+		var existing = power_sys.get_linked_partner(link_source)
+		if existing != null:
+			power_sys.unlink_blocks(link_source, existing)
+		existing = power_sys.get_linked_partner(anchor)
+		if existing != null:
+			power_sys.unlink_blocks(anchor, existing)
+		power_sys.link_blocks(link_source, anchor)
+
+	# Link complete — clear the selection. The just-clicked block does
+	# NOT become the new source (so its UI / partner highlight don't pop
+	# up). Player can click either endpoint later to start a new link.
+	link_source = Vector2i(-1, -1)
+	_link_just_linked = Vector2i(-1, -1)
 	queue_redraw()
+	return true
 
 
 ## Opens the in-world selection menu for a sorter or constructor block.
@@ -2157,16 +2410,19 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 		var block_id = main.placed_buildings.get(grid_pos, &"")
 		var block_data = Registry.get_block(block_id)
 		var max_ps: int = block_data.max_payload_size if block_data else 0
-		var tech_tree = get_node_or_null("/root/Main/TechTree")
 		# In the editor there is no `require_research` on Main — show all
-		# blocks regardless so a sector author can pick anything.
+		# blocks regardless so a sector author can pick anything. In-game,
+		# only list blocks the player has actually researched (TechTree is
+		# an autoload — a `get_node_or_null("/root/Main/TechTree")` lookup
+		# silently returned null and skipped the gate, which is why every
+		# 3×3 block was showing up).
 		var gate_on_research: bool = "require_research" in main and main.require_research
 		for block in Registry.blocks_list:
 			if block.tags.has("core"):
 				continue
 			if block.grid_size.x > max_ps or block.grid_size.y > max_ps:
 				continue
-			if gate_on_research and tech_tree and not tech_tree.is_researched(block.id):
+			if gate_on_research and not TechTree.is_researched(block.id):
 				continue
 			_world_menu_items.append({"id": block.id, "icon": block.icon, "name": block.display_name})
 	elif type == "archive":
@@ -2341,7 +2597,7 @@ func _apply_world_menu_selection(index: int) -> void:
 ## layout with wide cells that can fit each archive's full display name.
 func _world_menu_cell_dim() -> Vector2:
 	if _world_menu_type == "archive":
-		return Vector2(160.0, 26.0)
+		return Vector2(160.0, 26.0) * main.SPRITE_SCALE_FACTOR
 	return Vector2(_world_menu_cell_size, _world_menu_cell_size)
 
 
@@ -2661,6 +2917,7 @@ func _draw() -> void:
 		_ensure_textures_loaded()
 	_draw_placed_buildings()
 	_draw_cranes()
+	_draw_archive_scan_overlay()
 	_draw_paused_queue()
 	_draw_preview()
 	_draw_links()
@@ -3051,6 +3308,32 @@ func _withdraw_block_to_drone(anchor: Vector2i, item_id: StringName) -> int:
 ##     (also capped by max_stored_items when set)
 ##   - cores drop into main.resources (subject to storage capacity)
 ## Blocks that don't match any of the above accept nothing.
+## Resolves the *effective* input recipe for a block. Unit fabricators
+## have empty `input_items` and pull their recipe from the produced
+## unit's `build_cost`; refabricators look up `refab_recipes[selected]`
+## from the player's currently-selected tier-2 unit. Returns the dict
+## with item ids normalised through LogisticsSystem so the keys match
+## what the drone is actually carrying.
+func _get_effective_input_recipe(anchor: Vector2i, data: BlockData) -> Dictionary:
+	if data == null:
+		return {}
+	var recipe: Dictionary = data.input_items
+	if data.produced_unit != &"":
+		var unit_res = Registry.get_unit(data.produced_unit)
+		if unit_res and not unit_res.build_cost.is_empty():
+			recipe = unit_res.build_cost
+	if data.tags.has("refabricator") and _logistics and "refabricator_state" in _logistics \
+			and _logistics.refabricator_state.has(anchor):
+		var rsel: StringName = StringName(_logistics.refabricator_state[anchor].get("selected_t2", &""))
+		if rsel != &"" and data.refab_recipes != null and data.refab_recipes.has(rsel):
+			var custom = data.refab_recipes[rsel]
+			if custom is Dictionary and not custom.is_empty():
+				recipe = custom
+	if _logistics and _logistics.has_method("_normalize_item_keys"):
+		recipe = _logistics._normalize_item_keys(recipe)
+	return recipe
+
+
 func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int) -> int:
 	if count <= 0 or _logistics == null:
 		return 0
@@ -3078,25 +3361,8 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 		return accepted_c
 
 	# Factory input buffer: only accept items the *effective* recipe
-	# actually uses. Unit fabricators have empty `input_items` and pull
-	# their recipe from the produced unit's build_cost; refabricators use
-	# `_refab_effective_recipe` based on the player's selected tier-2.
-	# Falling through to data.input_items only would silently reject
-	# every drone-drop on those blocks.
-	var effective_recipe: Dictionary = data.input_items
-	if data.produced_unit != &"":
-		var unit_res = Registry.get_unit(data.produced_unit)
-		if unit_res and not unit_res.build_cost.is_empty():
-			effective_recipe = unit_res.build_cost
-	if data.tags.has("refabricator") and "refabricator_state" in _logistics \
-			and _logistics.refabricator_state.has(anchor):
-		var rsel: StringName = StringName(_logistics.refabricator_state[anchor].get("selected_t2", &""))
-		if rsel != &"" and data.refab_recipes.has(rsel):
-			var custom = data.refab_recipes[rsel]
-			if custom is Dictionary and not custom.is_empty():
-				effective_recipe = custom
-	if _logistics.has_method("_normalize_item_keys"):
-		effective_recipe = _logistics._normalize_item_keys(effective_recipe)
+	# actually uses (see `_get_effective_input_recipe`).
+	var effective_recipe: Dictionary = _get_effective_input_recipe(anchor, data)
 	if not effective_recipe.is_empty() and effective_recipe.has(item_id):
 		if not _logistics.factory_buffers.has(anchor):
 			_logistics.factory_buffers[anchor] = {
@@ -3191,7 +3457,12 @@ func _block_accepts_item(anchor: Vector2i, item_id: StringName) -> bool:
 			and main.has_method("get_building_faction") \
 			and main.get_building_faction(anchor) == FACTION_LUMINA:
 		return true
-	if data.input_items.has(item_id):
+	# Consult the effective recipe so unit fabricators (whose `input_items`
+	# is empty — the recipe lives on the produced unit's build_cost) and
+	# selection-driven refabricators don't get rejected by the drone's
+	# drag-drop just because their static `input_items` dict is bare.
+	var effective_recipe: Dictionary = _get_effective_input_recipe(anchor, data)
+	if not effective_recipe.is_empty() and effective_recipe.has(item_id):
 		return true
 	if data.tags.has("storage"):
 		return true
@@ -3363,6 +3634,107 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 		pass
 
 
+## Draws the block currently being constructed (or deconstructed) between
+## the constructor / deconstructor's base and top sprites, with a reveal-
+## line animation so the player can see progress at a glance.
+##   Constructor:    icon reveals left → right as build_time elapses.
+##   Deconstructor:  icon hides   left → right as decon time elapses.
+func _draw_constructor_layer(grid_pos: Vector2i, data: BlockData, top_pos: Vector2, width: float, height: float, _rot: int) -> void:
+	if _logistics == null:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var is_constructor: bool = data.tags.has("constructor")
+	var is_deconstructor: bool = data.tags.has("deconstructor")
+	var target_block: StringName = &""
+	var reveal_pct: float = 0.0
+	var phase_str: String = ""
+	if is_constructor and _logistics.constructor_state.has(anchor):
+		var cs: Dictionary = _logistics.constructor_state[anchor]
+		phase_str = String(cs.get("phase", ""))
+		if phase_str == "building":
+			target_block = StringName(cs.get("selected_block", &""))
+			var bd_for_time: BlockData = Registry.get_block(target_block) if target_block != &"" else null
+			var bt: float = bd_for_time.build_time if bd_for_time and bd_for_time.build_time > 0 else 2.0
+			reveal_pct = clampf(1.0 - float(cs.get("timer", bt)) / maxf(bt, 0.0001), 0.0, 1.0)
+	elif is_deconstructor and _logistics.deconstructor_state.has(anchor):
+		var ds: Dictionary = _logistics.deconstructor_state[anchor]
+		phase_str = String(ds.get("phase", ""))
+		if phase_str == "deconstructing":
+			var pd_var = ds.get("payload")
+			if pd_var is Dictionary:
+				var pd: Dictionary = pd_var
+				if String(pd.get("type", "")) == "building":
+					target_block = StringName(pd.get("block_id", ""))
+					var bd_for_time2: BlockData = Registry.get_block(target_block) if target_block != &"" else null
+					var bt2: float = bd_for_time2.build_time if bd_for_time2 and bd_for_time2.build_time > 0 else 2.0
+					reveal_pct = clampf(1.0 - float(ds.get("timer", bt2)) / maxf(bt2, 0.0001), 0.0, 1.0)
+	if target_block == &"":
+		return
+	var bd: BlockData = Registry.get_block(target_block)
+	if bd == null or bd.icon == null:
+		return
+	var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
+	var icon_size: float = minf(width, height) * 0.55
+	var icon_sz: Vector2 = _fit_texture_size(bd.icon, icon_size)
+	var rect_pos: Vector2 = center - icon_sz * 0.5
+	var alpha_mul: float = 0.4 + 0.6 * (reveal_pct if is_constructor else (1.0 - reveal_pct))
+	draw_texture_rect(bd.icon, Rect2(rect_pos, icon_sz), false, Color(1, 1, 1, alpha_mul))
+	# Reveal-line overlay. For the constructor the dark portion shrinks
+	# left → right; for the deconstructor it grows left → right.
+	var dark_pct: float = 1.0 - reveal_pct if is_constructor else reveal_pct
+	var dark_w: float = icon_sz.x * dark_pct
+	if dark_w > 0.0:
+		draw_rect(
+			Rect2(rect_pos.x + (icon_sz.x - dark_w), rect_pos.y, dark_w, icon_sz.y),
+			Color(0, 0, 0, 0.55),
+			true
+		)
+	if reveal_pct > 0.0 and reveal_pct < 1.0:
+		var line_x: float = rect_pos.x + icon_sz.x * (reveal_pct if is_constructor else (1.0 - reveal_pct))
+		draw_line(
+			Vector2(line_x, rect_pos.y),
+			Vector2(line_x, rect_pos.y + icon_sz.y),
+			Color(1.0, 0.9, 0.2, 0.9), 1.5
+		)
+
+
+## Draws the held payload of a loader / unloader between its base and
+## top sprites, mirroring how `_draw_fabricator_unit_layer` shows the
+## unit under construction. Items don't render in-world — they surface
+## in the hover tooltip — but seeing the held building/unit in-place is
+## the at-a-glance signal that the block has actually grabbed something.
+func _draw_loader_payload_layer(grid_pos: Vector2i, _data: BlockData, top_pos: Vector2, width: float, height: float, _rot: int) -> void:
+	if _logistics == null:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var payload: Dictionary = {}
+	if _logistics.loader_state.has(anchor):
+		var ls: Dictionary = _logistics.loader_state[anchor]
+		if ls.get("payload") != null and ls["payload"] is Dictionary:
+			payload = ls["payload"]
+	if payload.is_empty() and _logistics.unloader_state.has(anchor):
+		var us: Dictionary = _logistics.unloader_state[anchor]
+		if us.get("payload") != null and us["payload"] is Dictionary:
+			payload = us["payload"]
+	if payload.is_empty():
+		return
+	var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
+	var p_size: float = minf(width, height) * 0.55
+	var ptype: String = String(payload.get("type", ""))
+	if ptype == "building":
+		var bd: BlockData = Registry.get_block(StringName(payload.get("block_id", "")))
+		if bd and bd.icon:
+			var bsz: Vector2 = _fit_texture_size(bd.icon, p_size)
+			draw_texture_rect(bd.icon, Rect2(center - bsz * 0.5, bsz), false, Color(1, 1, 1, 0.85))
+	elif ptype == "unit":
+		var ud = Registry.get_unit(StringName(payload.get("unit_id", "")))
+		if ud and ud.icon:
+			var usz: Vector2 = _fit_texture_size(ud.icon, p_size)
+			draw_texture_rect(ud.icon, Rect2(center - usz * 0.5, usz), false, Color(1, 1, 1, 0.85))
+		elif ud:
+			draw_circle(center, p_size * 0.4, Color(ud.color.r, ud.color.g, ud.color.b, 0.75))
+
+
 ## Returns a size vector that fits the texture into a box of side `target_px`,
 ## preserving aspect ratio. Used so that source textures authored at arbitrary
 ## resolutions all render at the same on-screen scale.
@@ -3511,10 +3883,23 @@ func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String
 
 	if not _transport_astar.is_in_boundsv(from) or not _transport_astar.is_in_boundsv(to):
 		return []
-	if _transport_astar.is_point_solid(from) or _transport_astar.is_point_solid(to):
+	if _transport_astar.is_point_solid(from):
 		return []
+	# If the user dragged the cursor onto a non-transport block (the
+	# A* graph marks those solid), reroute to the nearest non-solid
+	# neighbour of that block instead of bailing with an empty path.
+	# Picking the cardinal neighbour closest to `from` makes the
+	# fall-back land on the side the player was approaching from, so
+	# the trailing belt sits flush against the block. Callers that
+	# care about "where the user actually pointed" can still pass the
+	# original `to` separately as a rotation hint.
+	var actual_to: Vector2i = to
+	if _transport_astar.is_point_solid(to):
+		actual_to = _nearest_walkable_neighbour(to, from, _transport_astar)
+		if actual_to == Vector2i(-9999, -9999):
+			return []
 
-	var id_path: PackedVector2Array = _transport_astar.get_point_path(from, to)
+	var id_path: PackedVector2Array = _transport_astar.get_point_path(from, actual_to)
 	if id_path.is_empty():
 		return []
 
@@ -3525,6 +3910,25 @@ func _compute_transport_path(from: Vector2i, to: Vector2i, transport_tag: String
 	if skip_crossings:
 		return raw
 	return _apply_transport_crossings(raw, transport_tag)
+
+
+## Returns the cardinal neighbour of `cell` that's walkable in the given
+## A* graph and closest to `from` (Manhattan). Returns
+## Vector2i(-9999, -9999) when every neighbour is solid / out of bounds.
+func _nearest_walkable_neighbour(cell: Vector2i, from: Vector2i, astar: AStarGrid2D) -> Vector2i:
+	var best: Vector2i = Vector2i(-9999, -9999)
+	var best_dist: int = 0x7FFFFFFF
+	for dir_idx in range(4):
+		var n: Vector2i = cell + DIR_VECTORS[dir_idx]
+		if not astar.is_in_boundsv(n):
+			continue
+		if astar.is_point_solid(n):
+			continue
+		var d: int = absi(n.x - from.x) + absi(n.y - from.y)
+		if d < best_dist:
+			best_dist = d
+			best = n
+	return best
 
 
 ## Returns true when `start` is a cell already occupied by a same-type
@@ -3636,27 +4040,58 @@ func _apply_transport_crossings(raw: Array[Vector2i], transport_tag: String) -> 
 
 
 ## Compute per-cell rotations for a transport path (each cell faces the next).
-func _compute_path_rotations(path: Array[Vector2i]) -> void:
+## `target_hint` (optional) is the cell the player's cursor was on when the
+## drag ended — when the path's last cell is one step away from it, we
+## point the trailing belt straight at the hint instead of using the
+## path's last delta. This is what makes drag-into-a-block place the
+## boundary belt facing INTO the block: A* falls back to a neighbour, but
+## the rotation still aims at the original target.
+func _compute_path_rotations(path: Array[Vector2i], target_hint: Vector2i = Vector2i(-9999, -9999)) -> void:
 	_pathfind_rotations.clear()
+	var has_hint: bool = target_hint != Vector2i(-9999, -9999)
 	for i in range(path.size()):
 		var rot := 0
+		var delta: Vector2i
 		if i < path.size() - 1:
-			var delta: Vector2i = path[i + 1] - path[i]
-			var idx: int = DIR_VECTORS.find(delta)
-			if idx >= 0:
-				rot = idx
-			else:
-				# Delta isn't a unit vector — happens when a bridge span is
-				# collapsed from raw path → result. Pick the dominant axis
-				# direction so the bridge start still faces toward its pair
-				# instead of defaulting to 0 (east).
-				if absi(delta.x) >= absi(delta.y):
-					rot = 0 if delta.x > 0 else 2
-				else:
-					rot = 1 if delta.y > 0 else 3
+			# Forward-looking: this cell's rotation points to the next.
+			delta = path[i + 1] - path[i]
 		elif i > 0:
-			# Last cell: same rotation as previous
-			rot = _pathfind_rotations.get(path[i - 1], 0)
+			# Last cell. If we have a target hint and it's a unit
+			# vector away, prefer it — that way a path that ended on
+			# the boundary of a block faces INTO the block. Otherwise
+			# derive from the path's own last step.
+			if has_hint and target_hint != path[i]:
+				var hint_delta: Vector2i = target_hint - path[i]
+				if DIR_VECTORS.find(hint_delta) >= 0:
+					delta = hint_delta
+				else:
+					delta = path[i] - path[i - 1]
+			else:
+				delta = path[i] - path[i - 1]
+		else:
+			# Single-cell path. If we have a unit-vector target hint,
+			# face it; otherwise leave the entry empty so the placement
+			# loop falls back to `placement_rotation` (Q-rotation).
+			if has_hint and target_hint != path[i]:
+				var hint_delta_s: Vector2i = target_hint - path[i]
+				if DIR_VECTORS.find(hint_delta_s) >= 0:
+					delta = hint_delta_s
+				else:
+					continue
+			else:
+				continue
+		var idx: int = DIR_VECTORS.find(delta)
+		if idx >= 0:
+			rot = idx
+		else:
+			# Delta isn't a unit vector — happens when a bridge span is
+			# collapsed from raw path → result. Pick the dominant axis
+			# direction so the bridge start still faces toward its pair
+			# instead of defaulting to 0 (east).
+			if absi(delta.x) >= absi(delta.y):
+				rot = 0 if delta.x > 0 else 2
+			else:
+				rot = 1 if delta.y > 0 else 3
 		_pathfind_rotations[path[i]] = rot
 
 
@@ -4170,10 +4605,26 @@ func _draw_placed_buildings() -> void:
 				if tex == null:
 					tex = data.top_sprite
 				_draw_block_texture(tex, top_pos, width, height, rot)
+			# Constructor / deconstructor: base + in-progress block (with
+			# build / decon reveal animation) + top.
+			elif data and data.base_sprite and data.top_sprite \
+					and (data.tags.has("constructor") or data.tags.has("deconstructor")):
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_constructor_layer(grid_pos, data, top_pos, width, height, rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
+			# Loader / unloader: base + held payload (between layers) + top.
+			# Item counts surface in the hover tooltip; the in-world layer
+			# only draws the held building/unit so the player can see at a
+			# glance that the block has grabbed something.
+			elif data and data.base_sprite and data.top_sprite \
+					and (data.tags.has("payload_loader") or data.tags.has("freight_loader") \
+						or data.tags.has("payload_unloader") or data.tags.has("freight_unloader")):
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_loader_payload_layer(grid_pos, data, top_pos, width, height, rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
 			# Plain layered render: base + top (no faction overlay, no
 			# fabricator unit layer, no refabricator side overlays). Used
-			# by payload loader/unloader and any future block that just
-			# wants a static two-layer sprite.
+			# by any block that just wants a static two-layer sprite.
 			elif data and data.base_sprite and data.top_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
 				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
@@ -4289,6 +4740,18 @@ func _draw_placed_buildings() -> void:
 						Vector2(line_x, b_top_pos.y + b_height),
 						Color(1.0, 0.9, 0.2, 0.9), 2.0
 					)
+				# CombatSystem only draws heads for fully-built turrets
+				# (inactive blocks are filtered out of its targeting/state
+				# init), so a turret under construction would otherwise
+				# show only its base. Overlay the head/chassis here at a
+				# slightly muted tint so the in-progress turret reads as
+				# what it'll become.
+				var b_data = Registry.get_block(b_block_id)
+				if b_data and b_data.is_turret():
+					var b_rot: int = int(main.building_rotation.get(grid_pos, 0))
+					_draw_turret_preview_heads(
+						b_data, b_top_pos, b_width, b_height, b_rot, Color(1, 1, 1, 0.7)
+					)
 			# Pending-not-active blocks are now rendered by the faded
 			# ghost preview path in PASS 2 — nothing to overlay here.
 
@@ -4383,7 +4846,14 @@ func _draw_placed_buildings() -> void:
 				if intact_w > 0.0:
 					draw_rect(Rect2(d_top_pos.x, d_top_pos.y, intact_w, d_height), Color(0.9, 0.2, 0.2, 0.18), true)
 
-	# --- PASS 2.5: Faction tint on enemy buildings ---
+	# --- PASS 2.5: Faction overlay on enemy buildings ---
+	# Draws a single sprite (FactionOverlayFerox.png / FactionOverlayDerelict.png)
+	# centered on the BOTTOM-RIGHT tile of the building's footprint, instead
+	# of tinting the entire footprint a flat colour. For 1×1 blocks the
+	# bottom-right tile == the only tile, so the overlay simply sits in
+	# the centre. For multi-tile blocks (e.g. cores), the overlay anchors
+	# to a single-tile slot at the bottom-right so the rest of the
+	# building art stays clearly visible.
 	if any_non_lumina:
 		for idx in order:
 			if is_wall_of[idx]:
@@ -4394,20 +4864,30 @@ func _draw_placed_buildings() -> void:
 			var bfaction: int = main.get_building_faction(grid_pos)
 			if bfaction == FACTION_LUMINA:
 				continue
+			var overlay_tex: Texture2D = null
+			if bfaction == FACTION_DERELICT:
+				overlay_tex = _faction_overlay_derelict
+			elif bfaction == FACTION_FEROX:
+				overlay_tex = _faction_overlay_ferox
+			if overlay_tex == null:
+				continue
 			var f_block_id: StringName = main.placed_buildings[grid_pos]
 			var block_size_f: Vector2i = _size_for.call(f_block_id)
 			var world_pos_f: Vector2 = main.grid_to_world(grid_pos)
 			var offset_f: Vector2 = _offset_for.call(f_block_id)
-			var margin_f := -1.0
-			var width_f: float = gs * block_size_f.x - margin_f * 2
-			var height_f: float = gs * block_size_f.y - margin_f * 2
-			var top_pos_f: Vector2 = world_pos_f + Vector2(margin_f, margin_f) + offset_f
-			if bfaction == FACTION_DERELICT:
-				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(0.5, 0.5, 0.6, 0.2), true)
-				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(0.6, 0.6, 0.7, 0.4), false, 2.0)
-			else:
-				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(1.0, 0.2, 0.2, 0.18), true)
-				draw_rect(Rect2(top_pos_f, Vector2(width_f, height_f)), Color(1.0, 0.3, 0.3, 0.45), false, 2.0)
+			# Bottom-right tile in the footprint: x = anchor.x + (w − 1),
+			# y = anchor.y + (h − 1). Centre of that tile is
+			# ((w − 0.5)*gs, (h − 0.5)*gs) in local space.
+			var br_centre: Vector2 = world_pos_f + offset_f + Vector2(
+				(float(block_size_f.x) - 0.5) * gs,
+				(float(block_size_f.y) - 0.5) * gs,
+			)
+			# Match the on-screen footprint of one tile so the overlay
+			# scales with the block and never bleeds past the bottom-
+			# right cell.
+			var ov_size: Vector2 = Vector2(gs, gs)
+			var ov_rect := Rect2(br_centre - ov_size * 0.5, ov_size)
+			draw_texture_rect(overlay_tex, ov_rect, false)
 
 	# --- PASS 3: Draw direction arrows on directional buildings ---
 	for idx in order:
@@ -4451,34 +4931,62 @@ func _draw_placed_buildings() -> void:
 				gs * block_size.x
 			)
 
-	# --- PASS 5: Draw the "no power at all" overlay for consumers on a
-	# network with zero generation. Network status is otherwise communicated
-	# via the hover tooltip; we don't clutter the map with a per-block bar.
-	if power_sys:
-		for idx in order:
-			if is_wall_of[idx]:
-				continue
-			var grid_pos: Vector2i = all_positions[idx]
-			if ss and ss.is_tile_hidden(grid_pos):
-				continue
-			var block_id: StringName = main.placed_buildings[grid_pos]
-			var data: BlockData = _get_block.call(block_id)
-			if data == null or data.electrical_power_use <= 0:
-				continue
-			var info: Dictionary = power_sys.get_electrical_network_info(grid_pos)
-			if float(info.get("efficiency", 1.0)) > 0.0:
-				continue
-			var block_size: Vector2i = _size_for.call(block_id)
-			var world_pos: Vector2 = main.grid_to_world(grid_pos)
-			var offset: Vector2 = _offset_for.call(block_id)
-			var margin := -1.0
-			var width: float = gs * block_size.x - margin * 2
-			var height: float = gs * block_size.y - margin * 2
-			var top_pos: Vector2 = world_pos + Vector2(margin, margin) + offset
-			draw_rect(Rect2(top_pos, Vector2(width, height)),
-				Color(1.0, 0.0, 0.0, 0.25), true)
-			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
-			_draw_no_power_icon(center)
+	# --- PASS 5: previously drew a red overlay + lightning-bolt icon on
+	# every consumer whose network had zero generation. Removed — the
+	# hover tooltip already surfaces the same info, and the overlay just
+	# made busy bases look broken.
+
+
+## Draws the turret chassis (multi-barrel only) and head sprite(s) on top
+## of an existing block preview, rotated to face `rot` (0=right, 1=down,
+## 2=left, 3=up — same convention as placement_rotation). No-op when the
+## block isn't a turret with a head sprite. Mirrors the live-draw math
+## in CombatSystem._draw_turret_heads so what the player sees in the
+## ghost is what they get on placement.
+func _draw_turret_preview_heads(data: BlockData, top_pos: Vector2, w: float, h: float, rot: int, tint: Color) -> void:
+	if data == null or not data.is_turret() or data.turret_head_sprite == null:
+		return
+	var center: Vector2 = top_pos + Vector2(w / 2.0, h / 2.0)
+	var aim_angle: float = float(rot) * (PI / 2.0)
+	var draw_angle: float = aim_angle + PI / 2.0
+	var bcount: int = maxi(data.barrel_count, 1)
+	var head_tex: Texture2D = data.turret_head_sprite
+	var tex_size: Vector2 = head_tex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+	var chassis_dir := Vector2.from_angle(aim_angle)
+	var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
+	# Chassis plate (multi-barrel only).
+	if bcount > 1:
+		draw_set_transform(center, draw_angle)
+		if data.turret_chassis_sprite:
+			var ctex: Texture2D = data.turret_chassis_sprite
+			var csize: Vector2 = ctex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+			draw_texture_rect(
+				ctex,
+				Rect2(Vector2(-csize.x * 0.5, -csize.y * 0.5), csize),
+				false,
+				tint,
+			)
+		else:
+			var plate_w: float = (float(bcount) - 1.0) * data.barrel_spacing + tex_size.x * 0.9
+			var plate_h: float = tex_size.y * 0.35
+			draw_rect(
+				Rect2(Vector2(-plate_w * 0.5, -plate_h * 0.5), Vector2(plate_w, plate_h)),
+				Color(0.32, 0.32, 0.34, tint.a),
+			)
+		draw_set_transform(Vector2.ZERO, 0.0)
+	# Heads — one per barrel, perpendicular to the aim axis.
+	for i in range(bcount):
+		var lateral: float = 0.0
+		if bcount > 1:
+			lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * data.barrel_spacing
+		var pivot: Vector2 = center + chassis_perp * lateral
+		draw_set_transform(pivot, draw_angle)
+		var rect := Rect2(
+			Vector2(-tex_size.x * 0.5, -tex_size.y + 14.0 * main.SPRITE_SCALE_FACTOR),
+			tex_size,
+		)
+		draw_texture_rect(head_tex, rect, false, tint)
+		draw_set_transform(Vector2.ZERO, 0.0)
 
 
 ## Draws a direction arrow at the given center position.
@@ -4500,7 +5008,7 @@ func _draw_direction_arrow(center: Vector2, rotation: int, color: Color) -> void
 
 ## Draws a health bar centered above a building.
 ## bar_width_base is the pixel width of the building (scales with size).
-func _draw_building_health_bar(world_pos: Vector2, health_pct: float, building_pixel_width: float = 64.0) -> void:
+func _draw_building_health_bar(world_pos: Vector2, health_pct: float, building_pixel_width: float = 128.0) -> void:
 	var bar_width = clamp(building_pixel_width * 0.8, 30.0, 150.0)
 	var bar_height := 5.0
 	var bar_pos = world_pos + Vector2(
@@ -4627,6 +5135,10 @@ func _draw_paused_queue() -> void:
 			_draw_drill_heads(grid_pos, rotation, data.grid_size, dh_variant, block_id, Color(1, 1, 1, 0.45))
 		if data.tags.has("crusher_heads"):
 			_draw_crusher_heads(grid_pos, rotation, data.grid_size, block_id, Color(1, 1, 1, 0.45), false)
+		# Turret heads / chassis overlay so paused-queue and out-of-
+		# build-range turret ghosts visibly show their barrels.
+		if data.is_turret():
+			_draw_turret_preview_heads(data, top_pos, w, h, rotation, Color(1, 1, 1, 0.45))
 
 		# Yellow outline for all queued blocks
 		draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
@@ -4679,6 +5191,9 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 		if _is_directional(block_id):
 			var center := top_pos + Vector2(w / 2.0, h / 2.0)
 			_draw_direction_arrow(center, q_rot, Color(1, 1, 1, 0.5))
+	# Turret heads / chassis ghost overlay so a queued turret reads as
+	# what it'll become, not just a flat base.
+	_draw_turret_preview_heads(data, top_pos, w, h, q_rot, tint)
 	# Yellow outline marks "queued, waiting for the drone".
 	draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
 
@@ -4775,6 +5290,12 @@ func _draw_preview() -> void:
 				var arrow_color = Color(1, 1, 1, 0.8) if cell_ok else Color(1, 0.3, 0.3, 0.6)
 				_draw_direction_arrow(center, cell_rot, arrow_color)
 
+			# Turret heads / chassis preview: only the selected block shows
+			# these, not junction/bridge substitutions.
+			if cell_block_id == main.selected_building and cell_data and cell_data.is_turret():
+				var t_rot_dl: int = preview_rots.get(cell, main.placement_rotation)
+				var t_tint_dl: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				_draw_turret_preview_heads(cell_data, cell_pos, w, h, t_rot_dl, t_tint_dl)
 			# Drill/crusher heads preview: only the selected block shows
 			# these, not junction/bridge substitutions.
 			if cell_block_id == main.selected_building and data and data.tags.has("drill_heads"):
@@ -4863,6 +5384,12 @@ func _draw_preview() -> void:
 		) + offset
 		var arrow_color = Color(1, 1, 1, 0.8) if can_place else Color(1, 0.3, 0.3, 0.6)
 		_draw_direction_arrow(center, main.placement_rotation, arrow_color)
+
+	# Turret heads / chassis preview overlay (mirrors the drag-line path
+	# below). Drawn after base/top so the heads sit on top of the body.
+	if data and data.is_turret():
+		var t_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		_draw_turret_preview_heads(data, top_pos, width, height, main.placement_rotation, t_tint)
 
 	# Drill heads preview: falls back to "N" when placement is invalid.
 	if data and data.tags.has("drill_heads"):
@@ -4972,6 +5499,121 @@ func _draw_demolish_rect() -> void:
 	draw_rect(Rect2(rect_pos, Vector2(width, height)), Color(1, 0, 0, 0.6), false, 2.0)
 
 
+## Walks placed buildings to figure out which archives are *currently*
+## under a powered scanner. Returns a dict of anchor → {scanner_rot, data}.
+func _scan_active_archives() -> Dictionary:
+	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	var scanned: Dictionary = {}
+	for grid_pos in main.placed_buildings:
+		if main.building_origins.get(grid_pos, grid_pos) != grid_pos:
+			continue
+		var data = Registry.get_block(main.placed_buildings[grid_pos])
+		if data == null or not data.tags.has("archive_scanner"):
+			continue
+		if power_sys and not power_sys.is_electrical_powered(grid_pos):
+			continue
+		var rot: int = main.building_rotation.get(grid_pos, 0)
+		var front_cells: Array[Vector2i] = _get_front_edge(grid_pos, data.grid_size, rot)
+		for cell in front_cells:
+			if not main.placed_buildings.has(cell):
+				continue
+			var a_anchor: Vector2i = main.building_origins.get(cell, cell)
+			var a_data = Registry.get_block(main.placed_buildings.get(a_anchor, &""))
+			if a_data == null or a_data.id != &"archive":
+				continue
+			var aid: StringName = archive_holdings.get(a_anchor, &"")
+			if aid == &"" or TechTree.is_researched(aid):
+				continue
+			if scanned.has(a_anchor):
+				continue
+			scanned[a_anchor] = {"scanner_rot": rot, "data": a_data}
+			break
+	return scanned
+
+
+## Steps every fade entry toward 1.0 (when currently scanned) or 0.0
+## (when not). Removes entries that have fully faded out so the dict
+## doesn't accumulate stale keys, and refreshes the cached scanner
+## rotation / archive data while a scan is live so the box / line
+## continues to track the right cell as long as it's visible.
+func _tick_archive_scan_fade(delta: float) -> void:
+	var scanned: Dictionary = _scan_active_archives()
+	# Bring fade UP for currently-scanned archives; refresh their cached
+	# rotation + data so the overlay tracks rebinds.
+	for a_anchor in scanned:
+		var info: Dictionary = scanned[a_anchor]
+		var entry: Dictionary = _archive_scan_fade.get(a_anchor, {})
+		entry["alpha"] = minf(float(entry.get("alpha", 0.0)) + delta * _ARCHIVE_SCAN_FADE_RATE, 1.0)
+		entry["scanner_rot"] = int(info["scanner_rot"])
+		entry["data"] = info["data"]
+		_archive_scan_fade[a_anchor] = entry
+	# Decay anyone NOT in the active set; drop entries that have
+	# finished fading out.
+	for a_anchor in _archive_scan_fade.keys():
+		if scanned.has(a_anchor):
+			continue
+		var entry: Dictionary = _archive_scan_fade[a_anchor]
+		var new_a: float = maxf(float(entry.get("alpha", 0.0)) - delta * _ARCHIVE_SCAN_FADE_RATE, 0.0)
+		if new_a <= 0.0:
+			_archive_scan_fade.erase(a_anchor)
+		else:
+			entry["alpha"] = new_a
+			_archive_scan_fade[a_anchor] = entry
+
+
+## Renders the purple scan box + sweeping reveal line for every archive
+## tracked in `_archive_scan_fade`, scaled by the per-anchor fade alpha
+## so the overlay smoothly fades in when a scanner activates and fades
+## out when the scanner is destroyed, depowered, or its archive gets
+## decoded.
+func _draw_archive_scan_overlay() -> void:
+	if _archive_scan_fade.is_empty():
+		return
+	var gs := float(main.GRID_SIZE)
+	# Triangle-wave sweep: ping-pongs from one edge to the other and
+	# back again over `_ARCHIVE_SCAN_PERIOD * 2` seconds.
+	var saw: float = fposmod(_archive_scan_phase / _ARCHIVE_SCAN_PERIOD, 2.0)
+	var sweep_pct: float = saw if saw <= 1.0 else 2.0 - saw
+
+	for a_anchor in _archive_scan_fade:
+		var entry: Dictionary = _archive_scan_fade[a_anchor]
+		var alpha: float = float(entry.get("alpha", 0.0))
+		if alpha <= 0.0:
+			continue
+		var a_data: BlockData = entry.get("data")
+		if a_data == null:
+			# Entry kept around for fade-out after data went stale —
+			# fall back to whatever's at the anchor right now.
+			a_data = Registry.get_block(main.placed_buildings.get(a_anchor, &""))
+			if a_data == null:
+				continue
+		var scanner_rot: int = int(entry.get("scanner_rot", 0))
+		var world_pos: Vector2 = main.grid_to_world(a_anchor)
+		var w: float = a_data.grid_size.x * gs
+		var h: float = a_data.grid_size.y * gs
+		var rect := Rect2(world_pos, Vector2(w, h))
+		var box_color := Color(0.7, 0.35, 1.0, alpha)
+		var fill_color := Color(0.7, 0.35, 1.0, 0.12 * alpha)
+		draw_rect(rect, fill_color, true)
+		draw_rect(rect, box_color, false, 2.0)
+		if scanner_rot == 0 or scanner_rot == 2:
+			var line_x: float = world_pos.x + w * sweep_pct
+			draw_line(
+				Vector2(line_x, world_pos.y),
+				Vector2(line_x, world_pos.y + h),
+				box_color,
+				2.0,
+			)
+		else:
+			var line_y: float = world_pos.y + h * sweep_pct
+			draw_line(
+				Vector2(world_pos.x, line_y),
+				Vector2(world_pos.x + w, line_y),
+				box_color,
+				2.0,
+			)
+
+
 func _draw_rebuild_mode() -> void:
 	if not _rebuild_mode:
 		return
@@ -4997,6 +5639,11 @@ func _draw_rebuild_mode() -> void:
 		color.a = 0.15
 		draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
 		draw_rect(Rect2(top_pos, Vector2(w, h)), Color(0.816, 0.808, 0.886, 0.25), false, 1.0)
+		# Turret heads on the destroyed-building ghost so rebuild mode
+		# previews the original orientation, not just a flat rectangle.
+		if data.is_turret():
+			var rb_rot: int = int(info.get("rotation", 0))
+			_draw_turret_preview_heads(data, top_pos, w, h, rb_rot, Color(1, 1, 1, 0.2))
 
 	# Draw selection rectangle if dragging
 	if _rebuild_dragging:
@@ -5140,8 +5787,8 @@ func _draw_links() -> void:
 	var wire_scale := 1.0  # Scale down the wire width (1.0 = native texture size)
 	var half_tile := Vector2(gs / 2.0, gs / 2.0)
 	if power_sys and "cable_connections" in power_sys and _wire_texture:
-		var tex_w: float = 15#_wire_texture.get_width()   # 15 — wire thickness
-		var tex_h: float = _wire_texture.get_height()  # 100 — wire length per tile
+		var tex_w: float = 15.0 * main.SPRITE_SCALE_FACTOR  # wire thickness, scales with grid
+		var tex_h: float = _wire_texture.get_height()  # wire length per tile (in source px)
 		var draw_w: float = tex_w * wire_scale  # Scaled wire thickness
 		for pair in power_sys.cable_connections:
 			var ca: Vector2i = pair[0]
@@ -5179,38 +5826,61 @@ func _draw_links() -> void:
 				draw_texture_rect_region(_wire_texture, Rect2(-hw, -this_len / 2.0, draw_w, this_len), src, cable_tint)
 				draw_set_transform(Vector2.ZERO, 0.0)
 
-	# Draw linking-mode highlights
-	if not linking_mode:
+	# --- Mindustry-style linking highlights ---
+	# Colors describe ROLE in the link, not which side was clicked:
+	#   yellow = INPUT  (pair[0], the block that initiated the link)
+	#   blue   = OUTPUT (pair[1], the partner)
+	# So clicking either end of an existing pair shows the same coloring.
+	# When a block is selected with no existing link yet, paint it yellow
+	# (it's about to become the input of a new link).
+	if link_source == Vector2i(-1, -1):
 		return
 
-	# Highlight all linkable blocks (only anchors, not every tile)
-	var highlighted_anchors := {}
-	for grid_pos in main.placed_buildings:
-		var anchor_pos: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-		if highlighted_anchors.has(anchor_pos):
-			continue
-		var block_id = main.placed_buildings[anchor_pos]
-		var data = Registry.get_block(block_id)
-		if data == null or not data.tags.has("linkable"):
-			continue
-		highlighted_anchors[anchor_pos] = true
-		var world_pos: Vector2 = main.grid_to_world(anchor_pos)
-		var offset = _get_top_offset(world_pos)
-		var rect_pos: Vector2 = world_pos + offset
-		var block_w: float = data.grid_size.x * gs
-		var block_h: float = data.grid_size.y * gs
-		var highlight_color := Color(0.3, 0.8, 1.0, 0.3)
-		if anchor_pos == link_source:
-			highlight_color = Color(0.0, 1.0, 0.5, 0.5)
-		draw_rect(Rect2(rect_pos, Vector2(block_w, block_h)), highlight_color, true)
-		draw_rect(Rect2(rect_pos, Vector2(block_w, block_h)), highlight_color.lightened(0.3), false, 2.0)
+	var src_data: BlockData = Registry.get_block(main.placed_buildings.get(link_source, &""))
+	if src_data == null:
+		return
 
-	# Draw line from source to mouse if source is selected
-	if link_source != Vector2i(-1, -1):
-		var source_world = main.grid_to_world(link_source) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-		source_world += _get_top_offset(main.grid_to_world(link_source))
-		var mouse_pos = get_global_mouse_position()
-		_draw_dashed_line(source_world, mouse_pos, Color(0.3, 1.0, 0.5, 0.5), 2.0, 6.0)
+	# Find the pair this block belongs to so we know which side is input
+	# vs output. Falls back to "no pair yet" if it's a brand-new selection.
+	var input_anchor: Vector2i = link_source
+	var output_anchor: Vector2i = Vector2i(-1, -1)
+	if power_sys and "linked_pairs" in power_sys:
+		for pair in power_sys.linked_pairs:
+			var pa: Vector2i = main.building_origins.get(pair[0], pair[0])
+			var pb: Vector2i = main.building_origins.get(pair[1], pair[1])
+			if pa == link_source or pb == link_source:
+				input_anchor = pa
+				output_anchor = pb
+				break
+
+	var draw_block_highlight := func(a: Vector2i, fill: Color, outline: Color):
+		var bd: BlockData = Registry.get_block(main.placed_buildings.get(a, &""))
+		if bd == null:
+			return
+		var wp: Vector2 = main.grid_to_world(a)
+		var off = _get_top_offset(wp)
+		var rp: Vector2 = wp + off
+		var bw: float = bd.grid_size.x * gs
+		var bh: float = bd.grid_size.y * gs
+		draw_rect(Rect2(rp, Vector2(bw, bh)), fill, true)
+		draw_rect(Rect2(rp, Vector2(bw, bh)), outline, false, 2.0)
+
+	var yellow_fill := Color(1.0, 0.85, 0.2, 0.35)
+	var yellow_outline := Color(1.0, 0.95, 0.4, 0.9)
+	var blue_fill := Color(0.3, 0.7, 1.0, 0.35)
+	var blue_outline := Color(0.5, 0.85, 1.0, 0.9)
+
+	draw_block_highlight.call(input_anchor, yellow_fill, yellow_outline)
+	if output_anchor != Vector2i(-1, -1):
+		draw_block_highlight.call(output_anchor, blue_fill, blue_outline)
+
+	# Dashed yellow line from source to the mouse so the player can see
+	# where their next click will go.
+	var src_world: Vector2 = main.grid_to_world(link_source) \
+		+ Vector2(src_data.grid_size.x * gs / 2.0, src_data.grid_size.y * gs / 2.0)
+	src_world += _get_top_offset(main.grid_to_world(link_source))
+	_draw_dashed_line(src_world, get_global_mouse_position(),
+		Color(1.0, 0.9, 0.3, 0.6), 2.0, 6.0)
 
 
 ## Draws a dashed line between two points.
@@ -5471,14 +6141,22 @@ func _draw_schematic_placement() -> void:
 					slot_ok = false
 
 		var color: Color = _get_block_color(block_id)
+		var slot_tint: Color
 		if slot_ok:
 			color.a = 0.4
 			draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
 			draw_rect(Rect2(top_pos, Vector2(w, h)), Color(0.3, 1.0, 0.3, 0.6), false, 1.5)
+			slot_tint = Color(1, 1, 1, 0.6)
 		else:
 			color = Color(1.0, 0.3, 0.3, 0.3)
 			draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
 			draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.3, 0.3, 0.6), false, 1.5)
+			slot_tint = Color(1, 0.3, 0.3, 0.5)
+		# Turret heads / chassis ghost so a schematic with turrets visibly
+		# previews barrels in the right direction before the player commits.
+		if data.is_turret():
+			var t_rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
+			_draw_turret_preview_heads(data, top_pos, w, h, t_rot, slot_tint)
 
 
 func _execute_schematic_placement() -> void:
@@ -5585,7 +6263,7 @@ func _draw_cranes() -> void:
 
 		var holding: bool = state["held_payload"] != null
 		var cs: float = CRANE_GRABBER_SIZE * (0.7 if holding else 1.0)
-		var grabber_thickness: float = 6.0
+		var grabber_thickness: float = 6.0 * main.SPRITE_SCALE_FACTOR
 		var grabber_color := Color(0.6, 0.5, 0.2, 0.9)
 		var g_angle: float = state.get("grabber_angle", 0.0)
 
@@ -5613,7 +6291,7 @@ func _draw_cranes() -> void:
 				var unit_data = Registry.get_unit(StringName(payload.get("unit_id", "")))
 				if unit_data:
 					if unit_data.icon:
-						var tex_size: Vector2 = unit_data.icon.get_size()
+						var tex_size: Vector2 = _fit_texture_size(unit_data.icon, gs)
 						draw_texture_rect(unit_data.icon, Rect2(grabber_pos.x - tex_size.x / 2.0, grabber_pos.y - tex_size.y / 2.0, tex_size.x, tex_size.y), false, Color(1, 1, 1, 0.6))
 					else:
 						# Draw the unit's actual shape and color
@@ -5695,15 +6373,23 @@ func _tick_archive_decoders(delta: float) -> void:
 			state["archive_id"] = &""
 			continue
 
-		# 2. Find a touching, powered archive scanner whose front faces an archive
+		# 2. Find a touching, powered archive scanner whose front faces an
+		# archive. Multi-tile decoders need to scan their entire footprint
+		# perimeter — the old 4-DIR-from-anchor scan only saw cells next
+		# to the top-left tile, so a scanner adjacent to any other tile of
+		# a 3x3 decoder went unrecognised.
 		var scanner_pos: Vector2i = Vector2i(-9999, -9999)
 		var archive_id: StringName = &""
 		var found := false
-		for dir_idx in range(4):
-			var n: Vector2i = anchor + DIR_VECTORS[dir_idx]
+		var seen_scanners: Dictionary = {}
+		var perimeter: Array[Vector2i] = _get_block_perimeter_cells(anchor, data.grid_size)
+		for n in perimeter:
 			if not main.placed_buildings.has(n):
 				continue
 			var n_anchor: Vector2i = main.building_origins.get(n, n)
+			if seen_scanners.has(n_anchor):
+				continue
+			seen_scanners[n_anchor] = true
 			var n_data = Registry.get_block(main.placed_buildings.get(n_anchor, &""))
 			if n_data == null or not n_data.tags.has("archive_scanner"):
 				continue

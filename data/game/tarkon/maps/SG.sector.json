@@ -5,6 +5,9 @@
 	"archive_holdings": {
 
 	},
+	"belt_unloader_state": {
+
+	},
 	"block_storage": {
 
 	},
@@ -751,7 +754,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777158799.23061
+		"timestamp": 1777590287.88149
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -3248,6 +3251,9 @@
 			"text": "You need to be in command mode to command units.\nPress \"U\" to go into command mode then left-click and drag to select units; then right-click to have the units go where you right-clicked."
 		}
 	],
+	"junction_items": {
+
+	},
 	"linked_pairs": [
 		[
 			"80,25",
@@ -3259,6 +3265,10 @@
 		]
 	],
 	"loader_state": {
+
+	},
+	"mass_driver_projectiles": [],
+	"mass_driver_state": {
 
 	},
 	"ore_tiles": {
@@ -3297,12 +3307,18 @@
 	"payload_items": {
 
 	},
+	"pipe_contents": {
+
+	},
 	"player_units": [],
 	"refabricator_state": {
 
 	},
 	"resources": {
-
+		"mat_copper": 994,
+		"mat_graphite": 574,
+		"mat_silicon": 379,
+		"mat_steel": 232
 	},
 	"script_steps": [
 		{

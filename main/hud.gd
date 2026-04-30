@@ -82,7 +82,6 @@ var tooltip_vbox: VBoxContainer
 var _power_display_anchor: Vector2i = Vector2i(-9999, -9999)
 var _power_display_gen: float = 0.0
 var _power_display_use: float = 0.0
-var _power_display_last_t: float = 0.0
 ## Floor count-up rate (units / second). At 60 FPS this works out to
 ## ~1 unit per frame, so any change <= ~240 units shows every integer
 ## ticking past in order (… 97, 98, 99, 100). Larger gaps accelerate
@@ -122,8 +121,25 @@ var _last_cost_building := &""
 var unit_mode_panel: PanelContainer
 
 # Objective panel (top-right, shows current script step conditions)
-var objective_panel: PanelContainer
+var objective_panel: PanelContainer  # legacy alias = portrait_panel
 var objective_vbox: VBoxContainer
+# Container wrapping the unit-portrait widgets (icon, bars, name).
+# Hidden when nothing is being controlled so the panel collapses to
+# just the wave / objective / capture info.
+var portrait_widgets_container: VBoxContainer
+# Vertical separator between the portrait widgets (left) and the
+# info section (right).
+var portrait_info_separator: VSeparator
+# Wave-preview footer (icons of next-wave units + a "Waves" button).
+# Visible only while waves are running.
+var wave_footer_container: VBoxContainer  # holds horizontal separator + footer row
+var wave_footer_separator: HSeparator
+var wave_footer_row: HBoxContainer
+var wave_icon_row: HBoxContainer
+var wave_list_button: Button
+var wave_skip_button: Button
+# Fullscreen overlay opened by the "Waves" button.
+var wave_list_overlay: CanvasLayer = null
 
 # Hint panel (mid-left of the screen, fade-in/out tutorial bubbles)
 var hint_panel: PanelContainer
@@ -159,6 +175,16 @@ var _network_info_locked_cell: Vector2i = Vector2i(-9999, -9999)
 var network_graph_overlay: CanvasLayer = null
 var network_graph_canvas: Control = null
 var network_graph_pinned_cell: Vector2i = Vector2i(-9999, -9999)
+# Cursor position over the network graph plot, in canvas-local space.
+# Updated from the canvas's gui_input — `get_local_mouse_position()` and
+# `get_viewport().get_mouse_position() - canvas.global_position` are
+# unreliable when the canvas is nested inside two CanvasLayers, so we
+# capture it directly from the InputEventMouseMotion the canvas receives.
+var _network_graph_hover_pos: Vector2 = Vector2(-1, -1)
+# Pause-aware "now" for the network graph. Advances each unpaused frame
+# (matches PowerSystem._sample_network_history's gating) so the X-axis
+# stops moving when the world is paused. Stored in seconds.
+var _network_graph_clock: float = 0.0
 
 # Category display names and icons (emoji fallback)
 const CATEGORY_INFO := {
@@ -236,6 +262,13 @@ func _ready() -> void:
 	main.resources_changed.connect(_on_resources_changed)
 	main.building_selected.connect(_on_building_selected)
 	TechTree.node_state_changed.connect(_on_tech_state_changed)
+	# Surface the "Content Unlocked" popup when an archive finishes
+	# decoding. The marker node (`-D-archive_id`) is hidden so the
+	# normal node_state_changed → unlock-icon path skips it; we hook
+	# the explicit archive_decoded signal instead.
+	if main.has_signal("archive_decoded") \
+			and not main.archive_decoded.is_connected(_on_archive_decoded):
+		main.archive_decoded.connect(_on_archive_decoded)
 
 	# Connect hint signals from the sector script. SectorScript lives as a
 	# child of Main and is set up before HUD._ready runs in practice, but
@@ -348,12 +381,21 @@ func _input(event: InputEvent) -> void:
 
 
 var _autosave_timer := 60.0
-const AUTOSAVE_INTERVAL := 60.0
+## Seconds between autosaves. Settable from the Settings → General panel
+## (range 5..120). HUD reads it every frame, so changes apply on the
+## next tick without needing a sector restart.
+var autosave_interval: float = 60.0
 
 func _process(delta: float) -> void:
 	# Track play time
 	if not main.world_paused and not main.sector_lost:
 		main.stats_play_time += delta
+	# Pause-aware clock for the network power graph + per-row
+	# sparklines. Stays put when paused so the X-axis "now" doesn't
+	# slide forward and the existing samples line up against a fixed
+	# present.
+	if not main.world_paused:
+		_network_graph_clock += delta
 
 	# Toggle whole HUD visibility with the "i" key
 	if Input.is_action_just_pressed("toggle_ui"):
@@ -365,7 +407,7 @@ func _process(delta: float) -> void:
 	# Periodic auto-save
 	_autosave_timer -= delta
 	if _autosave_timer <= 0.0:
-		_autosave_timer = AUTOSAVE_INTERVAL
+		_autosave_timer = clampf(autosave_interval, 5.0, 120.0)
 		if SaveManager.active_sector_id != &"" and not main.sector_lost:
 			SaveManager.sync_active_sector_resources()
 			SaveManager.save_sector(SaveManager.active_sector_id)
@@ -394,7 +436,10 @@ func _process(delta: float) -> void:
 	if main.selected_building != &"":
 		_update_info_label(main.selected_building)
 
-	# Update objective panel
+	# Portrait must run before objective so the merged panel knows
+	# whether the controlled-unit half is visible — _update_objective_panel
+	# uses that to decide separator visibility and final panel visibility.
+	_update_portrait_panel()
 	_update_objective_panel()
 
 	# Update hover tooltip / build cost panel
@@ -461,8 +506,8 @@ func _process(delta: float) -> void:
 	# Unit mode panel — visible whenever the UnitManager is in unit mode.
 	unit_mode_panel.visible = in_unit_mode
 
-	# Update portrait UI
-	_update_portrait_panel()
+	# (Portrait + objective are updated together earlier in _process so
+	#  the merged panel resolves visibility in a single pass.)
 
 	# Hint panel — fade in/out and rotate the queue.
 	_tick_hint_panel(delta)
@@ -475,6 +520,19 @@ func _process(delta: float) -> void:
 	if network_graph_overlay and is_instance_valid(network_graph_overlay) \
 			and network_graph_overlay.visible \
 			and network_graph_canvas and is_instance_valid(network_graph_canvas):
+		# Poll the cursor each frame too — the canvas's gui_input only
+		# fires while the mouse is moving, so a stationary cursor
+		# wouldn't update `_network_graph_hover_pos` and the white line
+		# never re-rendered after the first move-out. `get_local_mouse_position`
+		# was unreliable inside the nested CanvasLayer; using viewport
+		# space minus the canvas's screen position works.
+		var poll_pos: Vector2 = get_viewport().get_mouse_position() - network_graph_canvas.get_screen_position()
+		var canvas_size: Vector2 = network_graph_canvas.size
+		if poll_pos.x >= 0.0 and poll_pos.y >= 0.0 \
+				and poll_pos.x <= canvas_size.x and poll_pos.y <= canvas_size.y:
+			_network_graph_hover_pos = poll_pos
+		else:
+			_network_graph_hover_pos = Vector2(-1, -1)
 		network_graph_canvas.queue_redraw()
 
 
@@ -500,16 +558,34 @@ func _create_portrait_panel() -> void:
 	portrait_panel.add_theme_stylebox_override("panel", style)
 	add_child(portrait_panel)
 
-	var main_vbox = VBoxContainer.new()
-	main_vbox.add_theme_constant_override("separation", 4)
-	main_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	portrait_panel.add_child(main_vbox)
+	# Outer vbox: top row is the merged portrait + info section, bottom
+	# row is the wave-preview footer (only visible while waves run).
+	var root_vbox := VBoxContainer.new()
+	root_vbox.add_theme_constant_override("separation", 6)
+	root_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	portrait_panel.add_child(root_vbox)
+
+	# The merged top row arranges its two sections horizontally:
+	# portrait widgets on the left, wave/objective/capture info on the
+	# right.
+	var main_hbox = HBoxContainer.new()
+	main_hbox.add_theme_constant_override("separation", 8)
+	main_hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root_vbox.add_child(main_hbox)
+
+	# Wrapper for the portrait-specific widgets so we can hide all of
+	# them at once when nothing's being controlled (and only render the
+	# wave/objective/capture info section beside it).
+	portrait_widgets_container = VBoxContainer.new()
+	portrait_widgets_container.add_theme_constant_override("separation", 4)
+	portrait_widgets_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	main_hbox.add_child(portrait_widgets_container)
 
 	# --- Content row: [left bar] [icon] [right bars] ---
 	var content_hbox = HBoxContainer.new()
 	content_hbox.add_theme_constant_override("separation", 4)
 	content_hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	main_vbox.add_child(content_hbox)
+	portrait_widgets_container.add_child(content_hbox)
 
 	# Left health bar
 	var left_bar = _create_portrait_bar(Color(0.15, 0.05, 0.05, 0.8), Color(0.3, 0.9, 0.3))
@@ -570,7 +646,77 @@ func _create_portrait_panel() -> void:
 	portrait_name_label.add_theme_color_override("font_color", Color(0.7, 0.8, 0.9))
 	portrait_name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	portrait_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	main_vbox.add_child(portrait_name_label)
+	portrait_widgets_container.add_child(portrait_name_label)
+
+	# Vertical separator between the portrait section (left) and the
+	# wave/objective/capture info section (right) — visible only when
+	# both halves have content so a panel that's just info doesn't get
+	# a stray vertical line.
+	var v_sep := VSeparator.new()
+	v_sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	v_sep.visible = false
+	main_hbox.add_child(v_sep)
+	portrait_info_separator = v_sep
+
+	objective_vbox = VBoxContainer.new()
+	objective_vbox.add_theme_constant_override("separation", 4)
+	objective_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	main_hbox.add_child(objective_vbox)
+	# Keep the legacy alias so older code paths that touch
+	# `objective_panel` still resolve to a valid Control.
+	objective_panel = portrait_panel
+
+	# Wave footer: separator + (next-wave unit icons | Waves button).
+	# Wrapped in a VBox so the whole footer can be hidden as a unit when
+	# no waves are running, and shown to expand the panel down slightly
+	# while they are.
+	wave_footer_container = VBoxContainer.new()
+	wave_footer_container.add_theme_constant_override("separation", 4)
+	wave_footer_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wave_footer_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wave_footer_container.visible = false
+	root_vbox.add_child(wave_footer_container)
+
+	wave_footer_separator = HSeparator.new()
+	wave_footer_separator.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wave_footer_container.add_child(wave_footer_separator)
+
+	wave_footer_row = HBoxContainer.new()
+	wave_footer_row.add_theme_constant_override("separation", 4)
+	wave_footer_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wave_footer_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wave_footer_container.add_child(wave_footer_row)
+
+	# Left side: row of icons of the units in the next wave.
+	wave_icon_row = HBoxContainer.new()
+	wave_icon_row.add_theme_constant_override("separation", 2)
+	wave_icon_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wave_icon_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wave_footer_row.add_child(wave_icon_row)
+
+	# Right side: a small vertical stack of buttons locked to the right
+	# edge — Skip on top, Waves below. Skip zeroes the WaveManager's
+	# countdown so the next wave spawns this tick; Waves opens the
+	# fullscreen overlay.
+	var wave_button_stack := VBoxContainer.new()
+	wave_button_stack.add_theme_constant_override("separation", 2)
+	wave_button_stack.size_flags_horizontal = Control.SIZE_SHRINK_END
+	wave_button_stack.mouse_filter = Control.MOUSE_FILTER_PASS
+	wave_footer_row.add_child(wave_button_stack)
+
+	wave_skip_button = Button.new()
+	wave_skip_button.text = "Skip"
+	wave_skip_button.add_theme_font_size_override("font_size", 12)
+	wave_skip_button.custom_minimum_size = Vector2(72, 24)
+	wave_skip_button.pressed.connect(_on_wave_skip_pressed)
+	wave_button_stack.add_child(wave_skip_button)
+
+	wave_list_button = Button.new()
+	wave_list_button.text = "Waves"
+	wave_list_button.add_theme_font_size_override("font_size", 12)
+	wave_list_button.custom_minimum_size = Vector2(72, 24)
+	wave_list_button.pressed.connect(_open_wave_list_overlay)
+	wave_button_stack.add_child(wave_list_button)
 
 
 ## Creates a vertical bar with bg and fill for the portrait panel.
@@ -611,6 +757,11 @@ func _update_portrait_panel() -> void:
 
 	var is_controlling := unit_mgr != null and unit_mgr.controlled_entity != null
 	var ctrl_type: String = unit_mgr.controlled_type if unit_mgr else ""
+	# Portrait section is always visible — the default branch below
+	# falls through to drawing the player drone when nothing else is
+	# controlled, so there's always *some* entity to portray.
+	if portrait_widgets_container != null:
+		portrait_widgets_container.visible = true
 
 	if is_controlling and ctrl_type == "unit":
 		# --- Controlled Unit ---
@@ -655,25 +806,47 @@ func _update_portrait_panel() -> void:
 				portrait_color_rect.visible = true
 			# Name
 			portrait_name_label.text = bdata.display_name if bdata else "Turret"
-			# Left bar: health
-			var hp: float = main.building_health.get(grid_pos, bdata.max_health if bdata else 100.0)
+			# Left bar: health (anchor-keyed; one HP pool per building).
+			var hp_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+			var hp: float = main.building_health.get(hp_anchor, bdata.max_health if bdata else 100.0)
 			var max_hp: float = bdata.max_health if bdata else 100.0
 			var hp_pct: float = hp / max_hp if max_hp > 0 else 0.0
 			var hp_color: Color = Color(1.0 - hp_pct, hp_pct, 0.0)
 			portrait_left_bar_fill.color = hp_color
 			_set_portrait_bar(portrait_left_bar_fill, hp_pct)
-			# Right bar 1: cooldown (yellow)
+			# Right bar 1: cooldown (yellow). _update_turrets skips
+			# manually-controlled turrets, so combat.turret_cooldowns
+			# is frozen for the duration of control. Read from the
+			# unit_manager's live `_control_attack_timer` instead so the
+			# bar actually ticks down between manual shots.
 			portrait_right_bar_1_fill.color = Color(0.9, 0.85, 0.2)
 			portrait_right_bar_1_bg.color = Color(0.12, 0.1, 0.02, 0.8)
 			var cd: float = 0.0
 			var max_cd: float = bdata.attack_speed if bdata else 1.0
-			if combat and combat.turret_cooldowns.has(grid_pos):
+			if unit_mgr and "_control_attack_timer" in unit_mgr:
+				cd = float(unit_mgr._control_attack_timer)
+			elif combat and combat.turret_cooldowns.has(grid_pos):
 				cd = combat.turret_cooldowns[grid_pos]
 			var cd_pct: float = 1.0 - (cd / max_cd) if max_cd > 0 and cd > 0 else 1.0
 			_set_portrait_bar(portrait_right_bar_1_fill, cd_pct)
-			# Right bar 2: ammo (orange) — placeholder, always full
-			portrait_right_bar_2_container.visible = true
-			_set_portrait_bar(portrait_right_bar_2_fill, 1.0)
+			# Right bar 2: ammo (orange) — sums every AmmoType the turret
+			# accepts and fills against the block's storage cap so the
+			# bar reflects the live magazine.
+			var ammo_pct: float = 0.0
+			var ammo_visible: bool = false
+			if bdata and not bdata.ammo_types.is_empty() and _logistics:
+				var ammo_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+				var ammo_have: int = 0
+				for ammo in bdata.ammo_types:
+					if ammo is AmmoType:
+						ammo_have += _logistics.get_stored_item_count(ammo_anchor, (ammo as AmmoType).item_id)
+				var ammo_cap: int = bdata.max_stored_items if bdata.max_stored_items > 0 else 100
+				ammo_pct = clampf(float(ammo_have) / float(ammo_cap), 0.0, 1.0)
+				ammo_visible = true
+			portrait_right_bar_2_container.visible = ammo_visible
+			if ammo_visible:
+				portrait_right_bar_2_fill.color = Color(0.95, 0.55, 0.15)
+				_set_portrait_bar(portrait_right_bar_2_fill, ammo_pct)
 			# Right bar 3: booster (blue) — hidden unless boosting input exists
 			portrait_right_bar_3_container.visible = false
 
@@ -1128,7 +1301,8 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 
 	# --- Health Bar ---
 	var health_pct: float = main.get_building_health_pct(grid_pos)
-	var current_health: float = main.building_health.get(grid_pos, data.max_health)
+	var hp_anchor_tt: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var current_health: float = main.building_health.get(hp_anchor_tt, data.max_health)
 	_add_tooltip_health_bar(health_pct, current_health, data.max_health)
 
 	# --- Power Bar ---
@@ -1440,6 +1614,61 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					max_str = "/%.0f" % data.max_stored_fluids
 				_add_tooltip_line("  %s: %.0f%s" % [fluid_name, amount, max_str], Color(0.7, 0.8, 0.9))
 
+	# --- Loader / Unloader held payload (and its stored items) ---
+	# Loaders / unloaders carry a building payload around. Surface what
+	# they're holding (and what's inside it) the same way fabricators
+	# surface what they're producing — only in the tooltip, not in-world.
+	var is_loader: bool = data.tags.has("payload_loader") or data.tags.has("freight_loader")
+	var is_unloader: bool = data.tags.has("payload_unloader") or data.tags.has("freight_unloader")
+	if _logistics and (is_loader or is_unloader):
+		var lpayload: Dictionary = {}
+		var lphase: String = ""
+		if is_loader and "loader_state" in _logistics and _logistics.loader_state.has(origin):
+			var ls: Dictionary = _logistics.loader_state[origin]
+			lphase = String(ls.get("phase", ""))
+			if ls.get("payload") != null and ls["payload"] is Dictionary:
+				lpayload = ls["payload"]
+		elif is_unloader and "unloader_state" in _logistics and _logistics.unloader_state.has(origin):
+			var us: Dictionary = _logistics.unloader_state[origin]
+			lphase = String(us.get("phase", ""))
+			if us.get("payload") != null and us["payload"] is Dictionary:
+				lpayload = us["payload"]
+		if lphase != "" or not lpayload.is_empty():
+			_add_tooltip_separator()
+			if lphase != "":
+				var pcolor := Color(0.6, 0.7, 0.8)
+				match lphase:
+					"idle": pcolor = Color(0.7, 0.7, 0.7)
+					"filling", "extracting", "collecting": pcolor = Color(0.8, 0.8, 0.4)
+					"holding", "ejecting", "outputting": pcolor = Color(0.4, 0.6, 0.9)
+				_add_tooltip_line("Phase: %s" % lphase.capitalize(), pcolor)
+			if not lpayload.is_empty():
+				var ptype: String = String(lpayload.get("type", ""))
+				if ptype == "building":
+					var bd: BlockData = Registry.get_block(StringName(lpayload.get("block_id", "")))
+					var bn: String = bd.display_name if bd else String(lpayload.get("block_id", "?"))
+					_add_tooltip_line("Holding: %s" % bn, Color(0.7, 0.85, 1.0))
+					var pstored: Dictionary = lpayload.get("stored_items", {})
+					var ptotal := 0
+					for sid in pstored:
+						ptotal += int(pstored[sid])
+					var pcap: int = bd.max_stored_items if bd else 0
+					if pcap > 0:
+						_add_tooltip_line("  Contents: %d / %d" % [ptotal, pcap], Color(0.7, 0.75, 0.8))
+					elif ptotal > 0:
+						_add_tooltip_line("  Contents: %d" % ptotal, Color(0.7, 0.75, 0.8))
+					for item_id in pstored:
+						var amount := int(pstored[item_id])
+						if amount <= 0:
+							continue
+						var item = Registry.get_item_or_fluid(item_id)
+						var iname: String = item.display_name if item else str(item_id)
+						_add_tooltip_line("    %s: %d" % [iname, amount], Color(0.8, 0.85, 0.8))
+				elif ptype == "unit":
+					var ud = Registry.get_unit(StringName(lpayload.get("unit_id", "")))
+					var un: String = ud.display_name if ud else String(lpayload.get("unit_id", "?"))
+					_add_tooltip_line("Holding: %s" % un, Color(0.7, 0.85, 1.0))
+
 	# --- Factory / Refabricator Phase ---
 	# Refabricators have their own state dict; the factory_buffers phase
 	# on these blocks is just the default "collecting" and doesn't reflect
@@ -1508,9 +1737,6 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			var did: StringName = dstate.get("archive_id", &"")
 			if did == &"":
 				_add_tooltip_line("Decoding Archive: (idle)", Color(0.7, 0.7, 0.7))
-				# Diagnose why it's idle
-				var diag := _diagnose_archive_decoder(origin)
-				_add_tooltip_line("  Reason: %s" % diag, Color(0.9, 0.6, 0.3))
 			else:
 				var dnd = TechTree.get_node_data(did)
 				var dname: String = dnd["name"] if dnd else String(did)
@@ -1527,16 +1753,27 @@ func _diagnose_archive_decoder(anchor: Vector2i) -> String:
 	var power_sys = _power_sys_ref()
 	if power_sys and not power_sys.is_electrical_powered(anchor):
 		return "no electrical power"
-	const DIRS := [Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(0, -1)]
+	# Walk the decoder's full footprint perimeter so the diagnostic
+	# matches what the actual decoder tick checks (4-DIR-from-anchor was
+	# blind to anything next to a non-anchor tile of a multi-tile decoder).
+	var building_sys = _building_sys_ref()
+	if building_sys == null:
+		return "unknown"
+	var dec_data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	var dec_size: Vector2i = dec_data.grid_size if dec_data else Vector2i.ONE
+	var perimeter: Array[Vector2i] = building_sys._get_block_perimeter_cells(anchor, dec_size)
 	var found_scanner := false
 	var scanner_powered := false
 	var scanner_faces_archive := false
 	var archive_id_set := false
-	for d in DIRS:
-		var n: Vector2i = anchor + d
+	var seen_scanners: Dictionary = {}
+	for n in perimeter:
 		if not main.placed_buildings.has(n):
 			continue
 		var n_anchor: Vector2i = main.building_origins.get(n, n)
+		if seen_scanners.has(n_anchor):
+			continue
+		seen_scanners[n_anchor] = true
 		var n_data = Registry.get_block(main.placed_buildings.get(n_anchor, &""))
 		if n_data == null or not n_data.tags.has("archive_scanner"):
 			continue
@@ -1545,9 +1782,6 @@ func _diagnose_archive_decoder(anchor: Vector2i) -> String:
 			continue
 		scanner_powered = true
 		var rot: int = main.building_rotation.get(n_anchor, 0)
-		var building_sys = _building_sys_ref()
-		if building_sys == null:
-			continue
 		var front = building_sys._get_front_edge(n_anchor, n_data.grid_size, rot)
 		for cell in front:
 			if not main.placed_buildings.has(cell):
@@ -2506,84 +2740,499 @@ func _get_blocks_for_category(cat: int) -> Array[BlockData]:
 # =========================
 
 func _create_objective_panel() -> void:
-	objective_panel = PanelContainer.new()
-	objective_panel.offset_left = 10
-	objective_panel.offset_top = 90
-
-	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.06, 0.08, 0.88)
-	style.border_color = Color(1.0, 0.84, 0.0, 0.4)
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(8)
-	style.content_margin_left = 10
-	style.content_margin_right = 10
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
-	objective_panel.add_theme_stylebox_override("panel", style)
-	objective_panel.visible = false
-	objective_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(objective_panel)
-
-	objective_vbox = VBoxContainer.new()
-	objective_vbox.add_theme_constant_override("separation", 4)
-	objective_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	objective_panel.add_child(objective_vbox)
+	# The objective UI lives inside `portrait_panel` now (see
+	# _create_portrait_panel) so the two share one rectangle. This stub
+	# is kept for back-compat with the old call site in _ready and is a
+	# no-op — `objective_vbox` and the alias `objective_panel` were
+	# already wired up in _create_portrait_panel.
+	pass
 
 
 func _update_objective_panel() -> void:
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
-	if sector_script == null or not sector_script.has_method("get_current_objectives"):
-		objective_panel.visible = false
-		return
-
-	var objectives: Array = sector_script.get_current_objectives()
-	if objectives.is_empty():
-		objective_panel.visible = false
-		return
-
-	objective_panel.visible = true
-
-	# Rebuild content each frame (cheap — usually 1-3 objectives)
+	# Renders the info section beneath the controlled-unit portrait:
+	#   1. While waves are running, the current wave + countdown to the
+	#      next one ("Wave N/M", "Time Until Next Wave: …").
+	#   2. The current sector objective list.
+	#   3. If the sector is captured, a gray "Sector Captured" line in
+	#      place of the objectives.
+	# The whole portrait_panel becomes visible whenever any of those
+	# (or the unit portrait) has content to show.
 	for child in objective_vbox.get_children():
 		child.queue_free()
 
-	# Header
-	var header = Label.new()
-	header.text = "OBJECTIVE"
-	header.add_theme_font_size_override("font_size", 13)
-	header.add_theme_color_override("font_color", Color(1.0, 0.84, 0.0))
-	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	objective_vbox.add_child(header)
+	var any_info := false
 
-	for obj in objectives:
-		var text: String = obj.get("text", "")
-		var current: int = obj.get("current", 0)
-		var target: int = obj.get("target", 1)
-		var done: bool = obj.get("done", false)
-
-		var hbox = HBoxContainer.new()
-		hbox.add_theme_constant_override("separation", 6)
-		hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		objective_vbox.add_child(hbox)
-
-		# Checkmark or bullet
-		var bullet = Label.new()
-		bullet.text = "✔" if done else "▸"
-		bullet.add_theme_font_size_override("font_size", 12)
-		bullet.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3) if done else Color(0.8, 0.8, 0.8))
-		bullet.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		hbox.add_child(bullet)
-
-		# Objective text with progress
-		var lbl = Label.new()
-		if target > 1 or current > 0:
-			lbl.text = "%s: %d/%d" % [text, current, target]
+	# --- Wave info ---
+	var wave_info: Dictionary = _get_wave_info_for_panel()
+	if not wave_info.is_empty():
+		any_info = true
+		var wave_state: String = String(wave_info.get("state", "countdown"))
+		var wave_lbl := Label.new()
+		if wave_state == "cleared":
+			wave_lbl.text = "Waves Cleared"
+			wave_lbl.add_theme_color_override("font_color", Color(0.4, 0.95, 0.4))
 		else:
-			lbl.text = text
-		lbl.add_theme_font_size_override("font_size", 12)
-		lbl.add_theme_color_override("font_color", Color(0.5, 0.8, 0.5) if done else Color(0.85, 0.88, 0.92))
+			wave_lbl.text = "Wave %d/%s" % [
+				int(wave_info.get("current", 0)),
+				"∞" if wave_info.get("infinite", false) else str(int(wave_info.get("total", 0))),
+			]
+			wave_lbl.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
+		wave_lbl.add_theme_font_size_override("font_size", 13)
+		wave_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		objective_vbox.add_child(wave_lbl)
+
+		# Sub-line: countdown to next wave (default), "Final Wave" once
+		# everything's been queued, suppressed entirely once cleared.
+		if wave_state != "cleared":
+			var time_lbl := Label.new()
+			if wave_state == "final":
+				time_lbl.text = "Final Wave — defeat remaining enemies"
+				time_lbl.add_theme_color_override("font_color", Color(1.0, 0.7, 0.5))
+			else:
+				time_lbl.text = "Time Until Next Wave: %s" % _format_wave_countdown(float(wave_info.get("time_left", 0.0)))
+				time_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.6))
+			time_lbl.add_theme_font_size_override("font_size", 11)
+			time_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			objective_vbox.add_child(time_lbl)
+
+	# --- Captured? ---
+	# A sector that's captured AND not currently abandoned counts as
+	# "currently held". Once captured, the -C- marker stays researched
+	# forever (so tech gated on it remains unlocked), but the HUD
+	# should reflect the *current* state — same way planet-select
+	# distinguishes gold (held) from white (abandoned).
+	var sid: StringName = SaveManager.active_sector_id if "active_sector_id" in SaveManager else &""
+	var captured: bool = sid != &"" \
+		and TechTree.is_sector_captured(sid) \
+		and not (TechTree.has_method("was_sector_abandoned") and TechTree.was_sector_abandoned(sid))
+	if captured:
+		any_info = true
+		var cap_lbl := Label.new()
+		cap_lbl.text = "Sector Captured"
+		cap_lbl.add_theme_font_size_override("font_size", 13)
+		cap_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+		cap_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		objective_vbox.add_child(cap_lbl)
+	else:
+		# --- Objective list (skipped when captured — the gray
+		# "Sector Captured" line replaces it). ---
+		var sector_script = get_node_or_null("/root/Main/SectorScript")
+		var objectives: Array = []
+		if sector_script and sector_script.has_method("get_current_objectives"):
+			objectives = sector_script.get_current_objectives()
+		if not objectives.is_empty():
+			any_info = true
+			var header = Label.new()
+			header.text = "OBJECTIVE"
+			header.add_theme_font_size_override("font_size", 13)
+			header.add_theme_color_override("font_color", Color(1.0, 0.84, 0.0))
+			header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			objective_vbox.add_child(header)
+			for obj in objectives:
+				var text: String = obj.get("text", "")
+				var current: int = obj.get("current", 0)
+				var target: int = obj.get("target", 1)
+				var done: bool = obj.get("done", false)
+				var hbox = HBoxContainer.new()
+				hbox.add_theme_constant_override("separation", 6)
+				hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				objective_vbox.add_child(hbox)
+				var bullet = Label.new()
+				bullet.text = "✔" if done else "▸"
+				bullet.add_theme_font_size_override("font_size", 12)
+				bullet.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3) if done else Color(0.8, 0.8, 0.8))
+				bullet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				hbox.add_child(bullet)
+				var lbl = Label.new()
+				if target > 1 or current > 0:
+					lbl.text = "%s: %d/%d" % [text, current, target]
+				else:
+					lbl.text = text
+				lbl.add_theme_font_size_override("font_size", 12)
+				lbl.add_theme_color_override("font_color", Color(0.5, 0.8, 0.5) if done else Color(0.85, 0.88, 0.92))
+				lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				hbox.add_child(lbl)
+
+	objective_vbox.visible = any_info
+	# Separator only when BOTH halves of the panel have content, so a
+	# panel that's just info (no controlled unit) doesn't look like it
+	# has a stranded line at its top.
+	var portrait_visible: bool = portrait_widgets_container != null and portrait_widgets_container.visible
+	portrait_info_separator.visible = any_info and portrait_visible
+
+	# Wave footer: shows when waves are running. Carries a row of icons
+	# for whatever the *next* wave will spawn plus a "Waves" button that
+	# opens the fullscreen wave-list overlay.
+	var waves_running: bool = not wave_info.is_empty()
+	wave_footer_container.visible = waves_running
+	if waves_running:
+		_rebuild_wave_icon_row()
+
+	# Show the merged panel whenever ANY section has something to draw.
+	portrait_panel.visible = any_info or portrait_visible or waves_running
+
+
+## Rebuilds the row of unit icons shown in the wave footer (the next
+## wave's roster). Counts are summed by unit_id across spawn points.
+func _rebuild_wave_icon_row() -> void:
+	if wave_icon_row == null:
+		return
+	for child in wave_icon_row.get_children():
+		child.queue_free()
+	var roster: Array = _get_next_wave_roster()
+	if roster.is_empty():
+		# Stub label so the row keeps a baseline height.
+		var lbl := Label.new()
+		lbl.text = "(no spawns)"
+		lbl.add_theme_font_size_override("font_size", 11)
+		lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		hbox.add_child(lbl)
+		wave_icon_row.add_child(lbl)
+		return
+	for entry in roster:
+		var uid: StringName = entry["unit_id"]
+		var count: int = entry["count"]
+		var udata = Registry.get_unit(uid)
+		var slot := HBoxContainer.new()
+		slot.add_theme_constant_override("separation", 2)
+		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wave_icon_row.add_child(slot)
+		if udata and udata.icon:
+			var tex := TextureRect.new()
+			tex.texture = udata.icon
+			tex.custom_minimum_size = Vector2(20, 20)
+			tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			slot.add_child(tex)
+		else:
+			var dot := ColorRect.new()
+			dot.color = udata.color if udata else Color(0.6, 0.6, 0.6)
+			dot.custom_minimum_size = Vector2(20, 20)
+			dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			slot.add_child(dot)
+		var num := Label.new()
+		num.text = "x%d" % count
+		num.add_theme_font_size_override("font_size", 11)
+		num.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+		num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(num)
+
+
+## Returns the roster (units summed by id) for the *next* wave the
+## WaveManager is going to spawn. Empty when nothing is queued.
+func _get_next_wave_roster() -> Array:
+	var wm = get_node_or_null("/root/Main/WaveManager")
+	if wm == null or not ("_running" in wm) or not bool(wm._running):
+		return []
+	var idx: int = int(wm._idx) if "_idx" in wm else 0
+	var expanded: Array = wm._expanded_waves if "_expanded_waves" in wm else []
+	if idx >= expanded.size():
+		# Infinite-auto: ask the static roller for the next wave that
+		# would be generated, so the player still sees the upcoming
+		# preview even though it hasn't been baked into _expanded_waves.
+		if wm.has_method("_is_infinite_auto") and wm._is_infinite_auto():
+			var cfg: Dictionary = wm.config if "config" in wm else {}
+			var rolled: Array = wm._roll_wave_units(cfg, idx + 1)
+			return _sum_wave_entries(rolled)
+		return []
+	var wave: Dictionary = expanded[idx]
+	return _sum_wave_entries(wave.get("units", []))
+
+
+func _sum_wave_entries(units: Array) -> Array:
+	var totals: Dictionary = {}
+	var order: Array = []
+	for u in units:
+		var uid: StringName = StringName(u.get("unit_id", &""))
+		if uid == &"":
+			continue
+		var c: int = int(u.get("count", 1))
+		if c <= 0:
+			continue
+		if not totals.has(uid):
+			order.append(uid)
+		totals[uid] = int(totals.get(uid, 0)) + c
+	var result: Array = []
+	for uid in order:
+		result.append({"unit_id": uid, "count": int(totals[uid])})
+	return result
+
+
+## Skip the current wave countdown. Sets WaveManager._timer to 0 so
+## the very next process tick spawns the next wave immediately. No-op
+## when waves aren't running or there's nothing left to spawn.
+func _on_wave_skip_pressed() -> void:
+	var wm = get_node_or_null("/root/Main/WaveManager")
+	if wm == null:
+		return
+	if not bool(wm.get("_running")):
+		return
+	var idx: int = int(wm.get("_idx"))
+	var expanded_arr = wm.get("_expanded_waves")
+	var expanded: int = (expanded_arr as Array).size() if expanded_arr is Array else 0
+	var infinite: bool = wm.has_method("_is_infinite_auto") and wm._is_infinite_auto()
+	if not infinite and idx >= expanded:
+		return  # Finite run that's already spawned everything.
+	wm.set("_timer", 0.0)
+
+
+## Opens a fullscreen tinted overlay that lists every wave with its
+## roster. Format per wave:
+##   Wave N:
+##     - [icon][Unit Name]: [count]
+func _open_wave_list_overlay() -> void:
+	if wave_list_overlay != null and is_instance_valid(wave_list_overlay):
+		return
+	wave_list_overlay = CanvasLayer.new()
+	wave_list_overlay.layer = 150
+	wave_list_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(wave_list_overlay)
+	# Tint
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.7)
+	bg.anchor_right = 1.0
+	bg.anchor_bottom = 1.0
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP
+	bg.gui_input.connect(func(ev):
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			_close_wave_list_overlay()
+	)
+	wave_list_overlay.add_child(bg)
+	# Centred panel
+	var panel := PanelContainer.new()
+	panel.anchor_left = 0.5
+	panel.anchor_right = 0.5
+	panel.anchor_top = 0.5
+	panel.anchor_bottom = 0.5
+	panel.offset_left = -260
+	panel.offset_right = 260
+	panel.offset_top = -260
+	panel.offset_bottom = 260
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	var ps := StyleBoxFlat.new()
+	ps.bg_color = Color(0.06, 0.07, 0.1, 0.97)
+	ps.border_color = Color(1.0, 0.55, 0.4, 0.5)
+	ps.set_border_width_all(1)
+	ps.set_corner_radius_all(10)
+	ps.content_margin_left = 16
+	ps.content_margin_right = 16
+	ps.content_margin_top = 14
+	ps.content_margin_bottom = 14
+	panel.add_theme_stylebox_override("panel", ps)
+	wave_list_overlay.add_child(panel)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 6)
+	panel.add_child(vbox)
+	# Title + close button row
+	var title_row := HBoxContainer.new()
+	title_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(title_row)
+	var title := Label.new()
+	title.text = "Waves"
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(1.0, 0.55, 0.4))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.add_child(title)
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.add_theme_font_size_override("font_size", 12)
+	close_btn.custom_minimum_size = Vector2(72, 28)
+	close_btn.pressed.connect(_close_wave_list_overlay)
+	title_row.add_child(close_btn)
+	vbox.add_child(HSeparator.new())
+	# Scrolling list
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vbox.add_child(scroll)
+	var list := VBoxContainer.new()
+	list.add_theme_constant_override("separation", 8)
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list)
+	_populate_wave_list(list)
+
+
+func _close_wave_list_overlay() -> void:
+	if wave_list_overlay != null and is_instance_valid(wave_list_overlay):
+		wave_list_overlay.queue_free()
+	wave_list_overlay = null
+
+
+## Populates the wave-list overlay with every queued wave and its
+## roster. Reads off WaveManager._expanded_waves; for infinite-auto runs
+## that lazily generate, asks the static roller for the next ~50 waves
+## past whatever's already been baked so the list isn't empty.
+func _populate_wave_list(list: VBoxContainer) -> void:
+	var wm = get_node_or_null("/root/Main/WaveManager")
+	if wm == null:
+		var empty_lbl := Label.new()
+		empty_lbl.text = "(no waves configured)"
+		empty_lbl.add_theme_font_size_override("font_size", 13)
+		empty_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+		list.add_child(empty_lbl)
+		return
+	var expanded: Array = wm._expanded_waves if "_expanded_waves" in wm else []
+	var idx: int = int(wm._idx) if "_idx" in wm else 0
+	var waves_to_show: Array = []
+	for i in expanded.size():
+		waves_to_show.append({"num": i + 1, "units": (expanded[i] as Dictionary).get("units", [])})
+	# For infinite-auto, peek the next 50 waves past what's already baked.
+	if wm.has_method("_is_infinite_auto") and wm._is_infinite_auto():
+		var cfg: Dictionary = wm.config if "config" in wm else {}
+		var preview_count: int = 50
+		for j in preview_count:
+			var wave_num: int = expanded.size() + j + 1
+			var rolled: Array = wm._roll_wave_units(cfg, wave_num)
+			waves_to_show.append({"num": wave_num, "units": rolled})
+	if waves_to_show.is_empty():
+		var empty_lbl2 := Label.new()
+		empty_lbl2.text = "(no waves configured)"
+		empty_lbl2.add_theme_font_size_override("font_size", 13)
+		empty_lbl2.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+		list.add_child(empty_lbl2)
+		return
+	for wave_entry in waves_to_show:
+		var num: int = int(wave_entry["num"])
+		var units: Array = wave_entry["units"]
+		var roster: Array = _sum_wave_entries(units)
+		var header := Label.new()
+		var header_text := "Wave %d:" % num
+		# Mark waves the player has already cleared so the list stays
+		# readable as the run progresses.
+		if num <= idx:
+			header_text = "Wave %d: (cleared)" % num
+		header.text = header_text
+		header.add_theme_font_size_override("font_size", 14)
+		var header_color: Color = Color(0.5, 0.5, 0.5) if num <= idx else Color(1.0, 0.55, 0.4)
+		header.add_theme_color_override("font_color", header_color)
+		list.add_child(header)
+		if roster.is_empty():
+			var none_lbl := Label.new()
+			none_lbl.text = "  (empty)"
+			none_lbl.add_theme_font_size_override("font_size", 12)
+			none_lbl.add_theme_color_override("font_color", Color(0.55, 0.55, 0.55))
+			list.add_child(none_lbl)
+			continue
+		for r in roster:
+			var uid: StringName = r["unit_id"]
+			var count: int = int(r["count"])
+			var udata = Registry.get_unit(uid)
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", 4)
+			list.add_child(row)
+			# Indent + bullet
+			var bullet := Label.new()
+			bullet.text = "  - "
+			bullet.add_theme_font_size_override("font_size", 12)
+			bullet.add_theme_color_override("font_color", Color(0.8, 0.8, 0.8))
+			row.add_child(bullet)
+			# Icon
+			if udata and udata.icon:
+				var tex := TextureRect.new()
+				tex.texture = udata.icon
+				tex.custom_minimum_size = Vector2(18, 18)
+				tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				row.add_child(tex)
+			else:
+				var dot := ColorRect.new()
+				dot.color = udata.color if udata else Color(0.6, 0.6, 0.6)
+				dot.custom_minimum_size = Vector2(18, 18)
+				row.add_child(dot)
+			# Name + count
+			var name_lbl := Label.new()
+			var uname: String = udata.display_name if udata else String(uid)
+			name_lbl.text = "%s: %d" % [uname, count]
+			name_lbl.add_theme_font_size_override("font_size", 12)
+			name_lbl.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+			row.add_child(name_lbl)
+
+
+## Returns wave HUD info {current:int, total:int, time_left:float, infinite:bool}
+## or `{}` if waves aren't relevant for this sector. Reads off the WaveManager
+## state directly — there's no signal we can subscribe to that fires on
+## every tick.
+##
+## We treat the panel as "wave-relevant" when EITHER:
+##   - WaveManager._running is true (start_mode=landing, or the sector
+##     script already fired start_waves), OR
+##   - There are queued waves yet to spawn (so the next-wave preview
+##     and roster overlay still show even between runs).
+## A sector with no wave config at all (empty `_expanded_waves` and not
+## an infinite-auto run) returns `{}` so the panel collapses cleanly.
+func _get_wave_info_for_panel() -> Dictionary:
+	var wm = get_node_or_null("/root/Main/WaveManager")
+	if wm == null:
+		_debug_wave_panel("no WaveManager node found at /root/Main/WaveManager")
+		return {}
+	var running: bool = bool(wm.get("_running"))
+	var idx: int = int(wm.get("_idx"))
+	var expanded_arr = wm.get("_expanded_waves")
+	var expanded: int = (expanded_arr as Array).size() if expanded_arr is Array else 0
+	var infinite: bool = wm.has_method("_is_infinite_auto") and wm._is_infinite_auto()
+	var timer: float = float(wm.get("_timer"))
+	var cfg = wm.get("config")
+	var start_mode: String = ""
+	if cfg is Dictionary:
+		start_mode = String((cfg as Dictionary).get("start_mode", "?"))
+	_debug_wave_panel("running=%s idx=%d expanded=%d infinite=%s timer=%.1f start_mode=%s" \
+		% [str(running), idx, expanded, str(infinite), timer, start_mode])
+	# Show only when waves are *running*. start_mode="script" sectors
+	# look quiet until the sector script fires its `start_waves` step.
+	if not running:
+		return {}
+	# Finite run with no waves baked in yet → nothing to surface.
+	if not infinite and expanded == 0:
+		return {}
+	# Display "Wave N" where N is 1-based and pinned to the wave that's
+	# *about to spawn next* (or just spawned — _idx advances on spawn).
+	var current: int = clampi(idx + 1, 1, maxi(expanded, idx + 1))
+	# Cap "current" at total when finite and we've blown past the end.
+	if not infinite and idx >= expanded and expanded > 0:
+		current = expanded
+	# State: "countdown" while waves are still queueing, "final" once
+	# everything's been spawned but enemies remain alive, "cleared" once
+	# the waves_defeated signal has flagged the run finished. The
+	# objective-panel renderer uses this to suppress the stale "Time
+	# Until Next Wave" countdown after wave N spawned.
+	var state: String = "countdown"
+	if not infinite and idx >= expanded and expanded > 0:
+		if bool(wm.get("waves_all_defeated")):
+			state = "cleared"
+		else:
+			state = "final"
+	return {
+		"current": current,
+		"total": expanded,
+		"infinite": infinite,
+		"time_left": float(wm.get("_timer")),
+		"state": state,
+	}
+
+
+## Throttled debug logger for the wave panel. Prints at most once per
+## second per distinct message so the output stays readable while we
+## diagnose the "waves not showing" case.
+var _wave_debug_last_msg: String = ""
+var _wave_debug_last_t: float = -10.0
+func _debug_wave_panel(msg: String) -> void:
+	var now: float = Time.get_ticks_msec() / 1000.0
+	if msg == _wave_debug_last_msg and now - _wave_debug_last_t < 1.0:
+		return
+	_wave_debug_last_msg = msg
+	_wave_debug_last_t = now
+
+
+func _format_wave_countdown(seconds: float) -> String:
+	if seconds < 0.0:
+		seconds = 0.0
+	var total: int = int(ceil(seconds))
+	var minutes: int = total / 60
+	var secs: int = total % 60
+	if minutes > 0:
+		return "%dm, %ds" % [minutes, secs]
+	return "%ds" % secs
 
 
 # =========================
@@ -2961,21 +3610,21 @@ func _create_network_info_panel() -> void:
 	network_info_right.add_child(network_info_right_vbox)
 
 
-## Returns the network index of the block at `grid_pos` if it generates or
-## consumes power, else -1. Cable nodes are considered "transport" and are
-## not treated as a network anchor here — but if the player happens to
-## hover one and it has neighbours that participate, the network they
-## belong to is still resolvable via the cell map.
+## Returns the network index of the block at `grid_pos` if it generates,
+## consumes, or transports power, else -1. Producers and consumers are
+## the obvious case; cable nodes are treated as valid hover targets too
+## so a player who hovers a piece of wire (instead of the generator at
+## one end) still gets the network info panel for the grid that wire
+## belongs to.
 func _network_index_for(grid_pos: Vector2i) -> int:
 	if not main.placed_buildings.has(grid_pos):
 		return -1
 	var data = Registry.get_block(main.placed_buildings[grid_pos])
 	if data == null:
 		return -1
-	# Only resolve a network when the hovered block is itself a producer
-	# or a consumer (per the user spec). Cable nodes / empty cables don't
-	# count as a "power-using block" for the trigger.
-	var participates: bool = data.electrical_power_use > 0.0 or data.electrical_power_gen > 0.0
+	var participates: bool = data.electrical_power_use > 0.0 \
+		or data.electrical_power_gen > 0.0 \
+		or data.tags.has("cable_node")
 	if not participates:
 		return -1
 	var ps = _power_sys_ref()
@@ -3149,6 +3798,16 @@ func _build_network_info_row(anchor: Vector2i, d: BlockData, ps: Node) -> HBoxCo
 		power_lbl.add_theme_color_override("font_color", Color(1.0, 0.45, 0.45))
 	hbox.add_child(power_lbl)
 
+	# Tiny sparkline mirroring `eff_graph` but plotting the block's
+	# power-column value (the ±[num] beside it) instead of efficiency.
+	# Same 60-sample, 1 Hz cadence so a row that's been visible for ~60 s
+	# fills the line; producers are tinted green, consumers red.
+	var power_graph := Control.new()
+	power_graph.custom_minimum_size = Vector2(50, 14)
+	power_graph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	power_graph.draw.connect(_draw_power_graph.bind(power_graph))
+	hbox.add_child(power_graph)
+
 	var sep3 := VSeparator.new()
 	sep3.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(sep3)
@@ -3175,6 +3834,12 @@ func _build_network_info_row(anchor: Vector2i, d: BlockData, ps: Node) -> HBoxCo
 	hbox.set_meta("eff_graph", eff_graph)
 	hbox.set_meta("eff_history", PackedFloat32Array())
 	hbox.set_meta("eff_last_sample_t", 0.0)
+	hbox.set_meta("power_graph", power_graph)
+	# 600 samples = 10 minutes at 1 Hz; sparkline draws the most recent
+	# 60, the network-graph hover overlay reads the full window for its
+	# active-block icon stack.
+	hbox.set_meta("power_history", PackedFloat32Array())
+	hbox.set_meta("power_last_sample_t", 0.0)
 	_apply_network_info_status(hbox, anchor, d, ps)
 	return hbox
 
@@ -3218,6 +3883,61 @@ func _draw_eff_graph(ctrl: Control) -> void:
 	else:
 		line_col = Color(1.0, 0.45, 0.45)
 	ctrl.draw_polyline(pts, line_col, 1.5, true)
+
+
+## Per-row power sparkline. Reads `power_history` (raw watts) off the
+## parent hbox; scales against the block's rated gen/use so a generator
+## that's at full output reads as 100 % full just like the efficiency
+## graph next to it. Producer rows are tinted green, consumers red.
+func _draw_power_graph(ctrl: Control) -> void:
+	var hbox := ctrl.get_parent() as HBoxContainer
+	if hbox == null:
+		return
+	var w: float = ctrl.size.x
+	var h: float = ctrl.size.y
+	ctrl.draw_rect(Rect2(Vector2.ZERO, Vector2(w, h)), Color(0.08, 0.08, 0.1, 0.6), true)
+	ctrl.draw_rect(Rect2(Vector2.ZERO, Vector2(w, h)), Color(0.3, 0.3, 0.35, 0.5), false, 1.0)
+	var mid_y: float = h * 0.5
+	ctrl.draw_line(Vector2(0, mid_y), Vector2(w, mid_y), Color(0.4, 0.4, 0.45, 0.35), 1.0)
+	var hist: PackedFloat32Array = hbox.get_meta("power_history", PackedFloat32Array())
+	var n: int = hist.size()
+	if n < 2:
+		return
+	# Resolve rated power (gen for producers, use for consumers) so the
+	# y-axis tops out at the block's nameplate value. Falls back to the
+	# observed peak if the rated lookup is unavailable.
+	var anchor: Vector2i = hbox.get_meta("anchor", Vector2i(-9999, -9999))
+	var d: BlockData = null
+	if anchor != Vector2i(-9999, -9999):
+		d = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	var rated: float = 0.0
+	var is_producer := false
+	if d != null:
+		if d.electrical_power_gen > 0.0:
+			rated = d.electrical_power_gen
+			is_producer = true
+		elif d.electrical_power_use > 0.0:
+			rated = d.electrical_power_use
+	if rated <= 0.0:
+		for v in hist:
+			rated = maxf(rated, float(v))
+		if rated <= 0.0:
+			rated = 1.0
+	const MAX_N: int = 60
+	# Show only the last 60 samples (1 minute) on the row sparkline; the
+	# rest of `power_history` is reserved for the network-graph hover.
+	var n_disp: int = mini(n, MAX_N)
+	var step: float = w / float(MAX_N - 1)
+	var pts := PackedVector2Array()
+	for i in n_disp:
+		var sample_idx: int = n - n_disp + i
+		var v: float = clampf(float(hist[sample_idx]) / rated, 0.0, 1.0)
+		var x: float = w - float(n_disp - 1 - i) * step
+		var y: float = h - 1.0 - v * (h - 2.0)
+		pts.append(Vector2(x, y))
+	var line_col: Color = Color(0.4, 0.95, 0.4) if is_producer else Color(1.0, 0.55, 0.45)
+	ctrl.draw_polyline(pts, line_col, 1.5, true)
+
 
 
 func _apply_network_info_status(hbox: HBoxContainer, anchor: Vector2i, d: BlockData, ps: Node) -> void:
@@ -3269,21 +3989,44 @@ func _apply_network_info_status(hbox: HBoxContainer, anchor: Vector2i, d: BlockD
 		eff_col = Color(1.0, 0.45, 0.45)
 	eff_lbl.add_theme_color_override("font_color", eff_col)
 
+	# Sampling pauses while the world is paused so the sparklines /
+	# 10-min hover history don't drift forward without any actual
+	# gameplay state changing behind them. Repaints still run so the
+	# user can scrub the existing data. Use the pause-aware
+	# `_network_graph_clock` as the timestamp source so paused samples
+	# don't shift the timeline forward — every consumer (per-row
+	# sparkline + 10-min overlay) reads the same clock.
+	var world_paused: bool = "world_paused" in main and main.world_paused
+	var clock_now: float = _network_graph_clock
 	# Push a sample into the per-row efficiency history at ~1 Hz, then
 	# repaint the sparkline.
 	if hbox.has_meta("eff_graph"):
-		var now: float = Time.get_ticks_msec() / 1000.0
-		var last_t: float = float(hbox.get_meta("eff_last_sample_t", 0.0))
-		if now - last_t >= 1.0:
+		var last_t: float = float(hbox.get_meta("eff_last_sample_t", -1000.0))
+		if not world_paused and clock_now - last_t >= 1.0:
 			var hist: PackedFloat32Array = hbox.get_meta("eff_history", PackedFloat32Array())
 			hist.append(float(eff_pct) / 100.0)
 			while hist.size() > 60:
 				hist.remove_at(0)
 			hbox.set_meta("eff_history", hist)
-			hbox.set_meta("eff_last_sample_t", now)
+			hbox.set_meta("eff_last_sample_t", clock_now)
 		var graph: Control = hbox.get_meta("eff_graph", null)
 		if graph and is_instance_valid(graph):
 			graph.queue_redraw()
+	# Power sample (parallel cadence to the efficiency one). Stored long
+	# enough to feed both the per-row sparkline (last 60) and the
+	# network-graph hover-icon stack (full 600).
+	if hbox.has_meta("power_graph"):
+		var last_p: float = float(hbox.get_meta("power_last_sample_t", -1000.0))
+		if not world_paused and clock_now - last_p >= 1.0:
+			var phist: PackedFloat32Array = hbox.get_meta("power_history", PackedFloat32Array())
+			phist.append(power_val)
+			while phist.size() > 600:
+				phist.remove_at(0)
+			hbox.set_meta("power_history", phist)
+			hbox.set_meta("power_last_sample_t", clock_now)
+		var pgraph: Control = hbox.get_meta("power_graph", null)
+		if pgraph and is_instance_valid(pgraph):
+			pgraph.queue_redraw()
 
 
 ## Live-update only the per-row status labels (network unchanged).
@@ -3348,7 +4091,12 @@ func _open_network_graph_overlay() -> void:
 		network_graph_canvas.offset_right = 460
 		network_graph_canvas.offset_top = -240
 		network_graph_canvas.offset_bottom = 240
-		network_graph_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# STOP so motion events update `_network_graph_hover_pos` and
+		# clicks dismiss without falling through to the bg below. The bg
+		# still handles dismissal for clicks OUTSIDE the canvas rect.
+		network_graph_canvas.mouse_filter = Control.MOUSE_FILTER_STOP
+		network_graph_canvas.gui_input.connect(_on_network_graph_input)
+		network_graph_canvas.mouse_exited.connect(func(): _network_graph_hover_pos = Vector2(-1, -1))
 		network_graph_canvas.draw.connect(_draw_network_graph)
 		network_graph_overlay.add_child(network_graph_canvas)
 		var hint := Label.new()
@@ -3368,6 +4116,21 @@ func _open_network_graph_overlay() -> void:
 		network_graph_overlay.add_child(hint)
 	network_graph_overlay.visible = true
 	network_graph_canvas.queue_redraw()
+
+
+## Captures mouse motion / clicks on the network-graph canvas. Motion
+## stamps `_network_graph_hover_pos` (in canvas-local coords, which is
+## what the draw routine plots in); clicks close the overlay so the
+## existing dismiss-on-click affordance keeps working when the cursor
+## is over the chart instead of the bg.
+func _on_network_graph_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		_network_graph_hover_pos = (event as InputEventMouseMotion).position
+		if network_graph_canvas and is_instance_valid(network_graph_canvas):
+			network_graph_canvas.queue_redraw()
+	elif event is InputEventMouseButton and event.pressed \
+			and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+		_close_network_graph_overlay()
 
 
 func _close_network_graph_overlay() -> void:
@@ -3407,8 +4170,11 @@ func _draw_network_graph() -> void:
 			"collecting data...", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.7, 0.75, 0.8))
 		return
 
-	# Axes domain: 10 minutes ending now.
-	var now: float = Time.get_ticks_msec() / 1000.0
+	# Axes domain: 10 minutes ending at the pause-aware "now". Using the
+	# same clock as PowerSystem.sample_network_history + the per-row
+	# sparkline samples means a paused world freezes the whole graph
+	# (samples don't get pushed AND the X-axis doesn't slide forward).
+	var now: float = _network_graph_clock
 	var t_start: float = now - 600.0
 	# Find max y for scaling: use whichever of gen/use is larger.
 	var y_max: float = 1.0
@@ -3470,6 +4236,98 @@ func _draw_network_graph() -> void:
 	canvas.draw_line(Vector2(lx, ly + 16), Vector2(lx + 18, ly + 16), Color(1.0, 0.75, 0.4), 2.0)
 	canvas.draw_string(font, Vector2(lx + 24, ly + 20), "Consumption",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(1.0, 0.85, 0.7))
+
+	# --- Hover overlay: horizontal white line at the cursor's Y, with a
+	# stack of icons rising from the bottom of the chart at the cursor's
+	# X. Each icon represents a block whose power_history sample at the
+	# corresponding time was non-zero (i.e. it was active then). ---
+	# Position is captured directly off the canvas's gui_input
+	# (`_on_network_graph_input`) so the math doesn't have to chase the
+	# nested-CanvasLayer transform that broke `get_local_mouse_position`.
+	var mp: Vector2 = _network_graph_hover_pos
+	if mp.x < 0.0 or not plot_rect.has_point(mp):
+		return
+	# (Vertical hover guide is drawn below; no horizontal value line.)
+	# Map cursor X → time. Walk every block in the pinned network and
+	# pick up the icons of those whose PowerSystem-side per-block
+	# history was non-zero at that point in time. PowerSystem records
+	# samples for every electrical producer/consumer regardless of
+	# whether the info panel is open, so the icon stack now has the
+	# full 10-minute window available instead of just the time the
+	# panel happened to be open.
+	var fx: float = clampf((mp.x - plot_rect.position.x) / plot_rect.size.x, 0.0, 1.0)
+	var hover_t: float = t_start + fx * 600.0
+	var active_icons: Array = []
+	var seen_anchors: Dictionary = {}
+	if ps != null and ps.has_method("get_block_history"):
+		var net_idx: int = _network_index_for(network_graph_pinned_cell)
+		if net_idx >= 0 and net_idx < ps.elec_networks.size():
+			var net_cells: Array = ps.elec_networks[net_idx].get("cells", [])
+			for cell in net_cells:
+				var bid_h: StringName = main.placed_buildings.get(cell, &"")
+				if bid_h == &"":
+					continue
+				var d_h: BlockData = Registry.get_block(bid_h)
+				if d_h == null:
+					continue
+				if d_h.electrical_power_gen <= 0.0 and d_h.electrical_power_use <= 0.0:
+					continue
+				var anch_h: Vector2i = main.building_origins.get(cell, cell)
+				if seen_anchors.has(anch_h):
+					continue
+				seen_anchors[anch_h] = true
+				var bs: Array = ps.get_block_history(anch_h)
+				if bs.is_empty():
+					continue
+				# Find the sample whose t is closest to hover_t. Samples
+				# are time-ordered ascending, so a linear walk from the
+				# back is fine for ~600 entries.
+				var best_p: float = 0.0
+				var best_dt: float = INF
+				for j in range(bs.size() - 1, -1, -1):
+					var st: float = float(bs[j]["t"])
+					var dt: float = absf(st - hover_t)
+					if dt < best_dt:
+						best_dt = dt
+						best_p = float(bs[j]["p"])
+					if st < hover_t - 1.5:
+						break
+				if best_p <= 0.0 or best_dt > 5.0:
+					continue
+				if d_h.icon == null:
+					continue
+				active_icons.append(d_h.icon)
+	# Vertical white guide line at the cursor X across the plot (helps
+	# the player line the icon stack up with the time axis). Drop
+	# shadow + 2 px width matches the horizontal hover line above.
+	canvas.draw_line(
+		Vector2(mp.x + 1.0, plot_rect.position.y),
+		Vector2(mp.x + 1.0, plot_rect.position.y + plot_rect.size.y),
+		Color(0, 0, 0, 0.5),
+		2.0,
+	)
+	canvas.draw_line(
+		Vector2(mp.x, plot_rect.position.y),
+		Vector2(mp.x, plot_rect.position.y + plot_rect.size.y),
+		Color(1, 1, 1, 0.85),
+		2.0,
+	)
+	# Stack icons from the BOTTOM up at the cursor X. 18 px square +
+	# 2 px separation; clamp to the plot height so very busy networks
+	# don't overflow.
+	const ICON_SIZE: float = 18.0
+	const ICON_GAP: float = 2.0
+	var stack_x: float = mp.x - ICON_SIZE * 0.5
+	var bottom_y: float = plot_rect.position.y + plot_rect.size.y - ICON_SIZE - 2.0
+	var max_stack: int = int(plot_rect.size.y / (ICON_SIZE + ICON_GAP))
+	for i in mini(active_icons.size(), max_stack):
+		var icon_tex: Texture2D = active_icons[i]
+		var icon_y: float = bottom_y - float(i) * (ICON_SIZE + ICON_GAP)
+		canvas.draw_texture_rect(
+			icon_tex,
+			Rect2(Vector2(stack_x, icon_y), Vector2(ICON_SIZE, ICON_SIZE)),
+			false,
+		)
 
 
 # =========================
@@ -3931,6 +4789,23 @@ func _create_unlock_notify() -> void:
 	_unlock_notify_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
 	_unlock_notify_hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(_unlock_notify_hbox)
+
+
+## Fires when an archive_decoder completes a cycle. Stacks the archive
+## node onto the unlock popup directly so the player gets the standard
+## "content unlocked" banner at the top of the screen — the marker node
+## the TechTree rule researches is hidden, so the generic node-state
+## listener won't surface it on its own.
+func _on_archive_decoded(archive_id: StringName) -> void:
+	if archive_id == &"":
+		return
+	# Skip if a tech-tree window is currently open — the player is
+	# already watching the unlock land in the tree itself, no need to
+	# also flash a top-of-screen banner.
+	var tech_ui = get_node_or_null("/root/Main/TechTreeUI")
+	if tech_ui and "is_open" in tech_ui and tech_ui.is_open:
+		return
+	_show_unlock_icon(archive_id)
 
 
 func _show_unlock_icon(node_id: StringName) -> void:

@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://nbujjub08o3i"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cq0cdc0e6yl8b" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrillComplete.png" id="1_p4xnc"]
+[ext_resource type="Texture2D" uid="uid://gistjqr84b2c" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrillComplete.png" id="1_p4xnc"]
 [ext_resource type="Texture2D" uid="uid://dmovjrssoulrd" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrill.png" id="2"]
 
 [resource]

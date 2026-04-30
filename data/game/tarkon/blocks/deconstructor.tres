@@ -1,18 +1,27 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://6fpl1qb0aqan"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://lwgn1u1sasvx" path="res://textures/blocks/units/Deconstructor/DeconstructorBase.png" id="1_r1f26"]
+[ext_resource type="Texture2D" uid="uid://dav6slq381amq" path="res://textures/blocks/units/Deconstructor/DeconstructorComplete.png" id="2_o3hsd"]
+[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_p1wac"]
 
 [resource]
 script = ExtResource("1")
 id = &"deconstructor"
 display_name = "Deconstructor"
 description = "Deconstructs buildings and recovers some materials."
+icon = ExtResource("2_o3hsd")
 category = 7
-color = Color(0.8, 0.5, 0.5, 1)
-max_health = 320.0
-build_cost = { "copper": 200, "silicon": 80 }
-build_time = 2.0
-max_stored_items = 200
 tags = PackedStringArray("construction", "deconstructor")
+color = Color(0.8, 0.5, 0.5, 1)
 grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("4_p1wac")
+base_sprite = ExtResource("1_r1f26")
+max_health = 320.0
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
+build_time = 2.0
 max_payload_size = 3
+max_stored_items = 200

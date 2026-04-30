@@ -1,18 +1,27 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bkbvw1xlxoptr"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://c2xjokauwv7mq" path="res://textures/blocks/units/Consructor/ConstructorBase.png" id="1_hsdbx"]
+[ext_resource type="Texture2D" uid="uid://84271cgudcis" path="res://textures/blocks/units/Consructor/ConstructorComplete.png" id="2_2ouht"]
+[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_kjyab"]
 
 [resource]
 script = ExtResource("1")
 id = &"constructor"
 display_name = "Constructor"
 description = "Builds structures using delivered materials."
+icon = ExtResource("2_2ouht")
 category = 7
-color = Color(0.6, 0.7, 0.8, 1)
-max_health = 240.0
-build_cost = { "copper": 15, "graphite": 5 }
-build_time = 2.0
-max_stored_items = 200
 tags = PackedStringArray("construction", "constructor")
+color = Color(0.6, 0.7, 0.8, 1)
 grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("4_kjyab")
+base_sprite = ExtResource("1_hsdbx")
+max_health = 240.0
+build_cost = {
+"copper": 15,
+"graphite": 5
+}
+build_time = 2.0
 max_payload_size = 3
+max_stored_items = 200

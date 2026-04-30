@@ -15,8 +15,6 @@ tags = PackedStringArray("production", "processing", "omnidirectional")
 color = Color(0.8, 0.4, 0.2, 1)
 grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("2")
-barrel_count = null
-barrel_spacing = null
 max_health = 340.0
 build_cost = {
 "copper": 80,
@@ -29,9 +27,8 @@ input_items = {
 output_items = {
 "mat_steel": 1
 }
-production_time = 4.0
+production_time = 1.5
 requires_power = true
 power_consumption = 4.0
 electrical_power_use = 15.0
 max_stored_items = 30
-refab_recipes = null

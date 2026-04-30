@@ -695,7 +695,9 @@ func _on_save_sector() -> void:
 	if save_name == "":
 		_show_status("Enter a name first!")
 		return
-	if SaveManager.save_sector(save_name):
+	# Editor saves are *templates* — they belong in `user://maps/`
+	# alongside the bundled originals, not in the player's `/saves`.
+	if SaveManager.save_sector(save_name, true):
 		_show_status("Sector '%s' saved!" % save_name)
 	else:
 		_show_status("Failed to save sector!")

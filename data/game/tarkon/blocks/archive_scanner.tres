@@ -1,16 +1,19 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://df2yg0u167qxw"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://5fjjr3ndt65t" path="res://textures/blocks/cores/ArchiveScanner.png" id="1_b5pjh"]
 
 [resource]
 script = ExtResource("1")
 id = &"archive_scanner"
 display_name = "Archive Scanner"
 description = "Scans buried archive fragments and emits raw data over a data cable. Place near a recovered archive site to begin extraction."
+icon = ExtResource("1_b5pjh")
 category = 0
 tags = PackedStringArray("production", "archive", "archive_scanner")
 color = Color(0.4, 0.6, 0.9, 1)
 grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("1_b5pjh")
 max_health = 280.0
 build_cost = {
 "copper": 120,

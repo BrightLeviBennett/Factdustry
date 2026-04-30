@@ -18,7 +18,11 @@ extends Node2D
 # ============================================================
 
 # --- GRID SETTINGS ---
-const GRID_SIZE := 64
+const GRID_SIZE := 128
+## Scales sprite-pixel constants (originally tuned for a 64 px grid) to the
+## current GRID_SIZE so heads / items / drone / unit sprites render at the
+## same relative size after grid changes.
+const SPRITE_SCALE_FACTOR := float(GRID_SIZE) / 64.0
 var GRID_WIDTH := 100
 var GRID_HEIGHT := 100
 
@@ -692,11 +696,13 @@ func place_building_with_faction(grid_pos: Vector2i, block_id: StringName, rotat
 			if not is_within_bounds(tile_pos):
 				return false
 
+	# Health is tracked per-building (anchor only) — multi-tile buildings
+	# share a single HP entry instead of one per tile.
+	building_health[grid_pos] = data.max_health
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var tile_pos = grid_pos + Vector2i(x, y)
 			placed_buildings[tile_pos] = block_id
-			building_health[tile_pos] = data.max_health
 			building_rotation[tile_pos] = rotation
 			building_origins[tile_pos] = grid_pos
 			building_factions[tile_pos] = faction
@@ -751,6 +757,12 @@ func _get_swap_group(data: BlockData) -> StringName:
 	# placements with these block ids still swap among themselves.
 	if id_str == "shaft" or id_str == "gearbox" or id_str == "overhead_belt":
 		return &"shaft_power"
+	# Walls form a single group regardless of material — same-size walls
+	# can swap (copper ↔ brass ↔ aluminum, etc.). The same-footprint
+	# gate at the call site keeps a 1×1 wall from trying to overlay a
+	# 3×3 wall and vice versa.
+	if data.tags.has("wall"):
+		return &"wall"
 	return &""
 
 
@@ -758,31 +770,14 @@ func _get_swap_group(data: BlockData) -> StringName:
 ## cell, clearing any logistics/power state the old block had and then placing
 ## the new one with the new block's build_time. Used by the belt/shaft swap
 ## feature in try_place_building.
+##
+## Swaps go through the same code path as a fresh placement: the old block
+## is destroyed immediately and the new one is queued up with the standard
+## `building_build_progress` flow, so a player swapping a Belt → Junction
+## sees the same translucent-ghost build animation, the same gradual
+## resource consumption, and the same drone work scheduling as if they
+## had placed the new block on bare ground.
 func _swap_building_in_place(grid_pos: Vector2i, _old_data: BlockData, new_data: BlockData) -> bool:
-	# Defer the swap: leave the existing block in placed_buildings so it keeps
-	# functioning (belts keep moving items, drills keep producing, etc.) while
-	# the drone walks over to do the work. The real destroy + re-place happens
-	# in execute_pending_swap() when BuildingSystem begins ticking this anchor.
-	if new_data.build_time > 0:
-		# Replace any previous pending swap on the same cell (e.g. the player
-		# dragged over it twice with different block selections). The build
-		# is tracked HERE on the swap entry rather than on
-		# `building_build_progress`, so the existing block stays in
-		# placed_buildings (and visible at full opacity) until the drone
-		# finishes the work — at which point the swap commits atomically.
-		pending_swaps[grid_pos] = {
-			"new_block_id": new_data.id,
-			"new_rotation": placement_rotation,
-			"progress": 0.0,
-			"consumed": {},
-			"build_time": new_data.build_time,
-		}
-		if not work_order.has(grid_pos):
-			work_order.append(grid_pos)
-		# Signal so HUD / save layers can refresh queued-work readouts.
-		building_placed.emit(new_data.id, grid_pos)
-		return true
-	# Zero-build-time swaps commit immediately (no drone work to schedule).
 	return _execute_swap_now(grid_pos, new_data.id, placement_rotation)
 
 
@@ -895,15 +890,17 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 						building_rotation[grid_pos + Vector2i(x, y)] = placement_rotation
 			return true
 
-	# --- Same-group swap: placing a belt part on top of another belt part
-	# (or duct/conduit/payload/freight/shaft) replaces the existing block with
-	# the new one, still paying the new block's build time. Only works for
-	# 1x1 blocks (the families all use 1x1 parts).
-	if data.grid_size == Vector2i(1, 1) and placed_buildings.has(grid_pos):
+	# --- Same-group swap: placing a part of one of the swap families
+	# (belt / duct / conduit / payload / freight / shaft / wall) on top
+	# of another member of the same family replaces the existing block.
+	# Footprints must match — a 1×1 belt overlay is fine because every
+	# belt part is 1×1, and walls swap as long as the new wall has the
+	# same grid_size as the old one (1×1 → 1×1, 2×2 → 2×2, etc.).
+	if placed_buildings.has(grid_pos) and building_origins.get(grid_pos, grid_pos) == grid_pos:
 		var existing_id: StringName = placed_buildings[grid_pos]
 		if existing_id != selected_building:
 			var existing_data = Registry.get_block(existing_id)
-			if existing_data != null and existing_data.grid_size == Vector2i(1, 1):
+			if existing_data != null and existing_data.grid_size == data.grid_size:
 				var new_group: StringName = _get_swap_group(data)
 				var old_group: StringName = _get_swap_group(existing_data)
 				if new_group != &"" and new_group == old_group:
@@ -976,12 +973,13 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 	# No immediate cost deduction — resources are consumed progressively
 	# during construction by the build tick in building_system._process.
 
-	# Place all tiles
+	# Place all tiles. Health lives per-building on the anchor, not per
+	# tile, so multi-tile buildings have a single HP pool.
+	building_health[grid_pos] = data.max_health
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var tile_pos = grid_pos + Vector2i(x, y)
 			placed_buildings[tile_pos] = selected_building
-			building_health[tile_pos] = data.max_health
 			building_rotation[tile_pos] = placement_rotation
 			building_origins[tile_pos] = grid_pos
 			building_factions[tile_pos] = Faction.LUMINA
@@ -1025,12 +1023,12 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 			var rk := _resolve_resource_key(str(item_id))
 			resources[rk] -= int(data.build_cost[item_id])
 
-	# Place all tiles
+	# Place all tiles. Health is per-anchor (single HP pool per building).
+	building_health[grid_pos] = data.max_health
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var tile_pos = grid_pos + Vector2i(x, y)
 			placed_buildings[tile_pos] = block_id
-			building_health[tile_pos] = data.max_health
 			building_rotation[tile_pos] = rot
 			building_origins[tile_pos] = grid_pos
 			building_factions[tile_pos] = Faction.LUMINA
@@ -1047,11 +1045,14 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 
 # Deals damage to a building. Destroys it if HP reaches 0.
 func damage_building(grid_pos: Vector2i, amount: float) -> void:
-	if not building_health.has(grid_pos):
+	# Damage routes through the building's anchor — multi-tile buildings
+	# have one shared HP pool, not a separate value per tile.
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	if not building_health.has(anchor):
 		return
-	building_health[grid_pos] -= amount
-	if building_health[grid_pos] <= 0:
-		destroy_building(grid_pos, true)
+	building_health[anchor] -= amount
+	if building_health[anchor] <= 0:
+		destroy_building(anchor, true)
 
 
 # Queues a building for deconstruction. Resources are refunded progressively
@@ -1160,6 +1161,20 @@ func destroy_building_with_refund(grid_pos: Vector2i) -> void:
 
 ## Alias for destroy_building_with_refund — starts deconstruct animation with refund.
 func start_deconstruct(grid_pos: Vector2i) -> void:
+	# Archives can't be torn down until the data they hold has actually
+	# been decoded. Otherwise a player could reclaim the block (and
+	# whatever it slots back into the inventory) without ever finishing
+	# the research, which sidesteps the entire archive-decoder loop.
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	if placed_buildings.has(anchor):
+		var bid: StringName = placed_buildings[anchor]
+		var bdata = Registry.get_block(bid)
+		if bdata and bdata.id == &"archive":
+			var building_sys = _building_sys_ref()
+			if building_sys and "archive_holdings" in building_sys:
+				var stored_aid: StringName = building_sys.archive_holdings.get(anchor, &"")
+				if stored_aid != &"" and not TechTree.is_researched(stored_aid):
+					return
 	destroy_building_with_refund(grid_pos)
 
 
@@ -1356,12 +1371,12 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	var health: float = float(payload.get("health", data.max_health))
 	var faction: int = int(payload.get("faction", Faction.LUMINA))
 
-	# Place all tiles
+	# Place all tiles. Health is per-anchor (one HP pool per building).
+	building_health[grid_pos] = health
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var tile_pos = grid_pos + Vector2i(x, y)
 			placed_buildings[tile_pos] = block_id
-			building_health[tile_pos] = health
 			building_rotation[tile_pos] = rot
 			building_origins[tile_pos] = grid_pos
 			building_factions[tile_pos] = faction
@@ -1516,13 +1531,16 @@ func _remove_multi_tile_building(grid_pos: Vector2i, block_id: StringName, data:
 
 # Returns the health percentage (0.0 to 1.0) of a building.
 func get_building_health_pct(grid_pos: Vector2i) -> float:
-	if not building_health.has(grid_pos) or not placed_buildings.has(grid_pos):
+	if not placed_buildings.has(grid_pos):
 		return 1.0
-	var block_id = placed_buildings[grid_pos]
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	if not building_health.has(anchor):
+		return 1.0
+	var block_id = placed_buildings[anchor]
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return 1.0
-	return building_health[grid_pos] / data.max_health
+	return building_health[anchor] / data.max_health
 
 
 # =========================

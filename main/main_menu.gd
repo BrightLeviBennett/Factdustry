@@ -81,8 +81,15 @@ func _process(_delta: float) -> void:
 	var registry_progress: float = Registry.load_progress
 	var tech_progress: float = 1.0 if TechTree.is_loaded else 0.5
 	var total_progress: float = registry_progress * 0.8 + tech_progress * 0.2
-	if _loading_bar:
-		_loading_bar.size.x = _loading_screen.size.x * 0.6 * total_progress
+	if _loading_bar and _loading_screen != null:
+		# `_loading_screen.size.x` can briefly be NaN/INF on the first
+		# frames before layout settles (or if the viewport isn't ready
+		# yet), and `Control.set_size` rejects non-finite values with a
+		# loud error. Guard the assignment.
+		var screen_w: float = _loading_screen.size.x
+		var bar_w: float = screen_w * 0.6 * total_progress
+		if is_finite(screen_w) and is_finite(bar_w):
+			_loading_bar.size.x = maxf(bar_w, 0.0)
 	if _loading_label:
 		_loading_label.text = "Loading... %d%%" % int(total_progress * 100)
 

@@ -129,9 +129,9 @@ const VENT_PARTICLES_PER_PUFF := 1
 ## Lifetime of a particle in seconds. Longer = taller stream tail.
 const VENT_PARTICLE_LIFE := 1.8
 ## Starting upward speed in pixels per second.
-const VENT_PARTICLE_SPEED := 22.0
+const VENT_PARTICLE_SPEED := 44.0
 ## Starting half-size in pixels (sprite renders at 2× this).
-const VENT_PARTICLE_RADIUS := 44.0
+const VENT_PARTICLE_RADIUS := 88.0
 ## Modulate color for the steam sprite. Slight yellow/tan so the puff reads
 ## as hot vent gas rather than plain white steam (same trick the tech-tree
 ## checkmark uses — draw_texture's modulate tints the whole texture).

@@ -1,0 +1,22 @@
+[gd_resource type="Resource" script_class="UnitData" format=3]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"overrun"
+display_name = "Overrun"
+description = "Specializes in destroying structures."
+team = 0
+category = 0
+color = Color(0.5, 0.8, 0.3, 1)
+visual_size = 10.0
+max_health = 60.0
+move_speed = 1.328
+attack_damage = 20.0
+attack_speed = 1.0
+attack_range = 32.0
+movement_layer = 1
+detection_range = 500.0
+spawn_count = 1
+threat_value = 4.0

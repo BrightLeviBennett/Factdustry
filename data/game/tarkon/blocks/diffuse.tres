@@ -2,6 +2,9 @@
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 [ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_ammo"]
+[ext_resource type="Texture2D" uid="uid://coik2soop8tpg" path="res://textures/blocks/turrets/Diffuse/DiffuseBase.png" id="2_c4qlf"]
+[ext_resource type="Texture2D" uid="uid://bcydylmydxx5a" path="res://textures/blocks/turrets/Diffuse/DiffuseComplete.png" id="3_740hx"]
+[ext_resource type="Texture2D" uid="uid://dtv6ofg17hwfg" path="res://textures/blocks/turrets/Diffuse/DiffuseHead.png" id="4_740hx"]
 
 [sub_resource type="Resource" id="Resource_diffuse_graphite"]
 script = ExtResource("1_ammo")
@@ -27,9 +30,12 @@ script = ExtResource("1")
 id = &"diffuse"
 display_name = "Diffuse"
 description = "Close-range scattershot turret. Each shot fires a cone of small pellets that knock targets back. Consumes 2 graphite per shot."
+icon = ExtResource("3_740hx")
 category = 4
 tags = PackedStringArray("turret", "defense")
 color = Color(0.9, 0.3, 0.3, 1)
+base_sprite = ExtResource("2_c4qlf")
+turret_head_sprite = ExtResource("4_740hx")
 max_health = 260.0
 build_cost = {
 "copper": 100,
@@ -38,7 +44,6 @@ build_cost = {
 build_time = 3.0
 requires_power = true
 power_consumption = 3.0
-attack_damage = 8.0
 attack_speed = 0.8
 attack_range = 6.5
 ammo_types = Array[Resource]([SubResource("Resource_diffuse_graphite")])

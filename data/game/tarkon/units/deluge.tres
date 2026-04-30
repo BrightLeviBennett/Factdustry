@@ -1,0 +1,27 @@
+[gd_resource type="Resource" script_class="UnitData" format=3]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"deluge"
+display_name = "Deluge"
+description = "Tier-5 naval unit. Apex naval dreadnought."
+team = 0
+color = Color(0.2, 0.4, 0.85, 1)
+visual_size = 10.0
+sprite_scale = 0.7
+head_turn_speed = 3.0
+move_speed = 1.5
+turn_radius = 3.5
+max_health = 900.0
+attack_damage = 120.0
+spawn_count = 1
+threat_value = 11.0
+build_time = 40.0
+build_cost = {
+"copper": 320,
+"silicon": 150,
+"steel": 140,
+"aluminum": 30
+}

@@ -58,7 +58,7 @@ var _resume_mining_target: Variant = null  # Vector2i or null
 var _resume_mining_item_id: StringName = &""
 var mining_timer: float = 0.0
 var mining_item_id: StringName = &""
-var mining_speed: float = 2.0       # Loaded from mechanical_drill production_time
+var mining_speed: float = 1.0       # Loaded from mechanical_drill production_time
 var mined_inventory: Dictionary = {} # item_id -> count (held before delivery)
 const CORE_DELIVERY_RANGE := 15     # Chebyshev tile distance for auto-delivery
 const MINING_RANGE := 7             # Max tile distance before mining stops
@@ -66,6 +66,19 @@ const TRANSFER_DURATION := 0.3      # Seconds for item to fly to core
 const MAX_INVENTORY := 60           # Max items the drone can carry before mining pauses
 var _transfer_items: Array = []     # [{pos:Vector2, target:Vector2, item_id:StringName, icon:Texture2D, t:float}]
 var _mining_beam_phase: float = 0.0 # For pulsing animation
+
+# --- HEAL LASER ---
+# Default: drag-shoot drives combat, AI auto-heals nearby damage.
+# Press X to swap: drag-heal drives the laser, AI auto-shoots.
+const HEAL_RANGE_TILES := 6
+const HEAL_RATE := 30.0              # HP / second applied while a target is locked
+const HEAL_SNAP_ACQUIRE_DEG := 25.0  # Aim must be within this angle to grab a target
+const HEAL_SNAP_RELEASE_DEG := 40.0  # …and within this to keep it (hysteresis)
+var heal_mode: bool = false
+var heal_target: Variant = null      # Vector2i grid anchor of the locked target, or null
+var _heal_beam_endpoint: Vector2 = Vector2.ZERO
+var _heal_beam_active: bool = false
+var _heal_beam_phase: float = 0.0
 
 # --- DRAG-DROP DEPOSIT ---
 var _dragging_inventory := false     # True while left-click held on inventory display
@@ -115,7 +128,7 @@ func _ready() -> void:
 		health_regen = data.health_regen
 		drone_color = data.color
 	else:
-		# Fallbacks in case .tres is missing (1.3 t/s * 64 px/tile = 83.2 px/s)
+		# Fallbacks in case .tres is missing (1.3 t/s * GRID_SIZE px/tile)
 		push_warning("PlayerDrone: player_drone.tres not found in Registry!")
 		move_speed = 1.3 * float(main.GRID_SIZE)
 		max_health = 100.0
@@ -143,6 +156,8 @@ func _process(delta: float) -> void:
 	_handle_regen(delta)
 	_handle_destroy()
 	_handle_mining(delta)
+	_handle_healing(delta)
+	_heal_beam_phase += delta * 3.0
 	_update_transfers(delta)
 	queue_redraw()
 
@@ -153,6 +168,16 @@ func _input(event: InputEvent) -> void:
 		health = max_health
 		_clear_inventory()
 		_move_to_core()
+	# X swaps the drone between drag-shoot (default) and drag-heal modes.
+	# When healing is on the player drives the laser with the mouse and an
+	# auto-shooter handles enemies; when healing is off the player drags to
+	# shoot and an auto-healer mends damaged blocks in range.
+	if event is InputEventKey and event.pressed and not event.echo \
+			and (event.keycode == KEY_X or event.physical_keycode == KEY_X):
+		heal_mode = not heal_mode
+		heal_target = null
+		_heal_beam_active = false
+		get_viewport().set_input_as_handled()
 
 
 
@@ -613,6 +638,10 @@ func _get_focus_world_pos() -> Variant:
 		return main.grid_to_world(mining_target) + Vector2(
 			main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5
 		)
+	# Healing laser is also a focus — face wherever the beam is pointing
+	# so the shardling visibly aims at what it's healing.
+	if _heal_beam_active:
+		return _heal_beam_endpoint
 	return null
 
 
@@ -646,6 +675,7 @@ func _draw() -> void:
 	if not hud or hud.visible:
 		_draw_range_circle()
 	_draw_mining_beam()
+	_draw_heal_beam()
 	_draw_drone()
 	_draw_mined_inventory()
 	_draw_transfer_items()
@@ -682,7 +712,7 @@ func _draw_drone() -> void:
 		# Pixel-perfect: draw at the texture's native size (with an optional
 		# uniform scale multiplier from UnitData.sprite_scale). Preserves the
 		# texture's aspect ratio instead of forcing it into a square.
-		var scale_mult: float = data.sprite_scale if data else 1.0
+		var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR
 		var tex_size_v: Vector2 = drone_texture.get_size() * scale_mult
 		# Shift sprite along its local "up" so the body center (not the tip)
 		# sits at the rotation pivot.
@@ -718,6 +748,280 @@ func _draw_drone() -> void:
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Drives the green healing laser. Two modes:
+##   heal_mode == true  → laser follows the cursor (capped at HEAL_RANGE_TILES)
+##                        and snaps onto damaged friendly blocks the aim
+##                        sweeps over. Manual control; combat handled by AI.
+##   heal_mode == false → AI mode: pick the most-damaged friendly block in
+##                        range and lock the laser onto it. Manual shooting
+##                        runs as normal.
+func _handle_healing(delta: float) -> void:
+	if data == null or main == null:
+		_heal_beam_active = false
+		heal_target = null
+		return
+	# Mining and manual unit/turret control take precedence.
+	if mining_target != null:
+		_heal_beam_active = false
+		heal_target = null
+		return
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr and unit_mgr.controlled_entity != null:
+		_heal_beam_active = false
+		heal_target = null
+		return
+	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
+		_heal_beam_active = false
+		return
+	# Healing is a live gameplay action — block it while the world is
+	# paused so the player can't sneak a heal in (or out) during the
+	# freeze. Drops any existing lock too so a click-and-pause doesn't
+	# leave a phantom beam visible.
+	if "world_paused" in main and main.world_paused:
+		heal_target = null
+		_heal_beam_active = false
+		return
+	var range_px: float = HEAL_RANGE_TILES * float(main.GRID_SIZE)
+	var aim_pos: Vector2
+	var have_aim: bool = false
+	# Manual heal is active only in heal_mode AND while LMB is held.
+	# Outside that window the drone falls through to the AI auto-heal
+	# branch so it keeps mending damaged friendlies even while the
+	# player is busy manually shooting in default mode.
+	var manual_heal_active: bool = false
+	if heal_mode:
+		var lmb: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		if main.selected_building != &"":
+			lmb = false
+		if get_viewport().gui_get_hovered_control() != null:
+			lmb = false
+		manual_heal_active = lmb
+	if manual_heal_active:
+		aim_pos = get_global_mouse_position()
+		have_aim = true
+	else:
+		# AI: lock onto the most-damaged friendly block in range. Runs
+		# in either mode whenever manual healing isn't actively driving.
+		var ai_target = _find_ai_heal_target(range_px)
+		if ai_target == null:
+			heal_target = null
+			_heal_beam_active = false
+			return
+		heal_target = ai_target
+		# Anchor the laser to the building's edge nearest the drone so
+		# the beam visibly touches the closest tile rather than reaching
+		# into the building's centre.
+		aim_pos = _closest_perimeter_point_for_anchor(ai_target, position)
+		have_aim = true
+	if not have_aim:
+		return
+	# Cap the beam endpoint at HEAL_RANGE_TILES so the laser visibly stops
+	# short when the player aims past its reach.
+	var to_aim: Vector2 = aim_pos - position
+	var aim_dist: float = to_aim.length()
+	var aim_dir: Vector2 = to_aim.normalized() if aim_dist > 0.001 else Vector2.RIGHT
+	var capped_endpoint: Vector2 = aim_pos if aim_dist <= range_px else position + aim_dir * range_px
+
+	# Manual mode: snap onto a damaged friendly block under the aim. Once
+	# locked, keep the lock as long as the aim stays roughly toward it
+	# (HEAL_SNAP_RELEASE_DEG hysteresis). Only runs while manual heal is
+	# actively driving — when fallen through to AI, heal_target was set
+	# above by _find_ai_heal_target and we don't want to clobber it.
+	if manual_heal_active:
+		var snap = _resolve_heal_snap(aim_dir, range_px)
+		if snap != null:
+			heal_target = snap
+		else:
+			heal_target = null
+		if heal_target != null and heal_target is Vector2i:
+			# Snap to the point on the building's footprint perimeter
+			# closest to the player's aim, instead of the anchor center.
+			# For a 3x3 block this means the laser sits on the edge of
+			# whichever tile the cursor is closest to, not on a fixed
+			# point in the middle.
+			var t_point: Vector2 = _closest_perimeter_point_for_anchor(heal_target, aim_pos)
+			var to_t: Vector2 = t_point - position
+			if to_t.length() <= range_px:
+				capped_endpoint = t_point
+			else:
+				# Out of range — drop the lock so the laser still extends
+				# along the cursor direction up to its cap.
+				heal_target = null
+
+	_heal_beam_endpoint = capped_endpoint
+	_heal_beam_active = true
+
+	# Apply healing to the locked target. Health is per-building (anchor
+	# only) so a single dict bump fully heals every tile of a multi-tile
+	# block at once.
+	if heal_target == null or not (heal_target is Vector2i):
+		return
+	var anchor: Vector2i = main.building_origins.get(heal_target, heal_target)
+	var bid: StringName = main.placed_buildings.get(anchor, &"")
+	if bid == &"":
+		heal_target = null
+		return
+	var bdata = Registry.get_block(bid)
+	if bdata == null:
+		return
+	var max_hp: float = bdata.max_health
+	var cur_hp: float = float(main.building_health.get(anchor, max_hp))
+	if cur_hp >= max_hp:
+		# Fully healed — release the lock so the next sweep / AI tick
+		# can pick another damaged building.
+		heal_target = null
+		return
+	main.building_health[anchor] = minf(cur_hp + HEAL_RATE * delta, max_hp)
+
+
+## Returns the point on the building's footprint perimeter that's closest
+## to `from_world`. Used by the heal laser so its endpoint visibly sits
+## on the edge of the tile nearest the cursor (or, in AI mode, nearest
+## the drone) instead of always pointing at the anchor's centre.
+func _closest_perimeter_point_for_anchor(anchor: Vector2i, from_world: Vector2) -> Vector2:
+	var bid: StringName = main.placed_buildings.get(anchor, &"")
+	var bdata = Registry.get_block(bid) if bid != &"" else null
+	var gs: float = float(main.GRID_SIZE)
+	var bbox_min: Vector2 = main.grid_to_world(anchor)
+	var bbox_size: Vector2 = Vector2(gs, gs)
+	if bdata != null:
+		bbox_size = Vector2(bdata.grid_size.x, bdata.grid_size.y) * gs
+	var bbox_max: Vector2 = bbox_min + bbox_size
+	# Closest point in the rectangle (inside or on the edge).
+	var clamped: Vector2 = Vector2(
+		clampf(from_world.x, bbox_min.x, bbox_max.x),
+		clampf(from_world.y, bbox_min.y, bbox_max.y),
+	)
+	# When `from_world` is outside the rect, `clamped` already sits on
+	# the perimeter. When it's inside (cursor over the building), pick
+	# whichever of the four edges is closest so the beam endpoint stays
+	# on a tile boundary rather than burying itself in the centre.
+	if clamped == from_world:
+		var d_left: float = from_world.x - bbox_min.x
+		var d_right: float = bbox_max.x - from_world.x
+		var d_top: float = from_world.y - bbox_min.y
+		var d_bottom: float = bbox_max.y - from_world.y
+		var m: float = minf(minf(d_left, d_right), minf(d_top, d_bottom))
+		if m == d_left:
+			return Vector2(bbox_min.x, from_world.y)
+		elif m == d_right:
+			return Vector2(bbox_max.x, from_world.y)
+		elif m == d_top:
+			return Vector2(from_world.x, bbox_min.y)
+		else:
+			return Vector2(from_world.x, bbox_max.y)
+	return clamped
+
+
+## Picks the best damaged friendly block under the drone's aim direction.
+## Returns the building's anchor cell or null. Honours hysteresis: when a
+## target is already locked, allows up to HEAL_SNAP_RELEASE_DEG before
+## releasing — otherwise requires HEAL_SNAP_ACQUIRE_DEG to acquire a new
+## one. Always validates range and faction.
+func _resolve_heal_snap(aim_dir: Vector2, range_px: float):
+	if main == null:
+		return null
+	var lumina: int = main.Faction.LUMINA if "Faction" in main and "LUMINA" in main.Faction else 0
+	# Try to keep the existing lock first.
+	if heal_target != null and heal_target is Vector2i:
+		var anchor_existing: Vector2i = main.building_origins.get(heal_target, heal_target)
+		if main.placed_buildings.has(anchor_existing) \
+				and main.get_building_faction(anchor_existing) == lumina:
+			var bid_e: StringName = main.placed_buildings[anchor_existing]
+			var bd_e = Registry.get_block(bid_e)
+			if bd_e != null:
+				var max_e: float = bd_e.max_health
+				var cur_e: float = float(main.building_health.get(anchor_existing, max_e))
+				if cur_e < max_e:
+					var center_e: Vector2 = main.grid_to_world(anchor_existing) \
+						+ Vector2(bd_e.grid_size.x, bd_e.grid_size.y) * (main.GRID_SIZE * 0.5)
+					var to_e: Vector2 = center_e - position
+					if to_e.length() <= range_px:
+						var ang_e: float = abs(rad_to_deg(aim_dir.angle_to(to_e.normalized())))
+						if ang_e <= HEAL_SNAP_RELEASE_DEG:
+							return anchor_existing
+	# Otherwise scan all friendly blocks for the most direct damaged hit.
+	var best_anchor: Variant = null
+	var best_score: float = INF
+	var seen: Dictionary = {}
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen.has(anchor):
+			continue
+		seen[anchor] = true
+		if main.get_building_faction(anchor) != lumina:
+			continue
+		var bid: StringName = main.placed_buildings[anchor]
+		var bd = Registry.get_block(bid)
+		if bd == null:
+			continue
+		var maxh: float = bd.max_health
+		var cur: float = float(main.building_health.get(anchor, maxh))
+		if cur >= maxh:
+			continue
+		var center: Vector2 = main.grid_to_world(anchor) \
+			+ Vector2(bd.grid_size.x, bd.grid_size.y) * (main.GRID_SIZE * 0.5)
+		var to_b: Vector2 = center - position
+		var dist: float = to_b.length()
+		if dist > range_px or dist < 0.001:
+			continue
+		var ang: float = abs(rad_to_deg(aim_dir.angle_to(to_b.normalized())))
+		if ang > HEAL_SNAP_ACQUIRE_DEG:
+			continue
+		# Score: tighter angle is better, slight bonus for closer.
+		var score: float = ang + dist * 0.02
+		if score < best_score:
+			best_score = score
+			best_anchor = anchor
+	return best_anchor
+
+
+## AI heal-target picker. Returns the most-damaged friendly block within
+## range, or null if none. Used when heal_mode is off so the drone passively
+## mends nearby buildings while the player handles combat.
+func _find_ai_heal_target(range_px: float):
+	if main == null:
+		return null
+	var lumina: int = main.Faction.LUMINA if "Faction" in main and "LUMINA" in main.Faction else 0
+	var best_anchor: Variant = null
+	var best_pct: float = 1.0
+	var seen: Dictionary = {}
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen.has(anchor):
+			continue
+		seen[anchor] = true
+		if main.get_building_faction(anchor) != lumina:
+			continue
+		var bid: StringName = main.placed_buildings[anchor]
+		var bd = Registry.get_block(bid)
+		if bd == null:
+			continue
+		var maxh: float = bd.max_health
+		var cur: float = float(main.building_health.get(anchor, maxh))
+		if cur >= maxh:
+			continue
+		var center: Vector2 = main.grid_to_world(anchor) \
+			+ Vector2(bd.grid_size.x, bd.grid_size.y) * (main.GRID_SIZE * 0.5)
+		if center.distance_to(position) > range_px:
+			continue
+		var pct: float = cur / maxh if maxh > 0.0 else 1.0
+		if pct < best_pct:
+			best_pct = pct
+			best_anchor = anchor
+	return best_anchor
+
+
+func _draw_heal_beam() -> void:
+	if not _heal_beam_active:
+		return
+	var pulse: float = 0.5 + 0.5 * sin(_heal_beam_phase)
+	var endpoint_local: Vector2 = _heal_beam_endpoint - position
+	var main_ref = get_node("/root/Main")
+	# Beam emerges from the drone center (per spec) — start_offset is zero.
+	main_ref.draw_beam(self, Vector2.ZERO, endpoint_local, Color(0.3, 1.0, 0.4), pulse)
+
+
 func _draw_mining_beam() -> void:
 	if mining_target == null:
 		return
@@ -730,7 +1034,7 @@ func _draw_mining_beam() -> void:
 	# facing_angle = velocity.angle() + PI/2 + PI, so the sprite's -Y points forward
 	# Match the same native-size + scale math _draw_drone uses so the beam
 	# anchors exactly at the sprite's top edge regardless of texture aspect.
-	var scale_mult: float = data.sprite_scale if data else 1.0
+	var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR
 	var tex_h: float = drone_texture.get_size().y * scale_mult if drone_texture else ((data.visual_size if data else 12.0) * 2.0)
 	var tip_size: float = tex_h * 0.5
 	var tip_dir: Vector2 = Vector2(0, tip_size).rotated(facing_angle)

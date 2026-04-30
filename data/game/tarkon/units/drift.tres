@@ -1,0 +1,26 @@
+[gd_resource type="Resource" script_class="UnitData" format=3]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"drift"
+display_name = "Drift"
+description = "Tier-2 naval unit. Faster and tougher than Wade."
+team = 0
+color = Color(0.35, 0.55, 0.85, 1)
+visual_size = 6.0
+sprite_scale = 0.4
+head_turn_speed = 6.0
+move_speed = 1.7
+turn_radius = 2.2
+max_health = 220.0
+attack_damage = 28.0
+spawn_count = 1
+threat_value = 3.5
+build_time = 16.0
+build_cost = {
+"copper": 60,
+"silicon": 30,
+"steel": 15
+}

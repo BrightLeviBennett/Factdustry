@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="UnitData" format=3 uid="uid://rcu1ghfq17rm"]
+
+[ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"breach"
+display_name = "Breach"
+description = "Armored insectoid with strong mandibles."
+team = 0
+color = Color(0.5, 0.8, 0.3, 1)
+visual_size = 9.0
+max_health = 200.0
+attack_damage = 14.0
+immunities = PackedStringArray()
+spawn_count = 1
+threat_value = 3.0

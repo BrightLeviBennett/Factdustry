@@ -62,8 +62,21 @@ static func snapshot_sector(main: Node2D) -> DefenseSnapshot:
 		# Skip inactive buildings (under construction, derelict)
 		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
 			continue
-		var dps: float = data.attack_damage / maxf(data.attack_speed, 0.1)
-		var hp: float = main.building_health.get(grid_pos, data.max_health)
+		# Damage moved onto AmmoType entries — pick the highest-damage
+		# round (the turret typically uses its strongest ammo when it
+		# has stock) and account for projectiles_per_shot for shotgun-
+		# style turrets. Falls back to 0 dps if no ammo configured.
+		var per_shot_dmg: float = 0.0
+		for ammo in data.ammo_types:
+			if not (ammo is AmmoType):
+				continue
+			var a := ammo as AmmoType
+			var d := a.damage * float(maxi(a.projectiles_per_shot, 1))
+			if d > per_shot_dmg:
+				per_shot_dmg = d
+		var dps: float = per_shot_dmg / maxf(data.attack_speed, 0.1)
+		var anchor_hp: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		var hp: float = main.building_health.get(anchor_hp, data.max_health)
 		snap.turrets.append({
 			"grid_pos": anchor,
 			"block_id": block_id,

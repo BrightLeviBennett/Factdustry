@@ -1294,7 +1294,7 @@ func _on_back_pressed() -> void:
 		# Restore the sector that was being played from the autosave
 		var sector_id: StringName = SaveManager.active_sector_id
 		if sector_id != &"" and sector_id != &"_default":
-			var autosave_path: String = SaveManager.SAVE_DIR + str(sector_id) + ".sector.json"
+			var autosave_path: String = SaveManager.SAVES_DIR + str(sector_id) + ".sector.json"
 			if FileAccess.file_exists(autosave_path):
 				SaveManager.pending_map_path = autosave_path
 			else:
@@ -1366,7 +1366,7 @@ func _update_info_panel() -> void:
 func _launch_state(sector) -> String:
 	if sector == null:
 		return "LAUNCH"
-	var save_path: String = SaveManager.SAVE_DIR + str(sector.id) + ".sector.json"
+	var save_path: String = SaveManager.SAVES_DIR + str(sector.id) + ".sector.json"
 	var has_save: bool = FileAccess.file_exists(save_path)
 	if not has_save:
 		# First-ever launch: starting_grounds is free; anything else needs
@@ -1466,7 +1466,7 @@ func _on_launch_pressed() -> void:
 ## player confirms the resource cost.
 func _do_launch(sector) -> void:
 	SaveManager.pending_sector_id = sector.id
-	var autosave_path: String = SaveManager.SAVE_DIR + str(sector.id) + ".sector.json"
+	var autosave_path: String = SaveManager.SAVES_DIR + str(sector.id) + ".sector.json"
 	if FileAccess.file_exists(autosave_path):
 		SaveManager.pending_map_path = autosave_path
 	elif sector.map_path != "":

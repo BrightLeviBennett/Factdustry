@@ -1,16 +1,21 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dp6jjpf8voleh"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cuho5vnpyvg4j" path="res://textures/blocks/item transportation/SmallContainer.png" id="1_bx5lq"]
 
 [resource]
 script = ExtResource("1")
 id = &"small_container"
 display_name = "Small Container"
 description = "A small storage container. Can be loaded onto payload conveyors and filled/emptied by loaders and unloaders."
-category = 8
+icon = ExtResource("1_bx5lq")
+tags = PackedStringArray("storage")
 color = Color(0.6, 0.5, 0.3, 1)
+grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("1_bx5lq")
 max_health = 200.0
-build_cost = { "copper": 1 }
+build_cost = {
+"copper": 80
+}
 build_time = 1.0
 max_stored_items = 100
-tags = PackedStringArray("storage")

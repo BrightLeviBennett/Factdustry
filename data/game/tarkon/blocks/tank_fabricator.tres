@@ -35,4 +35,4 @@ side_inputs = {
 3: &"mat_copper"
 }
 max_stored_items = 40
-produced_unit = &"ant"
+produced_unit = &"press"

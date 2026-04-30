@@ -15148,7 +15148,7 @@
 			"in_unit_id": "",
 			"out_unit_id": "",
 			"phase": "idle",
-			"selected_t2": "beattle",
+			"selected_t2": "breach",
 			"timer": 0.0
 		}
 	},
@@ -15305,7 +15305,7 @@
 				},
 				{
 					"type": "units_produced",
-					"unit_id": "beattle"
+					"unit_id": "breach"
 				}
 			],
 			"name": "Research Unit",
@@ -15382,14 +15382,14 @@
 					"faction": "ferox",
 					"pos": "129,142",
 					"type": "spawn_unit",
-					"unit_id": "beattle"
+					"unit_id": "breach"
 				}
 			],
 			"conditions": [
 				{
 					"amount": 3.0,
 					"type": "units_destroyed",
-					"unit_id": "beattle"
+					"unit_id": "breach"
 				}
 			],
 			"name": "Spawn units",

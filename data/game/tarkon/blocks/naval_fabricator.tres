@@ -7,9 +7,9 @@
 
 [resource]
 script = ExtResource("1")
-id = &"ship_fabricator"
-display_name = "Ship Fabricator"
-description = "Constructs flying ship-class units."
+id = &"naval_fabricator"
+display_name = "Naval Fabricator"
+description = "Constructs naval (water-going) units."
 icon = ExtResource("2_4qffy")
 category = 6
 tags = PackedStringArray("fabricator", "units")
