@@ -32,4 +32,4 @@ Open terminal then copy + paste the following command:
 cd ~/Downloads && \
 curl -L -o Factdustry.zip "https://github.com/BrightLeviBennett/Factdustry/releases/latest/download/Factdustry.zip" && \
 unzip -o Factdustry.zip && \
-find . -name "Factdustry.app" -type d -exec xattr -rd com.apple.quarantine {} \; -exec open {} \;
+find . -name "Factdustry.app" -type d -exec xattr -rd com.apple.quarantine {} \\; -exec open {} \\;
