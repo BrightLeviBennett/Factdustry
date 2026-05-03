@@ -250,6 +250,28 @@ var core_position := Vector2i(48, 48)
 ## units don't move, logistics freeze, items don't enter core.
 var world_paused := false
 
+## Per-cell stash of a platform that's been "covered" by another block
+## placed on top. Each cell of a covered platform footprint has an entry
+## with the platform's block_id, anchor, rotation, faction, and health.
+## When the covering block is destroyed, the stash is replayed back into
+## placed_buildings so the platform reappears underneath. Lets a player
+## build turrets / belts on a platform without losing the platform when
+## those blocks are removed.
+var _platform_under: Dictionary = {}
+
+## When true (settings: "Pause When Window Loses Focus"), the world is
+## auto-paused on `NOTIFICATION_APPLICATION_FOCUS_OUT` and auto-unpaused
+## on `NOTIFICATION_APPLICATION_FOCUS_IN` — but ONLY if we're the ones
+## who paused it. If the player manually paused before tabbing out, we
+## leave the pause state alone on return so a deliberate pause survives
+## an alt-tab. Toggle lives in Settings → Game.
+var pause_on_unfocus := true
+## Set true on focus-out when we auto-paused; cleared on focus-in
+## after the auto-unpause fires, or whenever the player manually
+## toggles pause (so a deliberate unpause + alt-tab + return doesn't
+## get re-paused-then-unpaused inappropriately).
+var _auto_paused_by_focus := false
+
 # --- SIGNALS ---
 # Several of these are emitted from sibling systems (LogisticsSystem,
 # PlayerDrone, BuildingSystem, SectorScript) which call main.<signal>.emit(...).
@@ -285,6 +307,22 @@ func _notification(what: int) -> void:
 		SaveManager.save_campaign()
 		print("Main: Auto-saved on close.")
 		get_tree().quit()
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		# Auto-pause when the player tabs away. Mark the auto flag so
+		# focus-in knows to undo it. If the player had already manually
+		# paused before tabbing out, world_paused is already true and
+		# we leave the flag at false — focus-in won't auto-unpause and
+		# the deliberate pause survives the alt-tab.
+		if pause_on_unfocus and not world_paused and not sector_lost:
+			world_paused = true
+			_auto_paused_by_focus = true
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		# Mirror the pause: if WE paused on focus-out, undo it now.
+		# Otherwise leave the pause alone (manual pause stays).
+		if _auto_paused_by_focus:
+			_auto_paused_by_focus = false
+			if world_paused and not sector_lost:
+				world_paused = false
 
 
 func _ready() -> void:
@@ -406,6 +444,10 @@ func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause_world"):
 		if not is_ui_blocking():
 			world_paused = not world_paused
+			# Manual pause toggle invalidates the focus-auto flag —
+			# whatever the player just did is now a deliberate state
+			# that focus-in shouldn't override.
+			_auto_paused_by_focus = false
 			get_viewport().set_input_as_handled()
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -481,7 +523,162 @@ func can_afford(block_id: StringName) -> bool:
 
 
 func is_cell_empty(grid_pos: Vector2i) -> bool:
-	return not placed_buildings.has(grid_pos)
+	if not placed_buildings.has(grid_pos):
+		return true
+	# Platforms are treated as terrain — buildings can be placed on top.
+	# The covering block goes into placed_buildings as usual; the platform's
+	# data is stashed in `_platform_under` and restored on destroy.
+	return _is_platform_block_id(placed_buildings[grid_pos])
+
+
+## Returns true if the given block id has the `platform` tag.
+func _is_platform_block_id(block_id: StringName) -> bool:
+	var d = Registry.get_block(block_id)
+	return d != null and d.tags.has("platform")
+
+
+## Returns true if the terrain under a building's footprint accepts the
+## block. Mirrors the rules in `BuildingSystem._can_place_terrain` so the
+## preview's red overlay matches what `try_place_building` / `place_building_for_schematic`
+## actually enforce — without this, the preview rejection was advisory
+## only and the placement still went through.
+##
+## Rules (per-cell):
+##   - Void (no floor, no wall): reject everything except a cell that
+##     already has a platform under it.
+##   - Water (depth > 0): platforms accept any depth; pumps accept
+##     depths 1–2; everything else rejects unless a platform is under.
+##   - Platforms additionally reject dry land (depth 0) — they're
+##     water-only bridging blocks.
+func _terrain_accepts_at(grid_pos: Vector2i, data: BlockData) -> bool:
+	if data == null:
+		return false
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return true
+	var is_platform: bool = data.tags.has("platform")
+	var is_pump: bool = data.tags.has("pump")
+	for x in range(data.grid_size.x):
+		for y in range(data.grid_size.y):
+			var cell: Vector2i = grid_pos + Vector2i(x, y)
+			# A live platform at this cell counts as "dry ground" — it
+			# bridges whatever's underneath. Don't allow another
+			# platform on top of it (platforms don't stack).
+			var has_platform_under: bool = false
+			if placed_buildings.has(cell):
+				var existing_id: StringName = placed_buildings[cell]
+				if existing_id != data.id and _is_platform_block_id(existing_id):
+					if is_platform:
+						return false
+					has_platform_under = true
+			if has_platform_under:
+				continue
+			if terrain.has_method("is_void") and terrain.is_void(cell):
+				return false
+			var depth: int = 0
+			if terrain.has_method("get_water_depth_at"):
+				depth = int(terrain.get_water_depth_at(cell))
+			if is_platform and depth <= 0:
+				return false
+			if depth > 0:
+				if is_platform:
+					pass
+				elif is_pump and depth <= 2:
+					pass
+				else:
+					return false
+	return true
+
+
+## Captures platform info for every cell in the rect about to be written
+## by a placement. Each platform cell gets its block_id / anchor /
+## rotation / faction / current health stashed in `_platform_under` so
+## the platform can be replayed back into placed_buildings when the
+## covering block is destroyed.
+func _stash_covered_platforms(origin: Vector2i, size: Vector2i) -> void:
+	for x in range(size.x):
+		for y in range(size.y):
+			var cell: Vector2i = origin + Vector2i(x, y)
+			if not placed_buildings.has(cell):
+				continue
+			var existing_id: StringName = placed_buildings[cell]
+			if not _is_platform_block_id(existing_id):
+				continue
+			var p_anchor: Vector2i = building_origins.get(cell, cell)
+			_platform_under[cell] = {
+				"block_id": existing_id,
+				"anchor": p_anchor,
+				"rotation": building_rotation.get(cell, 0),
+				"faction": building_factions.get(cell, Faction.LUMINA),
+				"health": float(building_health.get(p_anchor, 0.0)),
+			}
+
+
+## After a building is destroyed, replays any stashed-platform info for
+## its footprint cells back into placed_buildings / origins / rotations
+## / factions / health. The platform reappears as if the cover was
+## never there.
+func _restore_platforms_at(cells: Array) -> void:
+	# A stash is only worth restoring if its platform anchor will still
+	# exist after this call — either it's already alive in placed_buildings
+	# (the cover sat on a non-anchor cell, so the rest of the platform was
+	# never erased) or this same restore will revive it (the cover sat on
+	# the anchor cell). Without this guard, destroying a platform that
+	# still had a covered cell would re-create a "ghost" platform cell
+	# with building_origins pointing at a now-empty anchor — corrupting
+	# any iteration like placed_buildings[building_origins[cell]].
+	var alive_anchors: Dictionary = {}
+	for cell in cells:
+		if not _platform_under.has(cell):
+			continue
+		var p_anchor: Vector2i = _platform_under[cell].get("anchor", cell)
+		if placed_buildings.has(p_anchor) and _is_platform_block_id(placed_buildings[p_anchor]):
+			alive_anchors[p_anchor] = true
+		if cell == p_anchor:
+			alive_anchors[p_anchor] = true
+
+	for cell in cells:
+		if not _platform_under.has(cell):
+			continue
+		var stash: Dictionary = _platform_under[cell]
+		_platform_under.erase(cell)
+		var p_block_id: StringName = StringName(stash.get("block_id", &""))
+		if p_block_id == &"":
+			continue
+		var p_anchor: Vector2i = stash.get("anchor", cell)
+		if not alive_anchors.has(p_anchor):
+			# Platform is gone — discard the stash rather than leaving an
+			# orphan cell whose origin points to nothing.
+			continue
+		placed_buildings[cell] = p_block_id
+		building_origins[cell] = p_anchor
+		building_rotation[cell] = int(stash.get("rotation", 0))
+		building_factions[cell] = int(stash.get("faction", Faction.LUMINA))
+		# Only restore health when no other entry already owns the
+		# anchor (e.g. another covering block whose anchor coincides).
+		# Saves the platform's last-known HP across cover/uncover.
+		if not building_health.has(p_anchor):
+			building_health[p_anchor] = float(stash.get("health", 0.0))
+
+
+## Returns true if the platform anchored at `anchor` has any of its
+## footprint cells currently covered by a non-platform block. Used by
+## `start_deconstruct` to refuse a platform decon while there's still
+## something built on top.
+func _platform_has_cover(anchor: Vector2i) -> bool:
+	if not placed_buildings.has(anchor):
+		return false
+	var data = Registry.get_block(placed_buildings[anchor])
+	if data == null or not data.tags.has("platform"):
+		return false
+	for x in range(data.grid_size.x):
+		for y in range(data.grid_size.y):
+			var cell: Vector2i = anchor + Vector2i(x, y)
+			# A covered cell has a different block_id (the cover), and
+			# the platform's data is stashed in `_platform_under`.
+			if _platform_under.has(cell):
+				return true
+	return false
 
 
 ## Returns the anchor (top-left) position for a building at grid_pos.
@@ -745,12 +942,10 @@ func _get_swap_group(data: BlockData) -> StringName:
 		return &"conduit"
 	# Payload transport
 	if id_str == "payload_conveyor" or id_str == "payload_router" \
-			or id_str == "payload_junction" or id_str == "payload_bridge" \
 			or id_str == "payload_loader" or id_str == "payload_unloader":
 		return &"payload"
 	# Freight transport
 	if id_str == "freight_conveyor" or id_str == "freight_router" \
-			or id_str == "freight_junction" or id_str == "freight_bridge" \
 			or id_str == "freight_loader" or id_str == "freight_unloader":
 		return &"freight"
 	# Legacy shaft/gearbox/overhead-belt group — kept so any existing
@@ -763,6 +958,11 @@ func _get_swap_group(data: BlockData) -> StringName:
 	# 3×3 wall and vice versa.
 	if data.tags.has("wall"):
 		return &"wall"
+	# Platforms also form a swap group so a same-size platform of a
+	# different material can replace another, and the size-up path
+	# below can absorb smaller platforms into a bigger one.
+	if data.tags.has("platform"):
+		return &"platform"
 	return &""
 
 
@@ -908,6 +1108,86 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 					if get_building_faction(grid_pos) == Faction.LUMINA:
 						return _swap_building_in_place(grid_pos, existing_data, data)
 
+	# --- Size-up swap (walls and platforms only): a bigger wall/platform
+	# absorbs any smaller same-group blocks whose footprints lie entirely
+	# inside the new block's footprint. Walls and platforms qualify
+	# because they hold no per-tick logistics state — destroying and
+	# replacing them is purely structural. Belts/ducts/etc. are excluded
+	# so a misclick doesn't silently incinerate a chain of factories'
+	# inputs. The new block must be larger than 1×1 (1×1 → 1×1 already
+	# goes through the same-size swap above).
+	if (data.tags.has("wall") or data.tags.has("platform")) \
+			and (data.grid_size.x > 1 or data.grid_size.y > 1):
+		var new_group_up: StringName = _get_swap_group(data)
+		if new_group_up != &"":
+			var size_up_ok := true
+			var anchors_to_absorb: Array = []
+			var seen_absorbed: Dictionary = {}
+			var absorbed_any := false
+			var terrain_up = _terrain_ref()
+			var rect_min: Vector2i = grid_pos
+			var rect_max: Vector2i = grid_pos + data.grid_size - Vector2i(1, 1)
+			for x in range(data.grid_size.x):
+				for y in range(data.grid_size.y):
+					var cell: Vector2i = grid_pos + Vector2i(x, y)
+					if not is_within_bounds(cell):
+						size_up_ok = false
+						break
+					if terrain_up and terrain_up.has_wall(cell):
+						size_up_ok = false
+						break
+					if _is_cell_occupied_by_unit(cell):
+						size_up_ok = false
+						break
+					if not placed_buildings.has(cell):
+						continue
+					var ex_anchor: Vector2i = building_origins.get(cell, cell)
+					if seen_absorbed.has(ex_anchor):
+						continue
+					var ex_id_up: StringName = placed_buildings[ex_anchor]
+					var ex_data_up = Registry.get_block(ex_id_up)
+					if ex_data_up == null:
+						size_up_ok = false
+						break
+					if _get_swap_group(ex_data_up) != new_group_up:
+						size_up_ok = false
+						break
+					if get_building_faction(ex_anchor) != Faction.LUMINA:
+						size_up_ok = false
+						break
+					# The absorbed block must lie ENTIRELY inside the
+					# new footprint — partial absorption would orphan
+					# cells of an unrelated tile.
+					var ex_max: Vector2i = ex_anchor + ex_data_up.grid_size - Vector2i(1, 1)
+					if ex_anchor.x < rect_min.x or ex_anchor.y < rect_min.y \
+							or ex_max.x > rect_max.x or ex_max.y > rect_max.y:
+						size_up_ok = false
+						break
+					seen_absorbed[ex_anchor] = true
+					anchors_to_absorb.append(ex_anchor)
+					absorbed_any = true
+				if not size_up_ok:
+					break
+			if size_up_ok and absorbed_any:
+				# Tear down each absorbed block first so building_destroyed
+				# fires and downstream systems clean up; then validate
+				# terrain (with the absorbed blocks gone, the
+				# "platforms don't stack" rule no longer trips on cells
+				# we're swapping out). Fall through to the standard
+				# placement code below, which now sees every cell as
+				# empty and commits the new block normally.
+				for a in anchors_to_absorb:
+					destroy_building(a)
+				if not _terrain_accepts_at(grid_pos, data):
+					# Terrain genuinely rejects this footprint (e.g.
+					# void cell that was bridged only by an absorbed
+					# platform — but the new platform doesn't span
+					# that cell's neighbours). Bail out: the absorbed
+					# blocks are already gone, but the player gets
+					# refunded by virtue of progressive build never
+					# starting.
+					return false
+
 	# Check all tiles the building occupies (for multi-tile buildings)
 	var terrain = _terrain_ref()
 	for x in range(data.grid_size.x):
@@ -923,6 +1203,11 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 			# the player's piloted unit all count.
 			if _is_cell_occupied_by_unit(check_pos):
 				return false
+	# Void / water-depth rules. The preview overlay was the only thing
+	# enforcing this before; without an explicit check here, a player
+	# whose preview said "no" could still commit the placement.
+	if not _terrain_accepts_at(grid_pos, data):
+		return false
 
 	# Core zone rule: core blocks MUST be on core_zone floor tiles.
 	if terrain and data.tags.has("core"):
@@ -973,6 +1258,13 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 	# No immediate cost deduction — resources are consumed progressively
 	# during construction by the build tick in building_system._process.
 
+	# Stash any platform that's about to be covered by this placement so
+	# the platform can be restored when the covering block is destroyed.
+	# Skipped when the new block IS a platform — platforms don't stack.
+	var new_is_platform: bool = data.tags.has("platform")
+	if not new_is_platform:
+		_stash_covered_platforms(grid_pos, data.grid_size)
+
 	# Place all tiles. Health lives per-building on the anchor, not per
 	# tile, so multi-tile buildings have a single HP pool.
 	building_health[grid_pos] = data.max_health
@@ -1014,6 +1306,10 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 				return false
 			if _is_cell_occupied_by_unit(check_pos):
 				return false
+	# Same void / water-depth gate `try_place_building` uses, so a
+	# schematic stamp can't sneak blocks onto the abyss either.
+	if not _terrain_accepts_at(grid_pos, data):
+		return false
 
 	# Deduct costs
 	if require_resources:
@@ -1022,6 +1318,12 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 		for item_id in data.build_cost:
 			var rk := _resolve_resource_key(str(item_id))
 			resources[rk] -= int(data.build_cost[item_id])
+
+	# Stash any covered platform (mirrors `try_place_building`) so a
+	# schematic-placed block on a platform can later be deconstructed
+	# back to bare platform.
+	if not data.tags.has("platform"):
+		_stash_covered_platforms(grid_pos, data.grid_size)
 
 	# Place all tiles. Health is per-anchor (single HP pool per building).
 	building_health[grid_pos] = data.max_health
@@ -1050,6 +1352,14 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
 	if not building_health.has(anchor):
 		return
+	# Platforms are invulnerable to in-combat damage. They're a terrain
+	# feature, not a target. Players can still deconstruct them once any
+	# blocks built on top are removed.
+	var bid: StringName = placed_buildings.get(anchor, &"")
+	if bid != &"":
+		var bdata = Registry.get_block(bid)
+		if bdata and bdata.tags.has("platform"):
+			return
 	building_health[anchor] -= amount
 	if building_health[anchor] <= 0:
 		destroy_building(anchor, true)
@@ -1175,6 +1485,11 @@ func start_deconstruct(grid_pos: Vector2i) -> void:
 				var stored_aid: StringName = building_sys.archive_holdings.get(anchor, &"")
 				if stored_aid != &"" and not TechTree.is_researched(stored_aid):
 					return
+		# Platforms with a covering block can't be deconstructed until
+		# whatever's on top is removed first. Without this guard the
+		# platform would vanish out from under a turret / belt.
+		if bdata and bdata.tags.has("platform") and _platform_has_cover(anchor):
+			return
 	destroy_building_with_refund(grid_pos)
 
 
@@ -1467,6 +1782,16 @@ func destroy_building(grid_pos: Vector2i, by_enemy: bool = false) -> void:
 	# Emit BEFORE erasing so signal handlers can still read building data
 	building_destroyed.emit(grid_pos)
 
+	# Track the cells we're about to free so we can replay any stashed
+	# platforms back onto them once the cover is gone.
+	var freed_cells: Array = []
+	if data:
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				freed_cells.append(anchor + Vector2i(x, y))
+	else:
+		freed_cells.append(grid_pos)
+
 	# For multi-tile buildings, remove all tiles that share this block ID
 	# and are adjacent (part of the same structure)
 	if data and (data.grid_size.x > 1 or data.grid_size.y > 1):
@@ -1477,6 +1802,12 @@ func destroy_building(grid_pos: Vector2i, by_enemy: bool = false) -> void:
 		building_rotation.erase(grid_pos)
 		building_origins.erase(grid_pos)
 		building_factions.erase(grid_pos)
+
+	# Replay any stashed platform entries onto the freed cells. Skipped
+	# when the destroyed block IS a platform (no platform-under-platform
+	# stacking) so this is a no-op for platform decon.
+	if data == null or not data.tags.has("platform"):
+		_restore_platforms_at(freed_cells)
 
 	# Check AFTER removal so the destroyed core isn't found in the scan
 	if faction == Faction.FEROX and data and data.tags.has("core"):
@@ -1591,7 +1922,7 @@ func is_within_bounds(grid_pos: Vector2i) -> bool:
 ## pulse: 0.0-1.0 animation phase for pulsing alpha
 ## width: base width of the outer colored lines
 ## circle_radius: radius of the endpoint circles
-static func draw_beam(canvas: CanvasItem, from_pos: Vector2, to_pos: Vector2, color: Color, pulse: float = 1.0, width: float = 5.0, circle_radius: float = 8.0) -> void:
+static func draw_beam(canvas: CanvasItem, from_pos: Vector2, to_pos: Vector2, color: Color, pulse: float = 1.0, width: float = 5.0 * SPRITE_SCALE_FACTOR, circle_radius: float = 8.0 * SPRITE_SCALE_FACTOR) -> void:
 	var alpha: float = 0.6 + 0.3 * pulse
 	var outer_color := Color(color.r, color.g, color.b, alpha)
 	var inner_color := Color(1.0, 1.0, 1.0, alpha)

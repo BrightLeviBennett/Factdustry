@@ -525,21 +525,24 @@ func _register_belt_transport() -> void:
 	_add(&"belt_bridge",         "Belt Bridge",         [&"conveyor_belt"],     [], {&"mat_copper": 80}, Vector2(5, 2))
 	_add(&"belt_sorter",         "Belt Sorter",         [&"conveyor_belt"],     [], {&"mat_copper": 80}, Vector2(6, 2))
 	_add(&"overflow_belt",       "Overflow Belt",       [&"conveyor_belt"],     [], {&"mat_copper": 70}, Vector2(7, 2))
-	_add(&"small_container",     "Small Container",     [&"belt_router"],       [&"mat_silicon"], {&"mat_copper": 150}, Vector2(4, 3))
-	_add(&"unloader",            "Unloader",            [&"belt_router"],       [&"mat_silicon"], {&"mat_copper": 60, &"mat_silicon": 25}, Vector2(3, 3))
 	_add(&"cargo_mass_driver",   "Cargo Mass Driver",   [&"belt_bridge"],       [], {&"mat_copper": 150}, Vector2(5, 3))
 	_add(&"inverted_belt_sorter","Inverted Belt Sorter", [&"belt_sorter"],      [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(6, 3))
 	_add(&"underflow_belt",      "Underflow Belt",      [&"overflow_belt"],     [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(7, 3))
+	
+	_add(&"unloader",            "Unloader",            [&"conveyor_belt"],     [&"mat_silicon"], {&"mat_copper": 60, &"mat_silicon": 25}, Vector2(8, 2))
+	_add(&"small_container",     "Small Container",     [&"unloader"],          [], {&"mat_copper": 150}, Vector2(8, 3))
+	_add(&"large_container",     "Large Container",     [&"small_container"],   [&"mat_steel"], {&"mat_copper": 300, &"mat_steel": 20}, Vector2(8, 4))
+	_add(&"huge_container",      "Huge Container",      [&"large_container"],   [&"mat_zinc"],   {&"mat_copper": 500, &"mat_steel": 45, &"mat_zinc": 30}, Vector2(8, 5))
 
 func _register_duct_transport() -> void:
-	_add(&"duct",                  "Duct",                  [&"conveyor_belt"],    [&"mat_steel"], {&"mat_copper": 80, &"mat_graphite": 20}, Vector2(10, 2))
-	_add(&"duct_junction",         "Duct Junction",         [&"duct"],             [], {&"mat_copper": 120, &"mat_graphite": 40, &"mat_silicon": 20}, Vector2(8, 3))
-	_add(&"duct_router",           "Duct Router",           [&"duct"],             [], {&"mat_copper": 120, &"mat_graphite": 40, &"mat_silicon": 20}, Vector2(9, 3))
-	_add(&"duct_bridge",           "Duct Bridge",           [&"duct"],             [], {&"mat_copper": 140, &"mat_graphite": 50, &"mat_silicon": 25}, Vector2(10, 3))
-	_add(&"duct_sorter",           "Duct Sorter",           [&"duct"],             [], {&"mat_copper": 140, &"mat_silicon": 50, &"mat_graphite": 30}, Vector2(11, 3))
-	_add(&"overflow_duct",         "Overflow Duct",         [&"duct"],             [], {&"mat_copper": 130, &"mat_silicon": 45, &"mat_graphite": 25}, Vector2(12, 3))
-	_add(&"inverted_duct_sorter",  "Inverted Duct Sorter",  [&"duct_sorter"],      [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 30}, Vector2(11, 4))
-	_add(&"underflow_duct",        "Underflow Duct",        [&"overflow_duct"],    [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 30}, Vector2(12, 4))
+	_add(&"duct",                  "Duct",                  [&"conveyor_belt"],    [&"mat_steel"], {&"mat_copper": 80, &"mat_graphite": 20}, Vector2(11, 2))
+	_add(&"duct_junction",         "Duct Junction",         [&"duct"],             [], {&"mat_copper": 120, &"mat_graphite": 40, &"mat_silicon": 20}, Vector2(9, 3))
+	_add(&"duct_router",           "Duct Router",           [&"duct"],             [], {&"mat_copper": 120, &"mat_graphite": 40, &"mat_silicon": 20}, Vector2(10, 3))
+	_add(&"duct_bridge",           "Duct Bridge",           [&"duct"],             [], {&"mat_copper": 140, &"mat_graphite": 50, &"mat_silicon": 25}, Vector2(11, 3))
+	_add(&"duct_sorter",           "Duct Sorter",           [&"duct"],             [], {&"mat_copper": 140, &"mat_silicon": 50, &"mat_graphite": 30}, Vector2(12, 3))
+	_add(&"overflow_duct",         "Overflow Duct",         [&"duct"],             [], {&"mat_copper": 130, &"mat_silicon": 45, &"mat_graphite": 25}, Vector2(13, 3))
+	_add(&"inverted_duct_sorter",  "Inverted Duct Sorter",  [&"duct_sorter"],      [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 30}, Vector2(12, 4))
+	_add(&"underflow_duct",        "Underflow Duct",        [&"overflow_duct"],    [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 30}, Vector2(13, 4))
 
 func _register_fluid_transport() -> void:
 	_add(&"fluid_conduit",              "Fluid Conduit",              [&"core_shard"],          [&"mat_steel"], {&"mat_copper": 25, &"mat_graphite": 10}, Vector2(18, 1))
@@ -634,24 +637,26 @@ func _register_production() -> void:
 
 func _register_turrets() -> void:
 	# Single Barrel branch
-	_add(&"single_barrel",   "Single Barrel",   [&"core_shard"],                       [], {&"mat_copper": 40}, Vector2(-11, 1))
-	_add(&"diffuse",         "Diffuse",         [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25}, Vector2(-11, 2))
-	_add(&"double_barrel",   "Double Barrel",   [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 90, &"mat_steel": 30}, Vector2(-10, 2))
-	_add(&"homing_diffuse",  "Homing Diffuse",  [&"diffuse"],                          [&"Not unlockable in campaign"], {&"mat_copper": 150, &"mat_silicon": 60, &"mat_graphite": 25}, Vector2(-11, 3))
-	_add(&"quad_barrel",     "Quad Barrel",     [&"double_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 30}, Vector2(-9, 2))
-	_add(&"shardstorm",      "Shardstorm",      [&"homing_diffuse", &"double_barrel"], [], {&"mat_copper": 250, &"mat_silicon": 100, &"mat_steel": 50}, Vector2(-10, 3))
-	_add(&"octo_barrel",     "Octo Barrel",     [&"quad_barrel"],                      [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-9, 3))
-	_add(&"thunderburst",    "Thunderburst",    [&"shardstorm"],                       [], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 110}, Vector2(-10, 4))
+	_add(&"single_barrel",   "Single Barrel",   [&"core_shard"],                       [&"mat_silicon"], {&"mat_copper": 40, &"mat_silicon": 15}, Vector2(-11, 1))
+	_add(&"double_barrel",   "Double Barrel",   [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 90, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-11, 2))
+	_add(&"quad_barrel",     "Quad Barrel",     [&"double_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 30}, Vector2(-11, 3))
+	_add(&"octo_barrel",     "Octo Barrel",     [&"quad_barrel"],                      [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-11, 4))
+	
+	# Diffuse Branch
+	_add(&"diffuse",         "Diffuse",         [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25, &"mat_steel": 10}, Vector2(-10, 2))
+	_add(&"aegis_arc",       "Aegis Arc",       [&"diffuse"],                          [&"-L-ruins"], {&"mat_copper": 600, &"mat_silicon": 200, &"mat_steel": 200}, Vector2(-10, 3))
 	
 	# Destroy branch
-	_add(&"gauss_launcher",  "Gauss Launcher",  [&"disarm"],                           [], {&"mat_copper": 200, &"mat_steel": 80, &"mat_graphite": 40}, Vector2(-14, 2))
 	_add(&"disarm",          "Disarm",          [&"destroy_turret"],                   [&"-D-archive_better_turrets"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(-13, 2))
 	_add(&"destroy_turret",  "Destroy",         [&"single_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 120, &"mat_steel": 40, &"mat_graphite": 20}, Vector2(-12, 2))
 	_add(&"annihilate",      "Annihilate",      [&"destroy_turret"],                   [&"Not unlockable in campaign"], {&"mat_copper": 300, &"mat_silicon": 60, &"mat_steel": 120}, Vector2(-12, 3))
 	_add(&"eclipse",         "Eclipse",         [&"annihilate"],                       [&"-L-ruins"], {&"mat_copper": 500, &"mat_steel": 240, &"mat_silicon": 100}, Vector2(-12, 4))
-	_add(&"aegis_arc",       "Aegis Arc",       [&"emp_diffuse"],                      [&"-L-ruins"], {&"mat_copper": 600, &"mat_silicon": 200, &"mat_steel": 200}, Vector2(-11, 5))
-	_add(&"missile_launcher","Missile Launcher",[&"annihilate"],                      [], {&"mat_copper": 250, &"mat_steel": 105}, Vector2(-13, 4))
-	_add(&"emp_diffuse",     "EMP Diffuse",     [&"homing_diffuse"],                   [], {&"mat_copper": 300, &"mat_silicon": 100, &"mat_steel": 50}, Vector2(-11, 4))
+	_add(&"missile_launcher","Missile Launcher",[&"annihilate"],                       [], {&"mat_copper": 250, &"mat_steel": 105}, Vector2(-13, 4))
+	
+	# Spritz/Wave/Lance Branch
+	_add(&"spritz",          "Spritz",          [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-13, 2))
+	_add(&"wave",            "Wave",            [&"spritz"],                           [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_steel": 25}, Vector2(-12, 2))
+	_add(&"lance",           "Lance",           [&"single_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(-13, 2))
 
 func _register_support() -> void:
 	_add(&"build_tower",                    "Build Tower",                    [&"core_bastion"],                  [], {&"mat_copper": 150, &"mat_steel": 50}, Vector2(-8, 6))
@@ -729,13 +734,9 @@ func _register_units() -> void:
 func _register_payload_freight() -> void:
 	_add(&"payload_conveyor",    "Payload Conveyor",    [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-22, 2))
 	_add(&"payload_router",      "Payload Router",      [&"payload_conveyor"],    [&"-D-archive_payload_systems"], {}, Vector2(-23, 3))
-	_add(&"payload_junction",    "Payload Junction",    [&"payload_router"],      [&"-D-archive_payload_systems"], {}, Vector2(-23, 4))
-	_add(&"payload_bridge",      "Payload Bridge",      [&"payload_junction"],    [&"-D-archive_payload_systems"], {}, Vector2(-23, 5))
-	
+
 	_add(&"freight_conveyor",    "Freight Conveyor",    [&"payload_conveyor"],    [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-22, 3))
 	_add(&"freight_router",      "Freight Router",      [&"freight_conveyor"],    [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-22, 4))
-	_add(&"freight_junction",    "Freight Junction",    [&"freight_router"],      [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-22, 5))
-	_add(&"freight_bridge",      "Freight Bridge",      [&"freight_junction"],    [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-22, 6))
 	
 	_add(&"payload_mass_driver", "Payload Mass Driver", [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-19, 2))
 	_add(&"freight_mass_driver", "Freight Mass Driver", [&"payload_mass_driver"], [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-19, 3))

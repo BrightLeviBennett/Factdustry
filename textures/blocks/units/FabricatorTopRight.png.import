@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dlfmb8ddvpiv7"
-path="res://.godot/imported/MMB.jpeg-8bb909644a767a3c82a8de8f5ebc001b.ctex"
+uid="uid://bb5h8bb8xxoh5"
+path="res://.godot/imported/FabricatorTopRight.png-a9d736bf24035549f673d1b030d91153.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/UI/MMB.jpeg"
-dest_files=["res://.godot/imported/MMB.jpeg-8bb909644a767a3c82a8de8f5ebc001b.ctex"]
+source_file="res://textures/blocks/units/FabricatorTopRight.png"
+dest_files=["res://.godot/imported/FabricatorTopRight.png-a9d736bf24035549f673d1b030d91153.ctex"]
 
 [params]
 

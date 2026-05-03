@@ -35,6 +35,16 @@ var health: float
 var damage_cooldown := 0.0
 const REGEN_DELAY := 3.0
 
+# Smoothed velocity for drift. The drone's actual movement uses
+# `_velocity_smooth` which lerps toward the input direction × speed at
+# `MOVE_ACCEL` while keys are held, and decays toward zero at the slower
+# `DRIFT_DECEL` when input drops, giving the shardling a brief glide
+# instead of stopping cold. Both rates feed an exp-decay smoothing
+# (frame-rate independent).
+const MOVE_ACCEL: float = 30.0
+const DRIFT_DECEL: float = 5.0
+var _velocity_smooth: Vector2 = Vector2.ZERO
+
 # --- FACING ---
 var facing_angle := PI             # Current visual rotation (radians)
 var _target_facing_angle := PI     # Target rotation (persists when input stops)
@@ -313,18 +323,19 @@ func _handle_movement(delta: float) -> void:
 
 	var move_x = Input.get_axis("move_left", "move_right")
 	var move_y = Input.get_axis("move_up", "move_down")
-	var velocity = Vector2(move_x, move_y)
+	var input_dir = Vector2(move_x, move_y)
+	var has_input: bool = input_dir.length() > 0
 
 	# Focus target = whatever we're mining OR currently building. Used for
 	# both facing-lock and the away-from-target slowdown.
 	var focus_pos = _get_focus_world_pos()
 
-	if velocity.length() > 0:
-		velocity = velocity.normalized()
+	if has_input:
+		input_dir = input_dir.normalized()
 		# Don't override rotation while focused — focus locks rotation toward
 		# the ore/building. Only free movement steers the facing.
 		if focus_pos == null:
-			_target_facing_angle = velocity.angle() + PI / 2.0 + PI  # Tip faces movement direction
+			_target_facing_angle = input_dir.angle() + PI / 2.0 + PI  # Tip faces movement direction
 
 	# While focused, lock rotation toward the focus point (non-mining case
 	# previously had no lock — now builds behave the same as mining).
@@ -332,6 +343,18 @@ func _handle_movement(delta: float) -> void:
 		var dir_to_focus: Vector2 = (focus_pos as Vector2) - position
 		if dir_to_focus.length_squared() > 1.0:
 			_target_facing_angle = dir_to_focus.angle() + PI / 2.0 + PI
+	elif not has_input:
+		# Free movement, no input held. While the drone is still drifting
+		# (smoothed velocity hasn't decayed), aim the facing along the
+		# drift direction so the body doesn't slide sideways/backwards
+		# pointing the wrong way. Once the drift effectively stops, lock
+		# the rotation target at the current facing so the drone holds
+		# whatever angle it ended up at instead of continuing to swing
+		# toward the last cardinal input direction.
+		if _velocity_smooth.length_squared() > 100.0:
+			_target_facing_angle = _velocity_smooth.angle() + PI / 2.0 + PI
+		else:
+			_target_facing_angle = facing_angle
 
 	# Always rotate toward target at constant speed (continues after input stops)
 	var angle_diff: float = wrapf(_target_facing_angle - facing_angle, -PI, PI)
@@ -345,11 +368,24 @@ func _handle_movement(delta: float) -> void:
 	# Speed is halved when moving AWAY from the current focus (ore OR build
 	# target). Toward the focus — or with no focus — run at full speed.
 	var effective_speed: float = move_speed
-	if focus_pos != null and velocity.length_squared() > 0.01:
+	if focus_pos != null and has_input:
 		var to_focus: Vector2 = ((focus_pos as Vector2) - position).normalized()
-		if velocity.dot(to_focus) < 0.0:
+		if input_dir.dot(to_focus) < 0.0:
 			effective_speed = move_speed * 0.5
-	var new_pos: Vector2 = position + velocity * effective_speed * delta
+
+	# Drift: smooth velocity toward the desired vector. Snappy ramp-up
+	# while the player holds keys (MOVE_ACCEL), gentle decay to zero on
+	# release (DRIFT_DECEL) — gives a brief glide instead of a hard stop.
+	var target_velocity: Vector2 = input_dir * effective_speed if has_input else Vector2.ZERO
+	var rate: float = MOVE_ACCEL if has_input else DRIFT_DECEL
+	var smoothing: float = 1.0 - exp(-rate * delta)
+	_velocity_smooth = _velocity_smooth.lerp(target_velocity, smoothing)
+	# Snap to zero once the drift gets imperceptible so the drone isn't
+	# perpetually sub-pixel-sliding.
+	if not has_input and _velocity_smooth.length_squared() < 1.0:
+		_velocity_smooth = Vector2.ZERO
+
+	var new_pos: Vector2 = position + _velocity_smooth * delta
 	new_pos.x = clamp(new_pos.x, 0.0, main.GRID_SIZE * main.GRID_WIDTH)
 	new_pos.y = clamp(new_pos.y, 0.0, main.GRID_SIZE * main.GRID_HEIGHT)
 
@@ -509,6 +545,15 @@ func _try_deliver_to_core(item_id: StringName) -> void:
 	if mined_inventory.get(item_id, 0) <= 0:
 		return
 
+	# Skip the auto-deliver entirely when the core can't accept this
+	# resource (storage cap hit). Without this gate the drone would
+	# decrement the inventory, spawn a transfer animation, and then
+	# `_update_transfers` would refund the item on arrival — visually
+	# noisy for a no-op. The mined item just stays in the drone's bag
+	# until something frees up space.
+	if main.has_method("can_accept_resource") and not main.can_accept_resource(item_id):
+		return
+
 	mined_inventory[item_id] -= 1
 
 	# Spawn transfer animation
@@ -600,6 +645,7 @@ func _move_to_core() -> void:
 		(core_pos.x + core_size.x / 2.0) * main.GRID_SIZE,
 		(core_pos.y + core_size.y / 2.0) * main.GRID_SIZE
 	)
+	_velocity_smooth = Vector2.ZERO
 
 
 ## Respawns the drone at an arbitrary world position. Used when releasing
@@ -607,6 +653,7 @@ func _move_to_core() -> void:
 ## (or where it died), not all the way at the core.
 func respawn_at(world_pos: Vector2) -> void:
 	position = world_pos
+	_velocity_smooth = Vector2.ZERO
 	_clear_inventory()
 
 
@@ -951,6 +998,11 @@ func _resolve_heal_snap(aim_dir: Vector2, range_px: float):
 		seen[anchor] = true
 		if main.get_building_faction(anchor) != lumina:
 			continue
+		# Stale building_origins entry — anchor may no longer be in
+		# placed_buildings (e.g. transient state during a destroy). Skip
+		# rather than crash on the missing key.
+		if not main.placed_buildings.has(anchor):
+			continue
 		var bid: StringName = main.placed_buildings[anchor]
 		var bd = Registry.get_block(bid)
 		if bd == null:
@@ -992,6 +1044,11 @@ func _find_ai_heal_target(range_px: float):
 			continue
 		seen[anchor] = true
 		if main.get_building_faction(anchor) != lumina:
+			continue
+		# Stale building_origins entry — anchor may no longer be in
+		# placed_buildings (e.g. transient state during a destroy). Skip
+		# rather than crash on the missing key.
+		if not main.placed_buildings.has(anchor):
 			continue
 		var bid: StringName = main.placed_buildings[anchor]
 		var bd = Registry.get_block(bid)

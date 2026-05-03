@@ -47,3 +47,4 @@ power_consumption = 3.0
 attack_speed = 0.8
 attack_range = 6.5
 ammo_types = Array[Resource]([SubResource("Resource_diffuse_graphite")])
+max_stored_items = 30

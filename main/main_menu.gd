@@ -37,7 +37,7 @@ const BUTTON_LABELS := [
 	"Multiplayer",
 ]
 
-const BUTTON_SCALE := 2.5
+const BUTTON_SCALE := 0.7
 const TITLE_SCALE := 1.0
 const GRID_COLUMNS := 2
 const GRID_H_SEP := 14
@@ -197,12 +197,7 @@ func _build_loading_screen() -> void:
 
 
 func _load_textures() -> void:
-	# Background: prefer MMB.jpeg, fall back to the old MainScreenBackground.png
-	if ResourceLoader.exists("res://textures/UI/MMB.jpeg"):
-		bg_texture = load("res://textures/UI/MMB.jpeg")
-	elif ResourceLoader.exists("res://textures/UI/MainScreenBackground.png"):
-		bg_texture = load("res://textures/UI/MainScreenBackground.png")
-
+	bg_texture = load("res://textures/UI/MMB.png")
 	title_texture = load("res://textures/UI/Title.png")
 	button_texture = load("res://textures/UI/Button.png")
 

@@ -1003,6 +1003,11 @@ func get_current_objectives() -> Array:
 
 
 ## Converts a single condition dict into an objective dict with progress info.
+##
+## Each objective dict carries the rendered `text`, the progress fields,
+## and an `icon` (Texture2D) when the objective targets a specific item /
+## block / unit — the HUD shows that icon between the bullet and the
+## label so the player can match the wording to a familiar sprite.
 func _get_objective_for_condition(cond: Dictionary) -> Dictionary:
 	var cond_type: String = cond.get("type", "always")
 	match cond_type:
@@ -1015,57 +1020,74 @@ func _get_objective_for_condition(cond: Dictionary) -> Dictionary:
 			var amount := int(cond.get("amount", 1))
 			var current := get_mined_count(item_id)
 			var name: String = _get_display_name_item(item_id)
-			return {"text": "Mine %s" % name, "current": mini(current, amount), "target": amount, "done": current >= amount}
+			return {"text": "Mine %s" % name, "icon": _get_item_icon(item_id), "current": mini(current, amount), "target": amount, "done": current >= amount}
 		"deposited":
 			var item_id := StringName(cond.get("item_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var baseline := int(_step_deposited_baselines.get(item_id, 0))
 			var current := int(main.resources.get(item_id, 0)) - baseline
 			var name: String = _get_display_name_item(item_id)
-			return {"text": "Deposit %s" % name, "current": clampi(current, 0, amount), "target": amount, "done": current >= amount}
+			return {"text": "Deposit %s" % name, "icon": _get_item_icon(item_id), "current": clampi(current, 0, amount), "target": amount, "done": current >= amount}
 		"produced":
 			var item_id := StringName(cond.get("item_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var current := get_produced_count(item_id)
 			var name: String = _get_display_name_item(item_id)
-			return {"text": "Produce %s" % name, "current": mini(current, amount), "target": amount, "done": current >= amount}
+			return {"text": "Produce %s" % name, "icon": _get_item_icon(item_id), "current": mini(current, amount), "target": amount, "done": current >= amount}
 		"placed":
 			var block_id := StringName(cond.get("block_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var baseline := int(_step_placed_baselines.get(block_id, 0))
 			var current := int(_placed_counts.get(block_id, 0)) - baseline
 			var name: String = _get_display_name_block(block_id)
-			return {"text": "Place %s" % name, "current": clampi(current, 0, amount), "target": amount, "done": current >= amount}
+			return {"text": "Place %s" % name, "icon": _get_block_icon(block_id), "current": clampi(current, 0, amount), "target": amount, "done": current >= amount}
 		"units_produced":
 			var unit_id := StringName(cond.get("unit_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var current := get_units_produced_count(unit_id)
 			var name: String = _get_display_name_unit(unit_id)
-			return {"text": "Produce %s" % name, "current": mini(current, amount), "target": amount, "done": current >= amount}
+			return {"text": "Produce %s" % name, "icon": _get_unit_icon(unit_id), "current": mini(current, amount), "target": amount, "done": current >= amount}
 		"units_destroyed":
 			var unit_id := StringName(cond.get("unit_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var current := get_ferox_units_destroyed_count(unit_id)
 			var name: String = _get_display_name_unit(unit_id)
-			return {"text": "Destroy %s" % name, "current": mini(current, amount), "target": amount, "done": current >= amount}
+			return {"text": "Destroy %s" % name, "icon": _get_unit_icon(unit_id), "current": mini(current, amount), "target": amount, "done": current >= amount}
 		"ferox_blocks_destroyed":
 			var block_id := StringName(cond.get("block_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var current := get_ferox_blocks_destroyed_count(block_id)
 			var name: String = _get_display_name_block(block_id)
-			return {"text": "Destroy FEROX %s" % name, "current": mini(current, amount), "target": amount, "done": current >= amount}
+			return {"text": "Destroy FEROX %s" % name, "icon": _get_block_icon(block_id), "current": mini(current, amount), "target": amount, "done": current >= amount}
 		"core_unit_mined":
 			var item_id := StringName(cond.get("item_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var current := get_core_unit_mined_count(item_id)
 			var name: String = _get_display_name_item(item_id)
-			return {"text": "Mine %s (Core Unit)" % name, "current": mini(current, amount), "target": amount, "done": current >= amount}
+			return {"text": "Mine %s (Core Unit)" % name, "icon": _get_item_icon(item_id), "current": mini(current, amount), "target": amount, "done": current >= amount}
 		"block_has_item":
 			var item_id := StringName(cond.get("item_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var name: String = _get_display_name_item(item_id)
-			return {"text": "%s in block storage" % name, "current": 0, "target": amount, "done": false}
+			return {"text": "%s in block storage" % name, "icon": _get_item_icon(item_id), "current": 0, "target": amount, "done": false}
 	return {}
+
+
+## Icon helpers — return null when the id doesn't resolve so callers can
+## just `if icon != null` without crashing on bad authoring.
+func _get_item_icon(item_id: StringName) -> Texture2D:
+	var data = Registry.get_item_or_fluid(item_id)
+	return data.icon if data else null
+
+
+func _get_block_icon(block_id: StringName) -> Texture2D:
+	var data = Registry.get_block(block_id)
+	return data.icon if data else null
+
+
+func _get_unit_icon(unit_id: StringName) -> Texture2D:
+	var data = Registry.get_unit(unit_id)
+	return data.icon if data else null
 
 
 func _get_display_name_item(item_id: StringName) -> String:

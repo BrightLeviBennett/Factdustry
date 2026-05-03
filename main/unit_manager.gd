@@ -1442,6 +1442,13 @@ func _find_nearest_building(from: Vector2i, target_faction: int = -1) -> Variant
 	for grid_pos in main.placed_buildings:
 		if target_faction >= 0 and main.get_building_faction(grid_pos) != target_faction:
 			continue
+		# Platforms are non-targetable terrain — units skip them when
+		# scanning for hostile structures so a unit doesn't waste
+		# pathing on a platform that can't be damaged anyway.
+		var bid: StringName = main.placed_buildings[grid_pos]
+		var bdata = Registry.get_block(bid)
+		if bdata and bdata.tags.has("platform"):
+			continue
 		var dx = abs(grid_pos.x - from.x)
 		var dy = abs(grid_pos.y - from.y)
 		var dist = max(dx, dy) as float

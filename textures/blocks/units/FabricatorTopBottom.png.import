@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://yk0ocxppsnrb"
-path="res://.godot/imported/SmallContainer_old.png-edd6dcd3fa1dc13690367f2400dbd81b.ctex"
+uid="uid://dmjccepyvtpin"
+path="res://.godot/imported/FabricatorTopBottom.png-43b82542e236fec5af3dae622564d08d.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/item transportation/SmallContainer_old.png"
-dest_files=["res://.godot/imported/SmallContainer_old.png-edd6dcd3fa1dc13690367f2400dbd81b.ctex"]
+source_file="res://textures/blocks/units/FabricatorTopBottom.png"
+dest_files=["res://.godot/imported/FabricatorTopBottom.png-43b82542e236fec5af3dae622564d08d.ctex"]
 
 [params]
 

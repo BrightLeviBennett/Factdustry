@@ -2601,7 +2601,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777585458.50439
+		"timestamp": 1777594355.58027
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -24551,9 +24551,9 @@
 					"curve_points": [
 						0.25,
 						0.708333333333333,
-						0.875,
-						1.25,
-						0.5
+						0.689565022786458,
+						0.601977030436198,
+						0.733360290527344
 					],
 					"first_wave": 2,
 					"last_wave": 10,
@@ -24566,9 +24566,9 @@
 				{
 					"curve_points": [
 						0.333333333333333,
-						1.0,
+						0.963839213053385,
 						0.916666666666667,
-						1.0,
+						0.569694519042969,
 						0.583333333333333
 					],
 					"first_wave": 7,
@@ -24577,7 +24577,7 @@
 					"max_per_wave": 3,
 					"min_per_wave": 1,
 					"spawn_point": "spawn1",
-					"unit_id": "fly"
+					"unit_id": "skim"
 				}
 			],
 			"auto_wave_count": 10,

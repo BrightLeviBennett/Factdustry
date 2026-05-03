@@ -2,12 +2,12 @@
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 [ext_resource type="Texture2D" uid="uid://ciil5f23qi48x" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseBottom.png" id="2"]
-[ext_resource type="Texture2D" uid="uid://bsuep8wcstqdq" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopBottom.png" id="3"]
-[ext_resource type="Texture2D" uid="uid://c5ft8iul0ley1" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopLeft.png" id="4"]
-[ext_resource type="Texture2D" uid="uid://j8usst4fgubt" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorTopRight.png" id="5"]
+[ext_resource type="Texture2D" uid="uid://dmjccepyvtpin" path="res://textures/blocks/units/FabricatorTopBottom.png" id="4_vjqcj"]
+[ext_resource type="Texture2D" uid="uid://borsu0j7t23np" path="res://textures/blocks/units/FabricatorTopLeft.png" id="5_m5vq3"]
 [ext_resource type="Texture2D" uid="uid://bfxtjgivne2no" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseLeft.png" id="6"]
+[ext_resource type="Texture2D" uid="uid://bb5h8bb8xxoh5" path="res://textures/blocks/units/FabricatorTopRight.png" id="6_tlmx1"]
 [ext_resource type="Texture2D" uid="uid://j2peaj078si5" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseRight.png" id="7"]
-[ext_resource type="Texture2D" uid="uid://camwtit5rw1gg" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorComplete.png" id="7_vjqcj"]
+[ext_resource type="Texture2D" uid="uid://lnwo8ic4vhha" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorComplete.png" id="7_vjqcj"]
 
 [resource]
 script = ExtResource("1")
@@ -20,9 +20,9 @@ tags = PackedStringArray("fabricator", "units", "refabricator")
 color = Color(0.6, 0.5, 0.7, 1)
 grid_size = Vector2i(3, 3)
 base_sprite = ExtResource("2")
-feed_overlay_back = ExtResource("3")
-feed_overlay_left = ExtResource("4")
-feed_overlay_right = ExtResource("5")
+feed_overlay_back = ExtResource("4_vjqcj")
+feed_overlay_left = ExtResource("5_m5vq3")
+feed_overlay_right = ExtResource("6_tlmx1")
 base_sprite_back = ExtResource("2")
 base_sprite_left = ExtResource("6")
 base_sprite_right = ExtResource("7")

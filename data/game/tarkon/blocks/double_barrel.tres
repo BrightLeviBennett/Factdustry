@@ -38,3 +38,4 @@ power_consumption = 3.0
 attack_speed = 0.5
 attack_range = 5.0
 ammo_types = Array[Resource]([SubResource("Resource_db_ammo")])
+max_stored_items = 30

@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://ceao5pre7cyx6"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cfvhdpqqfgpon" path="res://textures/blocks/units/PayloadConveyor/PayloadConveyor.png" id="1_cvckt"]
+[ext_resource type="Texture2D" uid="uid://b5mqtxlayyll" path="res://textures/blocks/units/PayloadConveyor/PayloadConveyor.png" id="1_cvckt"]
 
 [resource]
 script = ExtResource("1")
@@ -14,8 +14,6 @@ tags = PackedStringArray("payload", "transport")
 color = Color(0.6, 0.5, 0.7, 1)
 grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("1_cvckt")
-barrel_count = null
-barrel_spacing = null
 max_health = 220.0
 build_cost = {
 "copper": 20
@@ -23,4 +21,3 @@ build_cost = {
 build_time = 1.5
 transport_speed = 7.0
 max_payload_size = 3
-refab_recipes = null

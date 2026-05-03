@@ -81,6 +81,11 @@ const RECOIL_DECAY_TIME := 0.25
 var turret_barrel_angles := {}
 const BARREL_TOE_IN_MAX: float = deg_to_rad(20.0)
 const BARREL_TURN_SPEED: float = 8.0
+## Constant angular velocity (rad / sec) used by multi-barrel turret
+## chassis rotation. Single-barrel turrets keep the original ease-out
+## lerp (smooth swing), multi-barrel rotates at this fixed rate so the
+## chassis feels mechanical / rigid instead of swaying into position.
+const MULTI_BARREL_CHASSIS_TURN_RATE: float = 4.0
 
 # --- MANUAL CONTROL ---
 ## Set by UnitManager when the player manually controls a turret (Ctrl+click).
@@ -315,10 +320,21 @@ func _push_targeting_snapshot() -> void:
 			"detect_range": detect_range,
 		})
 
+	# Strip platform cells from the buildings snapshot so the targeting
+	# worker (which feeds both turret AI and idle player-unit auto-shoot)
+	# never even considers them as targets. Platforms are damage-immune
+	# anyway, but filtering here saves wasted shot-arc rotations.
+	var filtered_buildings: Dictionary = {}
+	for cell in main.placed_buildings:
+		var bid_f: StringName = main.placed_buildings[cell]
+		var bd_f = Registry.get_block(bid_f)
+		if bd_f and bd_f.tags.has("platform"):
+			continue
+		filtered_buildings[cell] = bid_f
 	_targeting_worker.push_snapshot({
 		"enemies": enemies_snap,
 		"player_units": player_snap,
-		"buildings": main.placed_buildings.duplicate(),
+		"buildings": filtered_buildings,
 		"factions": main.building_factions.duplicate(),
 		"origins": main.building_origins.duplicate(),
 		"turrets": turrets_snap,
@@ -483,10 +499,21 @@ func _update_turrets(delta: float) -> void:
 		if live_range_px > 0.0 and turret_world.distance_to(target_world) > live_range_px:
 			continue
 
-		# Smoothly rotate the turret head toward the target
+		# Rotate the chassis toward the target. Single-barrel turrets use
+		# the original ease-out lerp (smooth swing). Multi-barrel turrets
+		# rotate at a constant angular rate so the chassis reads as a
+		# rigid mechanical mount rather than swaying into place.
 		var target_angle: float = (target_world - turret_world).angle()
 		var current_angle = turret_angles[grid_pos]
-		turret_angles[grid_pos] = lerp_angle(current_angle, target_angle, delta * 8.0)
+		if barrel_count > 1:
+			var ang_diff: float = wrapf(target_angle - current_angle, -PI, PI)
+			var max_step: float = MULTI_BARREL_CHASSIS_TURN_RATE * delta
+			if absf(ang_diff) <= max_step:
+				turret_angles[grid_pos] = target_angle
+			else:
+				turret_angles[grid_pos] = wrapf(current_angle + signf(ang_diff) * max_step, -PI, PI)
+		else:
+			turret_angles[grid_pos] = lerp_angle(current_angle, target_angle, delta * 8.0)
 		# Per-barrel toe-in: each head aims at the target from its own
 		# muzzle pivot and is clamped to ±BARREL_TOE_IN_MAX from the
 		# chassis angle so the heads can converge on a close target.
@@ -745,7 +772,12 @@ func _relax_barrels_to_chassis(grid_pos: Vector2i, delta: float) -> void:
 	var chassis_a: float = float(turret_angles.get(grid_pos, 0.0))
 	var step: float = delta * BARREL_TURN_SPEED
 	for i in range(arr.size()):
-		arr[i] = lerp_angle(float(arr[i]), chassis_a, step)
+		var lerped: float = lerp_angle(float(arr[i]), chassis_a, step)
+		# Hard-clamp to ±BARREL_TOE_IN_MAX so a chassis snap can't leave
+		# a barrel parked outside its cone for a frame.
+		var off: float = wrapf(lerped - chassis_a, -PI, PI)
+		off = clampf(off, -BARREL_TOE_IN_MAX, BARREL_TOE_IN_MAX)
+		arr[i] = chassis_a + off
 
 
 ## Per-barrel toe-in update. Each barrel's pivot is offset perpendicular
@@ -780,7 +812,14 @@ func _update_barrel_toe_in(grid_pos: Vector2i, data, turret_world: Vector2, targ
 		var off: float = wrapf(desired - chassis_a, -PI, PI)
 		off = clampf(off, -BARREL_TOE_IN_MAX, BARREL_TOE_IN_MAX)
 		var clamped: float = chassis_a + off
-		barrel_arr[i] = lerp_angle(float(barrel_arr[i]), clamped, step)
+		var lerped: float = lerp_angle(float(barrel_arr[i]), clamped, step)
+		# Hard-clamp the post-lerp angle so the barrel can NEVER sit
+		# outside its ±BARREL_TOE_IN_MAX cone — even mid-transition. The
+		# lerp can momentarily land outside if the previous frame's
+		# chassis angle was different and the per-barrel angle drifted.
+		var final_off: float = wrapf(lerped - chassis_a, -PI, PI)
+		final_off = clampf(final_off, -BARREL_TOE_IN_MAX, BARREL_TOE_IN_MAX)
+		barrel_arr[i] = chassis_a + final_off
 
 
 # =========================
@@ -1259,6 +1298,10 @@ func _find_nearest_enemy_building(from_pos: Vector2, range_px: float) -> Vector2
 		# Skip under-construction / being-deconstructed blocks so the
 		# drone doesn't waste shots on a half-built target ghost.
 		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+			continue
+		# Skip platforms — invulnerable terrain, no point shooting them.
+		var bd_n = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if bd_n and bd_n.tags.has("platform"):
 			continue
 		var w: Vector2 = main.grid_to_world(anchor) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 		var d2: float = from_pos.distance_squared_to(w)

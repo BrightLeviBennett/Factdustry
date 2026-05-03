@@ -754,7 +754,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777590287.88149
+		"timestamp": 1777594015.43069
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -3831,21 +3831,21 @@
 					"faction": "ferox",
 					"pos": "49,35",
 					"type": "spawn_unit",
-					"unit_id": "ant"
+					"unit_id": "press"
 				},
 				{
 					"count": 1.0,
 					"faction": "ferox",
 					"pos": "50,35",
 					"type": "spawn_unit",
-					"unit_id": "ant"
+					"unit_id": "press"
 				},
 				{
 					"count": 1.0,
 					"faction": "ferox",
 					"pos": "51,35",
 					"type": "spawn_unit",
-					"unit_id": "ant"
+					"unit_id": "press"
 				}
 			]
 		},
@@ -3855,7 +3855,7 @@
 				{
 					"amount": 3.0,
 					"type": "units_destroyed",
-					"unit_id": "ant"
+					"unit_id": "press"
 				}
 			],
 			"name": "Unlock Map",
@@ -3885,7 +3885,7 @@
 				{
 					"amount": 1.0,
 					"type": "units_produced",
-					"unit_id": "ant"
+					"unit_id": "press"
 				}
 			],
 			"name": "Unit Production",

@@ -5,6 +5,9 @@
 	"archive_holdings": {
 
 	},
+	"belt_unloader_state": {
+
+	},
 	"block_storage": {
 
 	},
@@ -1991,7 +1994,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777079265.35412
+		"timestamp": 1777594142.80667
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -15084,6 +15087,10 @@
 	},
 	"grid_height": 300,
 	"grid_width": 300,
+	"hints": [],
+	"junction_items": {
+
+	},
 	"linked_pairs": [
 		[
 			"168,80",
@@ -15091,6 +15098,10 @@
 		]
 	],
 	"loader_state": {
+
+	},
+	"mass_driver_projectiles": [],
+	"mass_driver_state": {
 
 	},
 	"ore_tiles": {
@@ -15142,15 +15153,24 @@
 	"payload_items": {
 
 	},
+	"pipe_contents": {
+
+	},
 	"player_units": [],
 	"refabricator_state": {
 		"171,83": {
 			"in_unit_id": "",
 			"out_unit_id": "",
 			"phase": "idle",
-			"selected_t2": "breach",
+			"selected_t2": "beattle",
 			"timer": 0.0
 		}
+	},
+	"resources": {
+		"mat_copper": 993,
+		"mat_graphite": 574,
+		"mat_silicon": 2965,
+		"mat_steel": 1526
 	},
 	"script_steps": [
 		{
@@ -15312,6 +15332,9 @@
 			"on_exit": [
 				{
 					"type": "clear_texts"
+				},
+				{
+					"type": "clear_boxes"
 				}
 			]
 		},

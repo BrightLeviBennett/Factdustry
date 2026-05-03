@@ -192,14 +192,19 @@ func _sample_network_history(delta: float) -> void:
 			continue
 		var anchor: Vector2i = grid_pos
 		live_anchors[anchor] = true
+		var active: bool = _is_block_active(anchor, data)
 		var p: float = 0.0
-		if _is_block_active(anchor, data):
+		var e: float = 0.0
+		if active:
 			if data.electrical_power_gen > 0.0:
 				p = _get_effective_elec_gen(anchor, data)
+				if data.electrical_power_gen > 0.0:
+					e = clampf(p / data.electrical_power_gen, 0.0, 1.0)
 			else:
 				p = _get_effective_elec_use(anchor, data)
+				e = clampf(get_electrical_efficiency(anchor), 0.0, 1.0)
 		var bs: Array = _block_history.get(anchor, [])
-		bs.append({"t": now, "p": p})
+		bs.append({"t": now, "p": p, "e": e})
 		while bs.size() > 0 and float(bs[0]["t"]) < cutoff:
 			bs.pop_front()
 		_block_history[anchor] = bs
@@ -571,8 +576,10 @@ func _is_block_drawing_power(anchor: Vector2i, data: BlockData) -> bool:
 	if logistics == null:
 		return true
 
-	# Drills / extractors: idle when storage is full (nothing to mine into).
-	if data.category == BlockData.BlockCategory.EXTRACTORS:
+	# Drills / extractors / fluid pumps: idle when storage is full (nothing
+	# to mine into / nowhere to push fluid). Pumps live in the FLUIDS
+	# category rather than EXTRACTORS, so check the tag too.
+	if data.category == BlockData.BlockCategory.EXTRACTORS or data.tags.has("pump"):
 		if logistics.has_method("_is_storage_full") and logistics._is_storage_full(anchor, data):
 			return false
 		return true

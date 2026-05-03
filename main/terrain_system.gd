@@ -544,6 +544,19 @@ func has_wall(grid_pos: Vector2i) -> bool:
 	return wall_tiles.has(grid_pos)
 
 
+## Returns true if a cell has a floor tile, including cells that are
+## members of a multi-tile floor (Vent / Geyser) where only the origin
+## lives in `floor_tiles`. Water counts as a floor.
+func has_floor(grid_pos: Vector2i) -> bool:
+	return floor_tiles.has(grid_pos) or multi_tile_origins.has(grid_pos)
+
+
+## Returns true if a cell is void — no floor and no wall. Nothing can
+## be built on the abyss.
+func is_void(grid_pos: Vector2i) -> bool:
+	return not has_floor(grid_pos) and not wall_tiles.has(grid_pos)
+
+
 ## Returns the auto-computed water depth at a position, or 0 if the tile
 ## isn't water. 1 = shallow, 2 = medium, 3 = deep.
 ## Computed via BFS distance from the nearest non-water floor tile.

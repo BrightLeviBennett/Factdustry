@@ -2833,6 +2833,7 @@ func _update_objective_panel() -> void:
 				var current: int = obj.get("current", 0)
 				var target: int = obj.get("target", 1)
 				var done: bool = obj.get("done", false)
+				var icon_tex: Texture2D = obj.get("icon", null)
 				var hbox = HBoxContainer.new()
 				hbox.add_theme_constant_override("separation", 6)
 				hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2843,15 +2844,53 @@ func _update_objective_panel() -> void:
 				bullet.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3) if done else Color(0.8, 0.8, 0.8))
 				bullet.mouse_filter = Control.MOUSE_FILTER_IGNORE
 				hbox.add_child(bullet)
-				var lbl = Label.new()
+				# Verb-icon-noun layout: when an icon is present, split the
+				# objective text on its first space so the verb ("Place",
+				# "Deposit", "Produce", "Destroy", …) sits BEFORE the icon
+				# and the noun + counter sit after — easier to scan and
+				# more grammatical than "[icon] Place Foo".
+				var lbl_color: Color = Color(0.5, 0.8, 0.5) if done else Color(0.85, 0.88, 0.92)
+				var counter_suffix: String = ""
 				if target > 1 or current > 0:
-					lbl.text = "%s: %d/%d" % [text, current, target]
+					counter_suffix = ": %d/%d" % [current, target]
+				if icon_tex != null and " " in text:
+					var sp: int = text.find(" ")
+					var verb: String = text.substr(0, sp)
+					var noun: String = text.substr(sp + 1)
+					var verb_lbl = Label.new()
+					verb_lbl.text = verb
+					verb_lbl.add_theme_font_size_override("font_size", 12)
+					verb_lbl.add_theme_color_override("font_color", lbl_color)
+					verb_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+					hbox.add_child(verb_lbl)
+					var icon_rect := TextureRect.new()
+					icon_rect.texture = icon_tex
+					icon_rect.custom_minimum_size = Vector2(16, 16)
+					icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+					icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+					icon_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+					hbox.add_child(icon_rect)
+					var noun_lbl = Label.new()
+					noun_lbl.text = noun + counter_suffix
+					noun_lbl.add_theme_font_size_override("font_size", 12)
+					noun_lbl.add_theme_color_override("font_color", lbl_color)
+					noun_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+					hbox.add_child(noun_lbl)
 				else:
-					lbl.text = text
-				lbl.add_theme_font_size_override("font_size", 12)
-				lbl.add_theme_color_override("font_color", Color(0.5, 0.8, 0.5) if done else Color(0.85, 0.88, 0.92))
-				lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-				hbox.add_child(lbl)
+					if icon_tex != null:
+						var icon_rect := TextureRect.new()
+						icon_rect.texture = icon_tex
+						icon_rect.custom_minimum_size = Vector2(16, 16)
+						icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+						icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+						icon_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+						hbox.add_child(icon_rect)
+					var lbl = Label.new()
+					lbl.text = text + counter_suffix
+					lbl.add_theme_font_size_override("font_size", 12)
+					lbl.add_theme_color_override("font_color", lbl_color)
+					lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+					hbox.add_child(lbl)
 
 	objective_vbox.visible = any_info
 	# Separator only when BOTH halves of the panel have content, so a
@@ -3832,20 +3871,19 @@ func _build_network_info_row(anchor: Vector2i, d: BlockData, ps: Node) -> HBoxCo
 	hbox.set_meta("power_lbl", power_lbl)
 	hbox.set_meta("eff_lbl", eff_lbl)
 	hbox.set_meta("eff_graph", eff_graph)
-	hbox.set_meta("eff_history", PackedFloat32Array())
-	hbox.set_meta("eff_last_sample_t", 0.0)
 	hbox.set_meta("power_graph", power_graph)
-	# 600 samples = 10 minutes at 1 Hz; sparkline draws the most recent
-	# 60, the network-graph hover overlay reads the full window for its
-	# active-block icon stack.
-	hbox.set_meta("power_history", PackedFloat32Array())
-	hbox.set_meta("power_last_sample_t", 0.0)
+	# Per-block efficiency / power history is sampled in PowerSystem
+	# (`_block_history`) so it keeps accruing in the background even
+	# when this panel is hidden — sparklines below read straight from
+	# that store via `ps.get_block_history(anchor)`.
 	_apply_network_info_status(hbox, anchor, d, ps)
 	return hbox
 
 
-## Draws the per-row efficiency sparkline. Called from the Control's `draw`
-## signal — reads the rolling history off the parent row's meta.
+## Draws the per-row efficiency sparkline. Reads from PowerSystem's
+## per-block history (sampled in the background regardless of whether
+## the network panel is open) so the graph shows continuity even after
+## the panel was closed and reopened.
 func _draw_eff_graph(ctrl: Control) -> void:
 	var hbox := ctrl.get_parent() as HBoxContainer
 	if hbox == null:
@@ -3858,11 +3896,22 @@ func _draw_eff_graph(ctrl: Control) -> void:
 	# 50% reference line
 	var mid_y: float = h * 0.5
 	ctrl.draw_line(Vector2(0, mid_y), Vector2(w, mid_y), Color(0.4, 0.4, 0.45, 0.35), 1.0)
-	var hist: PackedFloat32Array = hbox.get_meta("eff_history", PackedFloat32Array())
+	var anchor_e: Vector2i = hbox.get_meta("anchor", Vector2i(-9999, -9999))
+	if anchor_e == Vector2i(-9999, -9999):
+		return
+	var ps_e = _power_sys_ref()
+	if ps_e == null or not ps_e.has_method("get_block_history"):
+		return
+	var bs: Array = ps_e.get_block_history(anchor_e)
+	const MAX_N: int = 60
+	# Pull only the trailing 60 samples (≈ 1 minute) into a flat array.
+	var hist: PackedFloat32Array = PackedFloat32Array()
+	var start_e: int = maxi(0, bs.size() - MAX_N)
+	for i in range(start_e, bs.size()):
+		hist.append(float(bs[i].get("e", 0.0)))
 	var n: int = hist.size()
 	if n < 2:
 		return
-	const MAX_N: int = 60
 	# Anchor the most recent sample at the right edge so a row that's only
 	# been on screen for 5 s shows 5 ticks of history at the right rather
 	# than stretching them across the whole width.
@@ -3885,10 +3934,10 @@ func _draw_eff_graph(ctrl: Control) -> void:
 	ctrl.draw_polyline(pts, line_col, 1.5, true)
 
 
-## Per-row power sparkline. Reads `power_history` (raw watts) off the
-## parent hbox; scales against the block's rated gen/use so a generator
-## that's at full output reads as 100 % full just like the efficiency
-## graph next to it. Producer rows are tinted green, consumers red.
+## Per-row power sparkline. Reads from PowerSystem's per-block history
+## (sampled in the background) and scales against the block's rated
+## gen/use so a generator at full output reads as 100 % full. Producer
+## rows are tinted green, consumers red.
 func _draw_power_graph(ctrl: Control) -> void:
 	var hbox := ctrl.get_parent() as HBoxContainer
 	if hbox == null:
@@ -3899,17 +3948,24 @@ func _draw_power_graph(ctrl: Control) -> void:
 	ctrl.draw_rect(Rect2(Vector2.ZERO, Vector2(w, h)), Color(0.3, 0.3, 0.35, 0.5), false, 1.0)
 	var mid_y: float = h * 0.5
 	ctrl.draw_line(Vector2(0, mid_y), Vector2(w, mid_y), Color(0.4, 0.4, 0.45, 0.35), 1.0)
-	var hist: PackedFloat32Array = hbox.get_meta("power_history", PackedFloat32Array())
+	var anchor: Vector2i = hbox.get_meta("anchor", Vector2i(-9999, -9999))
+	if anchor == Vector2i(-9999, -9999):
+		return
+	var ps_p = _power_sys_ref()
+	if ps_p == null or not ps_p.has_method("get_block_history"):
+		return
+	var bs_p: Array = ps_p.get_block_history(anchor)
+	const MAX_HIST_N: int = 60
+	# Trailing 60 samples for the sparkline; PowerSystem keeps the full
+	# 600 in `_block_history` for the 10-minute network graph overlay.
+	var hist: PackedFloat32Array = PackedFloat32Array()
+	var start_p: int = maxi(0, bs_p.size() - MAX_HIST_N)
+	for i in range(start_p, bs_p.size()):
+		hist.append(float(bs_p[i].get("p", 0.0)))
 	var n: int = hist.size()
 	if n < 2:
 		return
-	# Resolve rated power (gen for producers, use for consumers) so the
-	# y-axis tops out at the block's nameplate value. Falls back to the
-	# observed peak if the rated lookup is unavailable.
-	var anchor: Vector2i = hbox.get_meta("anchor", Vector2i(-9999, -9999))
-	var d: BlockData = null
-	if anchor != Vector2i(-9999, -9999):
-		d = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	var d: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
 	var rated: float = 0.0
 	var is_producer := false
 	if d != null:
@@ -3996,37 +4052,17 @@ func _apply_network_info_status(hbox: HBoxContainer, anchor: Vector2i, d: BlockD
 	# `_network_graph_clock` as the timestamp source so paused samples
 	# don't shift the timeline forward — every consumer (per-row
 	# sparkline + 10-min overlay) reads the same clock.
-	var world_paused: bool = "world_paused" in main and main.world_paused
-	var clock_now: float = _network_graph_clock
-	# Push a sample into the per-row efficiency history at ~1 Hz, then
-	# repaint the sparkline.
-	if hbox.has_meta("eff_graph"):
-		var last_t: float = float(hbox.get_meta("eff_last_sample_t", -1000.0))
-		if not world_paused and clock_now - last_t >= 1.0:
-			var hist: PackedFloat32Array = hbox.get_meta("eff_history", PackedFloat32Array())
-			hist.append(float(eff_pct) / 100.0)
-			while hist.size() > 60:
-				hist.remove_at(0)
-			hbox.set_meta("eff_history", hist)
-			hbox.set_meta("eff_last_sample_t", clock_now)
-		var graph: Control = hbox.get_meta("eff_graph", null)
-		if graph and is_instance_valid(graph):
-			graph.queue_redraw()
-	# Power sample (parallel cadence to the efficiency one). Stored long
-	# enough to feed both the per-row sparkline (last 60) and the
-	# network-graph hover-icon stack (full 600).
-	if hbox.has_meta("power_graph"):
-		var last_p: float = float(hbox.get_meta("power_last_sample_t", -1000.0))
-		if not world_paused and clock_now - last_p >= 1.0:
-			var phist: PackedFloat32Array = hbox.get_meta("power_history", PackedFloat32Array())
-			phist.append(power_val)
-			while phist.size() > 600:
-				phist.remove_at(0)
-			hbox.set_meta("power_history", phist)
-			hbox.set_meta("power_last_sample_t", clock_now)
-		var pgraph: Control = hbox.get_meta("power_graph", null)
-		if pgraph and is_instance_valid(pgraph):
-			pgraph.queue_redraw()
+	# History sampling is owned by PowerSystem (`_block_history` indexed
+	# by anchor) and runs in the background regardless of whether the
+	# network panel is open. The per-row sparklines just read from there
+	# and queue a redraw — the panel can be closed and reopened without
+	# losing graph continuity.
+	var graph: Control = hbox.get_meta("eff_graph", null)
+	if graph and is_instance_valid(graph):
+		graph.queue_redraw()
+	var pgraph: Control = hbox.get_meta("power_graph", null)
+	if pgraph and is_instance_valid(pgraph):
+		pgraph.queue_redraw()
 
 
 ## Live-update only the per-row status labels (network unchanged).

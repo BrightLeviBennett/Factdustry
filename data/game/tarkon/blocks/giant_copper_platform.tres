@@ -1,16 +1,21 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://c6js7ds62djxj"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://xci5p0attxpy" path="res://textures/blocks/walls/CopperPlatform.png" id="1_w3s82"]
 
 [resource]
 script = ExtResource("1")
 id = &"giant_copper_platform"
 display_name = "Giant Copper Platform"
 description = "A giant copper platform."
+icon = ExtResource("1_w3s82")
 category = 5
-color = Color(0.8, 0.6, 0.3, 1)
-max_health = 280.0
-grid_size = Vector2i(4, 4)
-build_cost = { "copper": 200 }
-build_time = 1.5
 tags = PackedStringArray("platform")
+color = Color(0.8, 0.6, 0.3, 1)
+grid_size = Vector2i(4, 4)
+top_sprite = ExtResource("1_w3s82")
+max_health = 280.0
+build_cost = {
+"copper": 200
+}
+build_time = 1.5

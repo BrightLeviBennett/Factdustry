@@ -42,7 +42,7 @@ const FACTION_FEROX := 1
 const FACTION_DERELICT := 2
 
 # --- PARALLAX SETTINGS ---
-var parallax_enabled := true
+var parallax_enabled := false
 @export var parallax_strength := 0.025
 @export var max_depth := 8.0
 @export var soft_cap_factor := 0.05
@@ -96,6 +96,14 @@ const DIR_NAMES := ["→", "↓", "←", "↑"]
 # --- BELT AUTO-TILE TEXTURES ---
 # Loaded in _ready(). Used to pick the right visual based on neighboring belts.
 var _belt_textures := {}
+# Phase for the conveyor scroll effect (pixels). Advances every unpaused
+# frame so the belt texture appears to move in its travel direction;
+# rendering wraps via texture_repeat so a single tile of art tiles
+# infinitely along the belt. Gated by `belt_scroll_enabled` — when off,
+# belts render statically and we skip the per-frame queue_redraw too.
+var _belt_scroll_phase: float = 0.0
+var belt_scroll_enabled: bool = false
+const _BELT_SCROLL_PIXELS_PER_SEC: float = 96.0
 var _payload_conveyor_textures := {}
 
 # --- PIPE / PUMP TEXTURES ---
@@ -295,6 +303,11 @@ func _ready() -> void:
 	# Linear-with-Mipmaps so floor tiles, building bases, faction
 	# overlays, etc. sample from the mip pyramid at any zoom.
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	# Conveyor belts animate by drawing a moving source rect into a static
+	# destination rect (see `_belt_scroll_phase`); for that to wrap
+	# seamlessly when the source rect runs past the texture's bounds,
+	# this CanvasItem needs to sample with repeat enabled.
+	texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
 	# Scale world-menu cell size to current GRID_SIZE so storage / sorter /
 	# picker panels stay proportional to a tile.
 	_world_menu_cell_size *= main.SPRITE_SCALE_FACTOR
@@ -1038,6 +1051,17 @@ func _process(_delta: float) -> void:
 	# back in or out, giving each head a real spool-up/coast-down feel.
 	if not ("world_paused" in main and main.world_paused):
 		_tick_crusher_head_states(_delta)
+		if belt_scroll_enabled:
+			# Advance the conveyor scroll phase. Wrap on a 1024 px window —
+			# big enough that no single belt segment hits the modulus,
+			# small enough that the float doesn't lose precision over a
+			# long session. Frozen while the world is paused so visuals
+			# match the "items aren't moving" reading the player gets
+			# from logistics. Skipped entirely when the toggle is off so
+			# we don't pay the per-frame redraw on machines that aren't
+			# using this effect.
+			_belt_scroll_phase = fposmod(_belt_scroll_phase + _delta * _BELT_SCROLL_PIXELS_PER_SEC, 1024.0)
+			queue_redraw()
 
 	# --- Unified work queue: build + deconstruct, one at a time ---
 	# Walk the queue and tick the first entry that's currently within build
@@ -1470,9 +1494,17 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 	# If the new block is a member of a swap family (belt/duct/conduit/etc),
 	# cells already holding another same-family block count as placeable —
 	# the click handler in main.try_place_building will swap them.
+	# Walls and platforms additionally allow size-up swaps where a bigger
+	# block absorbs smaller same-group blocks whose footprints all fall
+	# inside the new block's footprint.
 	var new_swap_group: StringName = &""
-	if data.grid_size == Vector2i(1, 1) and main.has_method("_get_swap_group"):
+	if main.has_method("_get_swap_group"):
 		new_swap_group = main._get_swap_group(data)
+	var size_up_eligible: bool = (data.tags.has("wall") or data.tags.has("platform")) \
+			and (data.grid_size.x > 1 or data.grid_size.y > 1) \
+			and new_swap_group != &""
+	var rect_min: Vector2i = grid_pos
+	var rect_max: Vector2i = grid_pos + data.grid_size - Vector2i(1, 1)
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var check_pos = grid_pos + Vector2i(x, y)
@@ -1487,20 +1519,56 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 				if cell_block_id != block_id:
 					var cell_data = Registry.get_block(cell_block_id)
 					if cell_data and cell_data.tags.has("platform"):
-						has_platform_under = true
+						# Reject stacking platform-on-platform unless the
+						# new block is a bigger platform that can absorb
+						# this one via the size-up swap.
+						if is_platform and not size_up_eligible:
+							return false
+						if is_platform and size_up_eligible:
+							var ex_anchor: Vector2i = main.building_origins.get(check_pos, check_pos)
+							var ex_max: Vector2i = ex_anchor + cell_data.grid_size - Vector2i(1, 1)
+							if ex_anchor.x < rect_min.x or ex_anchor.y < rect_min.y \
+									or ex_max.x > rect_max.x or ex_max.y > rect_max.y \
+									or main.get_building_faction(ex_anchor) != main.Faction.LUMINA:
+								return false
+							# Absorbed — treat as if cell were empty for the
+							# rest of this iteration.
+						else:
+							has_platform_under = true
 					elif cell_data and new_swap_group != &"" \
+							and data.grid_size == Vector2i(1, 1) \
 							and cell_data.grid_size == Vector2i(1, 1) \
 							and main._get_swap_group(cell_data) == new_swap_group \
 							and main.get_building_faction(check_pos) == main.Faction.LUMINA:
-						# Swap-compatible: cell is placeable. The swap itself
-						# happens in main.try_place_building.
+						# 1×1 same-group swap: cell is placeable. The swap
+						# itself happens in main.try_place_building.
 						pass
+					elif size_up_eligible and cell_data \
+							and main._get_swap_group(cell_data) == new_swap_group \
+							and main.get_building_faction(check_pos) == main.Faction.LUMINA:
+						# Size-up swap: the existing same-group block must
+						# lie ENTIRELY inside the new block's footprint;
+						# otherwise we'd corrupt cells of an unrelated tile.
+						var ex_anchor2: Vector2i = main.building_origins.get(check_pos, check_pos)
+						var ex_max2: Vector2i = ex_anchor2 + cell_data.grid_size - Vector2i(1, 1)
+						if ex_anchor2.x < rect_min.x or ex_anchor2.y < rect_min.y \
+								or ex_max2.x > rect_max.x or ex_max2.y > rect_max.y:
+							return false
 					else:
 						return false
 			if terrain and terrain.has_wall(check_pos):
 				return false
+			# Void rejection: no floor, no wall — nothing builds on the abyss,
+			# not even platforms (platforms bridge water, not nothing).
+			if terrain and terrain.is_void(check_pos) and not has_platform_under:
+				return false
 			if terrain:
 				var depth: int = terrain.get_water_depth_at(check_pos)
+				# Platforms are water-only — they bridge any water depth
+				# but reject placement on dry land. The red "can't place"
+				# overlay falls out of the same _can_place_terrain check.
+				if is_platform and depth <= 0 and not has_platform_under:
+					return false
 				if depth > 0 and not has_platform_under:
 					# Platforms can be placed on any water depth (they bridge it).
 					if is_platform:
@@ -2279,7 +2347,16 @@ func _unhandled_input(event: InputEvent) -> void:
 								var click_block_id = main.placed_buildings[_demolish_start]
 								var click_data = Registry.get_block(click_block_id)
 								var click_faction = main.get_building_faction(_demolish_start)
-								if click_faction == FACTION_LUMINA and (click_data == null or not click_data.tags.has("core")):
+								# LUMINA blocks: standard deconstruct path.
+								# DERELICT blocks: also deconstructable so the
+								# player can clean up an old enemy base before
+								# bothering to repair it. FEROX (live enemy)
+								# stays off-limits — units have to take those
+								# down. Cores never deconstruct.
+								var can_decon: bool = (click_faction == FACTION_LUMINA \
+									or click_faction == FACTION_DERELICT) \
+									and (click_data == null or not click_data.tags.has("core"))
+								if can_decon:
 									var click_anchor: Vector2i = main.building_origins.get(_demolish_start, _demolish_start)
 									if main.has_method("start_deconstruct"):
 										main.start_deconstruct(click_anchor)
@@ -3851,6 +3928,11 @@ func _build_transport_astar(transport_tag: String) -> void:
 						# prefers going around. Weight = 20 discourages crossing
 						# but allows it when no empty route exists.
 						_transport_astar.set_point_weight_scale(pos, 20.0)
+					elif existing_data.tags.has("platform"):
+						# Platforms are terrain — drag-place freely lays
+						# transport across them (the platform stays
+						# stashed underneath via main._platform_under).
+						pass
 					else:
 						# Non-transport building: impassable
 						_transport_astar.set_point_solid(pos, true)
@@ -3972,6 +4054,16 @@ func _apply_transport_crossings(raw: Array[Vector2i], transport_tag: String) -> 
 			var existing_id: StringName = main.placed_buildings[gp]
 			var existing_data = Registry.get_block(existing_id)
 			var same_transport: bool = existing_data != null and existing_data.tags.has(transport_tag)
+			# Platforms are terrain, not obstacles — drag straight onto them
+			# without trying to bridge over. The transport block's normal
+			# placement path stashes the platform underneath via
+			# `main._platform_under` and overwrites the cell with the new
+			# transport block.
+			var is_platform_under: bool = existing_data != null and existing_data.tags.has("platform")
+			if is_platform_under:
+				result.append(gp)
+				i += 1
+				continue
 
 			if same_transport:
 				var existing_rot: int = main.building_rotation.get(gp, 0)
@@ -4198,7 +4290,7 @@ func _get_belt_draw_info(grid_pos: Vector2i) -> Dictionary:
 	if tex_key == "cb":
 		angle += -(PI / 2.0)
 
-	return {"texture": _belt_textures.get(tex_key), "angle": angle}
+	return {"texture": _belt_textures.get(tex_key), "angle": angle, "key": tex_key}
 
 
 ## Like _transport_outputs_to but also checks virtual preview cells.
@@ -4247,7 +4339,7 @@ func _get_belt_draw_info_with_preview(grid_pos: Vector2i,
 	if tex_key == "cb":
 		angle += -(PI / 2.0)
 
-	return {"texture": _belt_textures.get(tex_key), "angle": angle}
+	return {"texture": _belt_textures.get(tex_key), "angle": angle, "key": tex_key}
 
 
 func _draw_placed_buildings() -> void:
@@ -4308,17 +4400,37 @@ func _draw_placed_buildings() -> void:
 	var gs := float(main.GRID_SIZE)
 	var half_gs: float = gs * 0.5
 
-	# Pre-compute sort distances so sort_custom becomes a pure float compare.
+	# Stable painter's-order sort by world position. The previous
+	# camera-distance sort flipped z-order whenever a block crossed from one
+	# side of the camera to the other, so two adjacent blocks would visibly
+	# swap who paints over whom as you panned past them — and a covered
+	# platform could end up painting on top of the block placed on it.
+	# World-Y ascending (north→south) is the standard 2.5D painter's order;
+	# X breaks side-by-side ties; platform-flag breaks same-cell ties so
+	# the cover always paints on top of its platform.
 	var n: int = all_positions.size()
-	var dists: PackedFloat32Array = PackedFloat32Array()
-	dists.resize(n)
+	var sort_y: PackedInt32Array = PackedInt32Array()
+	var sort_x: PackedInt32Array = PackedInt32Array()
+	var sort_under: PackedByteArray = PackedByteArray()
+	sort_y.resize(n)
+	sort_x.resize(n)
+	sort_under.resize(n)
+	var _platform_id_cache: Dictionary = {}
 	for i in range(n):
 		var gp: Vector2i = all_positions[i]
-		var cx: float = float(gp.x) * gs + half_gs
-		var cy: float = float(gp.y) * gs + half_gs
-		var dx: float = cx - cam_center.x
-		var dy: float = cy - cam_center.y
-		dists[i] = dx * dx + dy * dy
+		sort_y[i] = gp.y
+		sort_x[i] = gp.x
+		var is_plat := false
+		if not is_wall_of[i]:
+			var bid_check: StringName = main.placed_buildings.get(gp, &"")
+			if bid_check != &"":
+				if _platform_id_cache.has(bid_check):
+					is_plat = _platform_id_cache[bid_check]
+				else:
+					var bd_check: BlockData = Registry.get_block(bid_check)
+					is_plat = bd_check != null and bd_check.tags.has("platform")
+					_platform_id_cache[bid_check] = is_plat
+		sort_under[i] = 1 if is_plat else 0
 
 	# Sort an index permutation (keeps the parallel is_wall_of array aligned).
 	var order: Array = []
@@ -4326,7 +4438,11 @@ func _draw_placed_buildings() -> void:
 	for i in range(n):
 		order[i] = i
 	order.sort_custom(func(a: int, b: int) -> bool:
-		return dists[a] > dists[b])
+		if sort_y[a] != sort_y[b]:
+			return sort_y[a] < sort_y[b]
+		if sort_x[a] != sort_x[b]:
+			return sort_x[a] < sort_x[b]
+		return sort_under[a] > sort_under[b])
 
 	# Parallax offset — _get_top_offset ignores world_pos (leading underscore),
 	# so it's a single pair of values per frame. Compute once.
@@ -4532,10 +4648,48 @@ func _draw_placed_buildings() -> void:
 			var info: Dictionary = _get_belt_draw_info(grid_pos)
 			var texture: Texture2D = info["texture"]
 			var angle: float = info["angle"]
+			var tex_key: String = info.get("key", "straight")
 			if texture:
 				var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 				draw_set_transform(center, angle)
-				draw_texture_rect(texture, Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height)), false)
+				var dst_rect := Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height))
+				if not belt_scroll_enabled:
+					# Animation disabled — straight static draw, no source
+					# rect math, no scroll-vector branching.
+					draw_texture_rect(texture, dst_rect, false)
+					draw_set_transform(Vector2.ZERO, 0.0)
+					continue
+				# Per-variant UV scroll vector. Belt textures are authored
+				# "facing up" (see _get_belt_draw_info — the rotation adds
+				# PI/2 so rot 0 = right), so the through-line travel in
+				# texture-local coords is -y; sliding the source window
+				# down (+y) makes the visible surface scroll up. Corners
+				# scroll on a diagonal that approximates the curve's exit
+				# direction. Junctions reuse the straight scroll — the
+				# side spurs end up frozen-but-textured, which reads
+				# better than the whole tile sliding in one wrong axis.
+				# Without a separate "moving surface" mask we can't
+				# selectively animate just the curved strip; this is the
+				# nearest approximation a single PNG per variant allows.
+				var s: float = _belt_scroll_phase
+				var diag: float = s * 0.70710678  # 1/sqrt(2)
+				var scroll_off: Vector2
+				match tex_key:
+					"straight", "jl", "jr", "ja":
+						scroll_off = Vector2(0.0, s)
+					"ca":
+						# CA: through-line bends from back to right —
+						# in texture-local space the surface flows up
+						# and to the right.
+						scroll_off = Vector2(-diag, diag)
+					"cb":
+						# CB: mirror of CA, bends back to left.
+						scroll_off = Vector2(diag, diag)
+					_:
+						scroll_off = Vector2(0.0, s)
+				var tex_size: Vector2 = texture.get_size()
+				var src_rect := Rect2(scroll_off, tex_size)
+				draw_texture_rect_region(texture, dst_rect, src_rect)
 				draw_set_transform(Vector2.ZERO, 0.0)
 			else:
 				var color := _get_block_color(block_id)
@@ -4663,6 +4817,45 @@ func _draw_placed_buildings() -> void:
 					var ind_pos: Vector2 = top_pos + Vector2((width - ind_size) / 2.0, (height - ind_size) / 2.0)
 					draw_rect(Rect2(ind_pos, Vector2(ind_size, ind_size)), filter_item.color, true)
 					draw_rect(Rect2(ind_pos, Vector2(ind_size, ind_size)), filter_item.color.lightened(0.3), false, 1.0)
+
+		# Single-direction output indicator: when this block sends a particular
+		# item / fluid out exactly ONE side, paint that resource's icon at the
+		# midpoint of that edge, half a tile beyond the block. Resources that
+		# leave through multiple sides are skipped — the icon would just clutter
+		# the block. Skipped entirely for omnidirectional factories.
+		if data and not data.side_outputs.is_empty() and not data.tags.has("omnidirectional"):
+			var dir_count: Dictionary = {}
+			var dir_for: Dictionary = {}
+			for rel_key in data.side_outputs:
+				var oid := StringName(data.side_outputs[rel_key])
+				if oid == &"":
+					continue
+				dir_count[oid] = int(dir_count.get(oid, 0)) + 1
+				dir_for[oid] = int(rel_key)
+			var blk_rot: int = main.building_rotation.get(grid_pos, 0)
+			var blk_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+			var icon_sz: float = gs * 0.5
+			for oid in dir_count:
+				if dir_count[oid] != 1:
+					continue
+				var world_dir: int = (int(dir_for[oid]) + blk_rot) % 4
+				var icon_center: Vector2 = blk_center
+				match world_dir:
+					0: icon_center = blk_center + Vector2(width * 0.5 + gs * 0.5, 0)
+					1: icon_center = blk_center + Vector2(0, height * 0.5 + gs * 0.5)
+					2: icon_center = blk_center - Vector2(width * 0.5 + gs * 0.5, 0)
+					3: icon_center = blk_center - Vector2(0, height * 0.5 + gs * 0.5)
+				var out_tex: Texture2D = null
+				var item_d = Registry.get_item(oid)
+				if item_d and item_d.icon:
+					out_tex = item_d.icon
+				else:
+					var fluid_d = Registry.get_fluid(oid)
+					if fluid_d and fluid_d.icon:
+						out_tex = fluid_d.icon
+				if out_tex:
+					var rect := Rect2(icon_center - Vector2(icon_sz * 0.5, icon_sz * 0.5), Vector2(icon_sz, icon_sz))
+					draw_texture_rect(out_tex, rect, false)
 
 	# --- PASS 2.05: Batched wall fade (one draw_mesh instead of one draw_polygon per wall) ---
 	# The mesh was built at grid positions without parallax; apply it now so
@@ -4930,11 +5123,6 @@ func _draw_placed_buildings() -> void:
 				health_pct,
 				gs * block_size.x
 			)
-
-	# --- PASS 5: previously drew a red overlay + lightning-bolt icon on
-	# every consumer whose network had zero generation. Removed — the
-	# hover tooltip already surfaces the same info, and the overlay just
-	# made busy bases look broken.
 
 
 ## Draws the turret chassis (multi-barrel only) and head sprite(s) on top
@@ -5402,6 +5590,23 @@ func _draw_preview() -> void:
 		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
 		_draw_crusher_heads(preview_grid_pos, main.placement_rotation, data.grid_size, main.selected_building, ch_tint, false)
 
+	# Extractor efficiency readout — preview-only. A short white tick the
+	# width of the block plus an "Efficiency: NN%" label sit just above the
+	# previewed block, axis-aligned regardless of rotation, so the player
+	# can pick the best ore patch / water depth before committing to the
+	# placement. Not drawn after placement: the value is informational and
+	# would clutter every drill on the map.
+	if data and _logistics and (data.category == BlockData.BlockCategory.EXTRACTORS or data.tags.has("pump")) and _logistics.has_method("compute_extractor_preview_efficiency"):
+		var pv_eff: float = _logistics.compute_extractor_preview_efficiency(preview_grid_pos, data, main.placement_rotation)
+		var pv_w: float = float(main.GRID_SIZE) * grid_w
+		var pv_line_y: float = world_pos.y - 6.0
+		draw_line(Vector2(world_pos.x, pv_line_y), Vector2(world_pos.x + pv_w, pv_line_y), Color.WHITE, 2.0)
+		var pv_font: Font = ThemeDB.fallback_font
+		if pv_font:
+			var pv_text := "Efficiency: %d%%" % int(round(pv_eff * 100.0))
+			var pv_text_pos := Vector2(world_pos.x, pv_line_y - 4.0)
+			draw_string(pv_font, pv_text_pos, pv_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color.WHITE)
+
 	# Cable-node range preview: dashed yellow line extending ±range tiles in each
 	# cardinal direction, plus a yellow outline on the nearest connectable block
 	# the cable would actually wire up to.
@@ -5678,8 +5883,10 @@ func _demolish_rect(from: Vector2i, to: Vector2i) -> void:
 				# Skip cores (check tag, not just ID)
 				if data and data.tags.has("core"):
 					continue
-				# Skip enemy/derelict faction buildings
-				if main.get_building_faction(cell) != FACTION_LUMINA:
+				# LUMINA + DERELICT are both deconstructable. Live FEROX
+				# stays off-limits — unit combat handles those.
+				var rect_faction: int = main.get_building_faction(cell)
+				if rect_faction != FACTION_LUMINA and rect_faction != FACTION_DERELICT:
 					continue
 				var anchor: Vector2i = main.building_origins.get(cell, cell)
 				anchors[anchor] = block_id

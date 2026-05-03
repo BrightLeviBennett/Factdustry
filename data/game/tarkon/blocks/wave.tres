@@ -1,0 +1,49 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b7wave0002bx"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_ammo"]
+[ext_resource type="Texture2D" uid="uid://12n0k6gpubv5" path="res://textures/blocks/turrets/DoubleBarrel/DoubeBarrelBase.png" id="2_base"]
+[ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="3_head"]
+[ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="4_icon"]
+
+[sub_resource type="Resource" id="Resource_wave_water"]
+script = ExtResource("1_ammo")
+item_id = &"water"
+amount_per_shot = 2
+damage = 12.0
+building_damage_mult = 0.5
+inaccuracy = 14.0
+projectiles_per_shot = 5
+projectile_speed = 480.0
+projectile_lifetime = 0.7
+projectile_radius = 3.5
+knockback = 96.0
+projectile_color = Color(0.4, 0.7, 1.0, 1)
+trail_color = Color(0.55, 0.85, 1.0, 0.85)
+trail_length = 12.0
+metadata/_custom_type_script = "uid://mlvivi0chx0p"
+
+[resource]
+script = ExtResource("1")
+id = &"wave"
+display_name = "Wave"
+description = "Sprays a fan of pressurized water for medium-range area suppression. Heavy uptime cost."
+icon = ExtResource("4_icon")
+category = 4
+tags = PackedStringArray("turret", "defense")
+color = Color(0.4, 0.7, 1.0, 1)
+base_sprite = ExtResource("2_base")
+turret_head_sprite = ExtResource("3_head")
+max_health = 320.0
+build_cost = {
+"copper": 140,
+"silicon": 60,
+"steel": 20
+}
+build_time = 4.0
+requires_power = true
+power_consumption = 5.0
+attack_speed = 0.6
+attack_range = 6.5
+ammo_types = Array[Resource]([SubResource("Resource_wave_water")])
+max_stored_items = 40

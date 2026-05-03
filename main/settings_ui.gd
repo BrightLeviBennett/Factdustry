@@ -229,13 +229,16 @@ func _build_game_tab() -> void:
 			if hud and "autosave_interval" in hud:
 				hud.autosave_interval = float(v)
 	)
-	_add_toggle("Parallax Effect",
-		bool(_get_setting("parallax_enabled")),
+	# Auto-pause the world when the game window loses focus (alt-tab,
+	# minimise, click another app). Doesn't auto-unpause on return —
+	# the player presses space when they're ready.
+	_add_toggle("Pause When Window Loses Focus",
+		bool(_get_setting("pause_on_unfocus")),
 		func(v):
-			_set_setting("parallax_enabled", v)
-			var building_sys = get_node_or_null("/root/Main/BuildingSystem")
-			if building_sys and "parallax_enabled" in building_sys:
-				building_sys.parallax_enabled = v
+			_set_setting("pause_on_unfocus", bool(v))
+			var main_node = get_node_or_null("/root/Main")
+			if main_node and "pause_on_unfocus" in main_node:
+				main_node.pause_on_unfocus = bool(v)
 	)
 	# Tech tree pan: ON = WASD scrolls the canvas; OFF = click-and-drag
 	# pans it. The tech tree UI reads this every frame so a toggle takes
@@ -284,6 +287,30 @@ func _build_graphics_tab() -> void:
 	_add_toggle("VSync", bool(_get_setting("vsync")), func(v):
 		_set_setting("vsync", bool(v))
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if v else DisplayServer.VSYNC_DISABLED)
+	)
+	_add_section("Effects")
+	# Parallax: gives blocks the illusion of depth via a small camera-driven
+	# side offset. Off by default — purely cosmetic and some players find it
+	# distracting.
+	_add_toggle("Parallax Effect",
+		bool(_get_setting("parallax_enabled")),
+		func(v):
+			_set_setting("parallax_enabled", v)
+			var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+			if building_sys and "parallax_enabled" in building_sys:
+				building_sys.parallax_enabled = v
+	)
+	# Conveyor scroll: animates straight belt textures (and corner pieces
+	# diagonally) so the surface visibly flows. Off by default — the
+	# per-frame redraw it forces is wasted on machines with lots of belts
+	# but no other moving overlay.
+	_add_toggle("Animated Conveyor Belts",
+		bool(_get_setting("belt_scroll_enabled")),
+		func(v):
+			_set_setting("belt_scroll_enabled", bool(v))
+			var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+			if building_sys and "belt_scroll_enabled" in building_sys:
+				building_sys.belt_scroll_enabled = bool(v)
 	)
 
 func _get_window_mode_index() -> int:
@@ -461,10 +488,12 @@ const _DEFAULTS := {
 	"require_research": true,
 	"enemies_attack": true,
 	"unlock_all_tech": false,
-	"parallax_enabled": true,
+	"parallax_enabled": false,
+	"belt_scroll_enabled": false,
 	"pan_rotate_threshold": 1.5,
 	"autosave_interval": 60.0,
 	"tech_tree_wasd": false,
+	"pause_on_unfocus": true,
 }
 
 static var _cache: Dictionary = {}
@@ -566,9 +595,13 @@ static func apply_pending_settings() -> void:
 		main_node.require_research = bool(_get_setting("require_research"))
 	if main_node and "enemies_attack" in main_node:
 		main_node.enemies_attack = bool(_get_setting("enemies_attack"))
+	if main_node and "pause_on_unfocus" in main_node:
+		main_node.pause_on_unfocus = bool(_get_setting("pause_on_unfocus"))
 	var building_sys = main_node.get_node_or_null("BuildingSystem") if main_node else null
 	if building_sys and "parallax_enabled" in building_sys:
 		building_sys.parallax_enabled = bool(_get_setting("parallax_enabled"))
+	if building_sys and "belt_scroll_enabled" in building_sys:
+		building_sys.belt_scroll_enabled = bool(_get_setting("belt_scroll_enabled"))
 	var cam = main_node.get_node_or_null("Camera2D") if main_node else null
 	if cam and "pan_rotate_threshold" in cam:
 		cam.pan_rotate_threshold = float(_get_setting("pan_rotate_threshold"))
