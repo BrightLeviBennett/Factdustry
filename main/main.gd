@@ -421,6 +421,14 @@ func _ready() -> void:
 			for k in SaveManager.sector_resources[sid]:
 				resources[k] = int(SaveManager.sector_resources[sid][k])
 			resources_changed.emit(resources)
+		else:
+			# First-time landing on this sector — seed a small starter
+			# stockpile so the player has the materials needed to bootstrap
+			# their first drill / conveyor / generator chain without having
+			# to mine raw copper before placing anything.
+			resources[&"mat_copper"] = int(resources.get(&"mat_copper", 0)) + 500
+			resources[&"mat_silicon"] = int(resources.get(&"mat_silicon", 0)) + 500
+			resources_changed.emit(resources)
 		# Legacy saves can ship with stockpiles that exceed the current
 		# core cap (made before the cap existed, or after a core was
 		# destroyed mid-session). Trim them immediately so the player

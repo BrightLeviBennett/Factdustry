@@ -43,7 +43,11 @@ const HEAD_SCALE := 0.35
 ## yaws — and they hold their last orientation when no target is
 ## acquired, instead of snapping back to forward.
 var _healer_aim_offset: float = 0.0
-var _turret_aim_offset: float = 0.0
+## Each turret head tracks the target from its own world-space pivot,
+## so a close target makes the two heads visibly toe in instead of
+## staying perfect mirrors. Left / right are independent.
+var _turret_aim_offset_left: float = 0.0
+var _turret_aim_offset_right: float = 0.0
 ## True when the chassis has a live combat aim this frame (manual
 ## fire or auto-acquired enemy/building). When false, the turret aim
 ## offset is held steady so the heads keep their last pose.
@@ -243,30 +247,41 @@ func _update_head_aim(delta: float) -> void:
 	# pose stable while the world is frozen.
 	if "world_paused" in main and main.world_paused:
 		return
-	# Healer aim — only updates while a heal beam is live. When the
-	# beam drops, hold the last offset so the head stays where it was.
-	if _heal_beam_active:
-		var d: Vector2 = _heal_beam_endpoint - position
+
+	# Whichever head the player is currently driving with the cursor
+	# tracks the mouse continuously; the OTHER head runs on AI auto-aim
+	# (only updates when an actual target is acquired, otherwise holds
+	# its last pose). Default mode → turret heads on cursor, healer on
+	# heal AI. Heal mode → healer on cursor, turret heads on shoot AI.
+	var healer_aim_pos: Variant = _pick_healer_aim_pos()
+	if healer_aim_pos != null:
+		var d: Vector2 = (healer_aim_pos as Vector2) - position
 		if d.length_squared() > 1.0:
 			var world_angle: float = d.angle() + PI / 2.0 + PI
 			var target_offset: float = wrapf(world_angle - facing_angle, -PI, PI)
 			_healer_aim_offset = _smooth_angle(_healer_aim_offset, target_offset, delta)
 
-	# Turret aim — same idea: track combat_system's pick order, but
-	# only while a target is live. With no target the offset is held
-	# steady so the heads keep their last pose relative to the body
-	# (and naturally rotate WITH the body via `facing_angle + offset`
-	# at draw time).
+	# Turret aim — each head tracks the target from its own world-space
+	# pivot, so they aim at the SAME target but the angles differ when
+	# the target is close (the two heads visibly toe in instead of
+	# being perfect mirrors). With no target both offsets are held
+	# steady, naturally rotating WITH the body via `facing_angle + offset`.
 	_has_turret_aim = false
 	var aim_pos: Variant = _pick_turret_aim_pos()
 	if aim_pos != null:
 		_has_turret_aim = true
 		_turret_aim_pos = aim_pos as Vector2
-		var dt: Vector2 = _turret_aim_pos - position
-		if dt.length_squared() > 1.0:
+		for right_side in [false, true]:
+			var head_world: Vector2 = _turret_world_center(right_side)
+			var dt: Vector2 = _turret_aim_pos - head_world
+			if dt.length_squared() <= 1.0:
+				continue
 			var world_angle_t: float = dt.angle() + PI / 2.0 + PI
 			var target_offset_t: float = wrapf(world_angle_t - facing_angle, -PI, PI)
-			_turret_aim_offset = _smooth_angle(_turret_aim_offset, target_offset_t, delta)
+			if right_side:
+				_turret_aim_offset_right = _smooth_angle(_turret_aim_offset_right, target_offset_t, delta)
+			else:
+				_turret_aim_offset_left = _smooth_angle(_turret_aim_offset_left, target_offset_t, delta)
 
 
 func _smooth_angle(current: float, target: float, delta: float) -> float:
@@ -279,38 +294,67 @@ func _smooth_angle(current: float, target: float, delta: float) -> float:
 	return wrapf(current + step, -PI, PI)
 
 
-## Picks the world position the drone *would* shoot at this frame.
-## Mirrors `combat_system._update_drone_combat`'s priority ordering so
-## the visual heads stay coherent with where the projectile actually
-## flies. Returns null when no shot is queueable (mining, controlling
-## a unit, terrain paint, no targets in range).
+## Picks the world position the turret heads should aim at this frame.
+## Default mode → mouse cursor (continuous tracking, even when not
+## firing). Heal mode → AI auto-shoot target (nearest enemy unit, then
+## nearest enemy building inside drone range). Returns null when the
+## drone isn't allowed to point its turrets (controlling a unit /
+## mining / terrain paint), so the heads hold their last pose.
 func _pick_turret_aim_pos() -> Variant:
+	if not _drone_in_control():
+		return null
+	if not heal_mode:
+		# Default mode: heads follow the cursor unconditionally so the
+		# player can read where the next bullet will go without having
+		# to drag-fire first. GUI hovers / selected blocks don't matter
+		# for *aim* — only for actually firing — so we don't gate them.
+		return get_global_mouse_position()
+	# Heal mode: turret heads auto-aim at the nearest combat target.
+	return _ai_shoot_target_pos()
+
+
+## Picks the world position the healer head should aim at this frame.
+## Heal mode → mouse cursor (continuous tracking). Default mode → the
+## active heal-beam endpoint (the AI heal target, when one is locked).
+## Returns null when no heal aim is available so the head holds its
+## last pose instead of snapping back to chassis forward.
+func _pick_healer_aim_pos() -> Variant:
+	if not _drone_in_control():
+		return null
+	if heal_mode:
+		return get_global_mouse_position()
+	if _heal_beam_active:
+		return _heal_beam_endpoint
+	return null
+
+
+## Drone is "in control" when no overriding mode is taking the
+## controls (controlling a unit/turret directly, mining the ground,
+## terrain paint mode in the editor). Used to gate cursor-tracking on
+## the heads so they don't try to follow the mouse while the player
+## is doing something else with it.
+func _drone_in_control() -> bool:
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr and unit_mgr.controlled_entity != null:
-		return null
+		return false
 	if mining_target != null:
-		return null
+		return false
 	var terrain = _terrain_ref()
 	if terrain and "paint_mode" in terrain and terrain.paint_mode:
-		return null
+		return false
+	return true
 
-	# Manual fire: drag-shoot in default mode, LMB held, no GUI hover,
-	# no block selected for placement. Otherwise fall through to AI
-	# auto-aim so heads track passive defense targets too.
-	if not heal_mode:
-		var lmb: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-		if main.selected_building != &"":
-			lmb = false
-		if get_viewport().gui_get_hovered_control() != null:
-			lmb = false
-		if lmb:
-			return get_global_mouse_position()
 
+## Shared AI auto-target pick used by combat + the heads when one or
+## the other side is on AI duty. Returns the world position of the
+## nearest enemy unit in range, falling back to the nearest enemy
+## building, or null if neither exists in range.
+func _ai_shoot_target_pos() -> Variant:
+	var unit_mgr = _unit_mgr_ref()
 	var combat = main.get_node_or_null("CombatSystem")
 	var range_px: float = 4.0 * main.GRID_SIZE
 	if combat and "drone_range" in combat:
 		range_px = float(combat.drone_range) * main.GRID_SIZE
-
 	var enemies: Array[Node2D] = unit_mgr.enemies if unit_mgr else [] as Array[Node2D]
 	var nearest: Node2D = null
 	var best_d2: float = range_px * range_px
@@ -323,7 +367,6 @@ func _pick_turret_aim_pos() -> Variant:
 			nearest = e
 	if nearest != null:
 		return nearest.position
-
 	if combat and combat.has_method("_find_nearest_enemy_building"):
 		var nb: Vector2i = combat._find_nearest_enemy_building(position, range_px)
 		if nb != Vector2i(-9999, -9999):
@@ -839,7 +882,8 @@ func _move_to_core() -> void:
 func _reset_orientation() -> void:
 	facing_angle = PI
 	_target_facing_angle = PI
-	_turret_aim_offset = 0.0
+	_turret_aim_offset_left = 0.0
+	_turret_aim_offset_right = 0.0
 	_healer_aim_offset = 0.0
 	_has_turret_aim = false
 	_heal_beam_active = false
@@ -1079,12 +1123,17 @@ func _turret_muzzle_world(right_side: bool) -> Vector2:
 		return center
 	var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR * HEAD_SCALE
 	var head_h: float = turret_head_texture.get_size().y * scale_mult
-	# Aim is stored as an offset from chassis facing — combine for the
-	# absolute world rotation of the head, then project the muzzle
-	# half-a-head forward along that direction.
-	var world_rot: float = facing_angle + _turret_aim_offset
-	var fwd: Vector2 = Vector2(0.0, 1.0).rotated(world_rot)
+	var fwd: Vector2 = _turret_muzzle_fwd(right_side)
 	return center + fwd * (head_h * 0.5)
+
+
+## Unit vector pointing out the muzzle of one turret head. Combines
+## chassis facing with the per-side aim offset, since each head can
+## rotate independently.
+func _turret_muzzle_fwd(right_side: bool) -> Vector2:
+	var offset: float = _turret_aim_offset_right if right_side else _turret_aim_offset_left
+	var world_rot: float = facing_angle + offset
+	return Vector2(0.0, 1.0).rotated(world_rot)
 
 
 ## Combat-system entry point: returns the next turret muzzle's world
@@ -1097,16 +1146,31 @@ func next_turret_muzzle_world_pos() -> Vector2:
 	return pos
 
 
+## Returns both the world position and the unit forward direction of
+## the next turret muzzle, then flips the toggle. Combat uses the
+## direction to fire bullets along the head's actual aim line — so
+## a free-rotating head still throws projectiles out where the player
+## sees the barrel pointing, even when the head is rotated past the
+## chassis-forward arc (target behind the drone, etc.).
+func next_turret_muzzle_world_info() -> Dictionary:
+	var right_side: bool = _next_muzzle_is_right
+	_next_muzzle_is_right = not _next_muzzle_is_right
+	return {
+		"pos": _turret_muzzle_world(right_side),
+		"dir": _turret_muzzle_fwd(right_side),
+	}
+
+
 func _draw_turret_heads() -> void:
 	if turret_head_texture == null:
 		return
 	var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR * HEAD_SCALE
 	var tex_size: Vector2 = turret_head_texture.get_size() * scale_mult
 	var rect := Rect2(-tex_size * 0.5, tex_size)
-	var world_rot: float = facing_angle + _turret_aim_offset
 	for right_side in [false, true]:
 		var center_local: Vector2 = _turret_local_offset(right_side).rotated(facing_angle)
-		draw_set_transform(center_local, world_rot)
+		var offset: float = _turret_aim_offset_right if right_side else _turret_aim_offset_left
+		draw_set_transform(center_local, facing_angle + offset)
 		draw_texture_rect(turret_head_texture, rect, false)
 	draw_set_transform(Vector2.ZERO, 0.0)
 

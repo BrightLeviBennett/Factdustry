@@ -39,6 +39,7 @@ var mirror_y_btn: Button
 var convert_faction_btn: Button
 var line_size_label: Label
 var line_size_spin: SpinBox
+var circle_fill_check: CheckBox
 
 # Faction conversion popup
 var faction_popup: PanelContainer
@@ -104,9 +105,17 @@ func _create_toolbar() -> void:
 	toolbar.add_theme_stylebox_override("panel", _panel_style(Color(0, 0, 0, 0.7)))
 	add_child(toolbar)
 
+	# Scroll horizontally when the toolbar can't fit all its widgets.
+	# Vertical scroll is disabled — the bar is one row and the content
+	# is sized to its natural height.
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	toolbar.add_child(scroll)
+
 	var hbox = HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 6)
-	toolbar.add_child(hbox)
+	scroll.add_child(hbox)
 	_toolbar_hbox = hbox
 
 	# Mode toggle buttons
@@ -143,6 +152,18 @@ func _create_toolbar() -> void:
 	line_size_spin.custom_minimum_size = Vector2(56, 0)
 	line_size_spin.value_changed.connect(func(v: float): main.line_size = int(v))
 	hbox.add_child(line_size_spin)
+
+	# Circle-fill toggle. Only meaningful while the Circle tool is
+	# selected — visibility tracks the same gate as `line_size_spin`.
+	# Drives `main.circle_fill`; when off, `_apply_circle` stamps just
+	# the ring instead of the filled disk.
+	circle_fill_check = CheckBox.new()
+	circle_fill_check.text = "Fill Circle"
+	circle_fill_check.tooltip_text = "When off, the Circle tool draws an outline ring instead of a filled disk."
+	circle_fill_check.button_pressed = main.circle_fill
+	circle_fill_check.add_theme_font_size_override("font_size", 12)
+	circle_fill_check.toggled.connect(func(v: bool): main.circle_fill = v)
+	hbox.add_child(circle_fill_check)
 
 	# Mirror buttons (transform mode only)
 	var sep_transform = VSeparator.new()
@@ -314,6 +335,11 @@ func _update_tool_highlight() -> void:
 		line_size_label.visible = show_line_size
 	if line_size_spin:
 		line_size_spin.visible = show_line_size
+	# Fill-toggle is Circle-only.
+	var show_circle_fill: bool = (main.current_tool == main.Tool.CIRCLE) \
+		and (main.editor_mode == main.EditorMode.TERRAIN)
+	if circle_fill_check:
+		circle_fill_check.visible = show_circle_fill
 
 
 func _update_mode_visibility() -> void:

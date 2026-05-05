@@ -217,6 +217,35 @@ func reset_campaign() -> void:
 	active_sector_id = &""
 	pending_sector_id = &""
 	pending_map_path = ""
+	# Drop any parked-Main left over from a planet-map round-trip.
+	# Without this the parked tree's `main.resources` survives the wipe
+	# and the next `sync_active_sector_resources` (e.g. from opening
+	# the tech tree) re-seeds `sector_resources` from it, which then
+	# shows up in the tech tree's Global Resources panel as "magic"
+	# resources after a wipe. Same applies for any battery reserves
+	# the parked PowerSystem was carrying.
+	discard_parked_main()
+	# Zero live game state too — if Main is still in /root (player
+	# wiped while in-game) `main.resources`, `main.ferox_resources`,
+	# and the power network's persistent battery reserves all need
+	# to go to zero so the next save round-trip can't write them
+	# back into the campaign pool.
+	var live_main = get_node_or_null("/root/Main")
+	if live_main:
+		if "resources" in live_main and live_main.resources is Dictionary:
+			for k in live_main.resources.keys():
+				live_main.resources[k] = 0
+			if live_main.has_signal("resources_changed"):
+				live_main.resources_changed.emit(live_main.resources)
+		if "ferox_resources" in live_main and live_main.ferox_resources is Dictionary:
+			for k in live_main.ferox_resources.keys():
+				live_main.ferox_resources[k] = 0
+			if live_main.has_signal("ferox_resources_changed"):
+				live_main.ferox_resources_changed.emit(live_main.ferox_resources)
+		var power_sys = live_main.get_node_or_null("PowerSystem")
+		if power_sys and "_battery_stored" in power_sys \
+				and power_sys._battery_stored is Dictionary:
+			power_sys._battery_stored.clear()
 	# Wipe everything under /saves.
 	var dir = DirAccess.open(SAVES_DIR)
 	if dir != null:

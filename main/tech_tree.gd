@@ -767,7 +767,7 @@ func _register_units() -> void:
 	_add(&"pierce",                   "Pierce",                   [&"soar"],                      [&"unit_assembler"], {&"mat_copper": 750, &"mat_graphite": 260, &"mat_steel": 190}, Vector2(-25, 6))
 	_add(&"ascend",                   "Ascend",                   [&"pierce"],                    [&"unit_reassembler"], {&"mat_copper": 1100, &"mat_graphite": 400, &"mat_steel": 300}, Vector2(-25, 7))
 	# Unit Upgrader branch
-	_add(&"unit_refabricator",        "Unit Refabricator",        [&"tank_fabricator"],           [&"mat_steel"], {&"mat_copper": 150, &"mat_silicon": 50}, Vector2(-24, 2))
+	_add(&"unit_refabricator",        "Unit Refabricator",        [&"tank_fabricator"],           [&"mat_steel"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 50}, Vector2(-24, 2))
 	_add(&"unit_upgrader",            "Unit Upgrader",            [&"unit_refabricator"],         [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_silicon": 90, &"mat_steel": 35}, Vector2(-24, 3))
 	_add(&"unit_assembler",           "Unit Assembler",           [&"unit_upgrader"],             [], {&"mat_copper": 420, &"mat_silicon": 140, &"mat_steel": 80}, Vector2(-24, 4))
 	_add(&"unit_reassembler",         "Unit Reassembler",         [&"unit_assembler"],            [&"-L-ruins"], {&"mat_copper": 580, &"mat_silicon": 200, &"mat_steel": 130}, Vector2(-24, 5))

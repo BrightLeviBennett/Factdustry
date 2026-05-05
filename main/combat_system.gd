@@ -907,11 +907,15 @@ func _update_drone_combat(delta: float) -> void:
 		var nearest_a: Node2D = _find_nearest_enemy(drone.position, enemies_a)
 		if nearest_a != null and drone.position.distance_to(nearest_a.position) <= range_px_a:
 			drone_cooldown = drone_attack_speed
-			var origin_a: Vector2 = drone.next_turret_muzzle_world_pos() if drone.has_method("next_turret_muzzle_world_pos") else drone.position
+			# Bullet flies along the muzzle's actual facing direction
+			# (not muzzle→target) so a free-rotating head whose front
+			# isn't quite on-target this frame still spits projectiles
+			# out the barrel rather than firing them sideways.
+			var muzzle_a: Dictionary = _drone_muzzle_info(drone, nearest_a.position)
 			_spawn_projectile(
-				origin_a,
+				muzzle_a["pos"],
 				nearest_a,
-				nearest_a.position,
+				muzzle_a["pos"] + muzzle_a["dir"] * range_px_a,
 				"enemy",
 				drone_projectile_speed,
 				drone_damage,
@@ -930,11 +934,11 @@ func _update_drone_combat(delta: float) -> void:
 			return
 		var b_world: Vector2 = main.grid_to_world(nearest_bldg) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 		drone_cooldown = drone_attack_speed
-		var origin_b: Vector2 = drone.next_turret_muzzle_world_pos() if drone.has_method("next_turret_muzzle_world_pos") else drone.position
+		var muzzle_b: Dictionary = _drone_muzzle_info(drone, b_world)
 		_spawn_projectile(
-			origin_b,
+			muzzle_b["pos"],
 			nearest_bldg,
-			b_world,
+			muzzle_b["pos"] + muzzle_b["dir"] * range_px_a,
 			"building",
 			drone_projectile_speed,
 			drone_damage,
@@ -952,13 +956,15 @@ func _update_drone_combat(delta: float) -> void:
 	drone_cooldown = drone_attack_speed
 
 	var mouse_pos = get_global_mouse_position()
-	var direction = (mouse_pos - drone.position).normalized()
-	# Calculate a far-off target point in that direction
-	var target_pos = drone.position + direction * drone_range * main.GRID_SIZE
+	var muzzle_m: Dictionary = _drone_muzzle_info(drone, mouse_pos)
+	# Bullet leaves the muzzle along the muzzle's own facing axis so
+	# the trajectory matches whatever direction the visible head is
+	# pointing — even if it's lagged behind the cursor or rotated past
+	# the chassis-forward arc.
+	var target_pos = muzzle_m["pos"] + muzzle_m["dir"] * drone_range * main.GRID_SIZE
 
-	var origin_m: Vector2 = drone.next_turret_muzzle_world_pos() if drone.has_method("next_turret_muzzle_world_pos") else drone.position
 	_spawn_projectile(
-		origin_m,
+		muzzle_m["pos"],
 		null,              # no target ref — flies straight
 		target_pos,
 		"none",            # special type: hits nothing automatically
@@ -969,6 +975,23 @@ func _update_drone_combat(delta: float) -> void:
 		false,
 		0.0,
 	)
+
+
+## Resolves both the next muzzle's world position and its forward
+## direction for the player drone. Falls back gracefully on builds
+## without `next_turret_muzzle_world_info` — older drones return only
+## a position, in which case we synthesise a direction from the muzzle
+## back to the drone center → target line.
+func _drone_muzzle_info(drone: Node2D, fallback_target: Vector2) -> Dictionary:
+	if drone.has_method("next_turret_muzzle_world_info"):
+		return drone.next_turret_muzzle_world_info()
+	var pos: Vector2 = drone.position
+	if drone.has_method("next_turret_muzzle_world_pos"):
+		pos = drone.next_turret_muzzle_world_pos()
+	var dir: Vector2 = (fallback_target - drone.position).normalized()
+	if dir.length_squared() < 0.001:
+		dir = Vector2(1.0, 0.0)
+	return {"pos": pos, "dir": dir}
 
 
 # =========================

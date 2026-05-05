@@ -243,7 +243,8 @@
 	"res://data/game/tarkon/tiles/vent.tres",
 	"res://data/game/tarkon/tiles/water.tres",
 	"res://data/game/tarkon/tiles/water_deep.tres",
-	"res://data/game/tarkon/tiles/water_medium.tres"
+	"res://data/game/tarkon/tiles/water_medium.tres",
+	"res://data/game/tarkon/tiles/zinc_ore.tres"
   ],
   "status_effects": [
 	"res://data/game/tarkon/status_effects/burning.tres",

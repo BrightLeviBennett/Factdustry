@@ -116,6 +116,10 @@ var _line_erasing := false
 var _line_start := Vector2i.ZERO
 var _line_end := Vector2i.ZERO
 var line_size: int = 1
+## Circle tool: when true the disk is filled, when false only the
+## ring (an outline `line_size` cells thick) is stamped. Toggled by
+## the "Fill Circle" checkbox on the editor HUD top bar.
+var circle_fill: bool = true
 
 # Circle tool state. Drag from `_circle_center` outward; the radius
 # follows the cursor and the commit stamps every cell whose euclidean
@@ -801,10 +805,24 @@ func _apply_circle() -> void:
 	var radius: float = Vector2(_circle_edge - _circle_center).length() + 0.5
 	var rceil: int = int(ceil(radius))
 	var r2: float = radius * radius
+	# Outline mode: only paint cells inside the disk that have at
+	# least one cardinal neighbour OUTSIDE the disk — i.e. the
+	# perimeter band. The brush thickness still fattens it via the
+	# inner tx/ty loop, so `line_size` controls the ring width.
+	var outline_only: bool = not circle_fill
 	for dx in range(-rceil, rceil + 1):
 		for dy in range(-rceil, rceil + 1):
-			if float(dx * dx + dy * dy) > r2:
+			var d2: float = float(dx * dx + dy * dy)
+			if d2 > r2:
 				continue
+			if outline_only:
+				var on_edge: bool = \
+					float((dx + 1) * (dx + 1) + dy * dy) > r2 \
+					or float((dx - 1) * (dx - 1) + dy * dy) > r2 \
+					or float(dx * dx + (dy + 1) * (dy + 1)) > r2 \
+					or float(dx * dx + (dy - 1) * (dy - 1)) > r2
+				if not on_edge:
+					continue
 			var center_cell := _circle_center + Vector2i(dx, dy)
 			for tx in range(-half, -half + thickness):
 				for ty in range(-half, -half + thickness):
@@ -1597,10 +1615,19 @@ func _draw_circle_preview() -> void:
 	var radius: float = Vector2(_circle_edge - _circle_center).length() + 0.5
 	var rceil: int = int(ceil(radius))
 	var r2: float = radius * radius
+	var outline_only: bool = not circle_fill
 	for dx in range(-rceil, rceil + 1):
 		for dy in range(-rceil, rceil + 1):
 			if float(dx * dx + dy * dy) > r2:
 				continue
+			if outline_only:
+				var on_edge: bool = \
+					float((dx + 1) * (dx + 1) + dy * dy) > r2 \
+					or float((dx - 1) * (dx - 1) + dy * dy) > r2 \
+					or float(dx * dx + (dy + 1) * (dy + 1)) > r2 \
+					or float(dx * dx + (dy - 1) * (dy - 1)) > r2
+				if not on_edge:
+					continue
 			var center_cell := _circle_center + Vector2i(dx, dy)
 			for tx in range(-half, -half + thickness):
 				for ty in range(-half, -half + thickness):

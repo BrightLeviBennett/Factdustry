@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://b8qyard0inc01"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b3xh5ltdgpd4s" path="res://textures/terrain/Zinc.png" id="1_zinc0"]
+
+[resource]
+script = ExtResource("1")
+id = &"zinc_ore"
+display_name = "Zinc Ore"
+description = "A surface deposit of zinc. Place a drill facing it to extract. Like coal, zinc sits on the ground and requires a floor underneath — it can't be planted in walls."
+icon = ExtResource("1_zinc0")
+category = 2
+color = Color(0.78, 0.82, 0.88, 1)
+opacity = 0.9
+tags = PackedStringArray("ore", "mineral", "floor_ore")
+minable_resource = &"mat_zinc"

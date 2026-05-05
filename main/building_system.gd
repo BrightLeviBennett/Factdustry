@@ -3222,9 +3222,16 @@ func _get_top_offset(_world_pos: Vector2) -> Vector2:
 
 ## Draws a block texture at the given position, rotated by building rotation.
 ## Draws a block texture, rotated for directional blocks.
-## rot: 0=right, 1=down, 2=left, 3=up. Textures face up by default, so +90° offset applied.
-func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: float, rot: int = 0, tint: Color = Color.WHITE) -> void:
-	var angle: float = rot * PI / 2.0 + PI / 2.0  # +90° because textures face up, rot 0 = right
+## rot: 0=right, 1=down, 2=left, 3=up. Directional source textures face
+## UP (top of texture = front), so a +90° offset turns them into the
+## "rot 0 = right" baseline. Non-directional textures are authored
+## upright in source and shouldn't be rotated at all — pass
+## `directional = false` so the offset (and `rot`) are skipped, keeping
+## the art identical to the source file.
+func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: float, rot: int = 0, tint: Color = Color.WHITE, directional: bool = true) -> void:
+	var angle: float = 0.0
+	if directional:
+		angle = rot * PI / 2.0 + PI / 2.0
 	var center := top_pos + Vector2(w / 2.0, h / 2.0)
 	draw_set_transform(center, angle)
 	draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
@@ -4014,7 +4021,11 @@ func _get_block_grid_size(block_id: StringName) -> Vector2i:
 ## origin cells of each building), so multi-tile blocks render as one
 ## rect instead of one per covered cell.
 func _draw_block_hitboxes() -> void:
-	if not main or not main.show_hitboxes:
+	# `main` here is whatever wired this BuildingSystem up — usually the
+	# game's `Main` node, but the map editor reuses the same draw code
+	# with its own root that doesn't carry the developer toggles. Guard
+	# the property check so the editor doesn't crash on missing fields.
+	if main == null or not ("show_hitboxes" in main) or not main.show_hitboxes:
 		return
 	var gs := float(main.GRID_SIZE)
 	var color := Color(1.0, 0.2, 0.9, 0.9)
@@ -4919,9 +4930,9 @@ func _draw_placed_buildings() -> void:
 				_draw_scraper_head(grid_pos, top_pos, width, height)
 			# Unit fabricator layered rendering: base + unit-in-construction + top
 			if data and data.produced_unit != &"" and data.base_sprite and data.top_sprite:
-				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 				_draw_fabricator_unit_layer(grid_pos, data, top_pos, width, height, rot)
-				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Refabricator: base + per-side input overlays reflecting
 			# adjacent payload conveyors.
 			elif data and data.tags.has("refabricator") and data.base_sprite:
@@ -4948,14 +4959,14 @@ func _draw_placed_buildings() -> void:
 				var tex: Texture2D = _payload_conveyor_textures.get(tex_key)
 				if tex == null:
 					tex = data.top_sprite
-				_draw_block_texture(tex, top_pos, width, height, rot)
+				_draw_block_texture(tex, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Constructor / deconstructor: base + in-progress block (with
 			# build / decon reveal animation) + top.
 			elif data and data.base_sprite and data.top_sprite \
 					and (data.tags.has("constructor") or data.tags.has("deconstructor")):
-				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 				_draw_constructor_layer(grid_pos, data, top_pos, width, height, rot)
-				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Loader / unloader: base + held payload (between layers) + top.
 			# Item counts surface in the hover tooltip; the in-world layer
 			# only draws the held building/unit so the player can see at a
@@ -4963,33 +4974,33 @@ func _draw_placed_buildings() -> void:
 			elif data and data.base_sprite and data.top_sprite \
 					and (data.tags.has("payload_loader") or data.tags.has("freight_loader") \
 						or data.tags.has("payload_unloader") or data.tags.has("freight_unloader")):
-				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 				_draw_loader_payload_layer(grid_pos, data, top_pos, width, height, rot)
-				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Plain layered render: base + top (no faction overlay, no
 			# fabricator unit layer, no refabricator side overlays). Used
 			# by any block that just wants a static two-layer sprite.
 			elif data and data.base_sprite and data.top_sprite:
-				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
-				_draw_block_texture(data.top_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Faction-layered rendering (cores): base sprite + faction overlay
 			elif data and data.base_sprite:
-				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
+				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 				var overlay_scale := 0.7
 				var ow: float = width * overlay_scale
 				var oh: float = height * overlay_scale
 				var overlay_pos: Vector2 = top_pos + Vector2((width - ow) / 2.0, (height - oh) / 2.0)
 				var faction: int = main.get_building_faction(grid_pos)
 				if faction == FACTION_FEROX and data.ferox_overlay:
-					_draw_block_texture(data.ferox_overlay, overlay_pos, ow, oh, rot)
+					_draw_block_texture(data.ferox_overlay, overlay_pos, ow, oh, rot, Color.WHITE, is_dir)
 				elif faction == FACTION_DERELICT and data.derelict_overlay:
-					_draw_block_texture(data.derelict_overlay, overlay_pos, ow, oh, rot)
+					_draw_block_texture(data.derelict_overlay, overlay_pos, ow, oh, rot, Color.WHITE, is_dir)
 				elif data.lumina_overlay:
-					_draw_block_texture(data.lumina_overlay, overlay_pos, ow, oh, rot)
+					_draw_block_texture(data.lumina_overlay, overlay_pos, ow, oh, rot, Color.WHITE, is_dir)
 			# Top sprite only (single-layer world texture)
 			elif data and data.top_sprite:
 				var draw_rot: int = (rot + 1) % 4 if data.tags.has("shaft") else rot
-				_draw_block_texture(data.top_sprite, top_pos, width, height, draw_rot)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, draw_rot, Color.WHITE, is_dir)
 			# Fallback: colored rectangle. data.icon is intentionally NOT
 			# used here — it's reserved for UI (HUD/tooltips) only.
 			else:
@@ -5176,8 +5187,9 @@ func _draw_placed_buildings() -> void:
 				elif new_data.base_sprite:
 					swap_tex = new_data.base_sprite
 				if swap_tex:
-					var draw_rot: int = new_rot if _is_directional(new_id) else 0
-					_draw_block_texture(swap_tex, top_pos_s, w_s, h_s, draw_rot, tint_s)
+					var is_dir_s: bool = _is_directional(new_id)
+					var draw_rot: int = new_rot if is_dir_s else 0
+					_draw_block_texture(swap_tex, top_pos_s, w_s, h_s, draw_rot, tint_s, is_dir_s)
 				else:
 					var col_s: Color = _get_block_color(new_id)
 					col_s.a = 0.45
