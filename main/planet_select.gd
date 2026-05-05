@@ -118,6 +118,21 @@ var launch_overlay_requirements: VBoxContainer
 var launch_overlay_confirm: Button
 var launch_overlay_cancel: Button
 var launch_overlay_sector: Resource = null
+## Per-resource HSliders on the launch overlay. One slider per item
+## (built from Registry.items_list); the slider for a given material
+## is hidden when its tech-tree node isn't researched yet. Whatever
+## the player dials in gets added to the launch cost (deducted from
+## the source sector) and seeded into the destination sector on
+## landing. The whole row is hidden for starting_grounds because
+## LAUNCH_FREE bypasses the overlay.
+var launch_overlay_seed_container: VBoxContainer
+var _launch_seed_sliders: Dictionary = {}    # StringName item_id -> HSlider
+var _launch_seed_value_lbls: Dictionary = {} # StringName item_id -> Label
+var _launch_seed_rows: Dictionary = {}       # StringName item_id -> HBoxContainer
+## Hard cap on what a single slider can request. Re-clamped down to
+## the source sector's actual stockpile in `_refresh_launch_overlay_requirements`
+## so the player can never request more than they have.
+const LAUNCH_SEED_HARD_MAX: int = 1000
 var back_btn: Button
 var sector_name_label: Label
 var sector_desc_label: Label
@@ -1501,12 +1516,54 @@ func _do_launch(sector) -> void:
 # =========================
 
 ## Hardcoded cost to bootstrap a new sector. Pulled from core_shard's
-## build_cost so designers can tweak it in one place.
+## build_cost so designers can tweak it in one place. The player's
+## starter-pack sliders on the launch overlay add their values on top.
 func _get_launch_cost() -> Dictionary:
 	var core_data = Registry.get_block(&"core_shard")
-	if core_data == null:
-		return {}
-	return core_data.build_cost
+	var base: Dictionary = {}
+	if core_data:
+		# Duplicate so we never mutate the original BlockData dict.
+		base = core_data.build_cost.duplicate()
+	# Every slider on the overlay contributes its current value to
+	# the cost. We key the cost dict by `mat_*` for slider items so
+	# `_resolve_cost_key` returns it unchanged downstream — which
+	# means slider-driven costs cleanly overlap with whatever
+	# core_shard's build_cost specified in short form (`copper`,
+	# `silicon`, …) without one stomping the other.
+	for mat in _launch_seed_sliders.keys():
+		var amt: int = _launch_seed_amount(mat)
+		if amt <= 0:
+			continue
+		var key: String = String(mat)
+		# If the core_shard cost already lists this material in short
+		# form, fold our amount into the same key so the requirements
+		# row doesn't render twice.
+		var short: String = key.replace("mat_", "")
+		if base.has(short):
+			base[short] = int(base[short]) + amt
+		else:
+			base[key] = int(base.get(key, 0)) + amt
+	return base
+
+
+## Reads a slider's current value, defaulting to 0 if no slider exists
+## for this material (resource not unlocked, overlay not built yet,
+## or the row was hidden).
+func _launch_seed_amount(mat: StringName) -> int:
+	if not _launch_seed_sliders.has(mat):
+		return 0
+	var slider: HSlider = _launch_seed_sliders[mat]
+	if slider == null or not slider.visible:
+		return 0
+	return int(slider.value)
+
+
+## Returns the runtime amount of `mat` available in the source sector
+## (the one the player is launching from). Used to set per-slider max
+## values so the player can never spec more than they actually have.
+func _source_amount(mat: StringName) -> int:
+	var src: Dictionary = _get_source_resources()
+	return int(src.get(mat, 0))
 
 
 ## Returns the per-sector resource storage we should charge for a launch.
@@ -1583,6 +1640,58 @@ func _build_launch_overlay() -> void:
 	launch_overlay_requirements.add_theme_constant_override("separation", 4)
 	vbox.add_child(launch_overlay_requirements)
 
+	# Optional starter-pack sliders. Each unlocked material gets an
+	# HSlider — moving it adds that amount to the launch cost (deducted
+	# from the source sector) and seeds it into the destination sector
+	# on landing. Sliders for materials whose tech node isn't yet
+	# researched stay hidden so the panel is short until the player
+	# unlocks late-game refinements.
+	var seed_label := Label.new()
+	seed_label.text = "Starter pack:"
+	seed_label.add_theme_font_size_override("font_size", 13)
+	seed_label.add_theme_color_override("font_color", Color(0.55, 0.7, 0.55))
+	vbox.add_child(seed_label)
+
+	launch_overlay_seed_container = VBoxContainer.new()
+	launch_overlay_seed_container.add_theme_constant_override("separation", 4)
+	vbox.add_child(launch_overlay_seed_container)
+
+	_launch_seed_sliders.clear()
+	_launch_seed_value_lbls.clear()
+	_launch_seed_rows.clear()
+	for item in Registry.items_list:
+		var mat: StringName = item.id
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		# Icon — same look as the requirements rows above.
+		var icon_rect := TextureRect.new()
+		icon_rect.custom_minimum_size = Vector2(20, 20)
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		if item.icon:
+			icon_rect.texture = item.icon
+		icon_rect.tooltip_text = item.display_name
+		row.add_child(icon_rect)
+		var slider := HSlider.new()
+		slider.min_value = 0
+		slider.max_value = LAUNCH_SEED_HARD_MAX
+		slider.step = 50
+		slider.value = 0
+		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		slider.custom_minimum_size = Vector2(180, 0)
+		slider.value_changed.connect(func(_v): _refresh_launch_overlay_requirements())
+		row.add_child(slider)
+		var val_lbl := Label.new()
+		val_lbl.text = "0"
+		val_lbl.add_theme_font_size_override("font_size", 12)
+		val_lbl.custom_minimum_size = Vector2(48, 0)
+		val_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		row.add_child(val_lbl)
+		launch_overlay_seed_container.add_child(row)
+		_launch_seed_sliders[mat] = slider
+		_launch_seed_value_lbls[mat] = val_lbl
+		_launch_seed_rows[mat] = row
+
 	var spacer := Control.new()
 	spacer.custom_minimum_size = Vector2(0, 8)
 	vbox.add_child(spacer)
@@ -1610,6 +1719,10 @@ func _open_launch_overlay(sector) -> void:
 	_build_launch_overlay()
 	launch_overlay_sector = sector
 	launch_overlay_title.text = "Launch to %s" % sector.display_name
+	# Always start sliders at zero so the previous launch's setup
+	# doesn't carry over.
+	for slider in _launch_seed_sliders.values():
+		slider.value = 0
 	_refresh_launch_overlay_requirements()
 	launch_overlay.visible = true
 
@@ -1629,6 +1742,28 @@ func _on_launch_overlay_bg_input(event: InputEvent) -> void:
 ## Rebuilds the requirement list: one row per item with "have / needed"
 ## and a colour that flips red when the source sector is short.
 func _refresh_launch_overlay_requirements() -> void:
+	# Sliders first: hide rows for any item whose tech-tree node isn't
+	# researched, and clamp every slider's max + value to the source
+	# sector's available stockpile so the player can never request
+	# more than they actually have.
+	var src_for_clamp: Dictionary = _get_source_resources()
+	for mat in _launch_seed_sliders.keys():
+		var row: HBoxContainer = _launch_seed_rows[mat]
+		var slider: HSlider = _launch_seed_sliders[mat]
+		var visible_now: bool = TechTree.is_researched(mat)
+		row.visible = visible_now
+		if not visible_now:
+			# Hidden rows shouldn't keep contributing to cost.
+			slider.value = 0
+			continue
+		var have: int = int(src_for_clamp.get(mat, 0))
+		var cap: int = mini(LAUNCH_SEED_HARD_MAX, have)
+		slider.editable = cap > 0
+		slider.max_value = float(maxi(cap, 1))
+		if int(slider.value) > cap:
+			slider.value = float(cap)
+		var lbl: Label = _launch_seed_value_lbls[mat]
+		lbl.text = "%d" % int(slider.value)
 	for c in launch_overlay_requirements.get_children():
 		c.queue_free()
 	var cost: Dictionary = _get_launch_cost()
@@ -1704,6 +1839,16 @@ func _on_launch_confirm() -> void:
 		var key2: StringName = _resolve_cost_key(str(short_id))
 		src[key2] = int(src.get(key2, 0)) - need2
 	SaveManager.sector_resources[src_id] = src
+	# Hand the per-slider amounts off to Main. Cost was already
+	# deducted from the source sector above, so all that's left is for
+	# the destination sector to actually receive the materials on
+	# landing. Empty dict means "no seed", which is the common case.
+	var seed_pack: Dictionary = {}
+	for mat in _launch_seed_sliders.keys():
+		var amt: int = _launch_seed_amount(mat)
+		if amt > 0:
+			seed_pack[mat] = amt
+	SaveManager.pending_seed_pack = seed_pack
 	SaveManager.save_campaign()
 	var sector = launch_overlay_sector
 	_close_launch_overlay()

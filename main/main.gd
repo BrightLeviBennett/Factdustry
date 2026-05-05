@@ -421,13 +421,18 @@ func _ready() -> void:
 			for k in SaveManager.sector_resources[sid]:
 				resources[k] = int(SaveManager.sector_resources[sid][k])
 			resources_changed.emit(resources)
-		else:
-			# First-time landing on this sector — seed a small starter
-			# stockpile so the player has the materials needed to bootstrap
-			# their first drill / conveyor / generator chain without having
-			# to mine raw copper before placing anything.
-			resources[&"mat_copper"] = int(resources.get(&"mat_copper", 0)) + 500
-			resources[&"mat_silicon"] = int(resources.get(&"mat_silicon", 0)) + 500
+		# Optional starter pack: per-material amounts the player
+		# dialed in on the launch overlay's sliders. Cost was already
+		# deducted from the source sector, so we just add to the
+		# destination's stockpile here. Cleared immediately so a
+		# subsequent return to this sector can't re-seed.
+		# starting_grounds bypasses the overlay entirely, so this is a
+		# no-op for SG.
+		if not SaveManager.pending_seed_pack.is_empty():
+			var pack: Dictionary = SaveManager.pending_seed_pack
+			SaveManager.pending_seed_pack = {}
+			for mat in pack:
+				resources[mat] = int(resources.get(mat, 0)) + int(pack[mat])
 			resources_changed.emit(resources)
 		# Legacy saves can ship with stockpiles that exceed the current
 		# core cap (made before the cap existed, or after a core was
@@ -855,8 +860,13 @@ func can_accept_resource(item_id: StringName) -> bool:
 ## production-rate UI. Centralized so every "deposit into core" path
 ## (logistics belts, drone flight delivery, drone drag-drop) checks the
 ## same list.
-func is_incinerated_at_core(item_id: StringName) -> bool:
-	return item_id == &"mat_sand" or item_id == &"mat_coal"
+func is_incinerated_at_core(_item_id: StringName) -> bool:
+	# Sand / coal / iron all deposit into the core stockpile now —
+	# they used to be treated as industrial waste / fuel-only and
+	# disappear on contact with the core, but the gameplay loop wants
+	# them counted in the global pool so the launch-overlay sliders
+	# (and any other "spend from stockpile" UIs) can see them.
+	return false
 
 
 ## Trims every entry in `main.resources` down to the current per-resource

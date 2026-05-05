@@ -163,6 +163,14 @@ var pending_map_path := ""
 ## Sector ID that was launched (set by PlanetSelect, consumed by Main).
 var pending_sector_id: StringName = &""
 
+## Per-resource starter amounts the player dialed in on the launch
+## overlay. Keyed by mat_* item id, value = integer amount. The cost
+## was already deducted from the source sector by PlanetSelect; Main
+## consumes this dict once on landing, adds each entry to its
+## stockpile, and clears it so subsequent loads don't accidentally
+## re-seed.
+var pending_seed_pack: Dictionary = {}
+
 ## The sector currently being played (set by Main, cleared on exit).
 var active_sector_id: StringName = &""
 
@@ -217,6 +225,11 @@ func reset_campaign() -> void:
 	active_sector_id = &""
 	pending_sector_id = &""
 	pending_map_path = ""
+	pending_seed_pack.clear()
+	# Hints dismissed in a previous campaign would otherwise carry into
+	# the new one and stay hidden forever. Same dict that gets saved /
+	# loaded with `campaign.json`, so wipe it alongside the on-disk file.
+	global_hints_runtime.clear()
 	# Drop any parked-Main left over from a planet-map round-trip.
 	# Without this the parked tree's `main.resources` survives the wipe
 	# and the next `sync_active_sector_resources` (e.g. from opening
@@ -258,6 +271,16 @@ func reset_campaign() -> void:
 				DirAccess.remove_absolute(SAVES_DIR + fname)
 			fname = dir.get_next()
 		dir.list_dir_end()
+	# If a live Main is still standing the player's terrain / placed
+	# buildings / build queue / drone / etc. all survived the in-memory
+	# clear above. Just zeroing `main.resources` isn't enough — every
+	# pre-placed FEROX wall the player tore down stays torn down, the
+	# autosave's gone but the live tree still shows the post-tear state.
+	# Boot to the main menu so the player gets a fresh scene-tree on
+	# their next sector launch.
+	var live_main_after = get_node_or_null("/root/Main")
+	if live_main_after:
+		get_tree().change_scene_to_file("res://main/MainMenu.tscn")
 	print("SaveManager: Campaign reset — /saves wiped, /maps preserved.")
 
 
@@ -2221,6 +2244,11 @@ func get_global_resources() -> Dictionary:
 	# Apply offline accrual so UIs that poll this see live-updating totals
 	# while the player is on the planet menu.
 	advance_offline_production()
+	# Push the live active sector's stockpile + cap into the cache before
+	# the clamp so the panel sees the actual `main.resources` rather than
+	# a stale snapshot from the last autosave / sync tick. Without this
+	# the tech tree could lag the world by up to `_AUTO_WIPE_INTERVAL`.
+	sync_active_sector_resources()
 	# Defensive: re-clamp every sector against its recorded cap on each
 	# poll. The accrual loop already clamps as it adds, but in-place
 	# values can drift over cap from legacy saves, save-format changes,
@@ -2230,8 +2258,17 @@ func get_global_resources() -> Dictionary:
 	_clamp_sector_resources_to_caps()
 	var pool: Dictionary = {}
 	for sector_id in sector_resources:
-		for item_id in sector_resources[sector_id]:
-			pool[item_id] = pool.get(item_id, 0) + sector_resources[sector_id][item_id]
+		# Always read the active sector straight from `main.resources` so
+		# the tech tree's Global Resources panel mirrors the in-world HUD
+		# exactly, even between auto-sync ticks. Other sectors keep
+		# pulling from the cached snapshot + offline accrual.
+		var bucket: Dictionary = sector_resources[sector_id]
+		if sector_id == active_sector_id:
+			var live_main_g = get_node_or_null("/root/Main")
+			if live_main_g and live_main_g.get("resources") is Dictionary:
+				bucket = live_main_g.resources
+		for item_id in bucket:
+			pool[item_id] = pool.get(item_id, 0) + int(bucket[item_id])
 	return pool
 
 
@@ -2329,6 +2366,27 @@ func _clamp_sector_resources_to_caps() -> void:
 		for item_id in bucket.keys():
 			if int(bucket[item_id]) > cap:
 				bucket[item_id] = cap
+	# Clamp the LIVE active stockpile against its own cap too. Without
+	# this, `main.resources` happily piles past the cap and the next
+	# `sync_active_sector_resources` re-uploads the over-cap totals into
+	# `sector_resources[active_sector_id]`, defeating the per-sector
+	# clamp above. Same incinerate scrub applies — coal/sand in
+	# `main.resources` from a legacy save shouldn't linger in the HUD.
+	if main_for_check and active_sector_id != &"" \
+			and main_for_check.get("resources") and main_for_check.has_method("get_storage_cap_per_resource"):
+		var live_cap: int = int(main_for_check.get_storage_cap_per_resource())
+		var live_changed: bool = false
+		for key in main_for_check.resources.keys():
+			if has_incin_check and main_for_check.is_incinerated_at_core(key) \
+					and int(main_for_check.resources[key]) > 0:
+				main_for_check.resources[key] = 0
+				live_changed = true
+				continue
+			if live_cap > 0 and int(main_for_check.resources[key]) > live_cap:
+				main_for_check.resources[key] = live_cap
+				live_changed = true
+		if live_changed and main_for_check.has_signal("resources_changed"):
+			main_for_check.resources_changed.emit(main_for_check.resources)
 
 
 ## Captures the live sector's resource production rate and stamps "now".
