@@ -98,6 +98,14 @@ signal hints_cleared()
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	# Sector-script highlight boxes / scripted text are tutorial / hint
+	# overlays — they need to paint above the entire game world so the
+	# player actually sees what's being pointed at. Above buildings (50),
+	# above conveyor items (51), above steam (52), above units (53) so
+	# nothing in the gameplay scene can hide them. HUD popups still win
+	# (they live on a CanvasLayer).
+	z_index = 60
+	z_as_relative = false
 	# Connect signals for tracking. Some environments (the map editor)
 	# reuse SectorScript just for its rendering and don't emit the full
 	# set of gameplay signals, so guard each hookup with `has_signal`

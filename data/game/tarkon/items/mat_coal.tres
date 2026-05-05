@@ -1,14 +1,13 @@
-[gd_resource type="Resource" script_class="ItemData" format=3]
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://c5s7e1a6ir5dl"]
 
-[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://caf8v6q6iluih" path="res://textures/resources/coal.png" id="1_orr85"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_coal"
 display_name = "Coal"
 description = "Carbon-rich fossil fuel for power generation."
+icon = ExtResource("1_orr85")
 max_stack = 200
-category = 0
 color = Color(0.15, 0.15, 0.15, 1)
-base_value = 1.0
-conveyable = true

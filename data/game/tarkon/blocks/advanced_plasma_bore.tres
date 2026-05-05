@@ -1,16 +1,18 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://c8r2d6i6gdd4j"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" path="res://textures/blocks/resource extractors/AdvancedPLasmaBore.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://durkvuvb3g2e1" path="res://textures/blocks/resource extractors/AdvancedPLasmaBore.png" id="2"]
 
 [resource]
 script = ExtResource("1")
-icon = ExtResource("2")
 id = &"advanced_plasma_bore"
 display_name = "Advanced Plasma Bore"
 description = "Enhanced plasma drill for deep-core extraction."
+icon = ExtResource("2")
 category = 1
+tags = PackedStringArray("mining", "extraction")
 color = Color(1, 0.2, 0.4, 1)
+grid_size = Vector2i(3, 3)
 max_health = 320.0
 build_cost = {
 "copper": 200,
@@ -21,4 +23,3 @@ output_items = {
 "ore": 8
 }
 production_time = 2.0
-tags = PackedStringArray("mining", "extraction")

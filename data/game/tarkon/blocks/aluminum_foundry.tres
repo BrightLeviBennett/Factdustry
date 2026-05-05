@@ -1,0 +1,31 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"aluminum_foundry"
+display_name = "Aluminum Foundry"
+description = "Smelts bauxite directly into pure aluminum. Accepts bauxite from any side and outputs aluminum from any side. Requires electrical power."
+category = 2
+tags = PackedStringArray("production", "processing", "omnidirectional")
+color = Color(0.78, 0.82, 0.86, 1)
+grid_size = Vector2i(3, 3)
+max_health = 360.0
+build_cost = {
+"copper": 220,
+"silicon": 80,
+"steel": 40
+}
+build_time = 4.0
+input_items = {
+"mat_bauxite": 2
+}
+output_items = {
+"mat_aluminum": 1
+}
+production_time = 3.0
+requires_power = true
+power_consumption = 4.0
+electrical_power_use = 18.0
+max_stored_items = 30

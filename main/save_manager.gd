@@ -44,6 +44,114 @@ const GLOBAL_HINTS_BUNDLED_PATH := "res://data/game/global_hints.json"
 ## PlanetSelect checks this to show a "Back to Map" button.
 var return_to_game := false
 
+## Holds the Main scene while the player is browsing the planet
+## select overlay. Detached from /root and parented under us (an
+## autoload, which `change_scene_to_file` won't free) so the round
+## trip game → planet select → back to game is instant — the original
+## Main tree is just re-attached, with all live state intact.
+var _parked_main: Node = null
+
+## Preloaded once at boot so `change_scene_to_file` round-trips can be
+## bypassed: launching a sector instantiates this PackedScene and adds
+## it straight to `/root`, eliminating the one-frame black gap that
+## the deferred scene swap leaves behind.
+const _MAIN_PACKED_SCENE: PackedScene = preload("res://main/Main.tscn")
+
+
+## Replaces the current scene with a freshly instantiated Main, all
+## within the current frame so there's no render gap between the old
+## scene tearing down and the new one's first frame. Caller should
+## set `pending_map_path` / `pending_sector_id` first; Main._ready
+## reads those during the add_child below.
+func swap_scene_to_main() -> void:
+	# Hide the outgoing scene immediately so any render before this
+	# frame ends doesn't briefly composite both worlds.
+	var tree := get_tree()
+	var old: Node = tree.current_scene
+	if old != null:
+		if old is CanvasItem:
+			(old as CanvasItem).visible = false
+		elif old is Node3D:
+			(old as Node3D).visible = false
+		old.process_mode = Node.PROCESS_MODE_DISABLED
+	var fresh: Node = _MAIN_PACKED_SCENE.instantiate()
+	# Add to /root before swapping current_scene so absolute paths
+	# (e.g. `/root/Main/...`) resolve immediately when Main._ready
+	# runs in the add_child call.
+	tree.root.add_child(fresh)
+	tree.current_scene = fresh
+	if old != null:
+		old.queue_free()
+
+
+func park_main_for_planet_view(main_node: Node) -> bool:
+	if main_node == null:
+		return false
+	if _parked_main != null and _parked_main != main_node:
+		# Stale park (player jumped to planet view from a different
+		# sector without coming back). Release the previous tree so we
+		# don't leak it.
+		if is_instance_valid(_parked_main):
+			_parked_main.queue_free()
+		_parked_main = null
+	# Persist while Main is still at /root/Main so any code path that
+	# closes the window from the planet view (Quit, OS close, crash)
+	# has a complete on-disk snapshot to restore from. Skipping disk
+	# round-trip is only an optimization for the common Back-to-Game
+	# case; we don't want to lose progress to an exit out of the parked
+	# state.
+	if active_sector_id != &"" and active_sector_id != &"_default":
+		sync_active_sector_resources()
+		save_sector(String(active_sector_id))
+	save_campaign()
+	_parked_main = main_node
+	# Stop ticks + drawing while parked. CanvasLayers are independent
+	# of Node2D visibility so HUD / TechTreeUI / DatabaseUI need their
+	# own toggle.
+	main_node.process_mode = Node.PROCESS_MODE_DISABLED
+	if main_node is CanvasItem:
+		(main_node as CanvasItem).visible = false
+	for c in main_node.get_children():
+		if c is CanvasLayer:
+			(c as CanvasLayer).visible = false
+	var parent := main_node.get_parent()
+	if parent:
+		parent.remove_child(main_node)
+	add_child(main_node)
+	return true
+
+
+func has_parked_main() -> bool:
+	return _parked_main != null and is_instance_valid(_parked_main)
+
+
+## Re-attaches the parked Main back into /root as the current scene.
+## Returns true on success. Caller is responsible for freeing whatever
+## scene was previously current (e.g. PlanetSelect).
+func unpark_main_to_tree() -> bool:
+	if not has_parked_main():
+		return false
+	var m: Node = _parked_main
+	_parked_main = null
+	remove_child(m)
+	get_tree().root.add_child(m)
+	get_tree().current_scene = m
+	m.process_mode = Node.PROCESS_MODE_INHERIT
+	if m is CanvasItem:
+		(m as CanvasItem).visible = true
+	for c in m.get_children():
+		if c is CanvasLayer:
+			(c as CanvasLayer).visible = true
+	return true
+
+
+## Drops the parked tree entirely (used when the player picks a new
+## sector — the cached one is stale and must be rebuilt fresh).
+func discard_parked_main() -> void:
+	if has_parked_main():
+		_parked_main.queue_free()
+	_parked_main = null
+
 ## Set to true when navigating to PlanetSelect from the main menu.
 ## PlanetSelect checks this to show a "Back to Menu" button.
 var return_to_menu := false
@@ -247,18 +355,39 @@ func _process(delta: float) -> void:
 	if _auto_wipe_timer < _AUTO_WIPE_INTERVAL:
 		return
 	_auto_wipe_timer = 0.0
+	# Refresh the active sector's cache FROM main.resources first.
+	# Without this the cache lags whatever the player accumulated since
+	# the last autosave/sector-switch, so the clamper trims a stale
+	# snapshot and the sync-back below either does nothing or worse,
+	# trims main DOWN to the stale (lower) cache value. Re-sync first
+	# guarantees the clamp sees the live numbers.
+	sync_active_sector_resources()
 	_clamp_sector_resources_to_caps()
-	# Live sector also gets a sync-back: if the in-game stockpile is at
-	# cap and the cache is over (e.g. the legacy save just got trimmed),
-	# main.resources should reflect the trimmed amount immediately.
+	# Push the cap-trimmed totals back into main.resources so the live
+	# HUD reflects them immediately. Also catches saves/legacy values
+	# that ended up over-cap mid-session.
 	if active_sector_id != &"" and sector_resources.has(active_sector_id):
 		var main = get_node_or_null("/root/Main")
 		if main and main.get("resources"):
 			var bucket: Dictionary = sector_resources[active_sector_id]
+			var changed := false
 			for key in bucket:
 				if main.resources.has(key) \
 						and int(main.resources[key]) > int(bucket[key]):
 					main.resources[key] = int(bucket[key])
+					changed = true
+			# Scrub incinerated items (coal, sand) out of the live
+			# stockpile too — legacy saves recorded under the old
+			# "coal counts as a resource" rule keep showing it in the
+			# HUD until cleared. The cache scrub above already
+			# handles the global pool.
+			if main.has_method("is_incinerated_at_core"):
+				for key in main.resources.keys():
+					if main.is_incinerated_at_core(key) and int(main.resources[key]) > 0:
+						main.resources[key] = 0
+						changed = true
+			if changed and main.has_signal("resources_changed"):
+				main.resources_changed.emit(main.resources)
 
 
 ## Check if a sector has fallen while the player was away.
@@ -403,6 +532,13 @@ func load_game(save_name: String) -> bool:
 	for key in saved_resources:
 		main.resources[StringName(key)] = int(saved_resources[key])
 	main.resources_changed.emit(main.resources)
+	# Sync event-only material unlocks (mat_steel, mat_iron, …) against
+	# the player's current stockpile. Without this, loading a save where
+	# you already produced steel leaves the `mat_steel` node locked
+	# because the original `item_produced` signal fired pre-load and
+	# every dependent (Unit Refabricator, etc.) stays locked behind a
+	# dependency it visibly satisfies.
+	TechTree.sync_event_unlocks_from_resources(main.resources)
 
 	# --- Load ferox resources ---
 	var saved_ferox = data.get("ferox_resources", {})
@@ -1179,6 +1315,13 @@ func load_sector_from_path(path: String) -> bool:
 	if is_user_save_res and data.has("resources") and data["resources"] is Dictionary:
 		for item_id in data["resources"]:
 			main.resources[StringName(item_id)] = int(data["resources"][item_id])
+		# Sync event-only material unlocks (mat_steel, mat_iron, …) so a
+		# loaded save with a stockpile retroactively unlocks tech that
+		# depends on those materials. Without this, the original
+		# `item_produced` signal fired before load and the dependent
+		# nodes (Unit Refabricator, etc.) stay locked on a dep the
+		# player visibly satisfies.
+		TechTree.sync_event_unlocks_from_resources(main.resources)
 
 	# --- Restore drone position ---
 	if data.has("drone_position") and data["drone_position"] != "":
@@ -2139,11 +2282,21 @@ func _deserialize_storage_caps(data: Dictionary) -> void:
 ## No-op for sectors that never had a cap recorded (old saves / sectors
 ## that were never actually saved) so we don't zero out legit progress.
 func _clamp_sector_resources_to_caps() -> void:
+	# Pick up the incinerate rule from main. Centralized here so legacy
+	# saves that wrote coal/sand into sector_resources before the rule
+	# existed get scrubbed on the next tick rather than persisting in
+	# the global pool forever.
+	var main_for_check = get_node_or_null("/root/Main")
+	var has_incin_check: bool = main_for_check != null and main_for_check.has_method("is_incinerated_at_core")
 	for sid in sector_resources.keys():
+		var bucket: Dictionary = sector_resources[sid]
+		if has_incin_check:
+			for item_id in bucket.keys():
+				if main_for_check.is_incinerated_at_core(item_id):
+					bucket.erase(item_id)
 		var cap: int = int(sector_storage_caps.get(sid, 0))
 		if cap <= 0:
 			continue
-		var bucket: Dictionary = sector_resources[sid]
 		for item_id in bucket.keys():
 			if int(bucket[item_id]) > cap:
 				bucket[item_id] = cap
@@ -2203,9 +2356,22 @@ func advance_offline_production() -> void:
 			_sector_production_fractions[sid] = {}
 		var bucket: Dictionary = sector_resources[sid]
 		var fracs: Dictionary = _sector_production_fractions[sid]
+		# Items the core incinerates (coal, sand) shouldn't accrue into
+		# the offline pool either — they'd disappear on the next belt
+		# tick if the sector were live, so the global resource readout
+		# would be lying. Look up the rule via main when available so
+		# the list stays canonical in one place.
+		var main_for_check = get_node_or_null("/root/Main")
+		var has_incin_check: bool = main_for_check != null and main_for_check.has_method("is_incinerated_at_core")
 		for item_id in rates:
 			var rate: float = float(rates[item_id])
 			if rate == 0.0:
+				continue
+			if has_incin_check and main_for_check.is_incinerated_at_core(item_id):
+				# Wipe any stale carry-over fraction so toggling the
+				# blacklist later doesn't release a hidden spike.
+				fracs.erase(item_id)
+				bucket.erase(item_id)
 				continue
 			var added: float = rate * elapsed + float(fracs.get(item_id, 0.0))
 			var whole: int = int(floor(added))
@@ -2305,6 +2471,13 @@ func load_campaign() -> bool:
 	# Apply any resources produced while the game was closed. Uses the
 	# saved per-sector rates + timestamps captured at last snapshot.
 	advance_offline_production()
+	# Sync event-only material unlocks against the GLOBAL pool (sum of
+	# all sectors). The per-sector load path only sees the active
+	# sector's stockpile, so steel produced on a different sector would
+	# leave `mat_steel` and its dependents (Unit Refabricator, …) locked
+	# even though the tech-tree's Global Resources panel visibly showed
+	# the stockpile.
+	TechTree.sync_event_unlocks_from_resources(get_global_resources())
 	print("SaveManager: Campaign loaded (%d sectors with resources)" % sector_resources.size())
 	return true
 

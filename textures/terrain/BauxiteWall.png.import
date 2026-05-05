@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://vjrft17cijjt"
-path="res://.godot/imported/MineralExtractor_old.png-87b90adbd5aee9192b9918df79fe1bfd.ctex"
+uid="uid://dkxa06222bdd3"
+path="res://.godot/imported/BauxiteWall.png-cf861d58585e6ca9108eb2ffb5e3ce88.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/resource extractors/MineralExtractor_old.png"
-dest_files=["res://.godot/imported/MineralExtractor_old.png-87b90adbd5aee9192b9918df79fe1bfd.ctex"]
+source_file="res://textures/terrain/BauxiteWall.png"
+dest_files=["res://.godot/imported/BauxiteWall.png-cf861d58585e6ca9108eb2ffb5e3ce88.ctex"]
 
 [params]
 

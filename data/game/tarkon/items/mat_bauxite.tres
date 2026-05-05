@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"mat_bauxite"
 display_name = "Bauxite"
-description = "Aluminum ore. Must be refined into alumina and then aluminum before use."
+description = "Aluminum ore. Smelt 2 in an Aluminum Foundry to produce 1 aluminum."
 max_stack = 200
 category = 1
 color = Color(0.7, 0.4, 0.3, 1)

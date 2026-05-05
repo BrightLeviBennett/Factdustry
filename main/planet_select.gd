@@ -1291,7 +1291,17 @@ func _on_tech_tree_pressed() -> void:
 func _on_back_pressed() -> void:
 	if SaveManager.return_to_game:
 		SaveManager.return_to_game = false
-		# Restore the sector that was being played from the autosave
+		# Fast path: the live Main scene is parked under SaveManager.
+		# Re-attach it and free this PlanetSelect — instant return,
+		# no scene reload, no save / load roundtrip, no black frame.
+		if SaveManager.has_parked_main():
+			var ps := self
+			SaveManager.unpark_main_to_tree()
+			ps.queue_free()
+			return
+		# Fallback (park failed or was never set up): reload the
+		# sector from autosave the slow way — but still go through the
+		# manual same-frame swap so we don't reintroduce the black flash.
 		var sector_id: StringName = SaveManager.active_sector_id
 		if sector_id != &"" and sector_id != &"_default":
 			var autosave_path: String = SaveManager.SAVES_DIR + str(sector_id) + ".sector.json"
@@ -1303,9 +1313,12 @@ func _on_back_pressed() -> void:
 				if sector_data and sector_data.map_path != "":
 					SaveManager.pending_map_path = sector_data.map_path
 			SaveManager.pending_sector_id = sector_id
-		get_tree().change_scene_to_file(GAME_SCENE_PATH)
+		SaveManager.swap_scene_to_main()
 	else:
 		SaveManager.return_to_menu = false
+		# Returning to the main menu — drop any parked Main; the
+		# player will start fresh next time they launch.
+		SaveManager.discard_parked_main()
 		get_tree().change_scene_to_file("res://main/MainMenu.tscn")
 
 
@@ -1473,7 +1486,14 @@ func _do_launch(sector) -> void:
 		SaveManager.pending_map_path = sector.map_path
 	else:
 		SaveManager.pending_map_path = ""
-	get_tree().change_scene_to_file(GAME_SCENE_PATH)
+	# Launching a (possibly different) sector — the parked tree is for
+	# whatever the player came from; drop it so Main rebuilds against
+	# the freshly chosen pending_map_path.
+	SaveManager.discard_parked_main()
+	# Manual same-frame swap (no `change_scene_to_file` deferral) so
+	# the player goes from PlanetSelect straight to a fully built
+	# Main with the camera already framed on the core, no black flash.
+	SaveManager.swap_scene_to_main()
 
 
 # =========================

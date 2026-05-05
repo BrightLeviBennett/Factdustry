@@ -50,6 +50,11 @@ var selected_building: StringName = &""
 var require_resources := true
 var require_research := true
 var enemies_attack := true
+## Developer toggle: when true, every entity that can be hit (enemies,
+## the player drone, in-flight projectiles) overlays a magenta debug
+## hitbox so combat geometry is visible. Wired up from the Developer
+## settings tab and from apply_pending_settings on scene load.
+var show_hitboxes := false
 
 ## Tracks player buildings destroyed by enemies for potential rebuild.
 ## Key = Vector2i (anchor), Value = { "block_id": StringName, "rotation": int }
@@ -375,6 +380,22 @@ func _ready() -> void:
 	if drone and drone.has_method("_move_to_core"):
 		if not _drone_position_restored:
 			drone._move_to_core()
+
+	# Snap the camera onto the drone before the first frame is drawn so
+	# the player doesn't see the world spawn at (0, 0) and then teleport
+	# in. Mirrors how Mindustry just hands you the camera already framed
+	# on your core.
+	var cam: Camera2D = get_node_or_null("Camera2D") as Camera2D
+	if cam and drone:
+		cam.position = drone.position
+		# `reset_smoothing` flushes any pending lerp so the very first
+		# rendered frame is already centered on the drone instead of
+		# easing in from (0,0). force_update_scroll then commits the
+		# camera transform this frame.
+		if cam.has_method("reset_smoothing"):
+			cam.reset_smoothing()
+		if cam.has_method("force_update_scroll"):
+			cam.force_update_scroll()
 
 	# Stats tracking
 	building_placed.connect(func(_bid, _pos): stats_blocks_placed += 1)
@@ -807,10 +828,27 @@ func get_storage_cap_per_resource() -> int:
 
 ## Returns true if the core storage can accept one more of this resource.
 func can_accept_resource(item_id: StringName) -> bool:
+	# Incinerated items are "accepted" in the sense that the conveyor /
+	# drone shouldn't back up — the deposit just disappears. The actual
+	# add-to-pool path (try_add_to_resources / _absorb_item) is the one
+	# that drops the item.
+	if is_incinerated_at_core(item_id):
+		return true
 	var cap: int = get_storage_cap_per_resource()
 	if cap <= 0:
 		return true  # No cores = no limit (shouldn't happen in normal gameplay)
 	return resources.get(item_id, 0) < cap
+
+
+## Items that the core consumes without stockpiling. Sand has no use as
+## a stored resource (it's industrial waste). Coal is fuel — it's
+## supposed to flow into combustion generators, NOT pile up in the core
+## pool where it would inflate the global resource readout and skew
+## production-rate UI. Centralized so every "deposit into core" path
+## (logistics belts, drone flight delivery, drone drag-drop) checks the
+## same list.
+func is_incinerated_at_core(item_id: StringName) -> bool:
+	return item_id == &"mat_sand" or item_id == &"mat_coal"
 
 
 ## Trims every entry in `main.resources` down to the current per-resource
@@ -952,6 +990,13 @@ func _get_swap_group(data: BlockData) -> StringName:
 	# placements with these block ids still swap among themselves.
 	if id_str == "shaft" or id_str == "gearbox" or id_str == "overhead_belt":
 		return &"shaft_power"
+	# Vent slot blocks: turbine (power) and condenser (water) both
+	# occupy the same 3×3 footprint centered on a vent/geyser tile, so
+	# the player can swap one for the other in place without tearing
+	# the structure down. Restricted to these two ids so a misclick
+	# doesn't accidentally absorb anything else into the group.
+	if id_str == "vent_turbine" or id_str == "vent_condenser":
+		return &"vent_block"
 	# Walls form a single group regardless of material — same-size walls
 	# can swap (copper ↔ brass ↔ aluminum, etc.). The same-footprint
 	# gate at the call site keeps a 1×1 wall from trying to overlay a
@@ -966,19 +1011,98 @@ func _get_swap_group(data: BlockData) -> StringName:
 	return &""
 
 
-## Swaps an existing 1x1 building for a different 1x1 building at the same
-## cell, clearing any logistics/power state the old block had and then placing
-## the new one with the new block's build_time. Used by the belt/shaft swap
-## feature in try_place_building.
+## Swaps an existing same-footprint building for a different one at the
+## same cell. Instead of destroying the old block immediately, this
+## creates a `pending_swaps` entry that the build tick advances over
+## time — the OLD block stays live and functional in placed_buildings
+## while the new one's build cost is paid progressively. Each unit of
+## new resource paid in is matched by a proportional refund of the old
+## block's build_cost, so swapping a half-built belt back to a junction
+## doesn't punish the player for changing their mind.
 ##
-## Swaps go through the same code path as a fresh placement: the old block
-## is destroyed immediately and the new one is queued up with the standard
-## `building_build_progress` flow, so a player swapping a Belt → Junction
-## sees the same translucent-ghost build animation, the same gradual
-## resource consumption, and the same drone work scheduling as if they
-## had placed the new block on bare ground.
-func _swap_building_in_place(grid_pos: Vector2i, _old_data: BlockData, new_data: BlockData) -> bool:
-	return _execute_swap_now(grid_pos, new_data.id, placement_rotation)
+## When build progress hits 100% AND every cost item is fully paid, the
+## tick calls `execute_pending_swap` which runs the atomic destroy/replace
+## (firing all the normal building_destroyed cleanup so logistics state
+## is cleared cleanly).
+func _swap_building_in_place(grid_pos: Vector2i, old_data: BlockData, new_data: BlockData) -> bool:
+	# Re-clicking the same swap target is a no-op — keeps the existing
+	# progress instead of resetting to 0.
+	if pending_swaps.has(grid_pos):
+		var existing: Dictionary = pending_swaps[grid_pos]
+		if StringName(existing.get("new_block_id", &"")) == new_data.id \
+				and int(existing.get("new_rotation", 0)) == placement_rotation:
+			return true
+		# Otherwise the player picked a different swap target — refund
+		# everything already paid into the previous one before starting
+		# the new one (player-spent resources AND any old-pool refund
+		# already given gets undone implicitly via the new entry's own
+		# pool, but we hand back consumed since they're abandoned).
+		_refund_pending_swap(grid_pos, true)
+	# Snapshot the old block's build_cost as the refund pool, normalized
+	# to the same StringName keys main.resources uses. Refunds happen in
+	# `_tick_pending_swap` proportionally to build progress.
+	var refund_pool: Dictionary = {}
+	if old_data and not old_data.build_cost.is_empty():
+		for raw_id in old_data.build_cost:
+			var rk: StringName = _resolve_resource_key(str(raw_id))
+			refund_pool[rk] = int(old_data.build_cost[raw_id])
+	var build_time: float = new_data.build_time if new_data.build_time > 0.0 else 1.0
+	pending_swaps[grid_pos] = {
+		"new_block_id": new_data.id,
+		"new_rotation": placement_rotation,
+		"build_time": build_time,
+		"progress": 0.0,
+		"consumed": {},
+		"refund_pool": refund_pool,
+		"refunded": {},
+	}
+	if not work_order.has(grid_pos):
+		work_order.append(grid_pos)
+	# `building_placed` is intentionally NOT emitted here — the swap
+	# hasn't actually placed anything yet. The signal fires when the
+	# swap completes via `_execute_swap_now`, which already emits.
+	return true
+
+
+## Refunds whatever portion of an outstanding pending_swap entry hasn't
+## been refunded yet. Used when a swap is abandoned mid-build (player
+## queued a different swap on top, or deconstructed the cell). Returns
+## the items refunded, mostly for testing.
+func _refund_pending_swap(grid_pos: Vector2i, also_consumed: bool = false) -> void:
+	if not pending_swaps.has(grid_pos):
+		return
+	var entry: Dictionary = pending_swaps[grid_pos]
+	var pool: Dictionary = entry.get("refund_pool", {})
+	var refunded: Dictionary = entry.get("refunded", {})
+	for rk in pool:
+		var remaining: int = int(pool[rk]) - int(refunded.get(rk, 0))
+		if remaining > 0:
+			_grant_resource_capped(rk, remaining)
+	# Also refund any RESOURCES_CONSUMED for the new block — the player
+	# never received the new block, so material spent toward its build
+	# is wasted unless we hand it back. Only triggered on "abandoned"
+	# (also_consumed=true) — a finalized swap consumed for a real block.
+	if also_consumed:
+		var consumed: Dictionary = entry.get("consumed", {})
+		for rk in consumed:
+			var amt: int = int(consumed[rk])
+			if amt > 0:
+				_grant_resource_capped(rk, amt)
+
+
+## Adds `amount` of resource `rk` to main.resources, capped at the
+## current per-resource storage cap. Excess just disappears (matches
+## what mined / produced items do when storage is full).
+func _grant_resource_capped(rk: StringName, amount: int) -> void:
+	if amount <= 0:
+		return
+	var cap: int = get_storage_cap_per_resource()
+	var current: int = int(resources.get(rk, 0))
+	if cap > 0:
+		resources[rk] = mini(current + amount, cap)
+	else:
+		resources[rk] = current + amount
+	resources_changed.emit(resources)
 
 
 ## Executes a deferred same-group swap: destroys the old block (firing all
@@ -1247,7 +1371,16 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 	# Pumps must be on liquid
 	if data.tags.has("pump"):
 		var building_sys = _building_sys_ref()
-		if building_sys and not building_sys._is_on_liquid(grid_pos):
+		# Condensers extract from steam, not liquid — they need a vent or
+		# geyser tile centered under their footprint instead of a water
+		# source.
+		if data.tags.has("condenser"):
+			if terrain:
+				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+				var tid = terrain.floor_tiles.get(center, &"")
+				if tid != &"vent" and tid != &"geyser":
+					return false
+		elif building_sys and not building_sys._is_on_liquid(grid_pos):
 			return false
 
 	# Check if within drone build range
@@ -1379,6 +1512,30 @@ func destroy_building_with_refund(grid_pos: Vector2i) -> void:
 	# If already deconstructing, skip
 	if building_deconstruct_progress.has(anchor):
 		return
+	# Cancel any in-flight swap on this cell. The OLD block (still
+	# placed) will be properly refunded by the standard deconstruct
+	# below; the swap's already-paid OLD-pool refunds are honored,
+	# but the player-spent resources for the NEW block need to come
+	# back since the NEW block is now being abandoned.
+	if pending_swaps.has(anchor):
+		var sw_entry: Dictionary = pending_swaps[anchor]
+		var consumed: Dictionary = sw_entry.get("consumed", {})
+		for rk in consumed:
+			_grant_resource_capped(rk, int(consumed[rk]))
+		# Subtract the partial OLD-pool refund already given so the
+		# upcoming deconstruct refund (which gives back the OLD block's
+		# full build_cost) doesn't double up. Each `refunded[rk]` is
+		# the amount the swap already handed back from the OLD pool.
+		var refunded: Dictionary = sw_entry.get("refunded", {})
+		for rk in refunded:
+			var dock: int = mini(int(refunded[rk]), int(resources.get(rk, 0)))
+			if dock > 0:
+				resources[rk] -= dock
+		# Clear the entry so the build tick doesn't keep ticking it.
+		pending_swaps.erase(anchor)
+		var swi: int = work_order.find(anchor)
+		if swi >= 0 and not building_build_progress.has(anchor):
+			work_order.remove_at(swi)
 	# How much was actually paid so far — this is what gets refunded.
 	var total_to_refund := {}
 	var starting_progress: float = 0.0

@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://b2yapwn8bxwt1"]
+
+[ext_resource type="Texture2D" uid="uid://dkxa06222bdd3" path="res://textures/terrain/BauxiteWall.png" id="1_bxw01"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_bxw02"]
+
+[resource]
+script = ExtResource("2_bxw02")
+id = &"bauxite_wall"
+display_name = "Bauxite Wall"
+icon = ExtResource("1_bxw01")
+category = 1
+height = 8.0
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

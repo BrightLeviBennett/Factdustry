@@ -6,10 +6,10 @@
 [resource]
 script = ExtResource("1")
 id = &"water"
-display_name = "Water"
-description = "A body of fresh water. Depth is computed automatically from distance to shore. Ground units wade at half speed; they drown if submerged too long."
 icon = ExtResource("1_uf7ph")
-color = Color(0.2, 0.4, 0.8, 1)
+color = null
+draw_border = null
+border_color = null
 speed_modifier = 0.5
 tags = PackedStringArray("liquid", "water")
 is_liquid = true

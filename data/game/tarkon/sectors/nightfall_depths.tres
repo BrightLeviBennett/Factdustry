@@ -17,4 +17,5 @@ wave_units_data = PackedStringArray()
 objective = 1
 unlocks = PackedStringArray("zinc_deposits")
 required_sectors = PackedStringArray("waterfront_ruins")
+map_path = "res://data/game/tarkon/maps/ND.sector.json"
 tags = PackedStringArray("campaign", "sector", "dark")

@@ -17,6 +17,44 @@ var _hud: Node
 
 # --- TEXTURE ---
 var drone_texture: Texture2D = preload("res://textures/units/shardling/Shardling.png")
+## Mid-mounted healing emitter. Sits at the chassis center, rotates
+## independently to track the heal target, and the green beam exits
+## from the bottom edge of the rotated sprite.
+var heal_head_texture: Texture2D = preload("res://textures/units/shardling/ShardlingHealingHead.png")
+## Two of these flank the chassis (mid-left + mid-right, inset slightly
+## from the body edges). Each rotates to aim at the current shoot
+## target; bullets spawn from their muzzles, alternating sides per
+## shot for a Mindustry-style two-barrel cadence.
+var turret_head_texture: Texture2D = preload("res://textures/units/shardling/ShardlingTurretHead.png")
+
+## How far inward (along the chassis local +X / -X) the turret heads
+## sit from the chassis sprite's left/right edges.
+const TURRET_HEAD_INSET_PX := 8.0
+## Rad/sec rate at which the heads rotate toward their aim target.
+## High enough that they snap quickly without looking instant.
+const HEAD_ROTATION_SPEED := 10.0
+## Heads are drawn at a fraction of the source-texture size so they
+## sit proportionally on the chassis rather than dwarfing it. Tweak
+## here if the source art changes resolution.
+const HEAD_SCALE := 0.35
+## Aim is stored as an offset from the chassis `facing_angle` (so 0 =
+## head pointing the same direction as the body). Storing relative
+## means the heads naturally rotate WITH the chassis when the body
+## yaws — and they hold their last orientation when no target is
+## acquired, instead of snapping back to forward.
+var _healer_aim_offset: float = 0.0
+var _turret_aim_offset: float = 0.0
+## True when the chassis has a live combat aim this frame (manual
+## fire or auto-acquired enemy/building). When false, the turret aim
+## offset is held steady so the heads keep their last pose.
+var _has_turret_aim: bool = false
+var _turret_aim_pos: Vector2 = Vector2.ZERO
+## Toggles per shot so combat_system alternates left/right barrels.
+var _next_muzzle_is_right: bool = false
+## Drives the back-thruster pulse animation. Same shape as the heal /
+## mining beam phases so the engine glow breathes at the same cadence
+## as the lasers do.
+var _thruster_phase: float = 0.0
 
 # --- DATA ---
 # The UnitData resource loaded from player_drone.tres
@@ -110,6 +148,19 @@ func _sector_script_ref() -> Node:
 		_sector_script = get_node_or_null("/root/Main/SectorScript")
 	return _sector_script
 
+
+## True if the drone's beam can reach the ore at `cell`. Wall ores live
+## inside walls and are always reachable from outside. Floor ores sit
+## on the surface, so any block placed at the cell — including a
+## platform — buries them and the drone can't beam through.
+func _drone_can_reach_ore(cell: Vector2i, ore_data) -> bool:
+	if ore_data == null:
+		return false
+	# Wall-embedded ores keep the original "always mineable" rule.
+	if not ore_data.tags.has("floor_ore"):
+		return true
+	return not main.placed_buildings.has(cell)
+
 func _hud_ref() -> Node:
 	if _hud == null:
 		_hud = get_node_or_null("/root/Main/HUD")
@@ -167,9 +218,117 @@ func _process(delta: float) -> void:
 	_handle_destroy()
 	_handle_mining(delta)
 	_handle_healing(delta)
-	_heal_beam_phase += delta * 3.0
+	# Pulse phases freeze with the world — keeps the beams / thrusters
+	# visually still during pause instead of shimmering on a frozen scene.
+	var paused: bool = "world_paused" in main and main.world_paused
+	if not paused:
+		_heal_beam_phase += delta * 3.0
+		_thruster_phase += delta * 4.0
 	_update_transfers(delta)
+	_update_head_aim(delta)
 	queue_redraw()
+
+
+## Drives both head rotations independently of the chassis. Healer
+## tracks `_heal_beam_endpoint` whenever the beam is live; the two
+## turret heads share an angle that tracks the same target the
+## combat system would shoot at this frame (mouse cursor under
+## manual fire, otherwise the nearest enemy unit/building inside
+## drone range). Falls back to the chassis facing when no aim is
+## available so idle heads don't lock to a stale direction.
+func _update_head_aim(delta: float) -> void:
+	# Pause freezes head rotation in place — combat is gated on
+	# `world_paused` already, so the heads were aiming at a target
+	# they couldn't actually shoot. Holding the offset keeps the
+	# pose stable while the world is frozen.
+	if "world_paused" in main and main.world_paused:
+		return
+	# Healer aim — only updates while a heal beam is live. When the
+	# beam drops, hold the last offset so the head stays where it was.
+	if _heal_beam_active:
+		var d: Vector2 = _heal_beam_endpoint - position
+		if d.length_squared() > 1.0:
+			var world_angle: float = d.angle() + PI / 2.0 + PI
+			var target_offset: float = wrapf(world_angle - facing_angle, -PI, PI)
+			_healer_aim_offset = _smooth_angle(_healer_aim_offset, target_offset, delta)
+
+	# Turret aim — same idea: track combat_system's pick order, but
+	# only while a target is live. With no target the offset is held
+	# steady so the heads keep their last pose relative to the body
+	# (and naturally rotate WITH the body via `facing_angle + offset`
+	# at draw time).
+	_has_turret_aim = false
+	var aim_pos: Variant = _pick_turret_aim_pos()
+	if aim_pos != null:
+		_has_turret_aim = true
+		_turret_aim_pos = aim_pos as Vector2
+		var dt: Vector2 = _turret_aim_pos - position
+		if dt.length_squared() > 1.0:
+			var world_angle_t: float = dt.angle() + PI / 2.0 + PI
+			var target_offset_t: float = wrapf(world_angle_t - facing_angle, -PI, PI)
+			_turret_aim_offset = _smooth_angle(_turret_aim_offset, target_offset_t, delta)
+
+
+func _smooth_angle(current: float, target: float, delta: float) -> float:
+	var diff: float = wrapf(target - current, -PI, PI)
+	if absf(diff) < 0.01:
+		return target
+	var step: float = signf(diff) * HEAD_ROTATION_SPEED * delta
+	if absf(step) > absf(diff):
+		return target
+	return wrapf(current + step, -PI, PI)
+
+
+## Picks the world position the drone *would* shoot at this frame.
+## Mirrors `combat_system._update_drone_combat`'s priority ordering so
+## the visual heads stay coherent with where the projectile actually
+## flies. Returns null when no shot is queueable (mining, controlling
+## a unit, terrain paint, no targets in range).
+func _pick_turret_aim_pos() -> Variant:
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr and unit_mgr.controlled_entity != null:
+		return null
+	if mining_target != null:
+		return null
+	var terrain = _terrain_ref()
+	if terrain and "paint_mode" in terrain and terrain.paint_mode:
+		return null
+
+	# Manual fire: drag-shoot in default mode, LMB held, no GUI hover,
+	# no block selected for placement. Otherwise fall through to AI
+	# auto-aim so heads track passive defense targets too.
+	if not heal_mode:
+		var lmb: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		if main.selected_building != &"":
+			lmb = false
+		if get_viewport().gui_get_hovered_control() != null:
+			lmb = false
+		if lmb:
+			return get_global_mouse_position()
+
+	var combat = main.get_node_or_null("CombatSystem")
+	var range_px: float = 4.0 * main.GRID_SIZE
+	if combat and "drone_range" in combat:
+		range_px = float(combat.drone_range) * main.GRID_SIZE
+
+	var enemies: Array[Node2D] = unit_mgr.enemies if unit_mgr else [] as Array[Node2D]
+	var nearest: Node2D = null
+	var best_d2: float = range_px * range_px
+	for e in enemies:
+		if e == null or not is_instance_valid(e):
+			continue
+		var d2: float = position.distance_squared_to(e.position)
+		if d2 <= best_d2:
+			best_d2 = d2
+			nearest = e
+	if nearest != null:
+		return nearest.position
+
+	if combat and combat.has_method("_find_nearest_enemy_building"):
+		var nb: Vector2i = combat._find_nearest_enemy_building(position, range_px)
+		if nb != Vector2i(-9999, -9999):
+			return main.grid_to_world(nb) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+	return null
 
 func _input(event: InputEvent) -> void:
 	if main.is_ui_blocking():
@@ -238,6 +397,12 @@ func _unhandled_input(event: InputEvent) -> void:
 							and main.get_building_faction(drop_anchor) == main.Faction.LUMINA:
 						for item_id in mined_inventory.keys():
 							var have: int = int(mined_inventory[item_id])
+							# Coal / sand are incinerated at the core —
+							# the held stack just vanishes (no add to
+							# main.resources, no overflow).
+							if main.has_method("is_incinerated_at_core") and main.is_incinerated_at_core(item_id):
+								mined_inventory[item_id] = 0
+								continue
 							while have > 0:
 								if main.has_method("can_accept_resource") \
 										and not main.can_accept_resource(item_id):
@@ -295,9 +460,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				_resume_mining_target = null
 				_resume_mining_item_id = &""
 			else:
-				# Start mining this ore
+				# Start mining this ore — but if it's a floor ore that's
+				# currently buried under a block, the drone can't reach it.
+				# Wall ores stay mineable through the wall as before.
 				var ore_data = terrain.get_ore_at(grid_pos)
-				if ore_data and ore_data.minable_resource != &"":
+				if ore_data and ore_data.minable_resource != &"" \
+						and _drone_can_reach_ore(grid_pos, ore_data):
 					mining_target = grid_pos
 					mining_item_id = ore_data.minable_resource
 					mining_timer = mining_speed
@@ -470,9 +638,18 @@ func _handle_mining(delta: float) -> void:
 	if mining_target == null:
 		return
 
-	# Validate ore still exists
+	# Validate ore still exists AND that the drone can still reach it —
+	# a floor ore that just got covered by a placement mid-mining stops
+	# the drone immediately.
 	var terrain = _terrain_ref()
 	if terrain == null or not terrain.ore_tiles.has(mining_target):
+		mining_target = null
+		mining_item_id = &""
+		_resume_mining_target = null
+		_resume_mining_item_id = &""
+		return
+	var live_ore = terrain.get_ore_at(mining_target)
+	if not _drone_can_reach_ore(mining_target, live_ore):
 		mining_target = null
 		mining_item_id = &""
 		_resume_mining_target = null
@@ -575,8 +752,15 @@ func _update_transfers(delta: float) -> void:
 	for i in range(_transfer_items.size()):
 		_transfer_items[i]["t"] += delta / TRANSFER_DURATION
 		if _transfer_items[i]["t"] >= 1.0:
-			# Arrived at core — deposit if storage has room
+			# Arrived at core — incinerate or deposit.
 			var item_id: StringName = _transfer_items[i]["item_id"]
+			# Coal / sand vanish at the core (fuel + waste). Still emit
+			# `item_absorbed_in_core` so tech-tree progression unlocks
+			# fire on the first delivery.
+			if main.has_method("is_incinerated_at_core") and main.is_incinerated_at_core(item_id):
+				main.item_absorbed_in_core.emit(item_id)
+				to_remove.append(i)
+				continue
 			if not main.can_accept_resource(item_id):
 				# Storage full — return item to mined inventory
 				mined_inventory[item_id] = mined_inventory.get(item_id, 0) + 1
@@ -646,6 +830,20 @@ func _move_to_core() -> void:
 		(core_pos.y + core_size.y / 2.0) * main.GRID_SIZE
 	)
 	_velocity_smooth = Vector2.ZERO
+	_reset_orientation()
+
+
+## Restores the chassis + head rotations to neutral. Called on any
+## respawn path so a drone that died facing a wall doesn't reappear
+## with a stale aim pose.
+func _reset_orientation() -> void:
+	facing_angle = PI
+	_target_facing_angle = PI
+	_turret_aim_offset = 0.0
+	_healer_aim_offset = 0.0
+	_has_turret_aim = false
+	_heal_beam_active = false
+	heal_target = null
 
 
 ## Respawns the drone at an arbitrary world position. Used when releasing
@@ -655,6 +853,7 @@ func respawn_at(world_pos: Vector2) -> void:
 	position = world_pos
 	_velocity_smooth = Vector2.ZERO
 	_clear_inventory()
+	_reset_orientation()
 
 
 func is_in_build_range(grid_pos: Vector2i) -> bool:
@@ -685,10 +884,9 @@ func _get_focus_world_pos() -> Variant:
 		return main.grid_to_world(mining_target) + Vector2(
 			main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5
 		)
-	# Healing laser is also a focus — face wherever the beam is pointing
-	# so the shardling visibly aims at what it's healing.
-	if _heal_beam_active:
-		return _heal_beam_endpoint
+	# Heal beam used to count as a focus and pull the chassis to face the
+	# beam endpoint. Now that the rotating healer head handles aiming on
+	# its own, the chassis stays free to face the player's movement.
 	return null
 
 
@@ -721,12 +919,24 @@ func _draw() -> void:
 	var hud = _hud_ref()
 	if not hud or hud.visible:
 		_draw_range_circle()
+	# Chassis underneath, then turret + healer heads, then beams on top
+	# so the lasers visibly emerge from the rotating heads instead of
+	# vanishing behind the body. Mirrors how Mindustry's modular units
+	# stack their barrel art over the chassis. Thruster glows draw
+	# under the chassis so the body partially clips the inner half of
+	# each circle, leaving only the exhaust visibly poking out the back.
+	_draw_thrusters()
+	_draw_drone()
+	_draw_turret_heads()
+	_draw_healer_head()
 	_draw_mining_beam()
 	_draw_heal_beam()
-	_draw_drone()
 	_draw_mined_inventory()
 	_draw_transfer_items()
 	_draw_health_bar()
+	if main and main.show_hitboxes:
+		var hb_radius: float = (data.visual_size if data else 12.0)
+		draw_arc(Vector2.ZERO, hb_radius, 0, TAU, 32, Color(1.0, 0.2, 0.9, 0.9), 1.5)
 
 
 func _draw_range_circle() -> void:
@@ -795,6 +1005,124 @@ func _draw_drone() -> void:
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Three yellow exhaust circles arrayed across the chassis's back
+## edge — one larger center port flanked by two smaller ones — that
+## carry with the body via `facing_angle`. Drawn under the chassis so
+## the body clips the inner half of each circle, leaving the exhaust
+## poking out behind.
+func _draw_thrusters() -> void:
+	var chassis: Vector2 = _chassis_size()
+	if chassis.x <= 0.0 or chassis.y <= 0.0:
+		return
+	# Source faces +Y, so the back is at -Y in chassis-local space.
+	var back_y: float = -chassis.y * 0.45
+	var side_x: float = chassis.x * 0.28
+	var center_r: float = chassis.x * 0.10
+	var side_r: float = center_r * 0.5
+	# Pulse and color shaping match `Main.draw_beam` so the thrusters
+	# breathe in lockstep with the heal / mining lasers.
+	var pulse: float = 0.5 + 0.5 * sin(_thruster_phase)
+	var alpha: float = 0.6 + 0.3 * pulse
+	var outer_color := Color(1.0, 0.92, 0.25, alpha)
+	var inner_color := Color(1.0, 1.0, 1.0, alpha)
+	var ports: Array = [
+		[Vector2(-side_x, back_y), side_r],
+		[Vector2(0.0, back_y), center_r],
+		[Vector2(side_x, back_y), side_r],
+	]
+	for port in ports:
+		var local_pos: Vector2 = (port[0] as Vector2).rotated(facing_angle)
+		var r: float = port[1] as float
+		draw_circle(local_pos, r, outer_color)
+		draw_circle(local_pos, r * 0.5, inner_color)
+
+
+## Returns the chassis sprite's local size in pixels (post sprite_scale
+## and SPRITE_SCALE_FACTOR). Used to position the turret heads at the
+## correct mid-left / mid-right offsets regardless of texture resolution.
+func _chassis_size() -> Vector2:
+	if drone_texture == null:
+		var fallback: float = (data.visual_size if data else 12.0) * 2.0
+		return Vector2(fallback, fallback)
+	var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR
+	return drone_texture.get_size() * scale_mult
+
+
+## Returns the offset (in chassis-local pre-rotation pixels) of the
+## left or right turret head's center. Both sit on the chassis Y-axis
+## center line, X-offset from the body edges by `TURRET_HEAD_INSET_PX`.
+## The chassis sprite source faces +Y (the formula
+## `velocity.angle() + PI/2 + PI` aligns +Y to forward), so the body's
+## "left" edge is at -X local and "right" at +X local in unrotated space.
+func _turret_local_offset(right_side: bool) -> Vector2:
+	var w: float = _chassis_size().x
+	var sign_x: float = 1.0 if right_side else -1.0
+	return Vector2(sign_x * (w * 0.5 - TURRET_HEAD_INSET_PX), 0.0)
+
+
+## Returns the world-space center of a turret head (left or right),
+## accounting for the chassis rotation that carries the heads with the
+## body. The chassis is rotated by `facing_angle` so we rotate the
+## local offset by the same amount.
+func _turret_world_center(right_side: bool) -> Vector2:
+	return position + _turret_local_offset(right_side).rotated(facing_angle)
+
+
+## Returns the world muzzle position of a turret head — the front
+## (bottom-of-source-art) edge of the head sprite, projected outward
+## by half its texture height in the head's current aim direction.
+## Used by combat_system to spawn projectiles from the actual barrel
+## tip instead of the chassis center.
+func _turret_muzzle_world(right_side: bool) -> Vector2:
+	var center: Vector2 = _turret_world_center(right_side)
+	if turret_head_texture == null:
+		return center
+	var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR * HEAD_SCALE
+	var head_h: float = turret_head_texture.get_size().y * scale_mult
+	# Aim is stored as an offset from chassis facing — combine for the
+	# absolute world rotation of the head, then project the muzzle
+	# half-a-head forward along that direction.
+	var world_rot: float = facing_angle + _turret_aim_offset
+	var fwd: Vector2 = Vector2(0.0, 1.0).rotated(world_rot)
+	return center + fwd * (head_h * 0.5)
+
+
+## Combat-system entry point: returns the next turret muzzle's world
+## position and flips the toggle so the next call uses the other
+## barrel. Gives the drone a Mindustry-style alternating two-barrel
+## firing cadence without the combat code knowing which side fired.
+func next_turret_muzzle_world_pos() -> Vector2:
+	var pos: Vector2 = _turret_muzzle_world(_next_muzzle_is_right)
+	_next_muzzle_is_right = not _next_muzzle_is_right
+	return pos
+
+
+func _draw_turret_heads() -> void:
+	if turret_head_texture == null:
+		return
+	var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR * HEAD_SCALE
+	var tex_size: Vector2 = turret_head_texture.get_size() * scale_mult
+	var rect := Rect2(-tex_size * 0.5, tex_size)
+	var world_rot: float = facing_angle + _turret_aim_offset
+	for right_side in [false, true]:
+		var center_local: Vector2 = _turret_local_offset(right_side).rotated(facing_angle)
+		draw_set_transform(center_local, world_rot)
+		draw_texture_rect(turret_head_texture, rect, false)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+
+func _draw_healer_head() -> void:
+	if heal_head_texture == null:
+		return
+	var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR * HEAD_SCALE
+	var tex_size: Vector2 = heal_head_texture.get_size() * scale_mult
+	var rect := Rect2(-tex_size * 0.5, tex_size)
+	var world_rot: float = facing_angle + _healer_aim_offset
+	draw_set_transform(Vector2.ZERO, world_rot)
+	draw_texture_rect(heal_head_texture, rect, false)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+
 ## Drives the green healing laser. Two modes:
 ##   heal_mode == true  → laser follows the cursor (capped at HEAL_RANGE_TILES)
 ##                        and snaps onto damaged friendly blocks the aim
@@ -820,13 +1148,12 @@ func _handle_healing(delta: float) -> void:
 	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
 		_heal_beam_active = false
 		return
-	# Healing is a live gameplay action — block it while the world is
-	# paused so the player can't sneak a heal in (or out) during the
-	# freeze. Drops any existing lock too so a click-and-pause doesn't
-	# leave a phantom beam visible.
+	# Healing is a live gameplay action — block target acquisition / HP
+	# application while the world is paused so the player can't sneak a
+	# heal in during the freeze. The visual beam stays put on whatever
+	# it was already locked to so the world doesn't pop visually when
+	# the player pauses mid-heal.
 	if "world_paused" in main and main.world_paused:
-		heal_target = null
-		_heal_beam_active = false
 		return
 	var range_px: float = HEAL_RANGE_TILES * float(main.GRID_SIZE)
 	var aim_pos: Vector2
@@ -1074,9 +1401,17 @@ func _draw_heal_beam() -> void:
 		return
 	var pulse: float = 0.5 + 0.5 * sin(_heal_beam_phase)
 	var endpoint_local: Vector2 = _heal_beam_endpoint - position
+	# Beam emerges from the bottom of the rotating healer head — that's
+	# half a head-height out from chassis center along the head's
+	# forward (+Y local) axis after rotation.
+	var start_local: Vector2 = Vector2.ZERO
+	if heal_head_texture:
+		var scale_mult: float = (data.sprite_scale if data else 1.0) * main.SPRITE_SCALE_FACTOR * HEAD_SCALE
+		var head_h: float = heal_head_texture.get_size().y * scale_mult
+		var world_rot: float = facing_angle + _healer_aim_offset
+		start_local = Vector2(0.0, 1.0).rotated(world_rot) * (head_h * 0.5)
 	var main_ref = get_node("/root/Main")
-	# Beam emerges from the drone center (per spec) — start_offset is zero.
-	main_ref.draw_beam(self, Vector2.ZERO, endpoint_local, Color(0.3, 1.0, 0.4), pulse)
+	main_ref.draw_beam(self, start_local, endpoint_local, Color(0.3, 1.0, 0.4), pulse)
 
 
 func _draw_mining_beam() -> void:

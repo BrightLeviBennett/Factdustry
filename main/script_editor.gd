@@ -210,6 +210,11 @@ func _create_panel() -> void:
 	panel.offset_bottom = -10
 	panel.offset_left = -450
 	panel.offset_right = -6
+	# Lock the panel's RIGHT edge at offset_right and let the LEFT edge
+	# slide leftward when content needs more width — without this, the
+	# default GROW_DIRECTION_END pins the LEFT edge and pushes the RIGHT
+	# edge past the screen, so a wide step detail vanishes off-screen.
+	panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	panel.add_theme_stylebox_override("panel", _panel_style(Color(0, 0, 0, 0.8)))
 	add_child(panel)
 

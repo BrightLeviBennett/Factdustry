@@ -247,6 +247,12 @@ func _unit_mgr_ref() -> Node:
 
 
 func _ready() -> void:
+	# Items on conveyors / pipes / etc. need to paint ABOVE the building
+	# layer (BuildingSystem sits at z 51) so the player can see resources
+	# flowing across the top of belts/ducts. Without this they'd vanish
+	# behind every block they crossed.
+	z_index = 51
+	z_as_relative = false
 	await get_tree().process_frame
 	_terrain = get_node_or_null("/root/Main/TerrainSystem")
 	_power_sys = get_node_or_null("/root/Main/PowerSystem")
@@ -323,6 +329,13 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 	if data.category != BlockData.BlockCategory.EXTRACTORS:
 		return 1.0
 	var is_wall_miner: bool = data.tags.has("wall_miner")
+	var is_floor_miner: bool = data.tags.has("floor_miner")
+	# Floor miners (ground scraper) read every cell of their FOOTPRINT —
+	# not the front edge — because they strip topsoil straight down.
+	# Each covered ore cell after the first adds +25% throughput, so a
+	# 2×2 scraper sitting on four coal cells caps at 175%.
+	if is_floor_miner:
+		return _floor_miner_efficiency(origin, data.grid_size)
 	var front_cells := _get_front_edge(origin, data.grid_size, rot)
 	var dir: Vector2i
 	match rot:
@@ -342,11 +355,120 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 			if c1_ok or c2_ok:
 				hit_count += 1
 		else:
-			if terrain.get_ore_at(cell) != null:
-				hit_count += 1
-			elif terrain.get_ore_at(cell + dir) != null:
+			if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner) \
+					or _ore_is_minable_by(terrain.get_ore_at(cell + dir), is_floor_miner):
 				hit_count += 1
 	return float(hit_count) / float(front_count)
+
+
+## Counts how many cells of `origin`'s footprint have a floor-ore
+## underneath, then converts to an efficiency multiplier:
+##   0 covered → 0.0   (idle — nothing to scrape)
+##   1 covered → 1.0   (baseline)
+##   N covered → 1.0 + 0.25 × (N - 1)
+## So each tile beyond the first contributes +25% throughput.
+func _floor_miner_efficiency(origin: Vector2i, grid_size: Vector2i) -> float:
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return 0.0
+	var covered: int = 0
+	for x in range(grid_size.x):
+		for y in range(grid_size.y):
+			var cell: Vector2i = origin + Vector2i(x, y)
+			var ore: TerrainTileData = terrain.get_ore_at(cell)
+			if ore != null and ore.tags.has("floor_ore") and ore.minable_resource != &"":
+				covered += 1
+	if covered <= 0:
+		return 0.0
+	return 1.0 + 0.25 * float(covered - 1)
+
+
+## Computes what an extractor / pump / condenser would output if placed
+## here. Returns `{item_id, per_sec}`; `item_id` is empty + per_sec=0 if
+## the block isn't an extractor or has nothing to mine. The per-second
+## rate already factors in `efficiency` so the caller can render it
+## directly without re-doing the math.
+func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: int) -> Dictionary:
+	var blank := {"item_id": StringName(""), "per_sec": 0.0}
+	if data == null:
+		return blank
+	var efficiency: float = compute_extractor_preview_efficiency(origin, data, rot)
+	var terrain = _terrain_ref()
+	# Pumps & condensers run their own per-tile lookup. Pump rate scales
+	# with depth_mult (= efficiency) on PUMP_BASE_RATE_PER_SEC; condenser
+	# rate is the geyser-or-vent base (8 / 4) scaled by efficiency, where
+	# `efficiency` for condensers is geyser→1.0, vent→0.5.
+	if data.tags.has("pump"):
+		var fluid_id: StringName = &""
+		if data.tags.has("condenser"):
+			fluid_id = &"mat_water"
+			# 8 = geyser baseline; vent reads as 0.5 efficiency → 4/s.
+			return {"item_id": fluid_id, "per_sec": 8.0 * efficiency}
+		if terrain:
+			for x in range(data.grid_size.x):
+				for y in range(data.grid_size.y):
+					var lt = terrain.get_liquid_at(origin + Vector2i(x, y))
+					if lt != null and lt.extracted_liquid != &"":
+						fluid_id = lt.extracted_liquid
+						break
+				if fluid_id != &"":
+					break
+		if fluid_id == &"":
+			return blank
+		return {"item_id": fluid_id, "per_sec": PUMP_BASE_RATE_PER_SEC * efficiency}
+	if data.category != BlockData.BlockCategory.EXTRACTORS:
+		return blank
+	# Production cycle length (seconds for the block to finish 1 cycle
+	# at 100% efficiency). Drills produce 1 item per cycle of
+	# ore.minable_resource; wall miners produce sum(output_items).
+	var cycle: float = data.production_time if data.production_time > 0.0 else default_drill_time
+	if cycle <= 0.0:
+		cycle = 1.0
+	var is_wall_miner: bool = data.tags.has("wall_miner")
+	var is_floor_miner: bool = data.tags.has("floor_miner")
+	if is_wall_miner:
+		var first_id: StringName = &""
+		var total_per_cycle: int = 0
+		for raw_id in data.output_items:
+			if first_id == &"":
+				first_id = StringName(raw_id)
+			total_per_cycle += int(data.output_items[raw_id])
+		if first_id == &"" or total_per_cycle <= 0:
+			return blank
+		return {"item_id": first_id, "per_sec": float(total_per_cycle) * efficiency / cycle}
+	# Regular drill / floor miner — sample one valid ore tile under the
+	# scan window and report its minable_resource.
+	if terrain == null:
+		return blank
+	var scan_cells: Array = []
+	if is_floor_miner:
+		for fx in range(data.grid_size.x):
+			for fy in range(data.grid_size.y):
+				scan_cells.append(origin + Vector2i(fx, fy))
+	else:
+		scan_cells = _get_extended_front_edge(origin, data.grid_size, rot)
+	for cell in scan_cells:
+		var ore: TerrainTileData = terrain.get_ore_at(cell)
+		if not _ore_is_minable_by(ore, is_floor_miner):
+			continue
+		if ore.minable_resource == &"":
+			continue
+		return {"item_id": ore.minable_resource, "per_sec": efficiency / cycle}
+	return blank
+
+
+## True if this ore tile can be mined by a drill of the given type.
+## Floor-miner drills (ground scrapers) only mine surface ores tagged
+## "floor_ore"; regular drills only mine wall-embedded ores. Without
+## this split, a coal patch in the dirt would be free pickings for any
+## mechanical drill placed next to it.
+func _ore_is_minable_by(ore_data: TerrainTileData, is_floor_miner: bool) -> bool:
+	if ore_data == null:
+		return false
+	var is_floor_ore: bool = ore_data.tags.has("floor_ore")
+	if is_floor_miner:
+		return is_floor_ore
+	return not is_floor_ore
 
 
 func _update_drills(delta: float) -> void:
@@ -381,13 +503,30 @@ func _update_drills(delta: float) -> void:
 			continue
 
 		var rot: int = main.building_rotation.get(origin, 0)
-		# Check front edge + one tile ahead for the thing this drill mines.
-		var mine_cells = _get_extended_front_edge(origin, data.grid_size, rot)
 		var front_cells = _get_front_edge(origin, data.grid_size, rot)
 
 		# Wall miners (wall_crusher) mine blackstone walls into their configured
-		# output_items; regular drills mine ore deposits via ore.minable_resource.
+		# output_items. Floor miners (ground scraper) mine surface ores tagged
+		# "floor_ore". Regular drills mine wall-embedded ores via
+		# ore.minable_resource. Each kind ignores ores that aren't theirs so a
+		# mechanical drill can't snipe coal from a patch the scraper is
+		# supposed to handle.
 		var is_wall_miner: bool = data.tags.has("wall_miner")
+		var is_floor_miner: bool = data.tags.has("floor_miner")
+
+		# Pick the right scan window. Wall/regular drills look at the
+		# front edge + one tile beyond (they reach forward into ore
+		# walls). Floor miners pull from straight under the footprint —
+		# their target is a coal patch the block is sitting on, not
+		# something it faces.
+		var mine_cells: Array
+		if is_floor_miner:
+			mine_cells = []
+			for fx in range(data.grid_size.x):
+				for fy in range(data.grid_size.y):
+					mine_cells.append(origin + Vector2i(fx, fy))
+		else:
+			mine_cells = _get_extended_front_edge(origin, data.grid_size, rot)
 
 		var ore: TerrainTileData = null
 		var wall_found: bool = false
@@ -403,36 +542,46 @@ func _update_drills(delta: float) -> void:
 				continue
 		else:
 			for cell in mine_cells:
-				ore = terrain.get_ore_at(cell)
-				if ore != null and ore.minable_resource != &"":
-					break
-			if ore == null or ore.minable_resource == &"":
+				var candidate: TerrainTileData = terrain.get_ore_at(cell)
+				if not _ore_is_minable_by(candidate, is_floor_miner):
+					continue
+				if candidate.minable_resource == &"":
+					continue
+				ore = candidate
+				break
+			if ore == null:
 				extractor_efficiency[origin] = 0.0
 				continue
 
-		# Calculate efficiency: fraction of front-edge tiles that face the target
-		# (direct hit or one tile further ahead).
-		var front_count: int = front_cells.size()
-		var hit_count: int = 0
-		var dir: Vector2i
-		match rot:
-			0: dir = Vector2i(1, 0)
-			1: dir = Vector2i(0, 1)
-			2: dir = Vector2i(-1, 0)
-			3: dir = Vector2i(0, -1)
-			_: dir = Vector2i(1, 0)
-		for cell in front_cells:
-			if is_wall_miner:
-				var c1_ok: bool = terrain.get_ore_at(cell) == null and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall"
-				var c2_ok: bool = terrain.get_ore_at(cell + dir) == null and StringName(terrain.wall_tiles.get(cell + dir, &"")) == &"blackstone_wall"
-				if c1_ok or c2_ok:
-					hit_count += 1
-			else:
-				if terrain.get_ore_at(cell) != null:
-					hit_count += 1
-				elif terrain.get_ore_at(cell + dir) != null:
-					hit_count += 1
-		var efficiency: float = float(hit_count) / float(front_count) if front_count > 0 else 1.0
+		# Calculate efficiency. Floor miners (ground scraper) read every
+		# cell of their FOOTPRINT — not the front edge — and earn +25%
+		# per extra ore tile under them on top of a 100% baseline. Wall
+		# miners and standard drills keep the front-edge coverage
+		# fraction (direct hit + one tile ahead).
+		var efficiency: float = 1.0
+		if is_floor_miner:
+			efficiency = _floor_miner_efficiency(origin, data.grid_size)
+		else:
+			var front_count: int = front_cells.size()
+			var hit_count: int = 0
+			var dir: Vector2i
+			match rot:
+				0: dir = Vector2i(1, 0)
+				1: dir = Vector2i(0, 1)
+				2: dir = Vector2i(-1, 0)
+				3: dir = Vector2i(0, -1)
+				_: dir = Vector2i(1, 0)
+			for cell in front_cells:
+				if is_wall_miner:
+					var c1_ok: bool = terrain.get_ore_at(cell) == null and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall"
+					var c2_ok: bool = terrain.get_ore_at(cell + dir) == null and StringName(terrain.wall_tiles.get(cell + dir, &"")) == &"blackstone_wall"
+					if c1_ok or c2_ok:
+						hit_count += 1
+				else:
+					if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner) \
+							or _ore_is_minable_by(terrain.get_ore_at(cell + dir), is_floor_miner):
+						hit_count += 1
+			efficiency = float(hit_count) / float(front_count) if front_count > 0 else 1.0
 		extractor_efficiency[origin] = efficiency
 
 		# Electrical power: scale production speed by the network's
@@ -647,34 +796,69 @@ func _update_pumps(delta: float) -> void:
 		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
 			continue
 
-		# Check for liquid underneath any tile of the pump and pick the
-		# DEEPEST tile beneath the footprint — pumps with one tile in
-		# shallows and another in deep water output at the deep rate.
-		var liquid_tile: Variant = null
-		var max_depth: int = 0
-		for x in range(data.grid_size.x):
-			for y in range(data.grid_size.y):
-				var check_pos: Vector2i = anchor + Vector2i(x, y)
-				var lt = terrain.get_liquid_at(check_pos)
-				if lt != null and lt.extracted_liquid != &"":
-					if liquid_tile == null:
-						liquid_tile = lt
-					if terrain.has_method("get_water_depth_at"):
-						var d_here: int = int(terrain.get_water_depth_at(check_pos))
-						if d_here > max_depth:
-							max_depth = d_here
+		# Condenser branch: rate is determined by the steam source under
+		# the footprint (vent → 4 water/s, geyser → 8 water/s) instead
+		# of the standard pump's water-depth math.
+		var is_condenser: bool = data.tags.has("condenser")
+		var fluid_id: StringName = &""
+		var rate_per_sec: float = 0.0
+		if is_condenser:
+			var on_geyser := false
+			var on_vent := false
+			for x in range(data.grid_size.x):
+				for y in range(data.grid_size.y):
+					var cp: Vector2i = anchor + Vector2i(x, y)
+					var ftid: StringName = StringName(terrain.floor_tiles.get(cp, &""))
+					if ftid == &"geyser":
+						on_geyser = true
+					elif ftid == &"vent":
+						on_vent = true
+			if not (on_vent or on_geyser):
+				extractor_efficiency[anchor] = 0.0
+				continue
+			fluid_id = &"mat_water"
+			# Geyser wins on tie — a footprint that touches both is rare
+			# but the higher-yield source is the one the player placed
+			# the condenser FOR.
+			rate_per_sec = 8.0 if on_geyser else 4.0
+			# Efficiency overlay shows 100% on a geyser (max), 50% on a
+			# vent (half) so the live indicator matches the pump's
+			# normalized scale.
+			extractor_efficiency[anchor] = rate_per_sec / 8.0
+		else:
+			# Check for liquid underneath any tile of the pump and pick the
+			# DEEPEST tile beneath the footprint — pumps with one tile in
+			# shallows and another in deep water output at the deep rate.
+			var liquid_tile: Variant = null
+			var max_depth: int = 0
+			for x in range(data.grid_size.x):
+				for y in range(data.grid_size.y):
+					var check_pos: Vector2i = anchor + Vector2i(x, y)
+					var lt = terrain.get_liquid_at(check_pos)
+					if lt != null and lt.extracted_liquid != &"":
+						if liquid_tile == null:
+							liquid_tile = lt
+						if terrain.has_method("get_water_depth_at"):
+							var d_here: int = int(terrain.get_water_depth_at(check_pos))
+							if d_here > max_depth:
+								max_depth = d_here
 
-		if liquid_tile == null or liquid_tile.extracted_liquid == &"":
-			extractor_efficiency[anchor] = 0.0
-			continue
+			if liquid_tile == null or liquid_tile.extracted_liquid == &"":
+				extractor_efficiency[anchor] = 0.0
+				continue
 
-		# A floor tile with `is_liquid` but no depth reading (e.g. lava
-		# or a custom tile with no BFS depth entry) defaults to medium
-		# depth so it still produces something.
-		if max_depth <= 0:
-			max_depth = 2
+			# A floor tile with `is_liquid` but no depth reading (e.g. lava
+			# or a custom tile with no BFS depth entry) defaults to medium
+			# depth so it still produces something.
+			if max_depth <= 0:
+				max_depth = 2
 
-		# Power efficiency.
+			fluid_id = liquid_tile.extracted_liquid
+			var depth_mult: float = float(max_depth) / 2.0
+			extractor_efficiency[anchor] = depth_mult
+			rate_per_sec = PUMP_BASE_RATE_PER_SEC * depth_mult
+
+		# Power efficiency (shared between condensers and standard pumps).
 		var net_eff: float = 1.0
 		if power_sys and power_sys.has_method("get_electrical_efficiency"):
 			net_eff = clampf(float(power_sys.get_electrical_efficiency(anchor)), 0.0, 1.0)
@@ -683,17 +867,9 @@ func _update_pumps(delta: float) -> void:
 		if _is_storage_full(anchor, data):
 			continue
 
-		# Continuous flow: amount to push this frame, scaled by depth
-		# (shallow → 0.5×, medium → 1×, deep → 1.5×) and power.
-		var depth_mult: float = float(max_depth) / 2.0
-		extractor_efficiency[anchor] = depth_mult
-		var amount: float = PUMP_BASE_RATE_PER_SEC * depth_mult * net_eff * delta
+		var amount: float = rate_per_sec * net_eff * delta
 		if amount <= 0.0:
 			continue
-
-		# Try every edge cell once; push as much as each pipe accepts
-		# until either we run out of amount or no pipe will take more.
-		var fluid_id: StringName = liquid_tile.extracted_liquid
 		var pushed_any := false
 		for x in range(data.grid_size.x):
 			for y in range(data.grid_size.y):
@@ -890,14 +1066,12 @@ func _update_conveyors(delta: float) -> void:
 			if _try_transfer_item(next_pos, item["item_id"], entry_dir):
 				conveyor_items.erase(grid_pos)
 				continue
-
-			# Forward transfer failed. As a fallback, try to side-dump into
-			# any perpendicular non-conveyor neighbour that will accept this
-			# item (turrets, factories, constructors). Matches the Mindustry
-			# convenience where a belt adjacent to an ammo-hungry turret
-			# auto-feeds it without needing a router.
-			if _try_belt_side_dump(grid_pos, drilRotation, item["item_id"]):
-				conveyor_items.erase(grid_pos)
+			# No side-dump fallback: a belt only delivers to the cell it's
+			# facing. Without this, a belt running E-W next to a factory to
+			# its north would silently feed it whenever its forward push
+			# stalled — items shouldn't leak into blocks the belt isn't
+			# pointed at. If the player wants the perpendicular block fed,
+			# they need to route a belt that actually faces it.
 
 		# --- Junction perpendicular-axis items ---
 		var junction_full = []
@@ -1095,112 +1269,6 @@ func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 			return true
 
 	return false
-
-
-## Fallback used when a belt can't push its item forward: tries the two
-## perpendicular neighbours for a non-conveyor block that will accept this
-## item (turret ammo, factory input, constructor). Never dumps sideways into
-## another belt — that would silently reroute items in surprising ways.
-##
-## When BOTH sides could take the item, prefer the one with more free space
-## so two identical turrets sandwiching a belt stay balanced — otherwise a
-## fixed side-priority lets one turret hoard all the ammo while the opposite
-## one starves.
-func _try_belt_side_dump(grid_pos: Vector2i, belt_rot: int, item_id: StringName) -> bool:
-	var sides: Array[int] = [(belt_rot + 1) % 4, (belt_rot + 3) % 4]
-	# Sort sides by emptier-first so the neighbour that most recently
-	# consumed ammo / used an input gets the next item.
-	var scored: Array = []  # Array of [free_space, side_dir]
-	for side_dir in sides:
-		var side_pos: Vector2i = grid_pos + DIR_VECTORS[side_dir]
-		if _is_cross_faction(grid_pos, side_pos):
-			continue
-		if not main.placed_buildings.has(side_pos):
-			continue
-		if _is_conveyor_cell(side_pos):
-			continue
-		# Don't side-dump into refabricators — they should only get items
-		# from belts that actually point at them, so a belt running
-		# alongside doesn't silently leak its contents into a neighbouring
-		# refab when its forward push stalls.
-		var nb_anchor: Vector2i = main.building_origins.get(side_pos, side_pos)
-		var nb_data = Registry.get_block(main.placed_buildings.get(nb_anchor, &""))
-		if nb_data and nb_data.tags.has("refabricator"):
-			continue
-		scored.append([_side_dump_free_space(side_pos, item_id), side_dir])
-	scored.sort_custom(func(a, b): return a[0] > b[0])
-
-	for entry in scored:
-		var side_dir: int = entry[1]
-		var side_pos: Vector2i = grid_pos + DIR_VECTORS[side_dir]
-		var entry_dir: int = (side_dir + 2) % 4
-		if _try_transfer_item(side_pos, item_id, entry_dir):
-			return true
-	return false
-
-
-## Estimates how much room a side-dump target has for a given item. Higher =
-## more open to a new item. Used to sort side-dump candidates so the emptier
-## neighbour wins. Returns 0 for targets that can't take the item at all so
-## they sort behind anything that can.
-func _side_dump_free_space(grid_pos: Vector2i, item_id: StringName) -> int:
-	var data = Registry.get_block(main.placed_buildings.get(grid_pos, &""))
-	if data == null:
-		return 0
-	var anchor = main.get_building_anchor(grid_pos)
-	var origin: Vector2i = anchor if anchor != null else grid_pos
-
-	# Turret ammo storage: free = cap - current_total.
-	if data.is_turret() and not data.ammo_types.is_empty():
-		var matches := false
-		for ammo in data.ammo_types:
-			if ammo is AmmoType and (ammo as AmmoType).item_id == item_id:
-				matches = true
-				break
-		if not matches:
-			return 0
-		var cap: int = data.max_stored_items if data.max_stored_items > 0 else 30
-		var used: int = 0
-		if block_storage.has(origin):
-			for k in block_storage[origin]["items"]:
-				used += int(block_storage[origin]["items"][k])
-		return maxi(cap - used, 0)
-
-	# Factory buffer: free = cap - current amount of this item.
-	var is_omni: bool = data.tags.has("omnidirectional")
-	var is_unit_fab: bool = data.produced_unit != &""
-	if is_omni or is_unit_fab or not data.side_inputs.is_empty():
-		var eff_inputs := _get_effective_inputs(data)
-		var recipe_amt: int = 0
-		for raw_id in eff_inputs:
-			if StringName(raw_id) == item_id:
-				recipe_amt = int(eff_inputs[raw_id])
-				break
-		if recipe_amt <= 0:
-			return 0
-		var cap2: int = data.max_stored_items if data.max_stored_items > 0 else recipe_amt * 10
-		var have: int = 0
-		if factory_buffers.has(origin):
-			have = int(factory_buffers[origin]["inputs"].get(item_id, 0))
-		return maxi(cap2 - have, 0)
-
-	# Constructor: free = (needed - collected) for this item's cost slot.
-	if data.tags.has("constructor") and constructor_state.has(origin):
-		var state = constructor_state[origin]
-		if state["phase"] != "collecting":
-			return 0
-		var sel: StringName = state["selected_block"]
-		if sel == &"":
-			return 0
-		var tdata = Registry.get_block(sel)
-		if tdata == null:
-			return 0
-		for raw_id in tdata.build_cost:
-			if StringName(raw_id) == item_id or StringName("mat_" + str(raw_id)) == item_id:
-				var needed: int = int(tdata.build_cost[raw_id])
-				var have_c: int = int(state["collected"].get(StringName(str(raw_id)), 0))
-				return maxi(needed - have_c, 0)
-	return 0
 
 
 ## Non-mutating "will this block accept this item?" check. Used by the
@@ -2610,10 +2678,12 @@ func _update_belt_unloaders(_delta: float) -> void:
 ## Ferox cores feed the ferox pool; Lumina cores feed the player pool.
 ## Tries to absorb an item into core storage. Returns true if accepted, false if full.
 func _absorb_item(item_id: StringName, core_grid_pos: Vector2i = Vector2i(-1, -1)) -> bool:
-	# Sand isn't a real resource — cores incinerate it instead of adding
-	# it to the pool. Returning true tells the conveyor/drone the deposit
-	# succeeded so the item is consumed rather than backing up the belt.
-	if item_id == &"mat_sand":
+	# Sand and coal aren't long-term core stockpile resources — cores
+	# incinerate them instead of adding to the pool. Returning true tells
+	# the conveyor/drone the deposit succeeded so the item is consumed
+	# rather than backing up the belt. Coal in particular is a fuel item:
+	# it should flow into combustion generators, not pile up in the core.
+	if item_id == &"mat_sand" or item_id == &"mat_coal":
 		return true
 	# Refuse deposits into a core that isn't fully built (under
 	# construction or actively being deconstructed). Returning false

@@ -137,6 +137,17 @@ const CRUSHER_HEAD_ACCEL := 5.0
 # Updated in _process when the world is not paused.
 var _crusher_head_state: Dictionary = {}
 
+# --- SCRAPER HEAD TEXTURE ---
+# Single drum-like sprite drawn UNDER the ground scraper's base, spinning
+# whenever the scraper has power and storage room. Same inertia model as
+# the crusher heads but with a single head per block (centered) instead
+# of two front-edge gears.
+var _scraper_head_texture: Texture2D
+const SCRAPER_HEAD_SPIN := -4.5    # radians/sec target (negative = CCW)
+const SCRAPER_HEAD_ACCEL := 5.0    # eases to/from target (rad/s²)
+# Per-scraper state. Key = anchor. Value: {"angle": float, "vel": float}.
+var _scraper_head_state: Dictionary = {}
+
 # Archive-scan reveal-line phase. Advanced in _process when the world
 # isn't paused so the scan line freezes in place during pause. Used as a
 # triangle-wave input so the line ping-pongs across the archive instead
@@ -334,6 +345,13 @@ func _ready() -> void:
 	_popup_overlay.z_as_relative = false
 	_popup_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	add_child(_popup_overlay)
+	# Lift the building layer above ground/crawler/hover units so
+	# placed buildings AND placement previews paint over them. Without
+	# this a 2×2 ghost can completely vanish behind a stray crawler in
+	# its footprint, defeating the point of the preview. Popups stay
+	# on top via their own much-higher z_index (4096).
+	z_index = 50
+	z_as_relative = false
 	# Kick off all texture loads on background threads so they can overlap
 	# with Registry essentials + main/sector initialization. They're resolved
 	# the first time _draw() runs (see _ensure_textures_loaded).
@@ -621,6 +639,7 @@ const _PIPE_TEX_PATH := "res://textures/blocks/fluid transportation/FluidConduit
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
+const _SCRAPER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/Ground Scraper/GroundScraperHead.png"
 # Generic faction-overlay sprites stamped on top of the building's base
 # instead of tinting the whole footprint a flat colour. Centered on the
 # bottom-left tile of multi-tile buildings (and on the only tile of 1×1
@@ -650,6 +669,7 @@ func _queue_texture_loads() -> void:
 	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
+	ResourceLoader.load_threaded_request(_SCRAPER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_FACTION_OVERLAY_FEROX_PATH)
 	ResourceLoader.load_threaded_request(_FACTION_OVERLAY_DERELICT_PATH)
 	for key in _PAYLOAD_CONV_TEX_PATHS:
@@ -670,6 +690,7 @@ func _ensure_textures_loaded() -> void:
 	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
 	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
+	_scraper_head_texture = ResourceLoader.load_threaded_get(_SCRAPER_HEAD_TEX_PATH)
 	_faction_overlay_ferox = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_FEROX_PATH)
 	_faction_overlay_derelict = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_DERELICT_PATH)
 	for key in _PAYLOAD_CONV_TEX_PATHS:
@@ -937,6 +958,71 @@ func _tick_crusher_head_states(delta: float) -> void:
 		_crusher_head_state.erase(a)
 
 
+## Same shape as `_is_crusher_spinning` but generalized for any extractor:
+## active iff finished construction, not sector-disabled, has any power
+## (when it draws power), and its output buffer isn't full. Used by the
+## ground scraper's spinning drum.
+func _is_scraper_spinning(anchor: Vector2i, data: BlockData) -> bool:
+	if data == null:
+		return false
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	var ss = _sector_script_ref()
+	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
+		return false
+	if data.electrical_power_use > 0:
+		var ps = _power_sys_ref()
+		if ps == null or ps.get_electrical_efficiency(anchor) <= 0.0:
+			return false
+	if _logistics and _logistics.has_method("_is_storage_full"):
+		if _logistics._is_storage_full(anchor, data):
+			return false
+	return true
+
+
+## Per-frame tick for scraper heads. Mirrors `_tick_crusher_head_states`
+## but with a single angle/velocity per block instead of two.
+func _tick_scraper_head_states(delta: float) -> void:
+	if _scraper_head_state.is_empty():
+		return
+	var to_erase: Array[Vector2i] = []
+	for anchor in _scraper_head_state:
+		if not main.placed_buildings.has(anchor):
+			to_erase.append(anchor)
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
+		if data == null or not data.tags.has("scraper_head"):
+			to_erase.append(anchor)
+			continue
+		var active := _is_scraper_spinning(anchor, data)
+		var target: float = SCRAPER_HEAD_SPIN if active else 0.0
+		var s: Dictionary = _scraper_head_state[anchor]
+		var step: float = SCRAPER_HEAD_ACCEL * delta
+		s["vel"] = move_toward(float(s["vel"]), target, step)
+		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
+	for a in to_erase:
+		_scraper_head_state.erase(a)
+
+
+## Draws the scraper's spinning head texture centered on the block's
+## footprint at the same `top_pos` the base will draw at. Called BEFORE
+## the base sprite so the base ends up painted over the center of the
+## head and only the rim peeks out — matching the wall crusher's
+## "gear-under-shell" composition. Lazily initializes spin state so the
+## first draw works even if no tick has run yet.
+func _draw_scraper_head(grid_pos: Vector2i, top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	if _scraper_head_texture == null:
+		return
+	if not _scraper_head_state.has(grid_pos):
+		_scraper_head_state[grid_pos] = {"angle": 0.0, "vel": 0.0}
+	var s: Dictionary = _scraper_head_state[grid_pos]
+	var center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+	var size := Vector2(width, height)
+	draw_set_transform(center, float(s["angle"]))
+	draw_texture_rect(_scraper_head_texture, Rect2(-size * 0.5, size), false, tint)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+
 ## Handles Q or R key to rotate, L key to toggle linking mode.
 func _input(event: InputEvent) -> void:
 	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
@@ -1051,6 +1137,7 @@ func _process(_delta: float) -> void:
 	# back in or out, giving each head a real spool-up/coast-down feel.
 	if not ("world_paused" in main and main.world_paused):
 		_tick_crusher_head_states(_delta)
+		_tick_scraper_head_states(_delta)
 		if belt_scroll_enabled:
 			# Advance the conveyor scroll phase. Wrap on a 1024 px window —
 			# big enough that no single belt segment hits the modulus,
@@ -1315,6 +1402,24 @@ func _tick_pending_swap(anchor: Vector2i, delta: float) -> void:
 				if int(consumed.get(rk, 0)) < required:
 					all_fully_consumed = false
 		entry["consumed"] = consumed
+
+	# Mirror-refund the OLD block's build_cost in lockstep with `pct`
+	# so deconstructing the existing block is paid for as the swap
+	# advances, rather than at the end. Matches the player's mental
+	# model: "I'm gradually undoing the old block while building the
+	# new one, so I should be getting materials back as I go."
+	var refund_pool: Dictionary = entry.get("refund_pool", {})
+	var refunded: Dictionary = entry.get("refunded", {})
+	if not refund_pool.is_empty():
+		for rk in refund_pool:
+			var pool_amt: int = int(refund_pool[rk])
+			var target_refund: int = floori(pct * pool_amt)
+			var already_refunded: int = int(refunded.get(rk, 0))
+			var grant: int = target_refund - already_refunded
+			if grant > 0:
+				main._grant_resource_capped(rk, grant)
+				refunded[rk] = already_refunded + grant
+		entry["refunded"] = refunded
 
 		# Stall progress when nothing more can be paid for, so the swap
 		# pauses cleanly under resource starvation rather than silently
@@ -1698,9 +1803,16 @@ func _can_place_ignoring_range(grid_pos: Vector2i, block_id: StringName, rotatio
 		else:
 			if not _is_facing_ore(grid_pos, rotation, block_id):
 				return false
-	# Pump must be on liquid
+	# Pump must be on liquid — except for condensers, which extract from
+	# steam and need a vent or geyser tile centered under their footprint.
 	elif data.tags.has("pump"):
-		if not _is_on_liquid(grid_pos):
+		if data.tags.has("condenser"):
+			if terrain:
+				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+				var tid = terrain.floor_tiles.get(center, &"")
+				if tid != &"vent" and tid != &"geyser":
+					return false
+		elif not _is_on_liquid(grid_pos):
 			return false
 	# Archive scanner must face archive
 	elif data.tags.has("archive_scanner"):
@@ -1734,6 +1846,15 @@ func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 		return false
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 
+	# Unit-occupied check: if any non-flying unit overlaps the footprint,
+	# the placement gate in main.gd will reject — so the preview should
+	# read red. Flying units don't count (they're a different layer).
+	if main.has_method("_is_cell_occupied_by_unit"):
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				if main._is_cell_occupied_by_unit(grid_pos + Vector2i(x, y)):
+					return false
+
 	# Core zone rule: core blocks MUST be on a core_zone tile.
 	# Non-core blocks CAN be placed on core_zone tiles (no restriction).
 	if terrain and data.tags.has("core"):
@@ -1752,9 +1873,16 @@ func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 		else:
 			if not _is_facing_ore(grid_pos, main.placement_rotation):
 				return false
-	# Pump must be on liquid
+	# Pump must be on liquid — except for condensers, which extract from
+	# steam and need a vent or geyser tile centered under their footprint.
 	elif data.tags.has("pump"):
-		if not _is_on_liquid(grid_pos):
+		if data.tags.has("condenser"):
+			if terrain:
+				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+				var tid = terrain.floor_tiles.get(center, &"")
+				if tid != &"vent" and tid != &"geyser":
+					return false
+		elif not _is_on_liquid(grid_pos):
 			return false
 	# Archive scanner: no placement restriction — adjacency to an archive is
 	# checked at decoding time, not at placement time.
@@ -1815,14 +1943,38 @@ func _is_facing_ore(grid_pos: Vector2i, rotation: int, block_id: StringName = &"
 		3: dir = Vector2i(0, -1)
 		_: dir = Vector2i(1, 0)
 
+	# Floor miners only accept floor-ore patches (coal); regular drills
+	# only accept wall-embedded ores. Without this split, placing a
+	# mechanical drill next to a coal patch would succeed but the live
+	# tick would refuse to mine — confusing.
+	var is_floor_miner: bool = data.tags.has("floor_miner")
+	# Floor miners (ground scraper) sit DIRECTLY on top of their ore —
+	# the front edge is past the ore patch, so check the FOOTPRINT cells
+	# instead. Any covered floor-ore tile passes placement; the
+	# efficiency calc determines how productive that ends up being.
+	if is_floor_miner:
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				if _ore_matches_miner(terrain, grid_pos + Vector2i(x, y), true):
+					return true
+		return false
 	var front_cells = _get_front_edge(grid_pos, data.grid_size, rotation)
 	for cell in front_cells:
-		if terrain.get_ore_at(cell) != null:
+		if _ore_matches_miner(terrain, cell, is_floor_miner):
 			return true
-		# Also check one tile ahead
-		if terrain.get_ore_at(cell + dir) != null:
+		if _ore_matches_miner(terrain, cell + dir, is_floor_miner):
 			return true
 	return false
+
+
+func _ore_matches_miner(terrain, cell: Vector2i, is_floor_miner: bool) -> bool:
+	var ore_data: TerrainTileData = terrain.get_ore_at(cell)
+	if ore_data == null:
+		return false
+	var is_floor_ore: bool = ore_data.tags.has("floor_ore")
+	if is_floor_miner:
+		return is_floor_ore
+	return not is_floor_ore
 
 
 ## Returns true if this building's front edge faces a blackstone wall tile
@@ -2993,6 +3145,7 @@ func _draw() -> void:
 	if not _textures_ready:
 		_ensure_textures_loaded()
 	_draw_placed_buildings()
+	_draw_block_hitboxes()
 	_draw_cranes()
 	_draw_archive_scan_overlay()
 	_draw_paused_queue()
@@ -3427,6 +3580,14 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 			and main.has_method("get_building_faction") \
 			and main.get_building_faction(anchor) == FACTION_LUMINA \
 			and not main.is_building_inactive(anchor):
+		# Coal / sand vanish at the core — return `count` to the caller
+		# so the deposit reads as fully accepted (deletes the held stack)
+		# without inflating the resource pool.
+		if main.has_method("is_incinerated_at_core") and main.is_incinerated_at_core(item_id):
+			if main.has_signal("item_absorbed_in_core"):
+				for _i in range(count):
+					main.item_absorbed_in_core.emit(item_id)
+			return count
 		var accepted_c: int = 0
 		for _i in range(count):
 			if main.has_method("can_accept_resource") and not main.can_accept_resource(item_id):
@@ -3848,6 +4009,26 @@ func _get_block_grid_size(block_id: StringName) -> Vector2i:
 	return Vector2i(1, 1)
 
 
+## Developer overlay: outlines every placed block's tile footprint in
+## magenta when `main.show_hitboxes` is on. Only iterates anchors (the
+## origin cells of each building), so multi-tile blocks render as one
+## rect instead of one per covered cell.
+func _draw_block_hitboxes() -> void:
+	if not main or not main.show_hitboxes:
+		return
+	var gs := float(main.GRID_SIZE)
+	var color := Color(1.0, 0.2, 0.9, 0.9)
+	for anchor in main.placed_buildings:
+		var block_id: StringName = main.placed_buildings[anchor]
+		var data = Registry.get_block(block_id)
+		if data == null:
+			continue
+		var size: Vector2i = data.grid_size
+		var origin: Vector2 = main.grid_to_world(anchor)
+		var rect := Rect2(origin, Vector2(size.x * gs, size.y * gs))
+		draw_rect(rect, color, false, 1.5)
+
+
 ## Returns the visual height multiplier for a block (0.0–1.0).
 ## Transport blocks (conveyors) are drawn flatter than other buildings.
 func _get_height_scale(block_id: StringName) -> float:
@@ -3865,6 +4046,11 @@ func _is_directional(block_id: StringName) -> bool:
 	# Omnidirectional blocks accept/output on every side, so they never need
 	# a rotation. The tag wins over the EXTRACTORS-category default.
 	if data.tags.has("omnidirectional"):
+		return false
+	# Floor miners (ground scraper) read ore from straight under their
+	# footprint instead of facing forward into a wall, so rotation is
+	# meaningless for them — also overrides the EXTRACTORS default.
+	if data.tags.has("floor_miner"):
 		return false
 	return (data.is_transport() and not data.tags.has("junction")) \
 		or data.category == BlockData.BlockCategory.EXTRACTORS \
@@ -4517,8 +4703,8 @@ func _draw_placed_buildings() -> void:
 				continue
 			var fade_alpha := _get_wall_fade_alpha(grid_pos)
 			offset = parallax_off
-			side_color = tile_data.get_side_color()
-			side_color_darker = tile_data.get_side_color_dark()
+			side_color = Color.BLACK
+			side_color_darker = Color.BLACK
 			var darkness: float = 1.0 - fade_alpha
 			side_color = side_color.lerp(Color.BLACK, darkness)
 			side_color_darker = side_color_darker.lerp(Color.BLACK, darkness)
@@ -4594,8 +4780,6 @@ func _draw_placed_buildings() -> void:
 				draw_texture_rect(tile_data.icon, top_rect, false)
 			else:
 				draw_rect(top_rect, tile_data.color, true)
-			if tile_data.draw_border:
-				draw_rect(top_rect, tile_data.border_color, false, 1.0)
 			# Ore overlay
 			if terrain.ore_tiles.has(grid_pos):
 				var ore_data: TerrainTileData = _get_ore_tile.call(terrain.ore_tiles[grid_pos])
@@ -4727,6 +4911,12 @@ func _draw_placed_buildings() -> void:
 			var top_rect := Rect2(top_pos, Vector2(width, height))
 			var is_dir: bool = _is_directional(block_id)
 			var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
+			# Scraper head: spinning drum drawn UNDER whatever this block's
+			# base sprite ends up being, so the base covers the center of
+			# the head and only the rim peeks out — same composition as
+			# the wall crusher's gears.
+			if data and data.tags.has("scraper_head"):
+				_draw_scraper_head(grid_pos, top_pos, width, height)
 			# Unit fabricator layered rendering: base + unit-in-construction + top
 			if data and data.produced_unit != &"" and data.base_sprite and data.top_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot)
@@ -5194,6 +5384,49 @@ func _draw_direction_arrow(center: Vector2, rotation: int, color: Color) -> void
 	draw_line(end_pt, end_pt - back - perp, color, 2.5)
 
 
+## Paints an orange arrow on the cell directly in front of a directional
+## block's front edge — i.e. the cell items/units would flow into.
+## Used by the placement previews so the player can see the eject
+## direction before committing, even on textured blocks where the
+## sprite alone doesn't make orientation obvious. The arrow rotates
+## with the block; the cell it sits on shifts whenever the player
+## presses Q to re-rotate the preview.
+const _FRONT_DIR_ARROW_COLOR := Color(1.0, 0.55, 0.0, 0.95)
+func _draw_front_direction_arrow(grid_pos: Vector2i, grid_size: Vector2i, rotation: int) -> void:
+	var gs: float = float(main.GRID_SIZE)
+	var dir_v: Vector2i = DIR_VECTORS[rotation]
+	# Compute the arrow's center in world space directly. For odd-size
+	# blocks (1, 3, 5…) this lands on a cell center; for even-size
+	# blocks (2, 4…) it lands on the SHARED EDGE between the two middle
+	# cells — i.e. the geometric center of the face — so the arrow is
+	# always visually centered on the front of the block regardless of
+	# whether the block has an odd or even footprint.
+	var origin_world: Vector2 = Vector2(float(grid_pos.x), float(grid_pos.y)) * gs
+	var face_w: float = float(grid_size.x) * gs
+	var face_h: float = float(grid_size.y) * gs
+	var cell_center: Vector2
+	match rotation:
+		0:  # right — past the right edge, vertically centered
+			cell_center = origin_world + Vector2(face_w + gs * 0.5, face_h * 0.5)
+		1:  # down — past the bottom edge, horizontally centered
+			cell_center = origin_world + Vector2(face_w * 0.5, face_h + gs * 0.5)
+		2:  # left — past the left edge, vertically centered
+			cell_center = origin_world + Vector2(-gs * 0.5, face_h * 0.5)
+		_:  # up (3) — past the top edge, horizontally centered
+			cell_center = origin_world + Vector2(face_w * 0.5, -gs * 0.5)
+	# Slightly oversize the arrow so it reads from a distance — the
+	# preview is informational, not part of the final block art.
+	var dir_f := Vector2(dir_v)
+	var size: float = clampf(gs * 0.45, 14.0, 64.0)
+	var start_pt: Vector2 = cell_center - dir_f * size * 0.5
+	var end_pt: Vector2 = cell_center + dir_f * size * 0.5
+	draw_line(start_pt, end_pt, _FRONT_DIR_ARROW_COLOR, 4.0)
+	var perp := Vector2(-dir_f.y, dir_f.x) * size * 0.35
+	var back := dir_f * size * 0.4
+	draw_line(end_pt, end_pt - back + perp, _FRONT_DIR_ARROW_COLOR, 4.0)
+	draw_line(end_pt, end_pt - back - perp, _FRONT_DIR_ARROW_COLOR, 4.0)
+
+
 ## Draws a health bar centered above a building.
 ## bar_width_base is the pixel width of the building (scales with size).
 func _draw_building_health_bar(world_pos: Vector2, health_pct: float, building_pixel_width: float = 128.0) -> void:
@@ -5477,6 +5710,14 @@ func _draw_preview() -> void:
 				) + cell_offset
 				var arrow_color = Color(1, 1, 1, 0.8) if cell_ok else Color(1, 0.3, 0.3, 0.6)
 				_draw_direction_arrow(center, cell_rot, arrow_color)
+			# Front-cell orange arrow — drawn for ALL directional previews
+			# (textured and belts included). Lands on the cell one tile
+			# past the front face so the player sees exactly where the
+			# block will eject to.
+			if _is_directional(cell_block_id):
+				var dl_grid_size: Vector2i = cell_data.grid_size if cell_data else Vector2i(cell_grid_w, cell_grid_h)
+				var dl_rot: int = preview_rots.get(cell, main.placement_rotation)
+				_draw_front_direction_arrow(cell, dl_grid_size, dl_rot)
 
 			# Turret heads / chassis preview: only the selected block shows
 			# these, not junction/bridge substitutions.
@@ -5572,6 +5813,11 @@ func _draw_preview() -> void:
 		) + offset
 		var arrow_color = Color(1, 1, 1, 0.8) if can_place else Color(1, 0.3, 0.3, 0.6)
 		_draw_direction_arrow(center, main.placement_rotation, arrow_color)
+	# Front-cell orange arrow — drawn for ALL directional previews
+	# (textured and belts included) so the player can see exactly
+	# where the block will eject to.
+	if is_dir and data:
+		_draw_front_direction_arrow(preview_grid_pos, data.grid_size, main.placement_rotation)
 
 	# Turret heads / chassis preview overlay (mirrors the drag-line path
 	# below). Drawn after base/top so the heads sit on top of the body.
@@ -5590,22 +5836,52 @@ func _draw_preview() -> void:
 		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
 		_draw_crusher_heads(preview_grid_pos, main.placement_rotation, data.grid_size, main.selected_building, ch_tint, false)
 
-	# Extractor efficiency readout — preview-only. A short white tick the
-	# width of the block plus an "Efficiency: NN%" label sit just above the
-	# previewed block, axis-aligned regardless of rotation, so the player
-	# can pick the best ore patch / water depth before committing to the
-	# placement. Not drawn after placement: the value is informational and
-	# would clutter every drill on the map.
-	if data and _logistics and (data.category == BlockData.BlockCategory.EXTRACTORS or data.tags.has("pump")) and _logistics.has_method("compute_extractor_preview_efficiency"):
+	# Extractor efficiency readout — preview-only. A white tick the width
+	# of the block sits just above its top edge with "[icon] NN%(N.N/s)"
+	# centered over it, so the player sees both the percentage and the
+	# concrete throughput for a candidate placement before committing.
+	# Not drawn after placement — the live readout would clutter every
+	# drill on the map.
+	if data and _logistics and (data.category == BlockData.BlockCategory.EXTRACTORS or data.tags.has("pump")) \
+			and _logistics.has_method("compute_extractor_preview_efficiency"):
 		var pv_eff: float = _logistics.compute_extractor_preview_efficiency(preview_grid_pos, data, main.placement_rotation)
 		var pv_w: float = float(main.GRID_SIZE) * grid_w
 		var pv_line_y: float = world_pos.y - 6.0
 		draw_line(Vector2(world_pos.x, pv_line_y), Vector2(world_pos.x + pv_w, pv_line_y), Color.WHITE, 2.0)
 		var pv_font: Font = ThemeDB.fallback_font
 		if pv_font:
-			var pv_text := "Efficiency: %d%%" % int(round(pv_eff * 100.0))
-			var pv_text_pos := Vector2(world_pos.x, pv_line_y - 4.0)
-			draw_string(pv_font, pv_text_pos, pv_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color.WHITE)
+			var out_info: Dictionary = {"item_id": StringName(""), "per_sec": 0.0}
+			if _logistics.has_method("compute_extractor_preview_output"):
+				out_info = _logistics.compute_extractor_preview_output(preview_grid_pos, data, main.placement_rotation)
+			var per_sec: float = float(out_info.get("per_sec", 0.0))
+			var pv_text := "%d%%(%.2f/s)" % [int(round(pv_eff * 100.0)), per_sec]
+			var pv_font_size: int = 12
+			var text_w: float = pv_font.get_string_size(pv_text, HORIZONTAL_ALIGNMENT_LEFT, -1, pv_font_size).x
+			var icon_size: float = 16.0
+			var icon_gap: float = 3.0
+			var item_id: StringName = StringName(out_info.get("item_id", &""))
+			var icon_tex: Texture2D = null
+			if item_id != &"":
+				var item_d = Registry.get_item(item_id)
+				if item_d and item_d.icon:
+					icon_tex = item_d.icon
+				else:
+					var fluid_d = Registry.get_fluid(item_id)
+					if fluid_d and fluid_d.icon:
+						icon_tex = fluid_d.icon
+			var total_w: float = text_w + (icon_size + icon_gap if icon_tex else 0.0)
+			var center_x: float = world_pos.x + pv_w * 0.5
+			var draw_x: float = center_x - total_w * 0.5
+			# draw_string anchors to the BASELINE, so position the text
+			# slightly below the icon's vertical center for visual balance.
+			var baseline_y: float = pv_line_y - 4.0
+			if icon_tex:
+				var icon_y: float = baseline_y - pv_font_size * 0.85
+				draw_texture_rect(icon_tex,
+					Rect2(Vector2(draw_x, icon_y), Vector2(icon_size, icon_size)), false)
+				draw_x += icon_size + icon_gap
+			draw_string(pv_font, Vector2(draw_x, baseline_y), pv_text,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, pv_font_size, Color.WHITE)
 
 	# Cable-node range preview: dashed yellow line extending ±range tiles in each
 	# cardinal direction, plus a yellow outline on the nearest connectable block

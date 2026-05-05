@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dmkk62kq3tagx"
-path="res://.godot/imported/AluminumOre.png-b36fa6fe376ec91e2f794474c8820c9a.ctex"
+uid="uid://jpmkbyjemo4e"
+path="res://.godot/imported/CombustionGenerator.png-3e91044f9532377684b7d3693f061e19.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/AluminumOre.png"
-dest_files=["res://.godot/imported/AluminumOre.png-b36fa6fe376ec91e2f794474c8820c9a.ctex"]
+source_file="res://textures/blocks/power/CombustionGenerator.png"
+dest_files=["res://.godot/imported/CombustionGenerator.png-3e91044f9532377684b7d3693f061e19.ctex"]
 
 [params]
 

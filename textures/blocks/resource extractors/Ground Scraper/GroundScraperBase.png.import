@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cboykskfpp4a2"
-path="res://.godot/imported/BlackstoneFloor.jpeg-c34030f16aad248fc6f879b12a62083b.ctex"
+uid="uid://so8m316qk4o5"
+path="res://.godot/imported/GroundScraperBase.png-5a2bc4afc732da7e1c1fb8247e88c97d.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/BlackstoneFloor.jpeg"
-dest_files=["res://.godot/imported/BlackstoneFloor.jpeg-c34030f16aad248fc6f879b12a62083b.ctex"]
+source_file="res://textures/blocks/resource extractors/Ground Scraper/GroundScraperBase.png"
+dest_files=["res://.godot/imported/GroundScraperBase.png-5a2bc4afc732da7e1c1fb8247e88c97d.ctex"]
 
 [params]
 

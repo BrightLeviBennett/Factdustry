@@ -33,6 +33,8 @@ script = ExtResource("5_wkp8b")
 script = ExtResource("5_trn2v")
 
 [node name="CombatSystem" type="Node2D" parent="." unique_id=1331754618]
+z_index = 70
+z_as_relative = false
 script = ExtResource("8_5vvyt")
 
 [node name="PlayerDrone" type="Node2D" parent="." unique_id=1530151836]

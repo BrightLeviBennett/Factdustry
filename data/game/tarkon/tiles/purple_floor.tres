@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dn1dewgtu4qxj"]
+
+[ext_resource type="Texture2D" uid="uid://cs4e4lj5tbhlc" path="res://textures/terrain/PurpleFloor.png" id="1_wxeq0"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_a3rvb"]
+
+[resource]
+script = ExtResource("2_a3rvb")
+id = &"purple_floor"
+icon = ExtResource("1_wxeq0")
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

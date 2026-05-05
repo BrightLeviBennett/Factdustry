@@ -123,6 +123,11 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export_group("Power")
 @export var electrical_power_gen: float = 0.0
 @export var electrical_power_use: float = 0.0
+## Energy buffer (in power-seconds) this block contributes to its
+## electrical network. Batteries set this; everything else leaves it 0.
+## Surplus generation charges the buffer; deficit drains it before the
+## network browns out.
+@export var electrical_power_storage: float = 0.0
 
 
 @export_group("Directional IO")

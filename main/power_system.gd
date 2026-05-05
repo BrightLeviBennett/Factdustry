@@ -41,8 +41,18 @@ const DIR_VECTORS := [
 # --- NETWORK STATE ---
 ## Array of network dicts:
 ## { "cells": Array[Vector2i], "gen": float, "use": float,
-##   "powered": bool, "efficiency": float }
+##   "powered": bool, "efficiency": float,
+##   "capacity": float, "stored": float, "battery_anchors": Array[Vector2i] }
+## `stored` and `capacity` are derived from `_battery_stored` plus the
+## per-block `electrical_power_storage` field; `battery_anchors` lets the
+## per-frame charge/drain spread the change across the actual batteries
+## so each one's individual reserve survives a topology rebuild.
 var elec_networks: Array = []
+# Per-anchor stored power (in power-seconds). Survives network
+# rebuilds — when a wire is added/removed and the network re-walks, the
+# rebuild reads this dict to seed each network's `stored` field. Cleared
+# on building destroy (see _on_building_destroyed).
+var _battery_stored: Dictionary = {}
 # Per-anchor dynamic power-use override. When a block needs a draw that
 # changes at runtime (mass driver weight, future variable-load
 # machines, etc.) the owning system writes a value here and PowerSystem
@@ -293,10 +303,11 @@ func _process(delta: float) -> void:
 	if _activity_timer <= 0.0:
 		_activity_timer = _ACTIVITY_INTERVAL
 		_recompute_active_totals()
-	# Freeze the rolling history while the world is paused so the
-	# network-wide power graph / per-row sparklines don't keep marching
-	# forward without any state changes behind them.
+	# Freeze the rolling history AND the battery charge tick while paused
+	# so an unattended save with surplus generation doesn't silently fill
+	# every battery to the brim during a pause.
 	if not ("world_paused" in main and main.world_paused):
+		_tick_batteries(delta)
 		_sample_network_history(delta)
 
 
@@ -495,6 +506,9 @@ func _rebuild_electrical_networks() -> void:
 
 		var total_gen := 0.0
 		var total_use := 0.0
+		var total_capacity := 0.0
+		var total_stored := 0.0
+		var battery_anchors: Array[Vector2i] = []
 		var counted_anchors: Dictionary = {}
 		for cell in network_cells:
 			if main.has_method("is_building_inactive") and main.is_building_inactive(cell):
@@ -509,14 +523,26 @@ func _rebuild_electrical_networks() -> void:
 			var d: BlockData = cell_data[cell]
 			total_gen += _get_effective_elec_gen(cell, d)
 			total_use += _get_effective_elec_use(anchor_cell, d)
+			# Battery contribution: capacity + carried-over stored amount.
+			if d.electrical_power_storage > 0.0:
+				total_capacity += d.electrical_power_storage
+				var carried: float = clampf(float(_battery_stored.get(anchor_cell, 0.0)),
+					0.0, d.electrical_power_storage)
+				_battery_stored[anchor_cell] = carried
+				total_stored += carried
+				battery_anchors.append(anchor_cell)
 
 		var net_idx := elec_networks.size()
+		var powered: bool = total_gen >= total_use or (total_stored > 0.0 and total_capacity > 0.0)
 		elec_networks.append({
 			"cells": network_cells,
 			"gen": total_gen,
 			"use": total_use,
-			"powered": total_gen >= total_use,
-			"efficiency": _compute_efficiency(total_gen, total_use),
+			"capacity": total_capacity,
+			"stored": total_stored,
+			"battery_anchors": battery_anchors,
+			"powered": powered,
+			"efficiency": _compute_efficiency_with_storage(total_gen, total_use, total_stored, total_capacity),
 		})
 		for cell in network_cells:
 			elec_cell_to_net[cell] = net_idx
@@ -530,6 +556,77 @@ func _compute_efficiency(gen: float, use: float) -> float:
 	if use <= 0.0:
 		return 1.0
 	return clampf(gen / use, 0.0, 1.0)
+
+
+## Storage-aware variant: while batteries hold any charge, the network
+## reports 100% efficiency — the battery covers the deficit. Once the
+## reserve is drained, falls back to the gen/use ratio. Capacity is
+## passed in so a network with batteries that all happen to be empty
+## still treats this tick as a deficit (no infinite buffer).
+func _compute_efficiency_with_storage(gen: float, use: float, stored: float, capacity: float) -> float:
+	if use <= 0.0:
+		return 1.0
+	if gen >= use:
+		return 1.0
+	if capacity > 0.0 and stored > 0.0:
+		return 1.0
+	return clampf(gen / use, 0.0, 1.0)
+
+
+## Per-frame battery charge/drain. Surplus (`gen > use`) charges the
+## network's batteries; deficit drains them. Each network's `stored`
+## field is updated, and the change is distributed across the batteries
+## proportionally so individual `_battery_stored[anchor]` values track
+## the network's total.
+func _tick_batteries(delta: float) -> void:
+	if delta <= 0.0:
+		return
+	for net in elec_networks:
+		var capacity: float = float(net.get("capacity", 0.0))
+		if capacity <= 0.0:
+			continue
+		var stored: float = float(net.get("stored", 0.0))
+		var net_flow: float = float(net.get("gen", 0.0)) - float(net.get("use", 0.0))
+		var new_stored: float = clampf(stored + net_flow * delta, 0.0, capacity)
+		var actual_change: float = new_stored - stored
+		net["stored"] = new_stored
+		# Refresh efficiency now that storage state may have shifted —
+		# without this a freshly-empty buffer keeps reading 100% until
+		# the next activity recompute.
+		net["efficiency"] = _compute_efficiency_with_storage(
+			float(net["gen"]), float(net["use"]), new_stored, capacity)
+		net["powered"] = float(net["gen"]) >= float(net["use"]) or new_stored > 0.0
+		var anchors: Array = net.get("battery_anchors", [])
+		if anchors.is_empty() or actual_change == 0.0:
+			continue
+		# Spread the change across batteries proportionally to their
+		# remaining headroom (when charging) or remaining stock (when
+		# draining), so the smaller batteries don't get stuck at
+		# extremes while the big one carries everything.
+		var weights: PackedFloat32Array = PackedFloat32Array()
+		weights.resize(anchors.size())
+		var total_w: float = 0.0
+		for i in range(anchors.size()):
+			var a: Vector2i = anchors[i]
+			var d: BlockData = Registry.get_block(main.placed_buildings.get(a, &""))
+			if d == null:
+				weights[i] = 0.0
+				continue
+			var cur: float = float(_battery_stored.get(a, 0.0))
+			var w: float = (d.electrical_power_storage - cur) if actual_change > 0.0 else cur
+			weights[i] = maxf(w, 0.0)
+			total_w += weights[i]
+		if total_w <= 0.0:
+			continue
+		for i in range(anchors.size()):
+			var a2: Vector2i = anchors[i]
+			var d2: BlockData = Registry.get_block(main.placed_buildings.get(a2, &""))
+			if d2 == null:
+				continue
+			var share: float = actual_change * (weights[i] / total_w)
+			_battery_stored[a2] = clampf(
+				float(_battery_stored.get(a2, 0.0)) + share,
+				0.0, d2.electrical_power_storage)
 
 
 ## Lightweight rewalk of each network's cells to sum gen/use counting only
@@ -556,8 +653,10 @@ func _recompute_active_totals() -> void:
 				total_use += _get_effective_elec_use(anchor, d)
 		net["gen"] = total_gen
 		net["use"] = total_use
-		net["powered"] = total_gen >= total_use
-		net["efficiency"] = _compute_efficiency(total_gen, total_use)
+		var stored: float = float(net.get("stored", 0.0))
+		var capacity: float = float(net.get("capacity", 0.0))
+		net["powered"] = total_gen >= total_use or stored > 0.0
+		net["efficiency"] = _compute_efficiency_with_storage(total_gen, total_use, stored, capacity)
 
 
 ## Returns true if the block at `anchor` is currently doing work that would
@@ -604,13 +703,28 @@ func _is_block_drawing_power(anchor: Vector2i, data: BlockData) -> bool:
 
 
 ## Returns the effective electrical generation for a block, accounting for
-## terrain conditions: vent_powered blocks only generate when sitting on a
-## vent floor tile.
+## terrain conditions and fuel state. Vent-powered blocks need a vent
+## tile under them. Fuel-powered blocks (combustion generator) only
+## generate while their factory loop is in the "processing" phase —
+## i.e. while they have at least one fuel item buffered and consuming.
 func _get_effective_elec_gen(grid_pos: Vector2i, data: BlockData) -> float:
 	if data.electrical_power_gen <= 0.0:
 		return 0.0
 	if data.tags.has("vent_powered") and not _is_on_vent(grid_pos):
 		return 0.0
+	if data.tags.has("fuel_powered"):
+		var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+		if logistics == null:
+			return 0.0
+		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if not ("factory_buffers" in logistics) or not logistics.factory_buffers.has(anchor):
+			return 0.0
+		var phase: String = String(logistics.factory_buffers[anchor].get("phase", ""))
+		# Output during both processing (burning fuel) and outputting
+		# (the brief intra-cycle settlement step) — without the second,
+		# the generator visibly blinks to 0 power between fuel ticks.
+		if phase != "processing" and phase != "outputting":
+			return 0.0
 	return data.electrical_power_gen
 
 
@@ -651,4 +765,8 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 			linked_pairs.remove_at(i)
 	# Drop any dynamic-power override the block had registered.
 	_dynamic_power_use.erase(_grid_pos)
+	# Drop any stored battery charge for the destroyed anchor — survival
+	# across rebuilds is intentional, but a destroyed battery's charge is
+	# gone for good (no salvage refund).
+	_battery_stored.erase(_grid_pos)
 	_networks_dirty = true

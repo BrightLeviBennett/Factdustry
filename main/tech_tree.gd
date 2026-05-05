@@ -283,6 +283,38 @@ func load_save_data(data: Dictionary) -> void:
 			_force_researched(sector_id)
 
 
+## Walks every item_*-style unlock rule and force-researches the rule's
+## target if the player currently holds the trigger resource. Without
+## this, loading a save where the player already has 95k steel still
+## leaves `mat_steel` locked because the original `item_produced` signal
+## fired pre-load and the historical event is gone — and every dependent
+## node (Unit Refabricator, etc.) stays locked even though the dep is
+## "obviously" satisfied.
+##
+## Pass the player's resources dict (StringName → int). Safe to call
+## multiple times; nodes already researched are skipped.
+func sync_event_unlocks_from_resources(resources: Dictionary) -> void:
+	const RESOURCE_EVENTS := ["item_mined", "item_produced", "item_absorbed_in_core"]
+	for event in RESOURCE_EVENTS:
+		if not _unlock_rules.has(event):
+			continue
+		for rule in _unlock_rules[event]:
+			var trigger: StringName = rule["trigger"]
+			if not resources.has(trigger):
+				continue
+			if int(resources[trigger]) <= 0:
+				continue
+			var target: StringName = rule["node"]
+			if not nodes.has(target) or is_researched(target):
+				continue
+			if rule.get("unlock_only", false):
+				_force_unlocked(target)
+				node_state_changed.emit(target, NodeState.UNLOCKED)
+			else:
+				_force_researched(target)
+				node_state_changed.emit(target, NodeState.RESEARCHED)
+
+
 # ================================
 # EVENT LISTENERS
 # ================================
@@ -300,6 +332,10 @@ func _register_unlock_rules() -> void:
 	_add_rule("item_mined", &"mat_copper", &"mat_copper")
 	_add_rule("item_mined", &"mat_graphite", &"mat_graphite")
 	_add_rule("item_mined", &"mat_sand", &"mat_sand")
+	# Coal unlocks the moment the ground scraper's first chunk lands in
+	# the player's logistics. Same shape as the other "first mined ore"
+	# rules — emitted by _update_drills when the drill faction is LUMINA.
+	_add_rule("item_mined", &"mat_coal", &"mat_coal")
 	# Iron is produced by the mineral extractor, not mined — unlock it as
 	# soon as the extractor emits its first unit.
 	_add_rule("item_produced", &"mat_iron", &"mat_iron")
@@ -512,11 +548,17 @@ func _register_power() -> void:
 	_add(&"vent_turbine",         "Vent Turbine",         [&"core_shard"],              [&"mat_copper"], {&"mat_copper": 30}, Vector2(0, 1))
 	_add(&"cable_node",           "Cable Node",           [&"vent_turbine"],            [], {&"mat_copper": 15}, Vector2(0, 2))
 	_add(&"solar_panel",          "Solar Panel",          [&"vent_turbine"],            [&"mat_steel"], {&"mat_copper": 50, &"mat_silicon": 20, &"mat_steel": 10}, Vector2(-1, 2))
-	_add(&"solar_array",          "Solar Array",          [&"solar_panel"],             [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(-1, 3))
+	_add(&"large_solar_panel",    "Large Solar Panel",    [&"solar_panel"],             [], {&"mat_copper": 90, &"mat_silicon": 40, &"mat_steel": 20}, Vector2(-1, 3))
+	_add(&"solar_array",          "Solar Array",          [&"large_solar_panel"],       [&"-L-snowy_plains"], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(-1, 4))
 	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(0, 3))
 	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [&"Not unlockable in campaign"], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(0, 4))
 	_add(&"combustion_generator", "Combustion Generator", [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
-	_add(&"combustion_reactor",   "Combustion Reactor",   [&"combustion_generator"],    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 2))
+	_add(&"combustion_reactor",   "Combustion Reactor",   [&"combustion_generator"],    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 3))
+	# Battery tier — chained off the combustion generator branch since
+	# fuel-burning is the first generator that benefits from a buffer.
+	_add(&"small_battery",        "Small Battery",        [&"combustion_generator"],    [], {&"mat_copper": 30, &"mat_silicon": 10}, Vector2(2, 4))
+	_add(&"large_battery",        "Large Battery",        [&"small_battery"],           [], {&"mat_copper": 100, &"mat_silicon": 40, &"mat_steel": 15}, Vector2(2, 5))
+	_add(&"huge_battery",         "Huge Battery",         [&"large_battery"],           [&"Not unlockable in campaign"], {&"mat_copper": 240, &"mat_silicon": 100, &"mat_steel": 60}, Vector2(2, 6))
 
 func _register_belt_transport() -> void:
 	_add(&"conveyor_belt",       "Conveyor Belt",       [&"core_shard"],        [&"mat_copper"], {&"mat_copper": 20}, Vector2(5, 1))
@@ -548,7 +590,6 @@ func _register_fluid_transport() -> void:
 	_add(&"fluid_conduit",              "Fluid Conduit",              [&"core_shard"],          [&"mat_steel"], {&"mat_copper": 25, &"mat_graphite": 10}, Vector2(18, 1))
 	_add(&"fluid_pump",                 "Fluid Pump",                 [&"fluid_conduit"],       [], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_graphite": 15}, Vector2(14, 2))
 	_add(&"vent_condenser",             "Vent Condenser",             [&"fluid_conduit"],       [], {&"mat_copper": 70, &"mat_graphite": 25}, Vector2(15, 2))
-	_add(&"geyser_condenser",           "Geyser Condenser",           [&"vent_condenser"],      [], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(15, 3))
 	_add(&"conduit_junction",           "Conduit Junction",           [&"fluid_conduit"],       [], {&"mat_copper": 60, &"mat_graphite": 20}, Vector2(16, 2))
 	_add(&"conduit_router",             "Conduit Router",             [&"fluid_conduit"],       [], {&"mat_copper": 60, &"mat_graphite": 20}, Vector2(17, 2))
 	_add(&"conduit_bridge",             "Conduit Bridge",             [&"fluid_conduit"],       [], {&"mat_copper": 80, &"mat_graphite": 25, &"mat_silicon": 15}, Vector2(18, 2))
@@ -565,13 +606,13 @@ func _register_mining() -> void:
 	_add(&"wall_crusher",          "Wall Crusher",          [&"mechanical_drill"],      [&"mat_graphite"], {&"mat_copper": 80, &"mat_graphite": 25}, Vector2(23, -2))
 	_add(&"plasma_bore",           "Plasma Bore",           [&"mechanical_drill"],      [&"mat_steel"], {&"mat_copper": 100, &"mat_silicon": 40}, Vector2(22, -2))
 	_add(&"mineral_extractor",     "Mineral Extractor",     [&"mechanical_drill"],      [&"-L-ferrum_ridge"], {&"mat_copper": 70, &"mat_graphite": 20}, Vector2(21, -2))
-	_add(&"ground_scraper",        "Ground Scraper",        [&"impact_driller"],        [&"-L-nightfall_depths"], {&"mat_copper": 180, &"mat_graphite": 60, &"mat_steel": 30}, Vector2(26, -3))
+	_add(&"ground_scraper",        "Ground Scraper",        [&"mechanical_drill"],      [&"-L-nightfall_depths"], {&"mat_copper": 180, &"mat_graphite": 60, &"mat_steel": 30}, Vector2(26, -2))
 	_add(&"earthquake_harvester",  "Earthquake Harvester",  [&"impact_driller"],        [], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_steel": 40}, Vector2(25, -3))
 	_add(&"bauxite_grinder",       "Bauxite Grinder",       [&"bauxite_crusher"],       [], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_graphite": 30}, Vector2(24, -3))
 	_add(&"wall_grinder",          "Wall Grinder",          [&"wall_crusher"],          [&"mat_steel"], {&"mat_copper": 160, &"mat_steel": 50, &"mat_graphite": 30}, Vector2(23, -3))
 	_add(&"advanced_plasma_bore",  "Advanced Plasma Bore",  [&"plasma_bore"],           [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(22, -3))
 	_add(&"petroleum_drill",       "Petroleum Drill",       [&"mechanical_drill"],      [&"-L-dark_valley"], {&"mat_copper": 150, &"mat_graphite": 50, &"mat_steel": 25}, Vector2(21, -3))
-	_add(&"ground_harvester",      "Ground Harvester",      [&"ground_scraper"],        [], {&"mat_copper": 300, &"mat_silicon": 120, &"mat_steel": 80}, Vector2(26, -4))
+	_add(&"ground_harvester",      "Ground Harvester",      [&"ground_scraper"],        [&"Not unlockable in campaign"], {&"mat_copper": 300, &"mat_silicon": 120, &"mat_steel": 80}, Vector2(26, -3))
 	_add(&"eruption_harvester",    "Eruption Harvester",    [&"earthquake_harvester"],  [], {&"mat_copper": 300, &"mat_silicon": 120, &"mat_steel": 80}, Vector2(25, -4))
 
 func _register_materials() -> void:
@@ -595,11 +636,10 @@ func _register_materials() -> void:
 	# source extractable.
 	_add(&"mat_silicon",  "Silicon",  [&"mat_sand"],    [], {}, Vector2(28, 3), true)
 	_add(&"mat_steel",    "Steel",    [&"mat_iron"],    [], {}, Vector2(29, 3), true)
-	_add(&"mat_alumina",  "Alumina",  [&"mat_bauxite"], [], {}, Vector2(30, 3), true)
 	_add(&"mat_brass",    "Brass",    [&"mat_zinc"],    [], {}, Vector2(31, 3), true)
 
 	# Row 4 — Second-pass refinement. Aluminum sits above Alumina.
-	_add(&"mat_aluminum", "Aluminum", [&"mat_alumina"], [], {}, Vector2(30, 4), true)
+	_add(&"mat_aluminum", "Aluminum", [&"mat_bauxite"], [], {}, Vector2(30, 3), true)
 
 	# Keep the legacy nodes in the data model but mark them hidden so
 	# they don't render in the tech-tree UI. They stay reachable from
@@ -632,6 +672,7 @@ func _register_production() -> void:
 	_add(&"circuit_printer",             "Circuit Printer",             [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_graphite": 25}, Vector2(-5, 2))
 	_add(&"water_filter",                "Water Filter",                [&"silicon_mixer"],                    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(-4, 2))
 	_add(&"brass_mixer",                 "Brass Mixer",                 [&"steel_furnace"],                    [&"mat_zinc"], {&"mat_copper": 180, &"mat_silicon": 60, &"mat_steel": 30}, Vector2(-7, 3))
+	_add(&"aluminum_foundry",            "Aluminum Foundry",            [&"brass_mixer"],                      [&"mat_bauxite"], {&"mat_copper": 220, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(-8, 4))
 	_add(&"petroleum_refinery",          "Petroleum Refinery",          [&"brass_mixer"],                      [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 110, &"mat_silicon": 60}, Vector2(-7, 4))
 	_add(&"air_filter",                  "Air Filter",                  [&"graphite_electrolyzer"],            [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_graphite": 40, &"mat_steel": 25}, Vector2(-6, 3))
 
@@ -683,13 +724,13 @@ func _register_support() -> void:
 	_add(&"satellite_launchpad",            "Satellite Launchpad",            [&"launchpad"], [&"-D-archive_launch_systems", &"mat_aluminum"], {&"mat_copper": 500, &"mat_steel": 260, &"mat_graphite": 40}, Vector2(-3, 7))
 
 func _register_units() -> void:
-	_add(&"tank_fabricator",          "Tank Fabricator",          [&"core_shard"],                [], {&"mat_copper": 60}, Vector2(-25, 1))
+	_add(&"tank_fabricator",          "Tank Fabricator",          [&"core_shard"],                [], {&"mat_copper": 60}, Vector2(-26, 1))
 	# Tank line: Press → Breach → Overrun → Subdue → Raze
-	_add(&"press",                    "Press",                    [&"tank_fabricator"],           [], {&"mat_copper": 100}, Vector2(-25, 2))
-	_add(&"breach",                   "Breach",                   [&"press"],                     [&"unit_refabricator"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_graphite": 20}, Vector2(-25, 3))
-	_add(&"overrun",                  "Overrun",                  [&"breach"],                    [&"unit_upgrader"], {&"mat_copper": 300, &"mat_steel": 130}, Vector2(-25, 4))
-	_add(&"subdue",                   "Subdue",                   [&"overrun"],                   [&"unit_assembler"], {&"mat_copper": 480, &"mat_steel": 220, &"mat_graphite": 60}, Vector2(-25, 5))
-	_add(&"raze",                     "Raze",                     [&"subdue"],                    [&"unit_reassembler"], {&"mat_copper": 800, &"mat_steel": 360, &"mat_graphite": 120}, Vector2(-25, 6))
+	_add(&"press",                    "Press",                    [&"tank_fabricator"],           [], {&"mat_copper": 100}, Vector2(-26, 2))
+	_add(&"breach",                   "Breach",                   [&"press"],                     [&"unit_refabricator"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_graphite": 20}, Vector2(-26, 3))
+	_add(&"overrun",                  "Overrun",                  [&"breach"],                    [&"unit_upgrader"], {&"mat_copper": 300, &"mat_steel": 130}, Vector2(-26, 4))
+	_add(&"subdue",                   "Subdue",                   [&"overrun"],                   [&"unit_assembler"], {&"mat_copper": 480, &"mat_steel": 220, &"mat_graphite": 60}, Vector2(-26, 5))
+	_add(&"raze",                     "Raze",                     [&"subdue"],                    [&"unit_reassembler"], {&"mat_copper": 800, &"mat_steel": 360, &"mat_graphite": 120}, Vector2(-26, 6))
 	# Naval line: Wade → Drift → Plunge → Engulf → Deluge
 	_add(&"naval_fabricator",         "Naval Fabricator",         [&"tank_fabricator"],           [&"-D-archive_naval_units"], {&"mat_copper": 160, &"mat_graphite": 50}, Vector2(-30, 2))
 	_add(&"wade",                     "Wade",                     [&"naval_fabricator"],          [], {&"mat_copper": 220, &"mat_silicon": 70}, Vector2(-30, 3))
@@ -705,26 +746,26 @@ func _register_units() -> void:
 	_add(&"survey",                   "Survey",                   [&"intercept"],                 [&"unit_assembler"], {&"mat_copper": 800, &"mat_silicon": 300, &"mat_steel": 230}, Vector2(-29, 6))
 	_add(&"moniter",                  "Moniter",                  [&"survey"],                    [&"unit_reassembler"], {&"mat_copper": 1200, &"mat_silicon": 450, &"mat_steel": 370, &"mat_aluminum": 30}, Vector2(-29, 7))
 	# Support Hover line: Mend → Rebuild → Sustain → Support → Protect
-	_add(&"support_hover_fabricator", "Support Hover Fabricator", [&"tank_fabricator"],           [&"mat_steel"], {&"mat_copper": 110, &"mat_graphite": 35}, Vector2(-27, 2))
-	_add(&"mend",                     "Mend",                     [&"support_hover_fabricator"],  [], {&"mat_copper": 200, &"mat_graphite": 60, &"mat_steel": 30}, Vector2(-27, 3))
-	_add(&"rebuild",                  "Rebuild",                  [&"mend"],                      [&"unit_refabricator"], {&"mat_copper": 300, &"mat_graphite": 100, &"mat_steel": 50}, Vector2(-27, 4))
-	_add(&"sustain",                  "Sustain",                  [&"rebuild"],                   [&"unit_upgrader"], {&"mat_copper": 450, &"mat_graphite": 150, &"mat_steel": 105}, Vector2(-27, 5))
-	_add(&"support",                  "Support",                  [&"sustain"],                   [&"unit_assembler"], {&"mat_copper": 650, &"mat_graphite": 220, &"mat_steel": 170}, Vector2(-27, 6))
-	_add(&"protect",                  "Protect",                  [&"support"],                   [&"unit_reassembler"], {&"mat_copper": 900, &"mat_graphite": 300, &"mat_steel": 270}, Vector2(-27, 7))
+	_add(&"support_hover_fabricator", "Support Hover Fabricator", [&"tank_fabricator"],           [&"mat_steel"], {&"mat_copper": 110, &"mat_graphite": 35}, Vector2(-28, 2))
+	_add(&"mend",                     "Mend",                     [&"support_hover_fabricator"],  [], {&"mat_copper": 200, &"mat_graphite": 60, &"mat_steel": 30}, Vector2(-28, 3))
+	_add(&"rebuild",                  "Rebuild",                  [&"mend"],                      [&"unit_refabricator"], {&"mat_copper": 300, &"mat_graphite": 100, &"mat_steel": 50}, Vector2(-28, 4))
+	_add(&"sustain",                  "Sustain",                  [&"rebuild"],                   [&"unit_upgrader"], {&"mat_copper": 450, &"mat_graphite": 150, &"mat_steel": 105}, Vector2(-28, 5))
+	_add(&"support",                  "Support",                  [&"sustain"],                   [&"unit_assembler"], {&"mat_copper": 650, &"mat_graphite": 220, &"mat_steel": 170}, Vector2(-28, 6))
+	_add(&"protect",                  "Protect",                  [&"support"],                   [&"unit_reassembler"], {&"mat_copper": 900, &"mat_graphite": 300, &"mat_steel": 270}, Vector2(-28, 7))
 	# Hover line: Hoverboard → Hover-transport → Hoverlift → Hovercraft → Hovership
-	_add(&"hover_fabricator",         "Hover Fabricator",         [&"tank_fabricator"],           [&"-L-crevice"], {&"mat_copper": 130}, Vector2(-26, 2))
-	_add(&"hoverboard",               "Hoverboard",               [&"hover_fabricator"],          [], {&"mat_copper": 220, &"mat_graphite": 25}, Vector2(-26, 3))
-	_add(&"hover_transport",          "Hover-transport",          [&"hoverboard"],                [&"unit_refabricator"], {&"mat_copper": 350, &"mat_silicon": 120, &"mat_steel": 40}, Vector2(-26, 4))
-	_add(&"hoverlift",                "Hoverlift",                [&"hover_transport"],           [&"unit_upgrader"], {&"mat_copper": 500, &"mat_silicon": 180, &"mat_steel": 95}, Vector2(-26, 5))
-	_add(&"hovercraft",               "Hovercraft",               [&"hoverlift"],                 [&"unit_assembler"], {&"mat_copper": 700, &"mat_silicon": 250, &"mat_steel": 165}, Vector2(-26, 6))
-	_add(&"hovership",                "Hovership",                [&"hovercraft"],                [&"unit_reassembler"], {&"mat_copper": 1000, &"mat_silicon": 380, &"mat_steel": 250}, Vector2(-26, 7))
+	_add(&"hover_fabricator",         "Hover Fabricator",         [&"tank_fabricator"],           [&"-L-crevice"], {&"mat_copper": 130}, Vector2(-27, 2))
+	_add(&"hoverboard",               "Hoverboard",               [&"hover_fabricator"],          [], {&"mat_copper": 220, &"mat_graphite": 25}, Vector2(-27, 3))
+	_add(&"hover_transport",          "Hover-transport",          [&"hoverboard"],                [&"unit_refabricator"], {&"mat_copper": 350, &"mat_silicon": 120, &"mat_steel": 40}, Vector2(-27, 4))
+	_add(&"hoverlift",                "Hoverlift",                [&"hover_transport"],           [&"unit_upgrader"], {&"mat_copper": 500, &"mat_silicon": 180, &"mat_steel": 95}, Vector2(-27, 5))
+	_add(&"hovercraft",               "Hovercraft",               [&"hoverlift"],                 [&"unit_assembler"], {&"mat_copper": 700, &"mat_silicon": 250, &"mat_steel": 165}, Vector2(-27, 6))
+	_add(&"hovership",                "Hovership",                [&"hovercraft"],                [&"unit_reassembler"], {&"mat_copper": 1000, &"mat_silicon": 380, &"mat_steel": 250}, Vector2(-27, 7))
 	# Flying line: Skim → Glide → Soar → Pierce → Ascend
-	_add(&"flying_fabricator",        "Flying Fabricator",        [&"tank_fabricator"],           [&"dark_valley"], {&"mat_copper": 140, &"mat_graphite": 40}, Vector2(-24, 2))
-	_add(&"skim",                     "Skim",                     [&"flying_fabricator"],         [], {&"mat_copper": 230, &"mat_graphite": 70, &"mat_steel": 25}, Vector2(-24, 3))
-	_add(&"glide",                    "Glide",                    [&"skim"],                      [&"unit_refabricator"], {&"mat_copper": 360, &"mat_graphite": 120, &"mat_steel": 50}, Vector2(-24, 4))
-	_add(&"soar",                     "Soar",                     [&"glide"],                     [&"unit_upgrader"], {&"mat_copper": 520, &"mat_graphite": 180, &"mat_steel": 110}, Vector2(-24, 5))
-	_add(&"pierce",                   "Pierce",                   [&"soar"],                      [&"unit_assembler"], {&"mat_copper": 750, &"mat_graphite": 260, &"mat_steel": 190}, Vector2(-24, 6))
-	_add(&"ascend",                   "Ascend",                   [&"pierce"],                    [&"unit_reassembler"], {&"mat_copper": 1100, &"mat_graphite": 400, &"mat_steel": 300}, Vector2(-24, 7))
+	_add(&"flying_fabricator",        "Flying Fabricator",        [&"tank_fabricator"],           [&"dark_valley"], {&"mat_copper": 140, &"mat_graphite": 40}, Vector2(-25, 2))
+	_add(&"skim",                     "Skim",                     [&"flying_fabricator"],         [], {&"mat_copper": 230, &"mat_graphite": 70, &"mat_steel": 25}, Vector2(-25, 3))
+	_add(&"glide",                    "Glide",                    [&"skim"],                      [&"unit_refabricator"], {&"mat_copper": 360, &"mat_graphite": 120, &"mat_steel": 50}, Vector2(-25, 4))
+	_add(&"soar",                     "Soar",                     [&"glide"],                     [&"unit_upgrader"], {&"mat_copper": 520, &"mat_graphite": 180, &"mat_steel": 110}, Vector2(-25, 5))
+	_add(&"pierce",                   "Pierce",                   [&"soar"],                      [&"unit_assembler"], {&"mat_copper": 750, &"mat_graphite": 260, &"mat_steel": 190}, Vector2(-25, 6))
+	_add(&"ascend",                   "Ascend",                   [&"pierce"],                    [&"unit_reassembler"], {&"mat_copper": 1100, &"mat_graphite": 400, &"mat_steel": 300}, Vector2(-25, 7))
 	# Unit Upgrader branch
 	_add(&"unit_refabricator",        "Unit Refabricator",        [&"tank_fabricator"],           [&"mat_steel"], {&"mat_copper": 150, &"mat_silicon": 50}, Vector2(-24, 2))
 	_add(&"unit_upgrader",            "Unit Upgrader",            [&"unit_refabricator"],         [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_silicon": 90, &"mat_steel": 35}, Vector2(-24, 3))

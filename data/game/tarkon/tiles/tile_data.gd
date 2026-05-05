@@ -18,12 +18,9 @@ extends Resource
 # ============================================================
 
 # --- IDENTITY ---
-## Unique ID (e.g., "organic_floor", "membrane_wall")
+## Unique ID (e.g., "blackstone_floor", "grassy_wall")
 @export var id: StringName = &""
-## Display name
-@export var display_name: String = ""
-## Description
-@export_multiline var description: String = ""
+
 ## Icon texture
 @export var icon: Texture2D
 
@@ -36,28 +33,18 @@ enum TileCategory {
 @export var category: TileCategory = TileCategory.FLOOR
 
 # --- APPEARANCE ---
-## Top face color
-@export var color: Color = Color(0.15, 0.2, 0.15, 1.0)
-## Whether to draw a subtle border between adjacent tiles
-@export var draw_border: bool = false
-## Border color (if draw_border is true)
-@export var border_color: Color = Color(0.1, 0.15, 0.1, 1.0)
 ## Opacity (0.0-1.0), useful for semi-transparent overlays
 @export var opacity: float = 1.0
 
 # --- WALL PROPERTIES ---
 ## Height for parallax rendering (walls only, 0 = uses default wall height)
 @export var height: float = 0.0
-## Side color for parallax (auto-darkened if left black)
-@export var side_color: Color = Color.BLACK
 ## Whether this wall blocks unit pathfinding. If false, all unit types can walk through.
 @export var blocks_pathfinding: bool = true
 ## Can enemies see through this? (walls block LOS by default)
 @export var blocks_los: bool = false
 ## Can this wall be destroyed?
 @export var destructible: bool = false
-## Health (only matters if destructible)
-@export var max_health: float = 0.0
 ## If true, the floor tile underneath this wall is still visible.
 @export var render_tile_underneath: bool = false
 
@@ -110,15 +97,3 @@ func is_ore() -> bool:
 ## Returns true if this is a pumpable liquid source tile.
 func is_liquid_source() -> bool:
 	return is_liquid and extracted_liquid != &""
-
-## Returns the side color, auto-calculating if not set.
-func get_side_color() -> Color:
-	if side_color != Color.BLACK:
-		return side_color
-	return color.darkened(0.4)
-
-## Returns the darker side color for the other axis.
-func get_side_color_dark() -> Color:
-	if side_color != Color.BLACK:
-		return side_color.darkened(0.2)
-	return color.darkened(0.55)

@@ -116,10 +116,17 @@ var _sand_texture: Texture2D = null
 # --- VENT PARTICLES ---
 ## Live steam-puff particles emitted from vent tiles.
 ## Each entry: { "pos": Vector2, "vel": Vector2, "age": float,
-##               "life": float, "radius": float }
+##               "life": float, "radius": float, "color": Color,
+##               "circle_only": bool }
+## `color` defaults to VENT_PARTICLE_COLOR; geyser bursts override with
+## a blue tint. `circle_only` skips the steam texture and renders a
+## solid circle, used by geyser spurts.
 var _vent_particles: Array = []
 ## Per-vent-origin emission timer: Vector2i -> seconds until next puff.
 var _vent_emit_timers: Dictionary = {}
+## Per-geyser-origin emission timer: separate from vents because the
+## emission cadence is much slower (sporadic bursts vs continuous stream).
+var _geyser_emit_timers: Dictionary = {}
 ## Average seconds between emissions per vent. Tuned with VENT_PARTICLE_LIFE
 ## so each vent continually has several sprites in flight, forming a
 ## continuous stream rather than discrete puffs.
@@ -136,6 +143,28 @@ const VENT_PARTICLE_RADIUS := 88.0
 ## as hot vent gas rather than plain white steam (same trick the tech-tree
 ## checkmark uses — draw_texture's modulate tints the whole texture).
 const VENT_PARTICLE_COLOR := Color(1.0, 0.95, 0.75, 0.75)
+
+# --- GEYSER PARTICLES ---
+## Geysers spurt sporadically rather than streaming. Every burst spawns
+## a small cluster of upward-moving blue circles that fade out as they
+## rise. Suppressed (no animation) when covered by a non-condenser block.
+const GEYSER_BURST_INTERVAL := 4.5
+## Sprites per burst — enough to read as a "splash" without overwhelming
+## the screen.
+const GEYSER_PARTICLES_PER_BURST := 6
+## Lifetime of each geyser droplet.
+const GEYSER_PARTICLE_LIFE := 1.2
+## Initial upward speed; geyser droplets actually move (vent steam doesn't).
+const GEYSER_PARTICLE_SPEED := 140.0
+## Horizontal spread velocity at spawn so droplets fan out into a fountain.
+const GEYSER_PARTICLE_SPREAD := 36.0
+## Drop-radius in pixels. Smaller than vent steam — these are water beads.
+const GEYSER_PARTICLE_RADIUS := 14.0
+## Slight downward acceleration so the spurt arcs back toward ground.
+const GEYSER_PARTICLE_GRAVITY := 90.0
+## Bright blue with a hint of teal — reads as water droplets.
+const GEYSER_PARTICLE_COLOR := Color(0.35, 0.65, 1.0, 0.95)
+
 ## Steam sprite rendered for each particle.
 var _vent_steam_tex: Texture2D = null
 
@@ -151,11 +180,16 @@ func _ready() -> void:
 		overlay.set_script(overlay_script)
 		overlay.name = "VentParticleOverlay"
 		overlay.terrain = self
-		# z_index sandwich: buildings sit at 0, steam at 1 (just above),
-		# and units/bullets/drone get bumped to 2 below so they draw over
-		# the steam. This keeps smoke floating above the vent/turbine
-		# without hiding flying units or projectiles.
-		overlay.z_index = 1
+		# z_index sandwich:
+		#   50 BuildingSystem (placed blocks + previews)
+		#   51 LogisticsSystem (items on conveyors / pipes)
+		#   52 vent/geyser steam puffs (this overlay)
+		#   53 UnitManager + CombatSystem + PlayerDrone
+		#   60 SectorScript (tutorial/hint overlays — top of the world)
+		# Steam sits between conveyor items and units so a vent puff
+		# softly veils items but flying units / projectiles still cut
+		# through cleanly.
+		overlay.z_index = 52
 		overlay.z_as_relative = false
 		add_child(overlay)
 	await get_tree().process_frame
@@ -167,7 +201,7 @@ func _ready() -> void:
 	for node_path in ["/root/Main/UnitManager", "/root/Main/CombatSystem", "/root/Main/PlayerDrone"]:
 		var n = get_node_or_null(node_path)
 		if n is CanvasItem:
-			(n as CanvasItem).z_index = 2
+			(n as CanvasItem).z_index = 53
 
 
 func _process(delta: float) -> void:
@@ -188,20 +222,35 @@ func _tick_vent_particles(delta: float) -> void:
 	var world_paused: bool = "world_paused" in main and main.world_paused
 	if not world_paused:
 		for origin in floor_tiles:
-			if floor_tiles[origin] != &"vent":
-				continue
-			if not _vent_can_emit(origin):
-				# Reset the timer so the puff doesn't instantly fire the
-				# moment the covering block is removed.
-				_vent_emit_timers[origin] = VENT_EMIT_INTERVAL * randf_range(0.5, 1.0)
-				continue
-			var timer: float = _vent_emit_timers.get(origin, randf() * VENT_EMIT_INTERVAL)
-			timer -= delta
-			if timer <= 0.0:
-				_spawn_vent_puff(origin)
-				# Small jitter so the stream feels natural without gaps.
-				timer = VENT_EMIT_INTERVAL * randf_range(0.85, 1.15)
-			_vent_emit_timers[origin] = timer
+			var tile_id: StringName = floor_tiles[origin]
+			if tile_id == &"vent":
+				if not _vent_can_emit(origin):
+					# Reset the timer so the puff doesn't instantly fire the
+					# moment the covering block is removed.
+					_vent_emit_timers[origin] = VENT_EMIT_INTERVAL * randf_range(0.5, 1.0)
+					continue
+				var timer: float = _vent_emit_timers.get(origin, randf() * VENT_EMIT_INTERVAL)
+				timer -= delta
+				if timer <= 0.0:
+					_spawn_vent_puff(origin)
+					# Small jitter so the stream feels natural without gaps.
+					timer = VENT_EMIT_INTERVAL * randf_range(0.85, 1.15)
+				_vent_emit_timers[origin] = timer
+			elif tile_id == &"geyser":
+				if not _geyser_can_emit(origin):
+					# Hold the timer above zero so the moment the covering
+					# block is removed, the geyser doesn't immediately
+					# spurt — give it a beat to "build pressure".
+					_geyser_emit_timers[origin] = GEYSER_BURST_INTERVAL * randf_range(0.4, 0.8)
+					continue
+				var g_timer: float = _geyser_emit_timers.get(origin,
+					GEYSER_BURST_INTERVAL * randf_range(0.3, 1.0))
+				g_timer -= delta
+				if g_timer <= 0.0:
+					_spawn_geyser_burst(origin)
+					# Wide jitter so neighboring geysers don't sync up.
+					g_timer = GEYSER_BURST_INTERVAL * randf_range(0.7, 1.4)
+				_geyser_emit_timers[origin] = g_timer
 
 	# --- Update live particles. Paused world = freeze every sprite exactly
 	# where it is (no aging, rotation, or motion) and resume on unpause.
@@ -220,8 +269,14 @@ func _tick_vent_particles(delta: float) -> void:
 		if p["age"] >= p["life"]:
 			_vent_particles.remove_at(i)
 		else:
-			# Slight drag so puffs decelerate as they dissipate.
-			p["vel"] *= 1.0 - minf(delta * 0.6, 1.0)
+			# Geyser droplets fall under gravity; vent steam drifts on
+			# pure drag. The per-particle "gravity" field is 0 by default
+			# so vent puffs keep their original behavior.
+			var grav: float = float(p.get("gravity", 0.0))
+			if grav != 0.0:
+				p["vel"] = Vector2(p["vel"].x, p["vel"].y + grav * delta)
+			else:
+				p["vel"] *= 1.0 - minf(delta * 0.6, 1.0)
 			p["pos"] += p["vel"] * delta
 		i -= 1
 
@@ -238,6 +293,19 @@ func _vent_can_emit(origin: Vector2i) -> bool:
 	if data == null:
 		return true
 	return data.tags.has("vent_powered")
+
+
+## Mirror of `_vent_can_emit` for geysers. Open geysers spurt; geysers
+## with a vent-condenser on top still spurt — the spray reads as water
+## being collected. Anything else covering the geyser plugs it.
+func _geyser_can_emit(origin: Vector2i) -> bool:
+	if not main.placed_buildings.has(origin):
+		return true
+	var block_id: StringName = main.placed_buildings[origin]
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return true
+	return data.tags.has("condenser")
 
 
 func _spawn_vent_puff(origin: Vector2i) -> void:
@@ -264,6 +332,39 @@ func _spawn_vent_puff(origin: Vector2i) -> void:
 			"spin": randf_range(-0.8, 0.8),
 			# Slight non-uniform scale so not every particle is a perfect circle.
 			"aspect": Vector2(randf_range(0.85, 1.15), randf_range(0.85, 1.15)),
+		})
+
+
+## Geyser burst: a small fountain of upward-moving blue droplets. Unlike
+## vent steam (which is a continuous stream of slow puffs), geyser
+## particles have real velocity + gravity so each burst arcs visibly.
+func _spawn_geyser_burst(origin: Vector2i) -> void:
+	var gs: float = float(main.GRID_SIZE)
+	# Geyser is a 3x3 multi-tile keyed at its center cell, same as vent.
+	var center: Vector2 = Vector2(
+		(float(origin.x) + 0.5) * gs,
+		(float(origin.y) + 0.5) * gs
+	)
+	for _n in range(GEYSER_PARTICLES_PER_BURST):
+		var spread: float = randf_range(-GEYSER_PARTICLE_SPREAD, GEYSER_PARTICLE_SPREAD)
+		# A bit of vertical variance so droplets don't all crest at the
+		# same height — gives the spurt a more natural splash shape.
+		var up_speed: float = GEYSER_PARTICLE_SPEED * randf_range(0.85, 1.15)
+		_vent_particles.append({
+			"pos": center + Vector2(spread * 0.15, 0.0),
+			"vel": Vector2(spread, -up_speed),
+			"age": 0.0,
+			"life": GEYSER_PARTICLE_LIFE * randf_range(0.85, 1.15),
+			"radius": GEYSER_PARTICLE_RADIUS * randf_range(0.8, 1.2),
+			"angle": 0.0,
+			"spin": 0.0,
+			"aspect": Vector2.ONE,
+			# Per-particle overrides: blue circle + downward gravity
+			# distinguish geyser droplets from vent steam without
+			# branching the renderer on tile type.
+			"color": GEYSER_PARTICLE_COLOR,
+			"circle_only": true,
+			"gravity": GEYSER_PARTICLE_GRAVITY,
 		})
 
 
@@ -366,9 +467,16 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 		return
 
 	if data.is_ore():
-		# Ore can only be placed on a wall
-		if not wall_tiles.has(grid_pos):
-			return
+		# "floor_ore" ores (e.g. surface coal) sit on the ground instead
+		# of being embedded in walls — they need a floor under them and
+		# explicitly reject wall cells. Standard ores are wall-only.
+		var is_floor_ore: bool = data.tags.has("floor_ore")
+		if is_floor_ore:
+			if not floor_tiles.has(grid_pos) or wall_tiles.has(grid_pos):
+				return
+		else:
+			if not wall_tiles.has(grid_pos):
+				return
 		ore_tiles[grid_pos] = tile_id
 	elif data.is_wall():
 		wall_tiles[grid_pos] = tile_id
@@ -424,6 +532,13 @@ func remove_tile(grid_pos: Vector2i) -> void:
 		walls_changed.emit()
 	elif floor_tiles.has(grid_pos):
 		floor_tiles.erase(grid_pos)
+		# Floor-ores (e.g. surface coal) sit ON the floor — once the
+		# floor is gone, the ore has nothing to rest on. Mirrors how
+		# wall removal also clears the ore embedded in it.
+		if ore_tiles.has(grid_pos):
+			var ore_data = Registry.get_tile(ore_tiles[grid_pos])
+			if ore_data and ore_data.tags.has("floor_ore"):
+				ore_tiles.erase(grid_pos)
 		_floor_edge_dirty = true
 		_water_depth_dirty = true
 	else:
@@ -451,7 +566,7 @@ func _is_multi_tile(tile_id: StringName) -> bool:
 	if not data:
 		return false
 	# Check display_name for "Geyser" or "Vent"
-	return data.display_name == "Geyser" or data.display_name == "Vent"
+	return data.id == "geyser" or data.id == "vent"
 
 
 ## Places a 3x3 floor tile. The origin is grid_pos (center).
@@ -1192,12 +1307,20 @@ func draw_vent_particles_to(canvas: CanvasItem) -> void:
 		# over the rest of the life with smoothstep for a soft dissipation.
 		var fade_in: float = smoothstep(0.0, 0.2, t)
 		var fade_out: float = 1.0 - smoothstep(0.35, 1.0, t)
-		var alpha: float = VENT_PARTICLE_COLOR.a * fade_in * fade_out
-		# Radius eases from ~0.55× to ~1.8× over life. Starting smaller gives
-		# the "building up" look instead of a sudden full-size appearance.
-		var radius: float = float(p["radius"]) * lerp(0.55, 1.8, smoothstep(0.0, 1.0, t))
-		var col := Color(VENT_PARTICLE_COLOR.r, VENT_PARTICLE_COLOR.g, VENT_PARTICLE_COLOR.b, alpha)
-		if tex and native_size.x > 0.0 and native_size.y > 0.0:
+		# Per-particle base color (geyser droplets override). Vent
+		# steam keeps the original tan tint via the default.
+		var base_col: Color = p.get("color", VENT_PARTICLE_COLOR)
+		var alpha: float = base_col.a * fade_in * fade_out
+		# Geyser droplets keep a roughly constant size (water beads
+		# don't billow), vent steam grows from 0.55× to 1.8×.
+		var circle_only: bool = bool(p.get("circle_only", false))
+		var radius: float
+		if circle_only:
+			radius = float(p["radius"]) * lerp(1.0, 0.7, t)
+		else:
+			radius = float(p["radius"]) * lerp(0.55, 1.8, smoothstep(0.0, 1.0, t))
+		var col := Color(base_col.r, base_col.g, base_col.b, alpha)
+		if not circle_only and tex and native_size.x > 0.0 and native_size.y > 0.0:
 			var aspect: Vector2 = p.get("aspect", Vector2.ONE)
 			var size: Vector2 = Vector2(radius * 2.0, radius * 2.0) * aspect
 			var angle: float = float(p.get("angle", 0.0))
@@ -1268,6 +1391,15 @@ func _draw_floor_tiles() -> void:
 			if _water_depth_t.has(grid_pos):
 				continue
 			_draw_tile_texture(data, world_pos, size, data.opacity)
+
+			# Floor-ore overlay (e.g. surface coal). Wall-embedded ores are
+			# drawn by BuildingSystem alongside their wall in the wall pass,
+			# but floor ores have no wall to piggy-back on — draw them here
+			# directly over the floor tile so they're visible at all.
+			if ore_tiles.has(grid_pos):
+				var ore_data: TerrainTileData = Registry.get_tile(ore_tiles[grid_pos])
+				if ore_data and ore_data.tags.has("floor_ore"):
+					_draw_tile_texture(ore_data, world_pos, size, ore_data.opacity)
 
 			# Fade overlay is now rendered in one batched draw_mesh after the
 			# loop (see below). No per-tile fade work here.
@@ -1346,9 +1478,6 @@ func _draw_multi_tiles() -> void:
 			var color = data.color
 			color.a = data.opacity
 			draw_rect(rect, color, true)
-
-		if data.draw_border:
-			draw_rect(rect, data.border_color, false, 2.0)
 
 
 ## Draws all wall tiles. If a wall has render_tile_underneath = true,
@@ -1480,8 +1609,6 @@ func _draw_tile_texture(data: TerrainTileData, pos: Vector2, size: float, alpha:
 		var color = data.color
 		color.a = alpha
 		draw_rect(rect, color, true)
-	if data.draw_border:
-		draw_rect(rect, data.border_color, false, 1.0)
 
 func _draw_tile_health_bar(world_pos: Vector2, pct: float) -> void:
 	var bar_w := 40.0

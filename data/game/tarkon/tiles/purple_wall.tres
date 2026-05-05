@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://b6u6s4yg02p1e"]
+
+[ext_resource type="Texture2D" uid="uid://blg3o0pw50x8j" path="res://textures/terrain/PurpleWall.png" id="1_v5n0u"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_qe7qf"]
+
+[resource]
+script = ExtResource("2_qe7qf")
+id = &"purple_wall"
+icon = ExtResource("1_v5n0u")
+category = 1
+height = 8.0
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

@@ -1,21 +1,28 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b1pjyfpesrion"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://jpmkbyjemo4e" path="res://textures/blocks/power/CombustionGenerator.png" id="1_8337r"]
 
 [resource]
 script = ExtResource("1")
 id = &"combustion_generator"
 display_name = "Combustion Generator"
-description = "Combusts coal to produce power. More efficient if provided water."
+description = "Burns coal to generate 20 power. Consumes 1 coal per cycle. Stops generating when out of fuel."
+icon = ExtResource("1_8337r")
 category = 3
+tags = PackedStringArray("power", "fuel_powered", "omnidirectional")
 color = Color(0.9, 0.4, 0.1, 1)
+grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("1_8337r")
 max_health = 240.0
 build_cost = {
 "copper": 100,
 "silicon": 30
 }
 build_time = 3.0
-output_items = {
-"power": 15
+input_items = {
+"mat_coal": 1
 }
-tags = PackedStringArray("power")
+production_time = 3.0
+electrical_power_gen = 20.0
+max_stored_items = 8

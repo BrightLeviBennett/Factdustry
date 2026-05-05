@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://d4ea2ehs3j71o"
-path="res://.godot/imported/GrassyFloor_newold.png-999f9ab69eedfa7804854514cbcf6437.ctex"
+uid="uid://blg3o0pw50x8j"
+path="res://.godot/imported/PurpleWall.png-df22e6528f063b3536c417ccf9ccd738.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/GrassyFloor_newold.png"
-dest_files=["res://.godot/imported/GrassyFloor_newold.png-999f9ab69eedfa7804854514cbcf6437.ctex"]
+source_file="res://textures/terrain/PurpleWall.png"
+dest_files=["res://.godot/imported/PurpleWall.png-df22e6528f063b3536c417ccf9ccd738.ctex"]
 
 [params]
 

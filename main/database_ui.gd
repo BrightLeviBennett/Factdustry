@@ -37,12 +37,16 @@ var _all_tiles: Array = []
 var categories := {}
 
 # --- STYLE ---
-var bg_color := Color(0.05, 0.08, 0.05, 0.95)
-var panel_color := Color(0.08, 0.12, 0.08, 0.9)
-var highlight_color := Color(0.15, 0.3, 0.15, 1.0)
-var text_color := Color(0.8, 0.95, 0.8, 1.0)
-var dim_text_color := Color(0.5, 0.65, 0.5, 1.0)
-var accent_color := Color(0.3, 0.9, 0.5, 1.0)
+# Neutral black/gray theme. Per-stat colors (health green, damage red,
+# etc.) are still set inline at their call sites and intentionally stay
+# colored — only the chrome (bg / panels / highlights / body text) is
+# desaturated here.
+var bg_color := Color(0.05, 0.05, 0.06, 0.95)
+var panel_color := Color(0.10, 0.10, 0.12, 0.9)
+var highlight_color := Color(0.22, 0.22, 0.26, 1.0)
+var text_color := Color(0.92, 0.93, 0.95, 1.0)
+var dim_text_color := Color(0.60, 0.62, 0.66, 1.0)
+var accent_color := Color(0.78, 0.80, 0.84, 1.0)
 
 const TILE_SIZE := 48
 const TILE_PADDING := 4
@@ -122,6 +126,11 @@ func _refresh_tile_lock(tile: Dictionary) -> void:
 func _input(event: InputEvent) -> void:
 	if is_open and event.is_action_pressed("ui_cancel"):
 		_hide_ui()
+		get_viewport().set_input_as_handled()
+	elif _detail_open and not is_open and event.is_action_pressed("ui_cancel"):
+		# Standalone detail (opened from the tech tree) — Esc closes the
+		# overlay without touching the tech tree underneath.
+		_close_detail()
 		get_viewport().set_input_as_handled()
 
 
@@ -258,7 +267,7 @@ func _build_ui() -> void:
 
 	# --- Tooltip ---
 	_tooltip_panel = PanelContainer.new()
-	_tooltip_panel.add_theme_stylebox_override("panel", _make_style(Color(0.1, 0.14, 0.1, 0.95), 4))
+	_tooltip_panel.add_theme_stylebox_override("panel", _make_style(Color(0.12, 0.12, 0.14, 0.95), 4))
 	_tooltip_panel.visible = false
 	_tooltip_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_tooltip_panel.z_index = 100
@@ -377,7 +386,7 @@ func _build_tile(entry: Resource, cat_key: String) -> Dictionary:
 func _build_detail_overlay() -> void:
 	# Fullscreen dark backdrop
 	_detail_overlay = ColorRect.new()
-	_detail_overlay.color = Color(0.02, 0.04, 0.02, 0.8)
+	_detail_overlay.color = Color(0.07, 0.07, 0.07, 0.8)
 	_detail_overlay.anchor_right = 1.0
 	_detail_overlay.anchor_bottom = 1.0
 	_detail_overlay.visible = false
@@ -389,7 +398,7 @@ func _build_detail_overlay() -> void:
 
 	# Centered detail panel
 	_detail_panel = PanelContainer.new()
-	_detail_panel.add_theme_stylebox_override("panel", _make_style(Color(0.06, 0.09, 0.06, 0.98), 10))
+	_detail_panel.add_theme_stylebox_override("panel", _make_style(Color(0.08, 0.08, 0.10, 0.98), 10))
 	_detail_panel.anchor_left = 0.15
 	_detail_panel.anchor_right = 0.85
 	_detail_panel.anchor_top = 0.05
@@ -493,13 +502,34 @@ func _show_detail(entry: Resource, cat_key: String) -> void:
 			_show_fluid_details(entry as FluidData)
 		"status_effects":
 			_show_status_effect_details(entry as StatusEffectData)
-		"tiles":
-			_show_tile_details(entry as TerrainTileData)
 
 func _close_detail() -> void:
 	_detail_open = false
 	_detail_overlay.visible = false
 	_detail_panel.visible = false
+	# When the detail was opened standalone (e.g. clicked from the tech
+	# tree), the rest of the database UI is hidden — closing the detail
+	# means the database is fully gone, so drop our pause hold. Skip if
+	# the grid is up (regular flow keeps the pause until _hide_ui).
+	if not _bg.visible and not _scroll.visible:
+		process_mode = Node.PROCESS_MODE_INHERIT
+		var tech_ui = get_node_or_null("/root/Main/TechTreeUI")
+		if tech_ui == null or not tech_ui.is_open:
+			get_tree().paused = false
+
+
+## Opens just the detail overlay for `entry_id` without showing the
+## main database grid. Used by the tech tree so clicking a researched
+## node pops the entry over the tree instead of swapping screens.
+func show_entry_detail_only(entry_id: StringName) -> void:
+	for cat_key in categories:
+		var cat = categories[cat_key]
+		for entry in cat["list"]:
+			if entry.id == entry_id:
+				get_tree().paused = true
+				process_mode = Node.PROCESS_MODE_ALWAYS
+				_show_detail(entry, cat_key)
+				return
 
 
 # =========================
@@ -549,40 +579,19 @@ func _get_tech_id_for_entry(entry: Resource) -> StringName:
 
 func _show_item_details(item: ItemData) -> void:
 	_add_section("Properties")
-	_add_stat("Category", _item_category_name(item.category), text_color)
-	_add_stat("Max Stack", str(item.max_stack), text_color)
-	_add_stat("Base Value", str(item.base_value), text_color)
-	_add_stat("Conveyable", "Yes" if item.conveyable else "No", text_color)
 
 	_add_separator()
 	_add_section("Used In")
-	var found_use := false
-	for block in Registry.blocks_list:
-		if block.build_cost.has(item.id):
-			_add_text("• %s (cost: %d)" % [block.display_name, block.build_cost[item.id]], text_color, 13)
-			found_use = true
-		if block.input_items.has(item.id):
-			_add_text("• %s (input: %d/cycle)" % [block.display_name, block.input_items[item.id]], text_color, 13)
-			found_use = true
-	if not found_use:
-		_add_text("Not used in any recipes yet", dim_text_color, 13)
 
 	_add_separator()
 	_add_section("Produced By")
-	var found_source := false
-	for block in Registry.blocks_list:
-		if block.output_items.has(item.id):
-			_add_text("• %s (output: %d/cycle)" % [block.display_name, block.output_items[item.id]], text_color, 13)
-			found_source = true
-	if not found_source:
-		_add_text("Not produced by any building yet", dim_text_color, 13)
 
 
 func _show_block_details(block: BlockData) -> void:
 	_add_section("General")
 	_add_stat("Size", "%dx%d" % [block.grid_size.x, block.grid_size.y], text_color)
 	
-	_add_stat("Max HP", str(block.max_health), Color(0.4, 1.0, 0.4))
+	_add_stat("Health", str(block.max_health), Color(0.4, 1.0, 0.4))
 	if block.health_regen > 0:
 		_add_stat("Regen", "%s HP/sec" % str(block.health_regen), Color(0.4, 1.0, 0.4))
 		
@@ -617,9 +626,8 @@ func _show_block_details(block: BlockData) -> void:
 		for ammo in block.ammo_types:
 			if ammo is AmmoType:
 				max_dmg = maxf(max_dmg, (ammo as AmmoType).damage)
-		_add_stat_bar("Damage", max_dmg, 50.0, Color(1.0, 0.4, 0.4))
-		_add_stat_bar("Attack Speed", block.attack_speed, 3.0, Color(1.0, 0.8, 0.3))
-		_add_stat_bar("Range", block.attack_range, 10.0, Color(0.4, 0.7, 1.0))
+		_add_stat_bar("Base Attack Speed", block.attack_speed, 3.0, Color(1.0, 0.8, 0.3))
+		_add_stat_bar("Base Range", block.attack_range, 10.0, Color(0.4, 0.7, 1.0))
 		if block.is_aoe:
 			_add_stat("AoE Radius", "%s px" % str(block.aoe_radius), Color(1.0, 0.6, 0.3))
 
@@ -812,42 +820,6 @@ func _show_sector_details(sector: SectorData) -> void:
 			var sec = Registry.get_sector(StringName(sid))
 			var sname = sec.display_name if sec else str(sid)
 			_add_text("• " + sname, dim_text_color, 13)
-
-	if sector.tags.size() > 0:
-		_add_separator()
-		_add_stat("Tags", ", ".join(sector.tags), dim_text_color)
-
-
-func _show_tile_details(tile: TerrainTileData) -> void:
-	_add_section("Properties")
-	_add_stat("Category", "Wall" if tile.is_wall() else "Floor", text_color)
-	_add_color_swatch("Color", tile.color)
-
-	if tile.draw_border:
-		_add_color_swatch("Border", tile.border_color)
-
-	if tile.speed_modifier != 1.0:
-		var pct = (tile.speed_modifier - 1.0) * 100.0
-		var prefix = "+" if pct > 0 else ""
-		var col = Color(0.4, 1.0, 0.4) if pct > 0 else Color(1.0, 0.4, 0.4)
-		_add_stat("Speed Modifier", "%s%.0f%%" % [prefix, pct], col)
-
-	if tile.contact_damage > 0:
-		_add_stat("Contact Damage", "%s/sec" % str(tile.contact_damage), Color(1.0, 0.4, 0.4))
-
-	if tile.is_wall():
-		_add_separator()
-		_add_section("Wall Properties")
-		_add_stat("Height", str(tile.height), text_color)
-		_add_stat("Blocks LOS", "Yes" if tile.blocks_los else "No", text_color)
-		_add_stat("Destructible", "Yes" if tile.destructible else "No", text_color)
-		if tile.destructible:
-			_add_stat("Health", str(tile.max_health), Color(0.4, 1.0, 0.4))
-
-	if tile.tags.size() > 0:
-		_add_separator()
-		_add_stat("Tags", ", ".join(tile.tags), dim_text_color)
-
 
 # =========================
 # UI HELPER WIDGETS

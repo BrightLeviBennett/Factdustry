@@ -1,6 +1,6 @@
 [gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dd5oqdjel2bwg"]
 
-[ext_resource type="Texture2D" uid="uid://d4ea2ehs3j71o" path="res://textures/terrain/GrassyFloor_newold.png" id="1_6pt0b"]
+[ext_resource type="Texture2D" uid="uid://d4ea2ehs3j71o" path="res://textures/terrain/GrassyFloor.png" id="1_6pt0b"]
 [ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_3yob1"]
 
 [resource]

@@ -2601,7 +2601,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777594355.58027
+		"timestamp": 1777908811.50011
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -22711,10 +22711,9 @@
 
 	},
 	"resources": {
-		"mat_copper": 994,
-		"mat_graphite": 574,
-		"mat_silicon": 379,
-		"mat_steel": 232
+		"mat_copper": 15,
+		"mat_graphite": 9,
+		"mat_steel": 2
 	},
 	"script_steps": [
 		{
@@ -22729,7 +22728,7 @@
 				{
 					"from": "166,18",
 					"id": "PST2",
-					"text": "(-white)Research and place a [image]Archive Scanner facing a archive to scan it.",
+					"text": "(-white)Research and place a [res://textures/blocks/cores/ArchiveScanner.png]Archive Scanner facing a archive to scan it.",
 					"to": "172,18",
 					"type": "draw_text"
 				},
@@ -22769,7 +22768,7 @@
 				{
 					"from": "166,21",
 					"id": "PDT",
-					"text": "(-white)Research and place a [image]Archive Decoder next to a archive scanner to decode an archive. You will need to power it. ",
+					"text": "(-white)Research and place a [res://textures/blocks/cores/ArchiveDecoder.png]Archive Decoder next to a archive scanner to decode an archive. You will need to power it. ",
 					"to": "172,21",
 					"type": "draw_text"
 				},
@@ -22886,6 +22885,23 @@
 				},
 				{
 					"type": "release_camera"
+				}
+			]
+		},
+		{
+			"actions": [],
+			"conditions": [
+				{
+					"type": "waves_defeated"
+				}
+			],
+			"name": "End",
+			"on_exit": [
+				{
+					"type": "capture_sector"
+				},
+				{
+					"type": "stop_waves"
 				}
 			]
 		}

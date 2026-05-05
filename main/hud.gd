@@ -2703,15 +2703,20 @@ func _on_misc_database() -> void:
 
 
 func _on_misc_planet_map() -> void:
-	# Save current sector state so we can resume later
-	var sector_id: String = str(SaveManager.active_sector_id)
-	if sector_id != "" and sector_id != "_default":
-		SaveManager.save_sector(sector_id)
-	# Sync and save resources to global pool before leaving
+	# Park the live Main scene under SaveManager so coming back to it
+	# from PlanetSelect is instant — no save / reload / black frame.
+	# We still flush resources to the global pool so the planet view's
+	# Global Resources panel reflects what the sector currently holds.
 	SaveManager.sync_active_sector_resources()
-	SaveManager.save_campaign()
-	# Keep active_sector_id so "Back to Game" can restore this sector
 	SaveManager.return_to_game = true
+	var main_scene: Node = get_tree().current_scene
+	if not SaveManager.park_main_for_planet_view(main_scene):
+		# Park failed — fall back to the disk roundtrip so we don't
+		# leave the player stuck in a half-detached state.
+		var sector_id: String = str(SaveManager.active_sector_id)
+		if sector_id != "" and sector_id != "_default":
+			SaveManager.save_sector(sector_id)
+		SaveManager.save_campaign()
 	get_tree().change_scene_to_file("res://main/PlanetSelect.tscn")
 
 
@@ -4841,7 +4846,26 @@ func _on_archive_decoded(archive_id: StringName) -> void:
 	var tech_ui = get_node_or_null("/root/Main/TechTreeUI")
 	if tech_ui and "is_open" in tech_ui and tech_ui.is_open:
 		return
-	_show_unlock_icon(archive_id)
+	# Surface the actual content unlocked by decoding this archive, not
+	# the archive itself. Each node whose `dependencies` list contains
+	# `-D-archive_id` was gated by this archive — those are now eligible
+	# for research, so show them.
+	var marker := StringName("-D-%s" % archive_id)
+	var unlocked: Array[StringName] = []
+	for node_id in TechTree.nodes:
+		var nd: Dictionary = TechTree.nodes[node_id]
+		var deps: Array = nd.get("dependencies", [])
+		if deps.has(marker):
+			unlocked.append(node_id)
+	if unlocked.is_empty():
+		# Fallback: at least surface the archive itself so something pops.
+		_show_unlock_icon(archive_id)
+		return
+	# Stack each unlocked node into the popup (the existing helper
+	# extends the timer when called repeatedly, so multiple icons end
+	# up sharing a single banner).
+	for nid in unlocked:
+		_show_unlock_icon(nid)
 
 
 func _show_unlock_icon(node_id: StringName) -> void:

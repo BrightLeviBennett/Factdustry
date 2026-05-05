@@ -64,7 +64,7 @@ signal building_placed(block_id: StringName, grid_pos: Vector2i)
 signal building_destroyed(grid_pos: Vector2i)
 
 # --- EDITOR STATE ---
-enum Tool { PENCIL, ERASER, RECT_FILL, RECT_ERASE }
+enum Tool { PENCIL, LINE, CIRCLE, RECT_FILL, RECT_ERASE, BUCKET }
 enum EditorMode { TERRAIN, BUILDING, TRANSFORM, SCRIPT }
 
 var current_tool: Tool = Tool.PENCIL
@@ -85,11 +85,60 @@ var script_editor: Node = null
 # Painting state
 var _painting := false
 var _erasing := false
+# Last cell touched by paint/erase. Used to interpolate when the mouse
+# moves fast enough that consecutive InputEventMouseMotion events skip
+# over intermediate cells — we walk a Bresenham line from the last cell
+# to the current one so the brush fills every cell on the cursor's
+# path. Sentinel `_has_last_paint` distinguishes "no prior cell" from
+# the legitimate cell (0, 0).
+var _last_paint_cell := Vector2i.ZERO
+var _has_last_paint := false
 
-# Rectangle tool state
+# Rectangle tool state. `_rect_erasing` is set when the drag was started
+# with the right mouse button — the rect tool then performs a rect erase
+# on commit instead of a fill, so the player gets both behaviors out of
+# the single Rect tool (left = fill, right = erase) without juggling two
+# toolbar buttons.
 var _rect_dragging := false
+var _rect_erasing := false
 var _rect_start := Vector2i.ZERO
 var _rect_end := Vector2i.ZERO
+
+# Line tool state. Drag from `_line_start` to `_line_end`; on release
+# the cells along the Bresenham line get painted, optionally inflated
+# by `line_size` so the brush stamps an N×N square at every line cell
+# (size 1 = single-cell line). `_line_erasing` is set when the drag
+# was started with the right mouse button so the commit erases instead
+# of paints — same drag-button-distinguishes-action pattern as the
+# rect tool.
+var _line_dragging := false
+var _line_erasing := false
+var _line_start := Vector2i.ZERO
+var _line_end := Vector2i.ZERO
+var line_size: int = 1
+
+# Circle tool state. Drag from `_circle_center` outward; the radius
+# follows the cursor and the commit stamps every cell whose euclidean
+# distance from the center is ≤ radius. Right-drag erases instead of
+# paints, mirroring the rect/line convention.
+var _circle_dragging := false
+var _circle_erasing := false
+var _circle_center := Vector2i.ZERO
+var _circle_edge := Vector2i.ZERO
+
+# Undo / redo. Each stack entry is an Array of {cell, before, after}
+# triples capturing the per-cell terrain state before and after a
+# single user-visible operation (one stroke, one rect, one fill, one
+# circle, …). Capturing is gated by `_undoing` so the act of applying
+# an undo step doesn't itself enqueue a new step. `_undo_pending` is
+# the open transaction — populated as cells are mutated and committed
+# at the end of the operation.
+const UNDO_LIMIT := 64
+var _undo_stack: Array = []
+var _redo_stack: Array = []
+var _undo_pending: Dictionary = {}  # Vector2i → captured "before" state
+var _undo_active := false  # True between _undo_begin / _undo_commit
+var _undoing := false      # Suppresses capture while applying undo/redo
 
 # Transform mode state
 enum TransformPhase { SELECTING, SELECTED, DRAGGING }
@@ -120,6 +169,14 @@ var linked_pairs: Array = []  # Array of [Vector2i, Vector2i]
 
 func _ready() -> void:
 	_overlay.draw.connect(_draw_overlay)
+	# BuildingSystem._ready sets its own z_index to 50 (so previews and
+	# placed buildings paint over ground units in the main game), which
+	# would bury the editor's overlay-drawn UI: grid lines, ghost block
+	# preview, transform handles, rect/line/circle previews, link lines,
+	# bucket/cable-range overlays, etc. Lift the overlay well above the
+	# building layer so every editor cue stays visible.
+	_overlay.z_index = 100
+	_overlay.z_as_relative = false
 
 	# Disable BuildingSystem's input/process — the editor handles its own
 	var bs = get_node_or_null("BuildingSystem")
@@ -194,6 +251,19 @@ func can_afford(_block_id: StringName) -> bool:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
+		# Undo / redo. Cmd on macOS, Ctrl elsewhere — accept either so a
+		# laptop docked to an external keyboard works the same as the
+		# native one. Shift+Cmd+Z is redo (the macOS convention); Ctrl+Y
+		# is also accepted for Windows/Linux muscle memory.
+		if event.keycode == KEY_Z and (event.meta_pressed or event.ctrl_pressed):
+			if event.shift_pressed:
+				redo()
+			else:
+				undo()
+			return
+		if event.keycode == KEY_Y and event.ctrl_pressed:
+			redo()
+			return
 		# Rotation key (Q) for building mode
 		if event.keycode == KEY_Q and editor_mode == EditorMode.BUILDING:
 			placement_rotation = (placement_rotation + 1) % 4
@@ -304,36 +374,150 @@ func _unhandled_input(event: InputEvent) -> void:
 				_erase_block_at(grid_pos)
 			return
 
-		# --- Rectangle tools (terrain mode) ---
+		# --- Bucket flood-fill (terrain mode) ---
+		# One click = fill all 4-connected cells whose current floor matches
+		# the clicked cell's.
+		if current_tool == Tool.BUCKET:
+			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+				_undo_begin()
+				_flood_fill_at(grid_pos)
+				_undo_commit()
+				_overlay.queue_redraw()
+			return
+
+		# --- Line tool (terrain mode) ---
+		# Left-drag stamps the line with the selected tile. Right-drag
+		# erases instead — same convention as the rect tool. `line_size`
+		# thickens the brush into an N×N square at every cell along the
+		# line.
+		if current_tool == Tool.LINE:
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				if event.pressed:
+					_line_dragging = true
+					_line_erasing = false
+					_line_start = grid_pos
+					_line_end = grid_pos
+					_overlay.queue_redraw()
+				elif _line_dragging and not _line_erasing:
+					_line_dragging = false
+					_undo_begin()
+					_apply_line()
+					_undo_commit()
+					_overlay.queue_redraw()
+			elif event.button_index == MOUSE_BUTTON_RIGHT:
+				if event.pressed:
+					_line_dragging = true
+					_line_erasing = true
+					_line_start = grid_pos
+					_line_end = grid_pos
+					_overlay.queue_redraw()
+				elif _line_dragging and _line_erasing:
+					_line_dragging = false
+					_undo_begin()
+					_apply_line()
+					_undo_commit()
+					_overlay.queue_redraw()
+			return
+
+		# --- Circle tool (terrain mode) ---
+		# Left-drag from center to edge stamps a filled disk; right-drag
+		# erases the same shape. `line_size` controls brush thickness so
+		# you can fatten the result without redoing the gesture.
+		if current_tool == Tool.CIRCLE:
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				if event.pressed:
+					_circle_dragging = true
+					_circle_erasing = false
+					_circle_center = grid_pos
+					_circle_edge = grid_pos
+					_overlay.queue_redraw()
+				elif _circle_dragging and not _circle_erasing:
+					_circle_dragging = false
+					_undo_begin()
+					_apply_circle()
+					_undo_commit()
+					_overlay.queue_redraw()
+			elif event.button_index == MOUSE_BUTTON_RIGHT:
+				if event.pressed:
+					_circle_dragging = true
+					_circle_erasing = true
+					_circle_center = grid_pos
+					_circle_edge = grid_pos
+					_overlay.queue_redraw()
+				elif _circle_dragging and _circle_erasing:
+					_circle_dragging = false
+					_undo_begin()
+					_apply_circle()
+					_undo_commit()
+					_overlay.queue_redraw()
+			return
+
+		# --- Rectangle tool (terrain mode) ---
+		# Left-drag fills the rect with the selected tile; right-drag
+		# erases the rect. `RECT_ERASE` is kept as a separate tool for
+		# players who prefer the explicit affordance, but the same
+		# functionality is available off the right button in RECT_FILL
+		# mode so they don't have to swap tools to clean up a misclick.
 		if current_tool == Tool.RECT_FILL or current_tool == Tool.RECT_ERASE:
 			if event.button_index == MOUSE_BUTTON_LEFT:
 				if event.pressed:
 					_rect_dragging = true
+					_rect_erasing = (current_tool == Tool.RECT_ERASE)
 					_rect_start = grid_pos
 					_rect_end = grid_pos
 				else:
 					if _rect_dragging:
 						_rect_dragging = false
+						_undo_begin()
 						_apply_rect()
+						_undo_commit()
 						_overlay.queue_redraw()
-			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-				_rect_dragging = false
-				_overlay.queue_redraw()
+			elif event.button_index == MOUSE_BUTTON_RIGHT:
+				if event.pressed and current_tool == Tool.RECT_FILL:
+					# Right-drag in RECT_FILL = erase rect.
+					_rect_dragging = true
+					_rect_erasing = true
+					_rect_start = grid_pos
+					_rect_end = grid_pos
+				elif not event.pressed and _rect_dragging and _rect_erasing and current_tool == Tool.RECT_FILL:
+					_rect_dragging = false
+					_undo_begin()
+					_apply_rect()
+					_undo_commit()
+					_overlay.queue_redraw()
+				elif event.pressed:
+					# Right-press in RECT_ERASE: cancel any in-progress drag.
+					_rect_dragging = false
+					_overlay.queue_redraw()
 			return
 
 		# --- Pencil / Eraser (terrain mode) ---
+		# Each press-to-release stroke wraps a single undo transaction
+		# so a long zigzag undoes in one step rather than cell-by-cell.
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
 				_painting = true
+				_has_last_paint = false  # Fresh stroke — no interpolation source yet.
+				_undo_begin()
 				_paint_at(grid_pos)
+				_last_paint_cell = grid_pos
+				_has_last_paint = true
 			else:
 				_painting = false
+				_has_last_paint = false
+				_undo_commit()
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			if event.pressed:
 				_erasing = true
+				_has_last_paint = false
+				_undo_begin()
 				_erase_at(grid_pos)
+				_last_paint_cell = grid_pos
+				_has_last_paint = true
 			else:
 				_erasing = false
+				_has_last_paint = false
+				_undo_commit()
 
 	elif event is InputEventMouseMotion:
 		if editor_mode == EditorMode.SCRIPT:
@@ -352,10 +536,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif _rect_dragging:
 			_rect_end = grid_pos
 			_overlay.queue_redraw()
+		elif _line_dragging:
+			_line_end = grid_pos
+			_overlay.queue_redraw()
+		elif _circle_dragging:
+			_circle_edge = grid_pos
+			_overlay.queue_redraw()
 		elif _painting:
-			_paint_at(grid_pos)
+			_paint_stroke_to(grid_pos, false)
 		elif _erasing:
-			_erase_at(grid_pos)
+			_paint_stroke_to(grid_pos, true)
 
 
 # --- TERRAIN PAINTING ---
@@ -363,15 +553,178 @@ func _unhandled_input(event: InputEvent) -> void:
 func _paint_at(grid_pos: Vector2i) -> void:
 	if selected_tile == &"":
 		return
-	var terrain = $TerrainSystem
-	if current_tool == Tool.ERASER:
-		terrain.remove_tile(grid_pos)
-	else:
-		terrain.place_tile(grid_pos, selected_tile)
+	_undo_capture(grid_pos)
+	$TerrainSystem.place_tile(grid_pos, selected_tile)
 
 
 func _erase_at(grid_pos: Vector2i) -> void:
+	_undo_capture(grid_pos)
 	$TerrainSystem.remove_tile(grid_pos)
+
+
+# =========================
+# UNDO / REDO
+# =========================
+
+## Snapshots the current floor/wall/ore state of `cell` so a later
+## `_undo_commit` can record what changed. Cheap to call repeatedly —
+## only the FIRST capture for a given cell within an open transaction
+## is kept (subsequent calls are noops), so a stroke that paints the
+## same cell three times still gets undone in one step.
+func _undo_capture(cell: Vector2i) -> void:
+	if _undoing or not _undo_active:
+		return
+	if _undo_pending.has(cell):
+		return
+	_undo_pending[cell] = _capture_cell_state(cell)
+
+
+func _capture_cell_state(cell: Vector2i) -> Dictionary:
+	var t = $TerrainSystem
+	return {
+		"floor": t.floor_tiles.get(cell, null),
+		"wall": t.wall_tiles.get(cell, null),
+		"ore": t.ore_tiles.get(cell, null),
+	}
+
+
+## Begin a new undo transaction. Subsequent terrain mutations within
+## the same operation will accumulate into a single undoable step.
+func _undo_begin() -> void:
+	_undo_pending = {}
+	_undo_active = true
+
+
+## Close the current undo transaction. If anything actually changed,
+## push it onto the undo stack and clear the redo stack (any new edit
+## invalidates redo, same as every other editor in the world).
+func _undo_commit() -> void:
+	_undo_active = false
+	if _undo_pending.is_empty():
+		return
+	var step: Array = []
+	for cell in _undo_pending:
+		var before: Dictionary = _undo_pending[cell]
+		var after: Dictionary = _capture_cell_state(cell)
+		if before["floor"] == after["floor"] \
+				and before["wall"] == after["wall"] \
+				and before["ore"] == after["ore"]:
+			continue
+		step.append({"cell": cell, "before": before, "after": after})
+	_undo_pending = {}
+	if step.is_empty():
+		return
+	_undo_stack.append(step)
+	if _undo_stack.size() > UNDO_LIMIT:
+		_undo_stack.pop_front()
+	_redo_stack.clear()
+
+
+## Pops the most recent undo step and rolls every cell back to its
+## pre-operation state. Suppresses re-capture during the rollback so
+## the operation itself doesn't get re-recorded as a new step.
+func undo() -> void:
+	if _undo_stack.is_empty():
+		return
+	var step: Array = _undo_stack.pop_back()
+	_undoing = true
+	for entry in step:
+		_restore_cell_state(entry["cell"], entry["before"])
+	_undoing = false
+	$TerrainSystem.queue_redraw()
+	_redo_stack.append(step)
+
+
+## Replays the most recently undone step.
+func redo() -> void:
+	if _redo_stack.is_empty():
+		return
+	var step: Array = _redo_stack.pop_back()
+	_undoing = true
+	for entry in step:
+		_restore_cell_state(entry["cell"], entry["after"])
+	_undoing = false
+	$TerrainSystem.queue_redraw()
+	_undo_stack.append(step)
+	if _undo_stack.size() > UNDO_LIMIT:
+		_undo_stack.pop_front()
+
+
+## Sets a cell's floor/wall/ore dictionaries directly to the captured
+## snapshot. Bypasses TerrainSystem.place_tile/remove_tile so we
+## restore the EXACT prior state (including ore-on-wall combinations
+## that the normal placement path won't reproduce in a single call).
+func _restore_cell_state(cell: Vector2i, state: Dictionary) -> void:
+	var t = $TerrainSystem
+	if state["floor"] == null:
+		t.floor_tiles.erase(cell)
+	else:
+		t.floor_tiles[cell] = state["floor"]
+	if state["wall"] == null:
+		t.wall_tiles.erase(cell)
+	else:
+		t.wall_tiles[cell] = state["wall"]
+	if state["ore"] == null:
+		t.ore_tiles.erase(cell)
+	else:
+		t.ore_tiles[cell] = state["ore"]
+	t._floor_edge_dirty = true
+	t._water_depth_dirty = true
+
+
+## Continues an in-progress paint/erase stroke to `grid_pos`. Walks a
+## Bresenham line from the previous cell so a fast mouse swipe — where
+## the OS only delivers motion events every few cells — still fills
+## every cell along the cursor's path instead of leaving a dotted
+## trail. `erase` chooses between erase and paint behavior; the start
+## cell is skipped because it was already painted by the previous call.
+func _paint_stroke_to(grid_pos: Vector2i, erase: bool) -> void:
+	if not _has_last_paint or _last_paint_cell == grid_pos:
+		if erase:
+			_erase_at(grid_pos)
+		else:
+			_paint_at(grid_pos)
+		_last_paint_cell = grid_pos
+		_has_last_paint = true
+		return
+	for cell in _line_cells(_last_paint_cell, grid_pos):
+		if cell == _last_paint_cell:
+			continue  # Already painted by the previous step.
+		if not is_within_bounds(cell):
+			continue
+		if erase:
+			_erase_at(cell)
+		else:
+			_paint_at(cell)
+	_last_paint_cell = grid_pos
+
+
+## Bresenham line between two grid cells, inclusive of both endpoints.
+## Used by stroke interpolation so a fast brush stroke covers every
+## cell on the cursor's path.
+func _line_cells(a: Vector2i, b: Vector2i) -> Array:
+	var cells: Array = []
+	var x0: int = a.x
+	var y0: int = a.y
+	var x1: int = b.x
+	var y1: int = b.y
+	var dx: int = absi(x1 - x0)
+	var dy: int = -absi(y1 - y0)
+	var sx: int = 1 if x0 < x1 else -1
+	var sy: int = 1 if y0 < y1 else -1
+	var err: int = dx + dy
+	while true:
+		cells.append(Vector2i(x0, y0))
+		if x0 == x1 and y0 == y1:
+			break
+		var e2: int = 2 * err
+		if e2 >= dy:
+			err += dy
+			x0 += sx
+		if e2 <= dx:
+			err += dx
+			y0 += sy
+	return cells
 
 
 func _apply_rect() -> void:
@@ -381,16 +734,141 @@ func _apply_rect() -> void:
 	var max_x := maxi(_rect_start.x, _rect_end.x)
 	var max_y := maxi(_rect_start.y, _rect_end.y)
 
+	# `_rect_erasing` distinguishes a fill from an erase regardless of
+	# which tool started the drag — left-drag in RECT_FILL fills,
+	# right-drag in RECT_FILL or any drag in RECT_ERASE erases.
 	for x in range(min_x, max_x + 1):
 		for y in range(min_y, max_y + 1):
 			var cell := Vector2i(x, y)
 			if not is_within_bounds(cell):
 				continue
-			if current_tool == Tool.RECT_FILL and selected_tile != &"":
-				terrain.place_tile(cell, selected_tile)
-			elif current_tool == Tool.RECT_ERASE:
+			_undo_capture(cell)
+			if _rect_erasing:
 				terrain.remove_tile(cell)
+			elif selected_tile != &"":
+				terrain.place_tile(cell, selected_tile)
 
+	terrain.queue_redraw()
+
+
+## Stamps the line tool's drag onto the terrain. Walks a Bresenham line
+## from `_line_start` to `_line_end` and, for each cell, paints an
+## `line_size`×`line_size` square centered on it (size 1 = single
+## cell). Skips cells outside the world bounds. `_line_erasing`
+## flips the operation from paint to erase — same drag-button-decides
+## convention as the rect tool.
+func _apply_line() -> void:
+	if not _line_erasing and selected_tile == &"":
+		return
+	var terrain = $TerrainSystem
+	var thickness: int = maxi(1, line_size)
+	var half: int = thickness / 2
+	var painted: Dictionary = {}
+	for cell in _line_cells(_line_start, _line_end):
+		for dx in range(-half, -half + thickness):
+			for dy in range(-half, -half + thickness):
+				var p := Vector2i(cell.x + dx, cell.y + dy)
+				if painted.has(p):
+					continue
+				if not is_within_bounds(p):
+					continue
+				painted[p] = true
+				_undo_capture(p)
+				if _line_erasing:
+					terrain.remove_tile(p)
+				else:
+					terrain.place_tile(p, selected_tile)
+	terrain.queue_redraw()
+
+
+## Stamps the circle tool's drag. Treats `_circle_center` as the
+## center and `_circle_edge` as a point on the ring; every cell whose
+## euclidean distance from the center is ≤ that radius gets painted
+## (or erased, depending on `_circle_erasing`). `line_size` reuses the
+## line tool's thickness control: when > 1 the brush stamps an N×N
+## square at every disk cell, fattening the result without changing
+## the overall shape.
+func _apply_circle() -> void:
+	if not _circle_erasing and selected_tile == &"":
+		return
+	var terrain = $TerrainSystem
+	var thickness: int = maxi(1, line_size)
+	var half: int = thickness / 2
+	var painted: Dictionary = {}
+	# +0.5 so a click that ends exactly on a cell edge still includes
+	# that cell — without it, drag-distance just under 1 produces
+	# nothing.
+	var radius: float = Vector2(_circle_edge - _circle_center).length() + 0.5
+	var rceil: int = int(ceil(radius))
+	var r2: float = radius * radius
+	for dx in range(-rceil, rceil + 1):
+		for dy in range(-rceil, rceil + 1):
+			if float(dx * dx + dy * dy) > r2:
+				continue
+			var center_cell := _circle_center + Vector2i(dx, dy)
+			for tx in range(-half, -half + thickness):
+				for ty in range(-half, -half + thickness):
+					var p := Vector2i(center_cell.x + tx, center_cell.y + ty)
+					if painted.has(p):
+						continue
+					if not is_within_bounds(p):
+						continue
+					painted[p] = true
+					_undo_capture(p)
+					if _circle_erasing:
+						terrain.remove_tile(p)
+					else:
+						terrain.place_tile(p, selected_tile)
+	terrain.queue_redraw()
+
+
+## 4-connected flood fill starting at `start`. Replaces every cell whose
+## current floor tile id matches the start cell's with `selected_tile`.
+## When `selected_tile` is empty, the fill erases instead — useful for
+## carving out a void region without painting it cell-by-cell.
+##
+## "Source tile" includes the empty/void state, so clicking on a void cell
+## with grass selected fills the whole connected void region with grass.
+## Walls block the spread (you can't fill across a wall) so a closed pen
+## fills only its interior.
+func _flood_fill_at(start: Vector2i) -> void:
+	if not is_within_bounds(start):
+		return
+	var terrain = $TerrainSystem
+	var source_tile: StringName = StringName(terrain.floor_tiles.get(start, &""))
+	var target_tile: StringName = selected_tile
+	# No-op if clicking on a cell that already matches the brush — a fill
+	# that paints what's already there has nothing to do.
+	if source_tile == target_tile:
+		return
+	var stack: Array[Vector2i] = [start]
+	var visited: Dictionary = {start: true}
+	# Hard cap so a fill on a pathologically large connected region can't
+	# stall the editor.
+	var max_cells: int = 200000
+	var filled := 0
+	while not stack.is_empty() and filled < max_cells:
+		var cell: Vector2i = stack.pop_back()
+		var here: StringName = StringName(terrain.floor_tiles.get(cell, &""))
+		if here != source_tile:
+			continue
+		# Walls form a hard boundary — fills don't bleed across them.
+		if terrain.has_method("has_wall") and terrain.has_wall(cell):
+			continue
+		_undo_capture(cell)
+		if target_tile == &"":
+			terrain.remove_tile(cell)
+		else:
+			terrain.place_tile(cell, target_tile)
+		filled += 1
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var nb: Vector2i = cell + d
+			if not is_within_bounds(nb):
+				continue
+			if visited.has(nb):
+				continue
+			visited[nb] = true
+			stack.append(nb)
 	terrain.queue_redraw()
 
 
@@ -997,6 +1475,8 @@ func _draw_overlay() -> void:
 		_draw_grid()
 	_draw_core_marker()
 	_draw_rect_preview()
+	_draw_line_preview()
+	_draw_circle_preview()
 	_draw_transform_preview()
 	_draw_building_preview()
 	_draw_links()
@@ -1069,14 +1549,70 @@ func _draw_rect_preview() -> void:
 	var w := float((max_x - min_x + 1) * GRID_SIZE)
 	var h := float((max_y - min_y + 1) * GRID_SIZE)
 
+	# Color reflects what the drag will commit: red for an erase
+	# (right-drag in RECT_FILL or any drag in RECT_ERASE), green for
+	# a fill — `_rect_erasing` is set at drag-start.
 	var color: Color
-	if current_tool == Tool.RECT_FILL:
-		color = Color(0.2, 0.8, 0.2, 0.2)
-	else:
+	if _rect_erasing:
 		color = Color(1, 0, 0, 0.2)
+	else:
+		color = Color(0.2, 0.8, 0.2, 0.2)
 
 	_overlay.draw_rect(Rect2(top_left, Vector2(w, h)), color, true)
 	_overlay.draw_rect(Rect2(top_left, Vector2(w, h)), color.lightened(0.3), false, 2.0)
+
+
+func _draw_line_preview() -> void:
+	if not _line_dragging:
+		return
+	var thickness: int = maxi(1, line_size)
+	var half: int = thickness / 2
+	var color := Color(1, 0, 0, 0.2) if _line_erasing else Color(0.2, 0.8, 0.2, 0.2)
+	var border := color.lightened(0.3)
+	var seen: Dictionary = {}
+	var gs: float = float(GRID_SIZE)
+	for cell in _line_cells(_line_start, _line_end):
+		for dx in range(-half, -half + thickness):
+			for dy in range(-half, -half + thickness):
+				var p := Vector2i(cell.x + dx, cell.y + dy)
+				if seen.has(p):
+					continue
+				if not is_within_bounds(p):
+					continue
+				seen[p] = true
+				var wp := grid_to_world(p)
+				_overlay.draw_rect(Rect2(wp, Vector2(gs, gs)), color, true)
+				_overlay.draw_rect(Rect2(wp, Vector2(gs, gs)), border, false, 1.0)
+
+
+func _draw_circle_preview() -> void:
+	if not _circle_dragging:
+		return
+	var thickness: int = maxi(1, line_size)
+	var half: int = thickness / 2
+	var color := Color(1, 0, 0, 0.2) if _circle_erasing else Color(0.2, 0.8, 0.2, 0.2)
+	var border := color.lightened(0.3)
+	var seen: Dictionary = {}
+	var gs: float = float(GRID_SIZE)
+	var radius: float = Vector2(_circle_edge - _circle_center).length() + 0.5
+	var rceil: int = int(ceil(radius))
+	var r2: float = radius * radius
+	for dx in range(-rceil, rceil + 1):
+		for dy in range(-rceil, rceil + 1):
+			if float(dx * dx + dy * dy) > r2:
+				continue
+			var center_cell := _circle_center + Vector2i(dx, dy)
+			for tx in range(-half, -half + thickness):
+				for ty in range(-half, -half + thickness):
+					var p := Vector2i(center_cell.x + tx, center_cell.y + ty)
+					if seen.has(p):
+						continue
+					if not is_within_bounds(p):
+						continue
+					seen[p] = true
+					var wp := grid_to_world(p)
+					_overlay.draw_rect(Rect2(wp, Vector2(gs, gs)), color, true)
+					_overlay.draw_rect(Rect2(wp, Vector2(gs, gs)), border, false, 1.0)
 
 
 func _draw_transform_preview() -> void:

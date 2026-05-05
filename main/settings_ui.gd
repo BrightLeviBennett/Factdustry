@@ -494,6 +494,7 @@ const _DEFAULTS := {
 	"autosave_interval": 60.0,
 	"tech_tree_wasd": false,
 	"pause_on_unfocus": true,
+	"show_hitboxes": false,
 }
 
 static var _cache: Dictionary = {}
@@ -595,6 +596,8 @@ static func apply_pending_settings() -> void:
 		main_node.require_research = bool(_get_setting("require_research"))
 	if main_node and "enemies_attack" in main_node:
 		main_node.enemies_attack = bool(_get_setting("enemies_attack"))
+	if main_node and "show_hitboxes" in main_node:
+		main_node.show_hitboxes = bool(_get_setting("show_hitboxes"))
 	if main_node and "pause_on_unfocus" in main_node:
 		main_node.pause_on_unfocus = bool(_get_setting("pause_on_unfocus"))
 	var building_sys = main_node.get_node_or_null("BuildingSystem") if main_node else null
@@ -709,6 +712,20 @@ func _build_developer_tab() -> void:
 			_set_setting("enemies_attack", bool(v))
 			if main:
 				main.enemies_attack = v
+	)
+	_add_toggle("Show Hitboxes",
+		bool(_get_setting("show_hitboxes")),
+		func(v):
+			_set_setting("show_hitboxes", bool(v))
+			if main:
+				main.show_hitboxes = v
+				main.queue_redraw()
+				for unit in get_tree().get_nodes_in_group("enemy_units"):
+					if unit and is_instance_valid(unit):
+						unit.queue_redraw()
+				var drone = get_node_or_null("/root/Main/PlayerDrone")
+				if drone:
+					drone.queue_redraw()
 	)
 	_add_toggle("Unlock All Tech (sandbox)",
 		bool(_get_setting("unlock_all_tech")),

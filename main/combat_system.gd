@@ -195,7 +195,35 @@ func _logistics_ref() -> Node2D:
 	return _logistics
 
 
+## Dedicated overlay node for projectile rendering. Lives as a child
+## of CombatSystem with `top_level = true` (so it ignores parent
+## transform and draws in world space using its own coords) and a
+## very high z_index so bullets always render above the chassis,
+## buildings, and any other in-world Node2D no matter what z_index
+## those siblings adopt.
+var _projectile_overlay: Node2D = null
+
+
 func _ready() -> void:
+	# Bullets, turret heads, and the like draw above the player drone
+	# AND the building / logistics / terrain overlay layers (which set
+	# absolute z_indices in the 50–60 range), so the shardling's
+	# tracers visibly emerge from its barrels instead of vanishing
+	# behind the chassis or the building art they fly past.
+	z_index = 70
+	z_as_relative = false
+	# Mount a separate Node2D specifically for projectile draws so the
+	# bullets render on a guaranteed-on-top layer regardless of what
+	# any other in-world system does with z_index. The overlay's
+	# `_draw` defers back to `_draw_projectiles` here, keeping all the
+	# state (`projectiles` array, etc.) on this node.
+	_projectile_overlay = Node2D.new()
+	_projectile_overlay.name = "ProjectileOverlay"
+	_projectile_overlay.z_index = 4095
+	_projectile_overlay.z_as_relative = false
+	_projectile_overlay.set_script(preload("res://main/projectile_overlay.gd"))
+	_projectile_overlay.set("combat", self)
+	add_child(_projectile_overlay)
 	await get_tree().process_frame
 	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
 	_drone = get_node_or_null("/root/Main/PlayerDrone")
@@ -879,8 +907,9 @@ func _update_drone_combat(delta: float) -> void:
 		var nearest_a: Node2D = _find_nearest_enemy(drone.position, enemies_a)
 		if nearest_a != null and drone.position.distance_to(nearest_a.position) <= range_px_a:
 			drone_cooldown = drone_attack_speed
+			var origin_a: Vector2 = drone.next_turret_muzzle_world_pos() if drone.has_method("next_turret_muzzle_world_pos") else drone.position
 			_spawn_projectile(
-				drone.position,
+				origin_a,
 				nearest_a,
 				nearest_a.position,
 				"enemy",
@@ -901,8 +930,9 @@ func _update_drone_combat(delta: float) -> void:
 			return
 		var b_world: Vector2 = main.grid_to_world(nearest_bldg) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 		drone_cooldown = drone_attack_speed
+		var origin_b: Vector2 = drone.next_turret_muzzle_world_pos() if drone.has_method("next_turret_muzzle_world_pos") else drone.position
 		_spawn_projectile(
-			drone.position,
+			origin_b,
 			nearest_bldg,
 			b_world,
 			"building",
@@ -926,8 +956,9 @@ func _update_drone_combat(delta: float) -> void:
 	# Calculate a far-off target point in that direction
 	var target_pos = drone.position + direction * drone_range * main.GRID_SIZE
 
+	var origin_m: Vector2 = drone.next_turret_muzzle_world_pos() if drone.has_method("next_turret_muzzle_world_pos") else drone.position
 	_spawn_projectile(
-		drone.position,
+		origin_m,
 		null,              # no target ref — flies straight
 		target_pos,
 		"none",            # special type: hits nothing automatically
@@ -1462,7 +1493,9 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 
 func _draw() -> void:
 	_draw_turret_heads()
-	_draw_projectiles()
+	# Projectiles render on `_projectile_overlay` (z_index 4095) so
+	# they always sit above the chassis / buildings / terrain overlay,
+	# regardless of how those siblings configure their own z_indices.
 	_draw_turret_ranges()
 
 func _draw_turret_heads() -> void:
@@ -1573,7 +1606,12 @@ func _draw_turret_heads() -> void:
 			# --- Draw a small dot in the center ---
 			draw_circle(center, 3.0, data.color.lightened(0.4))
 
-func _draw_projectiles() -> void:
+## Draws every active projectile onto `canvas`. The canvas is passed
+## in (instead of using `self`) so the dedicated `ProjectileOverlay`
+## child node can host the draw on its own high-z layer — the draw
+## primitives operate on whatever CanvasItem they're called on, and
+## a bare `draw_circle(...)` here would always target this node.
+func _draw_projectiles(canvas: CanvasItem) -> void:
 	for proj in projectiles:
 		var pos = proj["pos"]
 		var color = proj["color"]
@@ -1586,17 +1624,23 @@ func _draw_projectiles() -> void:
 				var alpha = float(t) / trail.size() * 0.5
 				var trail_color = Color(color.r, color.g, color.b, alpha)
 				var width = radius * (float(t) / trail.size())
-				draw_line(trail[t], trail[t + 1], trail_color, width)
+				canvas.draw_line(trail[t], trail[t + 1], trail_color, width)
 
 		# Draw trail line from last trail point to current pos
 		if trail.size() > 0:
 			var trail_color = Color(color.r, color.g, color.b, 0.5)
-			draw_line(trail[trail.size() - 1], pos, trail_color, radius * 0.8)
+			canvas.draw_line(trail[trail.size() - 1], pos, trail_color, radius * 0.8)
 
 		# Draw the projectile itself — bright glowing circle
-		draw_circle(pos, radius + 1.0, Color(color.r, color.g, color.b, 0.3))
-		draw_circle(pos, radius, color)
-		draw_circle(pos, radius * 0.5, color.lightened(0.5))
+		canvas.draw_circle(pos, radius + 1.0, Color(color.r, color.g, color.b, 0.3))
+		canvas.draw_circle(pos, radius, color)
+		canvas.draw_circle(pos, radius * 0.5, color.lightened(0.5))
+
+		if main and main.show_hitboxes:
+			canvas.draw_arc(pos, radius, 0, TAU, 24, Color(1.0, 0.2, 0.9, 0.9), 1.5)
+			var aoe_r: float = float(proj.get("aoe_radius", 0.0))
+			if aoe_r > 0.0:
+				canvas.draw_arc(pos, aoe_r, 0, TAU, 48, Color(1.0, 0.5, 0.0, 0.7), 1.0)
 
 
 func _draw_turret_ranges() -> void:

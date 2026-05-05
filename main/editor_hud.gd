@@ -37,6 +37,8 @@ var faction_buttons := {}  # Faction int → Button
 var mirror_x_btn: Button
 var mirror_y_btn: Button
 var convert_faction_btn: Button
+var line_size_label: Label
+var line_size_spin: SpinBox
 
 # Faction conversion popup
 var faction_popup: PanelContainer
@@ -120,9 +122,27 @@ func _create_toolbar() -> void:
 
 	# Tool buttons (terrain mode tools)
 	_add_tool_btn(hbox, "Pencil", main.Tool.PENCIL)
-	_add_tool_btn(hbox, "Eraser", main.Tool.ERASER)
+	_add_tool_btn(hbox, "Line", main.Tool.LINE)
+	_add_tool_btn(hbox, "Circle", main.Tool.CIRCLE)
+	_add_tool_btn(hbox, "Bucket", main.Tool.BUCKET)
 	_add_tool_btn(hbox, "Rect Fill", main.Tool.RECT_FILL)
 	_add_tool_btn(hbox, "Rect Erase", main.Tool.RECT_ERASE)
+
+	# Line-thickness spinner. Visible only while the Line tool is
+	# selected (handled in _update_tool_highlight). Drives main.line_size,
+	# which the line tool reads when stamping its Bresenham line.
+	line_size_label = Label.new()
+	line_size_label.text = "Size:"
+	line_size_label.add_theme_font_size_override("font_size", 12)
+	hbox.add_child(line_size_label)
+	line_size_spin = SpinBox.new()
+	line_size_spin.min_value = 1
+	line_size_spin.max_value = 16
+	line_size_spin.step = 1
+	line_size_spin.value = main.line_size
+	line_size_spin.custom_minimum_size = Vector2(56, 0)
+	line_size_spin.value_changed.connect(func(v: float): main.line_size = int(v))
+	hbox.add_child(line_size_spin)
 
 	# Mirror buttons (transform mode only)
 	var sep_transform = VSeparator.new()
@@ -285,6 +305,15 @@ func _update_tool_highlight() -> void:
 			btn.add_theme_stylebox_override("normal", _panel_style(Color(0.2, 0.5, 0.8, 0.8)))
 		else:
 			btn.remove_theme_stylebox_override("normal")
+	# Show the brush-size spinner only when a tool that uses thickness
+	# is selected — currently the Line and Circle tools share the same
+	# `line_size` field. Hidden in every other mode.
+	var uses_size: bool = main.current_tool == main.Tool.LINE or main.current_tool == main.Tool.CIRCLE
+	var show_line_size: bool = uses_size and (main.editor_mode == main.EditorMode.TERRAIN)
+	if line_size_label:
+		line_size_label.visible = show_line_size
+	if line_size_spin:
+		line_size_spin.visible = show_line_size
 
 
 func _update_mode_visibility() -> void:
@@ -296,6 +325,8 @@ func _update_mode_visibility() -> void:
 	var show_tools: bool = (main.editor_mode == main.EditorMode.TERRAIN)
 	for tool_enum in tool_buttons:
 		tool_buttons[tool_enum].visible = show_tools
+	# Recompute size-spinner visibility (depends on both mode and tool).
+	_update_tool_highlight()
 	# Show mirror/convert buttons only in transform mode
 	var show_mirror: bool = (main.editor_mode == main.EditorMode.TRANSFORM)
 	if mirror_x_btn:
@@ -550,7 +581,7 @@ func _populate_tiles(category: int) -> void:
 func _add_tile_button(tile: TerrainTileData) -> void:
 	var btn = Button.new()
 	btn.custom_minimum_size = Vector2(TILE_BTN_SIZE, TILE_BTN_SIZE)
-	btn.tooltip_text = tile.display_name if tile.display_name != "" else String(tile.id)
+	btn.tooltip_text = String(tile.id)
 
 	if tile.icon:
 		var tex_rect = TextureRect.new()
@@ -570,9 +601,8 @@ func _add_tile_button(tile: TerrainTileData) -> void:
 func _select_tile(tile_id: StringName, btn: Button) -> void:
 	main.selected_tile = tile_id
 
-	if main.current_tool == main.Tool.ERASER:
-		main.current_tool = main.Tool.PENCIL
-		_update_tool_highlight()
+	# (No tool auto-swap on tile pick — Pencil/Line/etc all paint with
+	# the selected tile, and the previous Eraser tool no longer exists.)
 
 	if selected_tile_btn:
 		selected_tile_btn.remove_theme_stylebox_override("normal")
@@ -1010,7 +1040,7 @@ func _create_load_popup() -> void:
 	load_popup.add_child(vbox)
 
 	var title = Label.new()
-	title.text = "Load Map / Sector"
+	title.text = "Load Sector"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(title)
 
@@ -1041,12 +1071,6 @@ func _refresh_load_list() -> void:
 		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		load_list.add_child(lbl)
 		return
-
-	var header = Label.new()
-	header.text = "— Sectors —"
-	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	header.add_theme_color_override("font_color", Color(1.0, 0.7, 0.3))
-	load_list.add_child(header)
 
 	for sector_name in sectors:
 		_add_load_entry(sector_name, "sector")

@@ -600,9 +600,8 @@ func _on_node_clicked(nid: StringName) -> void:
 				_update_resource_panel()
 		TechTree.NodeState.RESEARCHED:
 			var db_ui = get_node_or_null("/root/Main/DatabaseUI")
-			if db_ui and db_ui.has_method("navigate_to_entry"):
-				_hide_ui()
-				db_ui.navigate_to_entry(nid)
+			if db_ui and db_ui.has_method("show_entry_detail_only"):
+				db_ui.show_entry_detail_only(nid)
 			return
 
 
@@ -635,7 +634,7 @@ func _update_tooltip(nid: StringName, screen_pos: Vector2) -> void:
 	tooltip_vbox.add_child(nl)
 
 	var cost = nd["research_cost"]
-	if not cost.is_empty() and state != TechTree.NodeState.LOCKED:
+	if not cost.is_empty() and state == TechTree.NodeState.UNLOCKED:
 		for item_id in cost:
 			var req = cost[item_id]
 			var spt = TechTree.get_spent(nid, item_id)
@@ -865,6 +864,17 @@ func _show_ui() -> void:
 	root_panel.visible = true
 	get_tree().paused = true
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	# Retroactively unlock event-only material nodes (mat_steel, …)
+	# against the cross-sector global pool. The per-sector load path
+	# only ever syncs against the active sector's stockpile, so steel
+	# produced on a different sector would leave dependents (Unit
+	# Refabricator, …) locked even though the Global Resources panel
+	# visibly showed the stockpile. Push the active sector's live
+	# stockpile into `sector_resources` first so the global pool
+	# reflects what's actually in the player's bank right now.
+	if main:
+		SaveManager.sync_active_sector_resources()
+	TechTree.sync_event_unlocks_from_resources(SaveManager.get_global_resources())
 	_compute_layout()
 	tree_canvas.queue_redraw()
 	resource_panel.visible = true

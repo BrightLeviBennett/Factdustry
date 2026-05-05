@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ba4c1knrph4ec"
-path="res://.godot/imported/GrassyFloor_old.png-828fd1906521f25353f8241a726c535f.ctex"
+uid="uid://c4ww087qwbfax"
+path="res://.godot/imported/ShardlingHealingHead.png-8689973b7d0dce21dbecc62a6012680b.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/GrassyFloor_old.png"
-dest_files=["res://.godot/imported/GrassyFloor_old.png-828fd1906521f25353f8241a726c535f.ctex"]
+source_file="res://textures/units/shardling/ShardlingHealingHead.png"
+dest_files=["res://.godot/imported/ShardlingHealingHead.png-8689973b7d0dce21dbecc62a6012680b.ctex"]
 
 [params]
 

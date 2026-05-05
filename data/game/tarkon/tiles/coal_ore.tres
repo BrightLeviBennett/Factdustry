@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://b8qyardcoal01"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dwn8m70n4augr" path="res://textures/terrain/Coal.png" id="1_coal0"]
+
+[resource]
+script = ExtResource("1")
+id = &"coal_ore"
+display_name = "Coal Ore"
+description = "A surface deposit of coal. Place a drill facing it to extract. Unlike most ores, coal sits on the ground and requires a floor underneath — it can't be planted in walls."
+icon = ExtResource("1_coal0")
+category = 2
+color = Color(0.18, 0.18, 0.2, 1)
+opacity = 0.9
+tags = PackedStringArray("ore", "mineral", "floor_ore")
+minable_resource = &"mat_coal"

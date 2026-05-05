@@ -16,8 +16,8 @@ grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("1_nggvr")
 max_health = 360.0
 build_cost = {
-"copper": 200,
-"silicon": 120
+"copper": 100,
+"silicon": 40
 }
 build_time = 4.0
 production_time = 8.0

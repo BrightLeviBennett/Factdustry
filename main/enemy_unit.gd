@@ -1283,6 +1283,8 @@ func _draw() -> void:
 	_draw_rebuild_progress()
 	_draw_health_bar()
 	_draw_selection_ring()
+	if main and main.show_hitboxes:
+		draw_arc(Vector2.ZERO, unit_size, 0, TAU, 32, Color(1.0, 0.2, 0.9, 0.9), 1.5)
 
 
 ## Renders the unit as a stacked base + rotating head, mirroring the

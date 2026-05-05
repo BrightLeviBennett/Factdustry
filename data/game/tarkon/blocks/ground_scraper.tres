@@ -1,17 +1,27 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://4pc7dj2sdifm"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://ufrqltloigyw" path="res://textures/blocks/resource extractors/Ground Scraper/GroundScraperComplete.png" id="2_gscom"]
+[ext_resource type="Texture2D" uid="uid://so8m316qk4o5" path="res://textures/blocks/resource extractors/Ground Scraper/GroundScraperBase.png" id="3_gsbas"]
 
 [resource]
 script = ExtResource("1")
 id = &"ground_scraper"
 display_name = "Ground Scraper"
-description = "Industrial surface miner that strips topsoil for ores."
+description = "Industrial surface miner that strips topsoil for ores like coal. Produces 1 coal every 2 seconds at baseline; each extra ore tile under the footprint adds +25% throughput. Only mines floor-borne ore deposits — wall ores are out of reach."
+icon = ExtResource("2_gscom")
 category = 1
+tags = PackedStringArray("mining", "extraction", "floor_miner", "scraper_head")
 color = Color(0.5, 0.6, 0.3, 1)
+grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("3_gsbas")
 max_health = 320.0
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 50,
+"silicon": 30
+}
 build_time = 4.0
-output_items = { "ore": 8 }
 production_time = 2.0
-tags = PackedStringArray("mining", "extraction")
+requires_power = true
+electrical_power_use = 10.0
+max_stored_items = 10
