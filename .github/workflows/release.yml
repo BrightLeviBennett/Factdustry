@@ -1,0 +1,180 @@
+name: Release on commit
+
+# Triggers whenever a commit lands on `main` whose subject line looks
+# like a version stamp (e.g. `v1.4.2:`, `v1.4.2(b):`). Parses that
+# commit's subject for the tag/title and the body for the release
+# notes, exports the macOS preset from Godot, and publishes a GitHub
+# release with the .app zipped as the artifact.
+#
+# Requirements you control:
+#   - Godot 4.x export_presets.cfg with a preset named `macOS`
+#     pointing at `../Factdustry.app` (already in repo).
+#   - Repository → Settings → Actions → General → Workflow
+#     permissions = "Read and write".
+#   - If you change Godot versions, bump GODOT_VERSION below.
+#
+# To skip the release on a normal push, just don't start the subject
+# with `v<digit>`. Anything else (`fix:`, `wip:`, …) is ignored.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  # Single source of truth — bump these when you upgrade Godot.
+  # The download URLs are derived from this; if upstream renames a
+  # release artifact, adjust the steps that fetch them.
+  GODOT_VERSION: "4.6-stable"
+  GODOT_VERSION_DIR: "4.6.stable"
+  EXPORT_PRESET: "macOS"
+  EXPORT_OUTPUT_NAME: "Factdustry.app"
+  RELEASE_ASSET_NAME: "Factdustry-macOS.zip"
+
+jobs:
+  release:
+    # macOS export needs to run on a macOS runner — the .app bundle
+    # has Mach-O binaries the Linux/Windows runners can't produce.
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Need the full history so `softprops/action-gh-release` can
+          # find or create the tag without `shallow update not allowed`
+          # complaints.
+          fetch-depth: 0
+
+      - name: Parse commit subject + body
+        id: parse
+        shell: bash
+        run: |
+          # `head_commit.message` is the FULL message — first line is
+          # the subject, blank-line-separated body follows. We pull
+          # both with `git log` so we don't have to deal with YAML
+          # escaping the GitHub-context string.
+          SUBJECT=$(git log -1 --pretty=format:'%s')
+          BODY=$(git log -1 --pretty=format:'%b')
+
+          # Subject must start with `v<num>...` followed by `:` to
+          # qualify as a release commit. e.g. `v1.4.2:`, `v1.4.2(b):`,
+          # `v1.4.10-rc1:`. Anything else is a regular commit and we
+          # bail out cleanly.
+          if [[ ! "$SUBJECT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Subject '$SUBJECT' is not a release commit — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Tag = subject up to (but not including) the first colon.
+          # `v1.4.2(b): - launch: …` → `v1.4.2(b)`.
+          TAG="${SUBJECT%%:*}"
+          # Title = same as tag for now; tweak if you want fuller titles.
+          TITLE="$TAG"
+
+          {
+            echo "skip=false"
+            echo "tag=$TAG"
+            echo "title=$TITLE"
+            # Multi-line body uses GitHub's heredoc syntax for the
+            # output file. The marker has to be unique enough not to
+            # collide with anything in the body — `EOF_BODY_MARKER`
+            # serves.
+            echo "body<<EOF_BODY_MARKER"
+            echo "$BODY"
+            echo "EOF_BODY_MARKER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bail if not a release commit
+        if: steps.parse.outputs.skip == 'true'
+        run: |
+          echo "Not a release commit. Done."
+
+      - name: Cache Godot binary + templates
+        if: steps.parse.outputs.skip == 'false'
+        id: godot_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /Applications/Godot.app
+            ~/Library/Application Support/Godot/export_templates/${{ env.GODOT_VERSION_DIR }}
+          # Cache key is just the version string — bump GODOT_VERSION
+          # in env to invalidate.
+          key: godot-${{ env.GODOT_VERSION }}-macos
+
+      - name: Install Godot
+        if: steps.parse.outputs.skip == 'false' && steps.godot_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}"
+          # Editor binary (universal macOS .app)
+          curl -fL "${BASE_URL}/Godot_v${GODOT_VERSION}_macos.universal.zip" -o godot.zip
+          unzip -q godot.zip
+          # The zip contains `Godot.app` at the root.
+          rm -rf /Applications/Godot.app
+          mv Godot.app /Applications/Godot.app
+
+      - name: Install export templates
+        if: steps.parse.outputs.skip == 'false' && steps.godot_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}"
+          curl -fL "${BASE_URL}/Godot_v${GODOT_VERSION}_export_templates.tpz" -o templates.tpz
+          mkdir -p "$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION_DIR}"
+          unzip -q templates.tpz -d /tmp/godot_templates
+          # The .tpz unpacks into `templates/` — flatten it into the
+          # version directory Godot expects.
+          mv /tmp/godot_templates/templates/* \
+            "$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION_DIR}/"
+
+      - name: Import resources (first headless pass)
+        if: steps.parse.outputs.skip == 'false'
+        shell: bash
+        run: |
+          # First headless run does the resource import. Any errors
+          # from missing optional plugins are noise — let it run.
+          /Applications/Godot.app/Contents/MacOS/Godot \
+            --headless --import \
+            --quit-after 1000 || true
+
+      - name: Export macOS preset
+        if: steps.parse.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/macos
+          /Applications/Godot.app/Contents/MacOS/Godot \
+            --headless \
+            --export-release "${EXPORT_PRESET}" \
+            "build/macos/${EXPORT_OUTPUT_NAME}"
+          # Sanity check — Godot's CLI exit code can lie if the
+          # preset has a soft failure, so verify the output exists.
+          test -d "build/macos/${EXPORT_OUTPUT_NAME}" \
+            || (echo "Export did not produce ${EXPORT_OUTPUT_NAME}" && exit 1)
+
+      - name: Zip the .app bundle
+        if: steps.parse.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GitHub releases prefer a single file; an .app is a
+          # directory, so zip it (preserving symlinks / permissions).
+          cd build/macos
+          zip -ry "../${RELEASE_ASSET_NAME}" "${EXPORT_OUTPUT_NAME}"
+
+      - name: Create GitHub release
+        if: steps.parse.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.parse.outputs.tag }}
+          name: ${{ steps.parse.outputs.title }}
+          body: ${{ steps.parse.outputs.body }}
+          # If a release with this tag already exists, overwrite the
+          # asset rather than failing — easier when re-running a
+          # workflow after fixing a build issue.
+          files: build/${{ env.RELEASE_ASSET_NAME }}
+          fail_on_unmatched_files: true
