@@ -17,8 +17,24 @@ name: Release on commit
 # with `v<digit>`. Anything else (`fix:`, `wip:`, …) is ignored.
 
 on:
+  # Auto-release: push a commit to `main` whose subject starts with
+  # `v<num>.<num>.<num>` (e.g. `v1.4.2:`, `v1.4.2(b):`).
   push:
     branches: [main]
+    # Pushing a tag like `v1.4.2-b` also triggers a release for that
+    # tag's commit — useful when an earlier version-stamped commit
+    # didn't auto-release because it wasn't HEAD at push time.
+    tags:
+      - 'v*'
+  # Manual trigger from the Actions tab. Optional `ref` input lets you
+  # pick a specific commit / branch / tag; defaults to whatever the
+  # workflow runs on.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit / branch / tag to release (leave blank for HEAD)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -46,32 +62,43 @@ jobs:
           # find or create the tag without `shallow update not allowed`
           # complaints.
           fetch-depth: 0
+          # Manual `workflow_dispatch` runs can pin to a specific
+          # commit / branch / tag via the `ref` input. Push events
+          # default to the pushed ref.
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Parse commit subject + body
         id: parse
         shell: bash
         run: |
-          # `head_commit.message` is the FULL message — first line is
-          # the subject, blank-line-separated body follows. We pull
-          # both with `git log` so we don't have to deal with YAML
-          # escaping the GitHub-context string.
+          # Subject + body of whatever commit we're sitting on. The
+          # checkout step above already moved HEAD to the right ref
+          # (push: HEAD = pushed commit; tag: HEAD = tag's commit;
+          # dispatch: HEAD = `ref` input or default).
           SUBJECT=$(git log -1 --pretty=format:'%s')
           BODY=$(git log -1 --pretty=format:'%b')
 
-          # Subject must start with `v<num>...` followed by `:` to
-          # qualify as a release commit. e.g. `v1.4.2:`, `v1.4.2(b):`,
-          # `v1.4.10-rc1:`. Anything else is a regular commit and we
-          # bail out cleanly.
-          if [[ ! "$SUBJECT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            echo "Subject '$SUBJECT' is not a release commit — skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Decide the tag name based on how the workflow was triggered:
+          #   - tag push → use the pushed tag verbatim (`refs/tags/foo`
+          #     → `foo`); we trust the pusher to have named it sanely.
+          #   - branch push / dispatch → derive the tag from the
+          #     commit subject by taking everything before the first
+          #     colon.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            # Subject must start with `v<num>...` followed by `:` for
+            # auto-release on a normal branch push. e.g. `v1.4.2:`,
+            # `v1.4.2(b):`, `v1.4.10-rc1:`. Anything else is a regular
+            # commit and we bail out cleanly.
+            if [[ ! "$SUBJECT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              echo "Subject '$SUBJECT' is not a release commit — skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            TAG="${SUBJECT%%:*}"
           fi
-
-          # Tag = subject up to (but not including) the first colon.
-          # `v1.4.2(b): - launch: …` → `v1.4.2(b)`.
-          TAG="${SUBJECT%%:*}"
-          # Title = same as tag for now; tweak if you want fuller titles.
+          # Title = tag for now; tweak if you want fuller titles.
           TITLE="$TAG"
 
           {
