@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ciil5f23qi48x"
-path="res://.godot/imported/UnitRefabricatorBaseBottom.png-5fec5b5d9255b806051ee881f8695304.ctex"
+uid="uid://d1fmyvwx1irtb"
+path="res://.godot/imported/UnitRefabricatorLeft.png-ea920564f4e107484d7980d1e2e50fc7.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseBottom.png"
-dest_files=["res://.godot/imported/UnitRefabricatorBaseBottom.png-5fec5b5d9255b806051ee881f8695304.ctex"]
+source_file="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorLeft.png"
+dest_files=["res://.godot/imported/UnitRefabricatorLeft.png-ea920564f4e107484d7980d1e2e50fc7.ctex"]
 
 [params]
 

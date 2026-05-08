@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cdiiy6yku6nnn"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -8,10 +8,16 @@ id = &"earthquake_harvester"
 display_name = "Earthquake Harvester"
 description = "Uses seismic pulses to shake loose buried minerals."
 category = 1
-color = Color(0.7, 0.4, 0.2, 1)
-max_health = 320.0
-build_cost = { "copper": 200, "silicon": 80 }
-build_time = 4.0
-output_items = { "ore": 8 }
-production_time = 2.0
 tags = PackedStringArray("mining", "extraction")
+color = Color(0.7, 0.4, 0.2, 1)
+grid_size = Vector2i(3, 3)
+max_health = 320.0
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
+build_time = 4.0
+output_items = {
+"ore": 8
+}
+production_time = 2.0

@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bt5r6hbjxk81g"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -7,10 +7,11 @@ script = ExtResource("1")
 id = &"duct"
 display_name = "Duct"
 description = "Enclosed transport tube. Faster than belts but more expensive."
-category = 8
+tags = PackedStringArray("duct", "transport")
 color = Color(0.7, 0.8, 0.4, 1)
 max_health = 210.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 15
+}
 build_time = 0.5
 transport_speed = 6.0
-tags = PackedStringArray("duct", "transport")

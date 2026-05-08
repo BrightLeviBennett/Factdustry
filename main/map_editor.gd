@@ -94,6 +94,14 @@ var _erasing := false
 var _last_paint_cell := Vector2i.ZERO
 var _has_last_paint := false
 
+# Block drag-place / drag-erase state — mirrors the terrain stroke pattern
+# so dragging the cursor across the map fills/erases every cell on the
+# path (using Bresenham interpolation for fast cursor moves).
+var _block_drag_placing := false
+var _block_drag_erasing := false
+var _block_drag_last_cell := Vector2i.ZERO
+var _block_drag_has_last := false
+
 # Rectangle tool state. `_rect_erasing` is set when the drag was started
 # with the right mouse button — the rect tool then performs a rect erase
 # on commit instead of a fill, so the player gets both behaviors out of
@@ -166,6 +174,9 @@ var _transform_drag_offset := Vector2i.ZERO  # where the user started dragging
 var _transform_current_offset := Vector2i.ZERO  # current mouse offset from drag start
 
 # Linking state
+# `linking_mode` was a toggle entered/exited via the L key; replaced by
+# Mindustry-style click-to-link (the source is implicit in `link_source`).
+# Variable kept around for any save-format compatibility but is unused.
 var linking_mode := false
 var link_source := Vector2i(-1, -1)
 var linked_pairs: Array = []  # Array of [Vector2i, Vector2i]
@@ -284,18 +295,48 @@ func _unhandled_input(event: InputEvent) -> void:
 					core_position = anchor
 					_overlay.queue_redraw()
 			return
-		# Toggle linking mode (L)
+		# Esc: close crane filter menu / exit crane link mode (mirrors the
+		# in-game ui_cancel chain in BuildingSystem._input). This runs
+		# before any other Esc-bound action so the editor's overall flow
+		# isn't disturbed.
+		if event.is_action_pressed("ui_cancel"):
+			var bs_esc = get_node_or_null("BuildingSystem")
+			if bs_esc:
+				if bs_esc._crane_filter_menu_open:
+					bs_esc._close_crane_filter_menu()
+					return
+				if bs_esc._crane_link_anchor != Vector2i(-1, -1):
+					bs_esc._crane_link_anchor = Vector2i(-1, -1)
+					bs_esc._crane_link_next_kind = "input"
+					bs_esc.queue_redraw()
+					return
+			if link_source != Vector2i(-1, -1):
+				link_source = Vector2i(-1, -1)
+				_overlay.queue_redraw()
+				return
+		# Linking is now click-to-link (Mindustry-style): clicking a
+		# `linkable` block in BUILDING mode selects it as the source, the
+		# next click on another linkable block creates the pair. The L key
+		# is kept only as a quick "cancel any in-flight link source" so a
+		# muscle-memory press doesn't break anything.
 		if event.keycode == KEY_L:
-			if linking_mode:
-				linking_mode = false
+			if link_source != Vector2i(-1, -1):
 				link_source = Vector2i(-1, -1)
-			else:
-				linking_mode = true
-				link_source = Vector2i(-1, -1)
-			_overlay.queue_redraw()
+				_overlay.queue_redraw()
 			return
 
 	if event is InputEventMouseButton:
+		# Mouse-up: always release any block drag, regardless of mode.
+		# (User may have switched modes mid-drag.)
+		if not event.pressed:
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				_block_drag_placing = false
+				if not _block_drag_erasing:
+					_block_drag_has_last = false
+			elif event.button_index == MOUSE_BUTTON_RIGHT:
+				_block_drag_erasing = false
+				if not _block_drag_placing:
+					_block_drag_has_last = false
 		# Script mode: no terrain/building interaction
 		if editor_mode == EditorMode.SCRIPT:
 			return
@@ -312,15 +353,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		if not is_within_bounds(grid_pos):
 			return
 
-		# --- Linking mode ---
-		if linking_mode:
-			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-				_handle_link_click(grid_pos)
-			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-				linking_mode = false
-				link_source = Vector2i(-1, -1)
-				_overlay.queue_redraw()
-			return
+		# (Click-to-link is handled inside the BUILDING-mode branch below;
+		# the standalone "linking_mode" toggle is no longer required.)
 
 		# --- Transform mode ---
 		if editor_mode == EditorMode.TRANSFORM:
@@ -329,6 +363,18 @@ func _unhandled_input(event: InputEvent) -> void:
 
 		# --- Building mode ---
 		if editor_mode == EditorMode.BUILDING:
+			# Crane link clicks (left + right) take priority over normal
+			# building-mode clicks. Filter menu, link mode toggling, diamond
+			# placement, and right-click delete all flow through the same
+			# helpers used in-game.
+			var bs_link = get_node_or_null("BuildingSystem")
+			if bs_link and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+				if bs_link._handle_crane_link_click(event):
+					return
+			if bs_link and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed \
+					and bs_link._crane_link_anchor != Vector2i(-1, -1):
+				if bs_link._handle_crane_link_right_click():
+					return
 			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 				# World-menu handling: if the world menu is already open,
 				# resolve the click against it first. Then, with no block
@@ -344,7 +390,15 @@ func _unhandled_input(event: InputEvent) -> void:
 					else:
 						bs._close_world_menu()
 					return
-				if selected_block == &"" and placed_buildings.has(grid_pos):
+				# Clicking on an already-placed block opens its in-world UI
+				# (sorter / constructor / refabricator / archive) or starts
+				# a link click if the block is `linkable`. The editor
+				# always has *something* selected in the palette, so we
+				# can't gate this on `selected_block == &""` like the
+				# campaign does — instead we hijack the click whenever the
+				# clicked cell is already occupied (placement would fail
+				# there anyway, since `_place_block_at` refuses to overlap).
+				if placed_buildings.has(grid_pos):
 					var click_block_id = placed_buildings[grid_pos]
 					var click_data = Registry.get_block(click_block_id)
 					var click_anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
@@ -363,12 +417,26 @@ func _unhandled_input(event: InputEvent) -> void:
 						if click_data.id == &"archive":
 							bs._open_world_menu("archive", click_anchor)
 							return
+					# Click-to-link (Mindustry-style): clicking a `linkable`
+					# block picks/chains a link.
+					if click_data and click_data.tags.has("linkable"):
+						_handle_link_click(click_anchor)
+						return
+					# Clicking a non-linkable block clears any pending source.
+					if link_source != Vector2i(-1, -1):
+						link_source = Vector2i(-1, -1)
+						_overlay.queue_redraw()
 				# Center multi-tile buildings on the mouse cursor
-				var place_pos := grid_pos
-				var sel_data = Registry.get_block(selected_block)
-				if sel_data and (sel_data.grid_size.x > 1 or sel_data.grid_size.y > 1):
-					place_pos -= Vector2i(sel_data.grid_size.x / 2, sel_data.grid_size.y / 2)
-				_place_block_at(place_pos)
+				_place_block_centered(grid_pos)
+				# Begin a drag: subsequent mouse motion fills cells along
+				# the cursor's path.
+				if selected_block != &"":
+					_block_drag_placing = true
+					_block_drag_last_cell = grid_pos
+					_block_drag_has_last = true
+			elif event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
+				_block_drag_placing = false
+				_block_drag_has_last = false
 			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 				# Close an open world menu without erasing the block beneath.
 				var bs_r = get_node_or_null("BuildingSystem")
@@ -376,6 +444,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					bs_r._close_world_menu()
 					return
 				_erase_block_at(grid_pos)
+				_block_drag_erasing = true
+				_block_drag_last_cell = grid_pos
+				_block_drag_has_last = true
+			elif event.button_index == MOUSE_BUTTON_RIGHT and not event.pressed:
+				_block_drag_erasing = false
+				_block_drag_has_last = false
 			return
 
 		# --- Bucket flood-fill (terrain mode) ---
@@ -533,10 +607,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		if editor_mode == EditorMode.TRANSFORM:
 			_handle_transform_motion(grid_pos)
 			return
-		elif linking_mode:
-			_overlay.queue_redraw()  # Update link line to mouse
+		elif link_source != Vector2i(-1, -1):
+			_overlay.queue_redraw()  # Update dashed link line to mouse
 		elif editor_mode == EditorMode.BUILDING:
 			_overlay.queue_redraw()  # Update building preview
+			# Drag-place / drag-erase fills cells along the cursor path so a
+			# fast drag doesn't skip tiles.
+			if _block_drag_placing:
+				_block_drag_stroke_to(grid_pos, false)
+			elif _block_drag_erasing:
+				_block_drag_stroke_to(grid_pos, true)
 		elif _rect_dragging:
 			_rect_end = grid_pos
 			_overlay.queue_redraw()
@@ -1325,6 +1405,44 @@ func _mirror_dict_y(dict: Dictionary, region_h: int) -> Dictionary:
 
 # --- BUILDING PLACEMENT ---
 
+## Helper: place `selected_block` centered on the cursor's grid cell.
+## Multi-tile blocks shift the anchor by half their footprint so the cell
+## under the cursor sits in the middle of the placed block.
+func _place_block_centered(grid_pos: Vector2i) -> void:
+	if selected_block == &"":
+		return
+	var place_pos := grid_pos
+	var sel_data = Registry.get_block(selected_block)
+	if sel_data and (sel_data.grid_size.x > 1 or sel_data.grid_size.y > 1):
+		place_pos -= Vector2i(sel_data.grid_size.x / 2, sel_data.grid_size.y / 2)
+	_place_block_at(place_pos)
+
+
+## Drag-stroke for block placement / erasure. Walks a Bresenham line from
+## the previous drag cell to `grid_pos` so the operation lands on every
+## cell the cursor swept over (motion events can skip tiles when the
+## cursor moves quickly).
+func _block_drag_stroke_to(grid_pos: Vector2i, erase: bool) -> void:
+	if not _block_drag_has_last or _block_drag_last_cell == grid_pos:
+		if erase:
+			_erase_block_at(grid_pos)
+		else:
+			_place_block_centered(grid_pos)
+		_block_drag_last_cell = grid_pos
+		_block_drag_has_last = true
+		return
+	for cell in _line_cells(_block_drag_last_cell, grid_pos):
+		if cell == _block_drag_last_cell:
+			continue
+		if not is_within_bounds(cell):
+			continue
+		if erase:
+			_erase_block_at(cell)
+		else:
+			_place_block_centered(cell)
+	_block_drag_last_cell = grid_pos
+
+
 func _place_block_at(grid_pos: Vector2i) -> void:
 	if selected_block == &"":
 		return
@@ -1446,27 +1564,63 @@ func _pick_next_spawn_core() -> void:
 
 # --- LINKING ---
 
+## Click-to-link click handler. Always called with a building anchor (so
+## `linked_pairs` stays normalized — without this, clicking a sub-cell of a
+## multi-tile block would store a stale cell that never matches the anchor
+## passed to `_remove_links_for` on erase, leaving dashed lines pointing at
+## empty space).
 func _handle_link_click(grid_pos: Vector2i) -> void:
-	if not placed_buildings.has(grid_pos):
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	if not placed_buildings.has(anchor):
 		return
-	var block_id = placed_buildings[grid_pos]
-	var data = Registry.get_block(block_id)
+	var data = Registry.get_block(placed_buildings[anchor])
 	if data == null or not data.tags.has("linkable"):
 		return
 
-	if link_source == Vector2i(-1, -1):
-		# First click — remember source
-		link_source = grid_pos
-	else:
-		# Second click — create the link
-		if grid_pos != link_source:
-			# Remove existing links for both endpoints (1:1 links)
-			_remove_links_for(link_source)
-			_remove_links_for(grid_pos)
-			linked_pairs.append([link_source, grid_pos])
-		# Done linking
-		linking_mode = false
+	# Click on the current source — deselect.
+	if anchor == link_source:
 		link_source = Vector2i(-1, -1)
+		_overlay.queue_redraw()
+		return
+
+	if link_source == Vector2i(-1, -1):
+		# First click — remember source.
+		link_source = anchor
+		_overlay.queue_redraw()
+		return
+
+	# Source already set: validate compatibility (bridge↔bridge, MD↔MD)
+	# before linking. Mismatched pairs reset the source instead of
+	# silently failing.
+	var source_data = Registry.get_block(placed_buildings.get(link_source, &""))
+	if source_data == null:
+		link_source = anchor
+		_overlay.queue_redraw()
+		return
+	var src_bridge: bool = source_data.tags.has("bridge")
+	var tgt_bridge: bool = data.tags.has("bridge")
+	var src_md: bool = source_data.tags.has("mass_driver")
+	var tgt_md: bool = data.tags.has("mass_driver")
+	if src_bridge != tgt_bridge or src_md != tgt_md:
+		link_source = anchor
+		_overlay.queue_redraw()
+		return
+
+	# Range gate (mirrors BuildingSystem._handle_link_click_on_anchor).
+	var max_range: float = maxf(source_data.link_range, data.link_range)
+	if max_range > 0.0:
+		var dx: float = float(anchor.x - link_source.x)
+		var dy: float = float(anchor.y - link_source.y)
+		if sqrt(dx * dx + dy * dy) > max_range:
+			link_source = anchor
+			_overlay.queue_redraw()
+			return
+
+	# 1:1 link — drop any existing partner on either endpoint first.
+	_remove_links_for(link_source)
+	_remove_links_for(anchor)
+	linked_pairs.append([link_source, anchor])
+	link_source = Vector2i(-1, -1)
 	_overlay.queue_redraw()
 
 
@@ -1752,19 +1906,25 @@ func _draw_links() -> void:
 	var link_color := Color(0.3, 0.8, 1.0, 0.7)
 	var half := Vector2(GRID_SIZE / 2.0, GRID_SIZE / 2.0)
 
-	# Draw existing links
-	for pair in linked_pairs:
+	# Draw existing links — lazily prune stale pairs whose endpoints no
+	# longer have a placed block (e.g. erase didn't catch them when the
+	# pair was stored against a non-anchor cell pre-fix).
+	for i in range(linked_pairs.size() - 1, -1, -1):
+		var pair = linked_pairs[i]
+		if not placed_buildings.has(pair[0]) or not placed_buildings.has(pair[1]):
+			linked_pairs.remove_at(i)
+			continue
 		var world_a: Vector2 = grid_to_world(pair[0]) + half
 		var world_b: Vector2 = grid_to_world(pair[1]) + half
 		_draw_dashed_line(world_a, world_b, link_color, 2.0, 8.0)
 		_overlay.draw_circle(world_a, 4.0, link_color)
 		_overlay.draw_circle(world_b, 4.0, link_color)
 
-	# Draw linking-mode highlights
-	if not linking_mode:
+	# No source selected → no linking-mode UI to draw.
+	if link_source == Vector2i(-1, -1):
 		return
 
-	# Highlight all linkable blocks
+	# Highlight all linkable blocks (and the chosen source in green).
 	for grid_pos in placed_buildings:
 		var block_id = placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
@@ -1777,11 +1937,17 @@ func _draw_links() -> void:
 		_overlay.draw_rect(Rect2(world_pos, Vector2(GRID_SIZE, GRID_SIZE)), highlight_color, true)
 		_overlay.draw_rect(Rect2(world_pos, Vector2(GRID_SIZE, GRID_SIZE)), highlight_color.lightened(0.3), false, 2.0)
 
-	# Draw line from source to mouse
-	if link_source != Vector2i(-1, -1):
-		var source_world: Vector2 = grid_to_world(link_source) + half
-		var mouse_pos: Vector2 = get_global_mouse_position()
-		_draw_dashed_line(source_world, mouse_pos, Color(0.3, 1.0, 0.5, 0.5), 2.0, 6.0)
+	# Draw line from source to mouse.
+	var source_world: Vector2 = grid_to_world(link_source) + half
+	var mouse_pos: Vector2 = get_global_mouse_position()
+	_draw_dashed_line(source_world, mouse_pos, Color(0.3, 1.0, 0.5, 0.5), 2.0, 6.0)
+
+	# Range circle (when the source block has a non-zero link_range).
+	var src_block_id: StringName = placed_buildings.get(link_source, &"")
+	var src_data2 = Registry.get_block(src_block_id)
+	if src_data2 and src_data2.link_range > 0.0:
+		_overlay.draw_arc(source_world, src_data2.link_range * GRID_SIZE,
+			0.0, TAU, 96, Color(0.3, 1.0, 0.5, 0.5), 1.5)
 
 
 func _draw_dashed_line(from: Vector2, to: Vector2, color: Color, width: float, dash_length: float) -> void:

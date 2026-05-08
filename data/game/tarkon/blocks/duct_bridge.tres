@@ -10,6 +10,7 @@ description = "Carries items through ducts over obstacles."
 category = 8
 color = Color(0.7, 0.8, 0.4, 1)
 max_health = 290.0
+link_range = 9.5
 build_cost = { "copper": 200, "silicon": 80 }
 build_time = 0.5
 transport_speed = 7.0

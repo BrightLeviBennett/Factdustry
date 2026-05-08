@@ -118,6 +118,9 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var max_payload_size: int = 0
 ## Crane arm range in tiles (crane blocks only).
 @export var crane_range: float = 0.0
+## Maximum link distance (in tiles, anchor-to-anchor euclidean) for
+## linkable blocks — bridges, mass drivers. 0 = unlimited.
+@export var link_range: float = 0.0
 
 
 @export_group("Power")

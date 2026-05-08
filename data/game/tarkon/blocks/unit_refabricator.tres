@@ -1,12 +1,12 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cya305k1ccq5w"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://ciil5f23qi48x" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseBottom.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://c2yrwlgqq35eq" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBase.png" id="1_vjqcj"]
+[ext_resource type="Texture2D" uid="uid://d1fmyvwx1irtb" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorLeft.png" id="3_m5vq3"]
 [ext_resource type="Texture2D" uid="uid://dmjccepyvtpin" path="res://textures/blocks/units/FabricatorTopBottom.png" id="4_vjqcj"]
 [ext_resource type="Texture2D" uid="uid://borsu0j7t23np" path="res://textures/blocks/units/FabricatorTopLeft.png" id="5_m5vq3"]
-[ext_resource type="Texture2D" uid="uid://bfxtjgivne2no" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseLeft.png" id="6"]
+[ext_resource type="Texture2D" uid="uid://0j7qr42q6n3b" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseLeft.png" id="6"]
 [ext_resource type="Texture2D" uid="uid://bb5h8bb8xxoh5" path="res://textures/blocks/units/FabricatorTopRight.png" id="6_tlmx1"]
-[ext_resource type="Texture2D" uid="uid://j2peaj078si5" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorBaseRight.png" id="7"]
 [ext_resource type="Texture2D" uid="uid://lnwo8ic4vhha" path="res://textures/blocks/units/Unit Refabricator/UnitRefabricatorComplete.png" id="7_vjqcj"]
 
 [resource]
@@ -19,13 +19,13 @@ category = 6
 tags = PackedStringArray("fabricator", "units", "refabricator")
 color = Color(0.6, 0.5, 0.7, 1)
 grid_size = Vector2i(3, 3)
-base_sprite = ExtResource("2")
+base_sprite = ExtResource("1_vjqcj")
 feed_overlay_back = ExtResource("4_vjqcj")
 feed_overlay_left = ExtResource("5_m5vq3")
 feed_overlay_right = ExtResource("6_tlmx1")
-base_sprite_back = ExtResource("2")
+base_sprite_back = ExtResource("1_vjqcj")
 base_sprite_left = ExtResource("6")
-base_sprite_right = ExtResource("7")
+base_sprite_right = ExtResource("3_m5vq3")
 max_health = 280.0
 build_cost = {
 "copper": 100,
@@ -41,4 +41,5 @@ production_time = 6.0
 requires_power = true
 power_consumption = 5.0
 electrical_power_use = 25.0
+electrical_power_storage = null
 max_stored_items = 60

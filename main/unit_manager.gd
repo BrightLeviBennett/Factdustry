@@ -621,7 +621,8 @@ func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2,
 	var arm_angle: float = state.get("arm_angle", 0.0)
 	var arm_ext: float = state.get("arm_extension", 0.0)
 	var arm_dir: Vector2 = Vector2(cos(arm_angle), sin(arm_angle))
-	var target_pos: Vector2 = state.get("target_pos", crane_center)
+	var tp_raw = state.get("target_pos", crane_center)
+	var target_pos: Vector2 = tp_raw if tp_raw is Vector2 else crane_center
 	var to_target_dist: float = (target_pos - crane_center).length()
 	var grabber_t: float = clampf(to_target_dist / arm_ext, 0.0, 1.0) if arm_ext > 1.0 else 1.0
 	var grabber_world: Vector2 = crane_center + arm_dir * (grabber_t * arm_ext)
@@ -656,6 +657,52 @@ func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2,
 					state["held_payload"] = payload
 					state["grabber_open"] = false
 					return
+
+		# Try to grab a payload from another crane whose head is near
+		# our grabber. Lets the player relay payloads between cranes
+		# without ever setting them down on a conveyor.
+		var building_sys_take = _building_sys_ref()
+		if building_sys_take and "crane_states" in building_sys_take:
+			var gs_take: float = main.GRID_SIZE
+			var pickup_radius: float = gs_take * 0.6
+			var best_anchor: Vector2i = anchor
+			var best_dist: float = pickup_radius
+			var found := false
+			for other_anchor in building_sys_take.crane_states:
+				if other_anchor == anchor:
+					continue
+				var other_state: Dictionary = building_sys_take.crane_states[other_anchor]
+				if other_state.get("held_payload", null) == null:
+					continue
+				if not main.placed_buildings.has(other_anchor):
+					continue
+				var other_data = Registry.get_block(main.placed_buildings[other_anchor])
+				if other_data == null:
+					continue
+				var other_base: Vector2 = main.grid_to_world(other_anchor) + Vector2(other_data.grid_size.x * gs_take / 2.0, other_data.grid_size.y * gs_take / 2.0)
+				var other_arm_angle: float = float(other_state.get("arm_angle", 0.0))
+				var other_arm_ext: float = float(other_state.get("arm_extension", 0.0))
+				var other_arm_dir: Vector2 = Vector2(cos(other_arm_angle), sin(other_arm_angle))
+				var ot_raw = other_state.get("target_pos", other_base)
+				var other_target: Vector2 = ot_raw if ot_raw is Vector2 else other_base
+				var other_to_target: float = (other_target - other_base).length()
+				var other_grabber_t: float = clampf(other_to_target / other_arm_ext, 0.0, 1.0) if other_arm_ext > 1.0 else 1.0
+				var other_grabber: Vector2 = other_base + other_arm_dir * (other_grabber_t * other_arm_ext)
+				var d: float = (other_grabber - grabber_world).length()
+				if d < best_dist:
+					best_dist = d
+					best_anchor = other_anchor
+					found = true
+			if found:
+				var donor_state: Dictionary = building_sys_take.crane_states[best_anchor]
+				state["held_payload"] = donor_state["held_payload"]
+				donor_state["held_payload"] = null
+				donor_state["grabber_open"] = true
+				if state["held_payload"] != null and state["held_payload"].get("type", "") == "building":
+					state["grabber_angle"] = int(state["held_payload"].get("rotation", 0)) * PI / 2.0
+				state["grabber_open"] = false
+				return
+
 
 		# Try to pick up a player unit
 		var clicked_unit = _get_player_unit_at(grabber_world)

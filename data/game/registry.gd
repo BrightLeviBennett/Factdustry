@@ -365,6 +365,18 @@ func get_blocks_by_category(category: BlockData.BlockCategory) -> Array[BlockDat
 	for block in blocks_list:
 		if block.category == category:
 			result.append(block)
+	# Units palette: payload-handling blocks render after unit-related blocks.
+	if category == BlockData.BlockCategory.UNITS:
+		result.sort_custom(func(a, b):
+			var ap: int = 1 if (a.tags.has("payload") or a.tags.has("freight") \
+					or a.tags.has("crane") or a.tags.has("constructor") \
+					or a.tags.has("deconstructor")) else 0
+			var bp: int = 1 if (b.tags.has("payload") or b.tags.has("freight") \
+					or b.tags.has("crane") or b.tags.has("constructor") \
+					or b.tags.has("deconstructor")) else 0
+			if ap != bp:
+				return ap < bp
+			return a.display_name < b.display_name)
 	return result
 
 

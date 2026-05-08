@@ -1984,6 +1984,9 @@
 
 	},
 	"core_position": "87,141",
+	"crane_links": {
+
+	},
 	"crane_states": {
 
 	},
@@ -1994,7 +1997,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777594142.80667
+		"timestamp": 1778200678.34489
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -15088,6 +15091,28 @@
 	"grid_height": 300,
 	"grid_width": 300,
 	"hints": [],
+	"hints_runtime": {
+		"clock": 35.2839976666685,
+		"landing_fired": true,
+		"runtime": {
+			"Mass Driver": {
+				"activated_at": 231894.702059201,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			},
+			"bridge": {
+				"activated_at": 231894.702059201,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			}
+		}
+	},
 	"junction_items": {
 
 	},
@@ -15172,6 +15197,46 @@
 		"mat_silicon": 2965,
 		"mat_steel": 1526
 	},
+	"script_runtime": {
+		"core_counts": {
+
+		},
+		"core_unit_mined_counts": {
+
+		},
+		"current_step": -1,
+		"decoded_archive_counts": {
+
+		},
+		"deposited_baselines": {
+
+		},
+		"disabled_buildings": [],
+		"ferox_blocks_destroyed_counts": {
+
+		},
+		"hidden_tiles": [],
+		"mined_counts": {
+
+		},
+		"placed_baselines": {
+
+		},
+		"placed_counts": {
+
+		},
+		"produced_counts": {
+
+		},
+		"script_running": false,
+		"step_wait_timer": 0.0,
+		"units_destroyed_counts": {
+
+		},
+		"units_produced_counts": {
+
+		}
+	},
 	"script_steps": [
 		{
 			"actions": [
@@ -15211,7 +15276,7 @@
 				{
 					"from": "64,137",
 					"id": "MET",
-					"text": "(-white)Research the [res://textures/blocks/resource extractors/MineralExtractor.png](-yellow)Mineral Extractor(-white) and place it on a geyser to extract iron.\n(-white)You will need to power it.",
+					"text": "(-white)Research the [res://textures/blocks/resource extractors/MineralExtractor.png](-yellow)Mineral Extractor(-white) and place it on a geyser to extract [res://textures/TexNotFound.png]Iron.\n(-white)You will need to power it.",
 					"to": "70,137",
 					"type": "draw_text"
 				},
@@ -15261,7 +15326,7 @@
 				{
 					"from": "67,137",
 					"id": "SFT",
-					"text": "(-white)Now research and place a [res://textures/blocks/factories/SteelFurnace.png]Steel Furnace to produce steel from iron.",
+					"text": "(-white)Now research and place a [res://textures/blocks/factories/SteelFurnace.png]Steel Furnace to produce [res://textures/TexNotFound.png]Steel from [res://textures/TexNotFound.png]Iron.",
 					"to": "73,137",
 					"type": "draw_text"
 				},
@@ -15343,7 +15408,7 @@
 				{
 					"from": "107,135",
 					"id": "TT",
-					"text": "(-white)You will need to resarch the [image]Double Barrel and [imageLarge ]Large Steel Wall then build a defense with them to better attack the enemy's stronger units. make sure to supply them with resources.",
+					"text": "(-white)You will need to resarch the [res://textures/blocks/turrets/DoubleBarrel/DoubleBarrelComplete.png]Double Barrel and [res://textures/blocks/walls/LargeSteelWall.png]Large Steel Wall then build a defense with them to better attack the enemy's stronger units. make sure to supply them with resources.",
 					"to": "119,135",
 					"type": "draw_text"
 				},
@@ -15432,6 +15497,7 @@
 			"actions": [
 				{
 					"from": "114,135",
+					"id": "CT",
 					"text": "(-white)Now command your units and destroy the enemy core.",
 					"to": "119,135",
 					"type": "draw_text"

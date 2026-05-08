@@ -67,7 +67,7 @@ extends Resource
 @export_range(0.0, 45.0, 0.1) var inaccuracy: float = 0.0
 
 ## Number of projectiles fired per shot (for shotgun-style ammo)
-@export_range(1, 16) var projectiles_per_shot: int = 1
+@export_range(1, 1000) var projectiles_per_shot: int = 1
 
 
 # =========================

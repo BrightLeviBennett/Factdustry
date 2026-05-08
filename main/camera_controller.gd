@@ -5,7 +5,10 @@ extends Camera2D
 # ============================================================
 
 @export var zoom_speed := 0.1
-@export var min_zoom := 0.3
+## Drop the floor a long way so the player can pull back far enough to
+## survey a whole sector at once. The renderer already culls offscreen
+## tiles so the cost is bounded.
+@export var min_zoom := 0.08
 @export var max_zoom := 3.0
 @export var zoom_smoothing := 8.0
 @export var follow_smoothing := 6.0

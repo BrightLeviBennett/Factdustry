@@ -1172,8 +1172,16 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 		if _is_pipe_cell(to):
 			return _add_fluid_to_pipe(to, item_id, PIPE_PUSH_AMOUNT)
 	else:
-		# Junction: route to correct slot based on entry axis
+		# Junction: route to correct slot based on entry axis. Refuse to
+		# accept anything if the cell on the FAR side (the exit) has no
+		# placed building — items would otherwise queue forever inside a
+		# junction whose output spills onto bare terrain. They stay on the
+		# upstream belt until something exists for the junction to feed.
 		if _is_junction_cell(to) and entry_dir >= 0:
+			var exit_dir: int = (entry_dir + 2) % 4
+			var exit_pos: Vector2i = to + DIR_VECTORS[exit_dir]
+			if not main.placed_buildings.has(exit_pos):
+				return false
 			if _is_junction_primary_axis(to, entry_dir):
 				if not conveyor_items.has(to):
 					conveyor_items[to] = {
@@ -1196,6 +1204,16 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 		var _is_instant := (_is_sorter_cell(to)
 			or _is_inverted_sorter_cell(to) or _is_overflow_cell(to)
 			or _is_underflow_cell(to) or _is_bridge_cell(to))
+
+		# Routers only accept items entering from their BACK side (the
+		# direction opposite the rotation arrow). Items hitting any other
+		# face are rejected and stay on the upstream belt — every other
+		# face is reserved for output. entry_dir < 0 means "unknown source"
+		# (drone deposits etc.), which we still let through.
+		if _is_router_cell(to) and entry_dir >= 0:
+			var router_rot: int = main.building_rotation.get(to, 0)
+			if entry_dir != (router_rot + 2) % 4:
+				return false
 
 		# Route item to conveyor
 		if _is_conveyor_cell(to) and not conveyor_items.has(to):
@@ -1232,14 +1250,10 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 ## directions (all except the entry direction), using round-robin so items
 ## spread evenly across outputs — just like Mindustry routers.
 func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
-	var item_entry_dir: int = item.get("entry_dir", -1)
-
-	# Build the 3 output directions (all except where the item came from)
-	# If entry_dir is unknown (-1), exclude the direction behind the router's rotation
-	var exclude_dir: int = item_entry_dir
-	if exclude_dir < 0:
-		var rot: int = main.building_rotation.get(grid_pos, 0)
-		exclude_dir = (rot + 2) % 4  # behind
+	# Routers reserve their BACK face for input only — outputs are the
+	# other three sides regardless of which face the item entered from.
+	var rot: int = main.building_rotation.get(grid_pos, 0)
+	var exclude_dir: int = (rot + 2) % 4
 
 	var outputs: Array[int] = []
 	for dir_idx in range(4):
@@ -1365,11 +1379,9 @@ func _router_exit_accepts(grid_pos: Vector2i, dir: int, item_id: StringName) -> 
 
 
 func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
-	var item_entry_dir: int = item.get("entry_dir", -1)
-	var exclude_dir: int = item_entry_dir
-	if exclude_dir < 0:
-		var rot: int = main.building_rotation.get(grid_pos, 0)
-		exclude_dir = (rot + 2) % 4
+	# Back side is input-only; outputs are the other three sides.
+	var rot: int = main.building_rotation.get(grid_pos, 0)
+	var exclude_dir: int = (rot + 2) % 4
 
 	var outputs: Array[int] = []
 	for dir_idx in range(4):
@@ -1666,11 +1678,10 @@ func _update_payloads(delta: float) -> void:
 				continue
 
 			# --- ROUTER: distribute to 3 output directions (round-robin) ---
+			# Back face is input-only; outputs are the other three sides.
 			if _is_router_cell(grid_pos):
-				var exclude_dir: int = entry_dir
-				if exclude_dir < 0:
-					var rot: int = main.building_rotation.get(grid_pos, 0)
-					exclude_dir = (rot + 2) % 4
+				var rot: int = main.building_rotation.get(grid_pos, 0)
+				var exclude_dir: int = (rot + 2) % 4
 
 				var outputs: Array[int] = []
 				for dir_idx in range(4):
@@ -1816,11 +1827,11 @@ func _payload_router_exit_open(grid_pos: Vector2i, exit_dir: int) -> bool:
 ## order, skipping the entry side. Returns -1 if every candidate is
 ## blocked (caller leaves any cached `exit_dir` in place so the visual
 ## doesn't oscillate while stalled). Mirrors item routers' picker.
-func _pick_payload_router_exit(grid_pos: Vector2i, entry_dir: int) -> int:
-	var exclude_dir: int = entry_dir
-	if exclude_dir < 0:
-		var rot: int = main.building_rotation.get(grid_pos, 0)
-		exclude_dir = (rot + 2) % 4
+func _pick_payload_router_exit(grid_pos: Vector2i, _entry_dir: int) -> int:
+	# Back face is input-only; outputs are the other three sides regardless
+	# of which face the payload entered from.
+	var rot: int = main.building_rotation.get(grid_pos, 0)
+	var exclude_dir: int = (rot + 2) % 4
 	var outputs: Array[int] = []
 	for d in range(4):
 		if d != exclude_dir:
@@ -1883,6 +1894,14 @@ func _try_push_payload(grid_pos: Vector2i, payload_data: Dictionary, entry_dir: 
 func _try_transfer_payload(to: Vector2i, payload_data: Dictionary, entry_dir: int) -> bool:
 	if not _is_payload_cell(to):
 		return false
+	# Payload routers only accept payloads entering from their BACK face;
+	# the other three sides are reserved for output. Unknown entry_dir
+	# (-1) is allowed through for non-belt sources (drones, scripts, etc.).
+	if _is_router_cell(to) and entry_dir >= 0:
+		var to_anchor: Vector2i = main.building_origins.get(to, to)
+		var router_rot: int = main.building_rotation.get(to_anchor, 0)
+		if entry_dir != (router_rot + 2) % 4:
+			return false
 	# Don't push into loaders/unloaders/deconstructors — they pull payloads themselves
 	var to_block_id: StringName = main.placed_buildings.get(to, &"")
 	if to_block_id != &"":
@@ -4678,6 +4697,11 @@ func _draw_items() -> void:
 
 	for grid_pos in conveyor_items:
 		if _ss_items and _ss_items.is_tile_hidden(grid_pos):
+			continue
+		# Bridges are visually "underground" — items inside one are
+		# being teleported between the input and output ends and
+		# shouldn't appear on the conveyor surface. Skip the draw.
+		if _is_bridge_cell(grid_pos):
 			continue
 		var entry = conveyor_items[grid_pos]
 		var item_id: StringName = entry["item_id"]

@@ -336,6 +336,11 @@ func _input(event: InputEvent) -> void:
 		var is_other_ui_open: bool = (tech_tree_ui and tech_tree_ui.is_open) or (database_ui and database_ui.is_open)
 		if is_other_ui_open:
 			return  # Their own _input handles ui_cancel
+		# Crane link mode / filter menu owns Esc first — let
+		# BuildingSystem._input close those before we open the escape menu.
+		var bsys = get_node_or_null("/root/Main/BuildingSystem")
+		if bsys and (bsys._crane_filter_menu_open or bsys._crane_link_anchor != Vector2i(-1, -1)):
+			return
 		# Escape menu
 		if escape_menu_open:
 			_close_escape_menu()
@@ -2736,7 +2741,22 @@ func _get_blocks_for_category(cat: int) -> Array[BlockData]:
 			if main.require_research and TechTree.nodes.has(block.id) and not TechTree.is_researched(block.id):
 				continue
 			result.append(block)
-	result.sort_custom(func(a, b): return a.display_name < b.display_name)
+	# In the Units category, push payload-handling blocks to the bottom
+	# (after the proper unit-related blocks). Within each group entries
+	# stay alphabetical.
+	if cat == BlockData.BlockCategory.UNITS:
+		result.sort_custom(func(a, b):
+			var ap: int = 1 if (a.tags.has("payload") or a.tags.has("freight") \
+					or a.tags.has("crane") or a.tags.has("constructor") \
+					or a.tags.has("deconstructor")) else 0
+			var bp: int = 1 if (b.tags.has("payload") or b.tags.has("freight") \
+					or b.tags.has("crane") or b.tags.has("constructor") \
+					or b.tags.has("deconstructor")) else 0
+			if ap != bp:
+				return ap < bp
+			return a.display_name < b.display_name)
+	else:
+		result.sort_custom(func(a, b): return a.display_name < b.display_name)
 	return result
 
 

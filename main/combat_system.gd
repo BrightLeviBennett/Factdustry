@@ -880,9 +880,10 @@ func _update_drone_combat(delta: float) -> void:
 
 	# Manual shoot is active only in default mode AND while LMB is held
 	# (with no GUI hover / no building selected). Outside that window
-	# the drone falls through to the AI auto-shoot branch so it keeps
-	# returning fire while the player is busy manually healing in heal
-	# mode — and so it passively defends in default mode when idle.
+	# the drone falls through to the AI auto-shoot branch — but ONLY if
+	# we're in shooting mode. In heal mode, auto-shoot is suppressed so
+	# the two modes are properly siloed (heal mode = healing only,
+	# shooting mode = shooting only).
 	var heal_active: bool = "heal_mode" in drone and bool(drone.heal_mode)
 	var manual_shoot_active: bool = false
 	if not heal_active:
@@ -893,6 +894,9 @@ func _update_drone_combat(delta: float) -> void:
 			lmb = false
 		manual_shoot_active = lmb
 	drone_is_shooting = manual_shoot_active
+
+	if heal_active:
+		return
 
 	if not manual_shoot_active:
 		# AI auto-shoot: nearest enemy in range, on the same cooldown

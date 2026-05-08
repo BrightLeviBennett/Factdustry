@@ -1723,6 +1723,17 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 		drill_timer = logistics.drill_timers[anchor]
 		logistics.drill_timers.erase(anchor)
 
+	# Capture crane state when picking up another crane — without this
+	# the picked-up crane forgets whatever it was holding (and the
+	# crane that's holding it has no way to display the inner payload).
+	# Deep-duplicate so subsequent edits to crane_states can't reach
+	# back into the captured snapshot through shared dict references.
+	var crane_state_snapshot: Dictionary = {}
+	var building_sys = get_node_or_null("BuildingSystem")
+	if building_sys and "crane_states" in building_sys \
+			and building_sys.crane_states.has(anchor):
+		crane_state_snapshot = (building_sys.crane_states[anchor] as Dictionary).duplicate(true)
+
 	# Build payload data
 	var payload := {
 		"type": "building",
@@ -1738,6 +1749,7 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 		"constructor_data": constructor_data,
 		"sorter_filter": str(sorter_filter),
 		"drill_timer": drill_timer,
+		"crane_state": crane_state_snapshot,
 	}
 
 	# Silently remove all tiles of this building
@@ -1790,7 +1802,6 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 			power_sys.linked_pairs.remove_at(to_remove[i])
 
 	# Clean up crane states (building system)
-	var building_sys = _building_sys_ref()
 	if building_sys and "crane_states" in building_sys:
 		building_sys.crane_states.erase(anchor)
 	if building_sys and "archive_holdings" in building_sys:
@@ -1839,6 +1850,14 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 			if terrain and terrain.has_wall(check_pos):
 				return false
 
+	# Same terrain-accept gate the regular placement path uses — without
+	# this, a crane could drop a normal block onto a water tile (because
+	# `is_cell_empty` only checks placed_buildings) or drop a platform
+	# onto dry ground (platforms require water). Also rejects void cells
+	# and stacking platforms on platforms.
+	if not _terrain_accepts_at(grid_pos, data):
+		return false
+
 	# Extractor placement checks
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
 		var building_sys = _building_sys_ref()
@@ -1860,6 +1879,11 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	var rot: int = int(payload.get("rotation", 0))
 	var health: float = float(payload.get("health", data.max_health))
 	var faction: int = int(payload.get("faction", Faction.LUMINA))
+
+	# Stash any platform sitting under this footprint so it can be
+	# restored when the dropped block is destroyed. Without this the
+	# overwrite below permanently erases the platform.
+	_stash_covered_platforms(grid_pos, data.grid_size)
 
 	# Place all tiles. Health is per-anchor (one HP pool per building).
 	building_health[grid_pos] = health
@@ -1904,6 +1928,24 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 			logistics.drill_timers[grid_pos] = drill_timer
 
 	building_placed.emit(block_id, grid_pos)
+
+	# Restore captured crane state (for cranes that were themselves
+	# picked up by another crane). `building_placed.emit` above runs
+	# `BuildingSystem._on_building_placed` synchronously, which seeds
+	# a default `crane_states[grid_pos]` entry — overwrite that with
+	# the snapshot we captured during pickup so the placed crane keeps
+	# any held_payload / arm_angle / etc. it had when it was grabbed.
+	var crane_state_snapshot: Dictionary = payload.get("crane_state", {})
+	if not crane_state_snapshot.is_empty() and data.tags.has("crane"):
+		var building_sys2 = _building_sys_ref()
+		if building_sys2 and "crane_states" in building_sys2:
+			var restored: Dictionary = crane_state_snapshot.duplicate(true)
+			# Vector2 fields round-trip through JSON as strings if this
+			# crane was held in a save. Coerce them back to Vector2 so the
+			# draw / AI loops don't trip on a typed assignment.
+			if not (restored.get("target_pos", Vector2.ZERO) is Vector2):
+				restored["target_pos"] = Vector2.ZERO
+			building_sys2.crane_states[grid_pos] = restored
 	return true
 
 

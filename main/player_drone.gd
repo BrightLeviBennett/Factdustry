@@ -1238,8 +1238,14 @@ func _handle_healing(delta: float) -> void:
 		aim_pos = get_global_mouse_position()
 		have_aim = true
 	else:
-		# AI: lock onto the most-damaged friendly block in range. Runs
-		# in either mode whenever manual healing isn't actively driving.
+		# AI auto-heal is gated to heal mode only. In shooting mode the
+		# beam stays off so the two modes are properly siloed (shooting
+		# mode = shooting only, heal mode = healing only).
+		if not heal_mode:
+			heal_target = null
+			_heal_beam_active = false
+			return
+		# AI: lock onto the most-damaged friendly block in range.
 		var ai_target = _find_ai_heal_target(range_px)
 		if ai_target == null:
 			heal_target = null

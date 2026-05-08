@@ -1055,6 +1055,24 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 				"round_robin": int(st.get("round_robin", 0)),
 			}
 
+	# Save crane links (input/output diamonds + filters per crane).
+	var crane_links_save := {}
+	if building_sys and "crane_links" in building_sys:
+		for pos in building_sys.crane_links:
+			var ce: Dictionary = building_sys.crane_links[pos]
+			var serialized := {"inputs": [], "outputs": []}
+			for arr_key in ["inputs", "outputs"]:
+				for spec in ce.get(arr_key, []):
+					var filter_strs: Array = []
+					for fid in spec.get("filter", []):
+						filter_strs.append(str(fid))
+					serialized[arr_key].append({
+						"kind": spec.get("kind", "ground"),
+						"pos": _vec2i_to_str(spec.get("pos", Vector2i.ZERO)),
+						"filter": filter_strs,
+					})
+			crane_links_save[_vec2i_to_str(pos)] = serialized
+
 	# Save crane states from BuildingSystem
 	var crane_states_save := {}
 	if building_sys and "crane_states" in building_sys:
@@ -1109,6 +1127,7 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"loader_state": loader_state_save,
 		"unloader_state": unloader_state_save,
 		"crane_states": crane_states_save,
+		"crane_links": crane_links_save,
 		"archive_holdings": _serialize_archive_holdings(),
 		"archive_decoder_state": _serialize_archive_decoder_state(),
 		"mass_driver_state": mass_driver_state_save,
@@ -1708,6 +1727,25 @@ func load_sector_from_path(path: String) -> bool:
 				"held_payload": held,
 				"target_pos": Vector2.ZERO,
 			}
+
+	# --- Restore crane links ---
+	if building_sys and "crane_links" in building_sys and data.has("crane_links") and data["crane_links"] is Dictionary:
+		building_sys.crane_links.clear()
+		for key in data["crane_links"]:
+			var pos: Vector2i = _str_to_vec2i(key)
+			var saved = data["crane_links"][key]
+			var entry := {"inputs": [], "outputs": []}
+			for arr_key in ["inputs", "outputs"]:
+				for s in saved.get(arr_key, []):
+					var filter_arr: Array = []
+					for fid in s.get("filter", []):
+						filter_arr.append(StringName(fid))
+					entry[arr_key].append({
+						"kind": s.get("kind", "ground"),
+						"pos": _str_to_vec2i(s.get("pos", "0,0")),
+						"filter": filter_arr,
+					})
+			building_sys.crane_links[pos] = entry
 
 	# --- Restore archive holdings ---
 	if building_sys and "archive_holdings" in building_sys and data.has("archive_holdings") and data["archive_holdings"] is Dictionary:

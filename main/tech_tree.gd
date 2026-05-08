@@ -601,13 +601,13 @@ func _register_fluid_transport() -> void:
 
 func _register_mining() -> void:
 	_add(&"mechanical_drill",      "Mechanical Drill",      [&"core_shard"],            [&"mat_copper"], {&"mat_copper": 30}, Vector2(22, -1))
-	_add(&"impact_driller",        "Impact Driller",        [&"mechanical_drill"],      [&"-L-zinc_deposits"], {&"mat_copper": 90, &"mat_graphite": 30}, Vector2(25, -2))
+	_add(&"impact_drill",        "Impact Drill",          [&"mechanical_drill"],      [&"-L-zinc_deposits"], {&"mat_copper": 90, &"mat_graphite": 30}, Vector2(25, -2))
 	_add(&"bauxite_crusher",       "Bauxite Crusher",       [&"mechanical_drill"],      [&"-L-aluminum_mountains"], {&"mat_copper": 80, &"mat_silicon": 25}, Vector2(24, -2))
 	_add(&"wall_crusher",          "Wall Crusher",          [&"mechanical_drill"],      [&"mat_graphite"], {&"mat_copper": 80, &"mat_graphite": 25}, Vector2(23, -2))
 	_add(&"plasma_bore",           "Plasma Bore",           [&"mechanical_drill"],      [&"mat_steel"], {&"mat_copper": 100, &"mat_silicon": 40}, Vector2(22, -2))
 	_add(&"mineral_extractor",     "Mineral Extractor",     [&"mechanical_drill"],      [&"-L-ferrum_ridge"], {&"mat_copper": 70, &"mat_graphite": 20}, Vector2(21, -2))
 	_add(&"ground_scraper",        "Ground Scraper",        [&"mechanical_drill"],      [&"-L-nightfall_depths"], {&"mat_copper": 180, &"mat_graphite": 60, &"mat_steel": 30}, Vector2(26, -2))
-	_add(&"earthquake_harvester",  "Earthquake Harvester",  [&"impact_driller"],        [], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_steel": 40}, Vector2(25, -3))
+	_add(&"earthquake_harvester",  "Earthquake Harvester",  [&"impact_drill"],        [], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_steel": 40}, Vector2(25, -3))
 	_add(&"bauxite_grinder",       "Bauxite Grinder",       [&"bauxite_crusher"],       [], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_graphite": 30}, Vector2(24, -3))
 	_add(&"wall_grinder",          "Wall Grinder",          [&"wall_crusher"],          [&"mat_steel"], {&"mat_copper": 160, &"mat_steel": 50, &"mat_graphite": 30}, Vector2(23, -3))
 	_add(&"advanced_plasma_bore",  "Advanced Plasma Bore",  [&"plasma_bore"],           [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(22, -3))
@@ -681,7 +681,7 @@ func _register_turrets() -> void:
 	_add(&"single_barrel",   "Single Barrel",   [&"core_shard"],                       [&"mat_silicon"], {&"mat_copper": 40, &"mat_silicon": 15}, Vector2(-11, 1))
 	_add(&"double_barrel",   "Double Barrel",   [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 90, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-11, 2))
 	_add(&"quad_barrel",     "Quad Barrel",     [&"double_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 30}, Vector2(-11, 3))
-	_add(&"octo_barrel",     "Octo Barrel",     [&"quad_barrel"],                      [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-11, 4))
+	_add(&"octo_barrel",     "Octo Barrel",     [&"quad_barrel"],                      [&"mat_brass", &"-D-archive_brass_turrets"], {&"mat_copper": 280, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-11, 4))
 	
 	# Diffuse Branch
 	_add(&"diffuse",         "Diffuse",         [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25, &"mat_steel": 10}, Vector2(-10, 2))
@@ -690,9 +690,9 @@ func _register_turrets() -> void:
 	# Destroy branch
 	_add(&"disarm",          "Disarm",          [&"destroy_turret"],                   [&"-D-archive_better_turrets"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(-13, 2))
 	_add(&"destroy_turret",  "Destroy",         [&"single_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 120, &"mat_steel": 40, &"mat_graphite": 20}, Vector2(-12, 2))
-	_add(&"annihilate",      "Annihilate",      [&"destroy_turret"],                   [&"Not unlockable in campaign"], {&"mat_copper": 300, &"mat_silicon": 60, &"mat_steel": 120}, Vector2(-12, 3))
+	_add(&"annihilate",      "Annihilate",      [&"destroy_turret"],                   [&"mat_brass", &"-D-archive_brass_turrets"], {&"mat_copper": 300, &"mat_silicon": 60, &"mat_steel": 120}, Vector2(-12, 3))
 	_add(&"eclipse",         "Eclipse",         [&"annihilate"],                       [&"-L-ruins"], {&"mat_copper": 500, &"mat_steel": 240, &"mat_silicon": 100}, Vector2(-12, 4))
-	_add(&"missile_launcher","Missile Launcher",[&"annihilate"],                       [], {&"mat_copper": 250, &"mat_steel": 105}, Vector2(-13, 4))
+	_add(&"missile_launcher","Missile Launcher",[&"annihilate"],                       [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 105}, Vector2(-13, 4))
 	
 	# Spritz/Wave/Lance Branch
 	_add(&"spritz",          "Spritz",          [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-13, 2))
@@ -739,7 +739,7 @@ func _register_units() -> void:
 	_add(&"engulf",                   "Engulf",                   [&"plunge"],                    [&"unit_assembler"], {&"mat_copper": 780, &"mat_silicon": 280, &"mat_steel": 220}, Vector2(-30, 6))
 	_add(&"deluge",                   "Deluge",                   [&"engulf"],                    [&"unit_reassembler"], {&"mat_copper": 1150, &"mat_silicon": 420, &"mat_steel": 360, &"mat_aluminum": 30}, Vector2(-30, 7))
 	# Crawler line: Scout → Trace → Intercept → Survey → Moniter
-	_add(&"crawler_fabricator",       "Crawler Fabricator",       [&"tank_fabricator"],           [&"-L-aluminum_mountains"], {&"mat_copper": 120, &"mat_silicon": 40}, Vector2(-29, 2))
+	_add(&"crawler_fabricator",       "Crawler Fabricator",       [&"tank_fabricator"],           [&"mat_aluminum"], {&"mat_copper": 120, &"mat_silicon": 40}, Vector2(-29, 2))
 	_add(&"scout",                    "Scout",                    [&"crawler_fabricator"],        [], {&"mat_copper": 250, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(-29, 3))
 	_add(&"trace",                    "Trace",                    [&"scout"],                     [&"unit_refabricator"], {&"mat_copper": 400, &"mat_silicon": 130, &"mat_steel": 80}, Vector2(-29, 4))
 	_add(&"intercept",                "Intercept",                [&"trace"],                     [&"unit_upgrader"], {&"mat_copper": 600, &"mat_silicon": 200, &"mat_steel": 150}, Vector2(-29, 5))
@@ -776,22 +776,22 @@ func _register_payload_freight() -> void:
 	_add(&"payload_conveyor",    "Payload Conveyor",    [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-22, 2))
 	_add(&"payload_router",      "Payload Router",      [&"payload_conveyor"],    [&"-D-archive_payload_systems"], {}, Vector2(-23, 3))
 
-	_add(&"freight_conveyor",    "Freight Conveyor",    [&"payload_conveyor"],    [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-22, 3))
-	_add(&"freight_router",      "Freight Router",      [&"freight_conveyor"],    [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-22, 4))
+	_add(&"freight_conveyor",    "Freight Conveyor",    [&"payload_conveyor"],    [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-22, 3))
+	_add(&"freight_router",      "Freight Router",      [&"freight_conveyor"],    [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-22, 4))
 	
 	_add(&"payload_mass_driver", "Payload Mass Driver", [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-19, 2))
-	_add(&"freight_mass_driver", "Freight Mass Driver", [&"payload_mass_driver"], [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-19, 3))
+	_add(&"freight_mass_driver", "Freight Mass Driver", [&"payload_mass_driver"], [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-19, 3))
 	
 	_add(&"payload_loader",      "Payload Loader",      [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-21, 2))
 	_add(&"payload_unloader",    "Payload Unloader",    [&"payload_loader"],      [&"-D-archive_payload_systems"], {}, Vector2(-21, 3))
-	_add(&"freight_loader",      "Freight Loader",      [&"payload_loader"],      [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-20, 3))
-	_add(&"freight_unloader",    "Freight Unloader",    [&"freight_loader"],      [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-20, 4))
+	_add(&"freight_loader",      "Freight Loader",      [&"payload_loader"],      [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-20, 3))
+	_add(&"freight_unloader",    "Freight Unloader",    [&"freight_loader"],      [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-20, 4))
 	
 	_add(&"constructor",         "Constructor",         [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-18, 2))
 	_add(&"deconstructor",       "Deconstructor",       [&"constructor"],         [&"-D-archive_payload_systems"], {}, Vector2(-18, 3))
-	_add(&"payload_crane",       "Payload Crane",       [&"tank_fabricator"],     [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-17, 2))
-	_add(&"large_constructor",   "Large Constructor",   [&"deconstructor"],       [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-18, 4))
-	_add(&"large_deconstructor", "Large Deconstructor", [&"large_constructor"],   [&"-L-zinc_deposits"], {&"mat_copper": 1}, Vector2(-18, 5))
+	_add(&"payload_crane",       "Payload Crane",       [&"tank_fabricator"],     [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-17, 2))
+	_add(&"large_constructor",   "Large Constructor",   [&"deconstructor"],       [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-18, 4))
+	_add(&"large_deconstructor", "Large Deconstructor", [&"large_constructor"],   [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-18, 5))
 
 func _register_walls() -> void:
 	# Copper tier (base)
@@ -846,11 +846,15 @@ func _register_archives() -> void:
 	_add(&"archive_naval_units",  "Archive: Naval Units",  [], [], {}, Vector2(30, -3), true)
 	_add(&"archive_launch_systems",  "Archive: Launch Systems",  [], [], {}, Vector2(30, -3), true)
 	_add(&"archive_interplanetary_launch_systems",  "Archive: Interplanetary Launch Systems",  [], [], {}, Vector2(30, -3), true)
+	_add(&"archive_brass_turrets", "Archive: Brass Turrets", [], [], {}, Vector2(30, -2), true)
+	_add(&"archive_freight_systems",   "Archive: Freight Systems",   [], [], {}, Vector2(30, -1), true)
 	nodes[&"archive_payload_systems"]["hidden"] = true
 	nodes[&"archive_better_turrets"]["hidden"] = true
 	nodes[&"archive_naval_units"]["hidden"] = true
 	nodes[&"archive_launch_systems"]["hidden"] = true
 	nodes[&"archive_interplanetary_launch_systems"]["hidden"] = true
+	nodes[&"archive_brass_turrets"]["hidden"] = true
+	nodes[&"archive_freight_systems"]["hidden"] = true
 
 	# Track archive ids so the -D- markers and archive_decoded rules get created.
 	archive_ids = [
@@ -859,6 +863,8 @@ func _register_archives() -> void:
 		&"archive_naval_units",
 		&"archive_launch_systems",
 		&"archive_interplanetary_launch_systems",
+		&"archive_brass_turrets",
+		&"archive_freight_systems"
 	]
 	# Auto-research the archive's own node when its archive is decoded in-world.
 	for aid in archive_ids:

@@ -6,6 +6,15 @@ extends Node2D
 # any other in-world content, no matter what's stacked beneath them.
 class PopupOverlay extends Node2D:
 	var owner_sys: Node = null
+	func _process(_delta: float) -> void:
+		# Self-paced redraw so the popup repaints every frame whenever a
+		# menu / storage panel is open. Fixes the map editor case where
+		# the parent BuildingSystem has `set_process(false)` and the
+		# normal _draw → queue_redraw cascade isn't running.
+		if owner_sys == null:
+			return
+		if owner_sys._world_menu_open or owner_sys._storage_panel_open:
+			queue_redraw()
 	func _draw() -> void:
 		if owner_sys:
 			owner_sys._draw_world_menu(self)
@@ -13,6 +22,12 @@ class PopupOverlay extends Node2D:
 
 
 var _popup_overlay: PopupOverlay = null
+## Companion node that hosts cable-wire drawing on z 52 (above the
+## LogisticsSystem layer at 51) so items running on conveyors don't
+## render on top of the wires. Created in _ready alongside the popup
+## overlay; calls back to `_draw_cable_links(self)` for the actual
+## drawing so all the texture / state still lives on BuildingSystem.
+var _cable_overlay: Node2D = null
 
 # ============================================================
 # BUILDING_SYSTEM.GD - Building Placement & Rendering
@@ -192,6 +207,34 @@ func _power_sys_ref() -> Node:
 		_power_sys = get_node_or_null("/root/Main/PowerSystem")
 	return _power_sys
 
+# --- CRANE LINK STATE ---
+# crane_links[crane_anchor] = {
+#   "inputs":  Array of LinkSpec,
+#   "outputs": Array of LinkSpec,
+# }
+# LinkSpec = {
+#   "kind": "ground" | "block",
+#   "pos":  Vector2i,            # ground tile (clicked center) or block anchor
+#   "filter": Array[StringName], # empty = accept all, otherwise allowed unit/block ids
+# }
+var crane_links: Dictionary = {}
+
+# Currently selected crane in link-mode (Vector2i(-1,-1) = none)
+var _crane_link_anchor: Vector2i = Vector2i(-1, -1)
+# Next placement alternates: "input" or "output"
+var _crane_link_next_kind: String = "input"
+
+# In-world filter menu (shift+click on a diamond)
+var _crane_filter_menu_open := false
+var _crane_filter_menu_anchor: Vector2i = Vector2i(-1, -1)  # crane this menu belongs to
+var _crane_filter_menu_kind: String = "input"  # "input" or "output"
+var _crane_filter_menu_index: int = -1  # which entry in inputs/outputs
+var _crane_filter_menu_world_pos: Vector2 = Vector2.ZERO
+var _crane_filter_menu_items: Array = []  # Array of {id: StringName, icon: Texture2D, name: String}
+var _crane_filter_menu_columns: int = 6
+var _crane_filter_menu_cell: float = 44.0
+var _crane_filter_menu_hovered: int = -1
+
 # --- WORLD MENU STATE (sorter filter / constructor selection) ---
 var _world_menu_open := false
 var _world_menu_pos := Vector2i.ZERO  # Grid position of the block that opened the menu
@@ -322,6 +365,7 @@ func _ready() -> void:
 	# Scale world-menu cell size to current GRID_SIZE so storage / sorter /
 	# picker panels stay proportional to a tile.
 	_world_menu_cell_size *= main.SPRITE_SCALE_FACTOR
+	_crane_filter_menu_cell *= main.SPRITE_SCALE_FACTOR
 	# Scale crane dimensions (originally tuned at the 64-px grid baseline).
 	var sf: float = main.SPRITE_SCALE_FACTOR
 	CRANE_ARM3_WIDTH *= sf
@@ -345,6 +389,17 @@ func _ready() -> void:
 	_popup_overlay.z_as_relative = false
 	_popup_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	add_child(_popup_overlay)
+	# Cable wires render on their own layer (z 52, absolute) so the
+	# LogisticsSystem at z 51 can't draw items over them. Same pattern
+	# as the popup overlay above — separate Node2D, callback into
+	# `_draw_cable_links(self)` for the actual draws.
+	_cable_overlay = Node2D.new()
+	_cable_overlay.name = "CableOverlay"
+	_cable_overlay.z_index = 52
+	_cable_overlay.z_as_relative = false
+	_cable_overlay.set_script(preload("res://main/cable_overlay.gd"))
+	_cable_overlay.set("building_sys", self)
+	add_child(_cable_overlay)
 	# Lift the building layer above ground/crawler/hover units so
 	# placed buildings AND placement previews paint over them. Without
 	# this a 2×2 ghost can completely vanish behind a stray crawler in
@@ -1046,6 +1101,17 @@ func _input(event: InputEvent) -> void:
 			_schematic_confirmed = true
 			queue_redraw()
 	if event.is_action_pressed("ui_cancel"):
+		# Filter menu first, then crane link mode, then power-link source.
+		if _crane_filter_menu_open:
+			_close_crane_filter_menu()
+			get_viewport().set_input_as_handled()
+			return
+		if _crane_link_anchor != Vector2i(-1, -1):
+			_crane_link_anchor = Vector2i(-1, -1)
+			_crane_link_next_kind = "input"
+			queue_redraw()
+			get_viewport().set_input_as_handled()
+			return
 		if link_source != Vector2i(-1, -1):
 			link_source = Vector2i(-1, -1)
 			_link_just_linked = Vector2i(-1, -1)
@@ -1138,6 +1204,7 @@ func _process(_delta: float) -> void:
 	if not ("world_paused" in main and main.world_paused):
 		_tick_crusher_head_states(_delta)
 		_tick_scraper_head_states(_delta)
+		_tick_autonomous_cranes(_delta)
 		if belt_scroll_enabled:
 			# Advance the conveyor scroll phase. Wrap on a 1024 px window —
 			# big enough that no single belt segment hits the modulus,
@@ -1218,6 +1285,29 @@ func _process(_delta: float) -> void:
 		var mouse_world = get_global_mouse_position()
 		_demolish_end = main.world_to_grid(mouse_world)
 		queue_redraw()
+
+	# Keep redrawing while in crane link mode (highlight + diamonds).
+	# Also exit link mode if the linked crane has started deconstructing —
+	# the player tearing it down shouldn't keep its link UI active.
+	if _crane_link_anchor != Vector2i(-1, -1):
+		var still_valid: bool = main.placed_buildings.has(_crane_link_anchor)
+		if still_valid and "building_deconstruct_progress" in main \
+				and main.building_deconstruct_progress.has(_crane_link_anchor):
+			still_valid = false
+		if not still_valid:
+			_crane_link_anchor = Vector2i(-1, -1)
+			_crane_link_next_kind = "input"
+			if _crane_filter_menu_open:
+				_close_crane_filter_menu()
+		queue_redraw()
+
+	# Crane filter menu hover
+	if _crane_filter_menu_open:
+		var fmw := get_global_mouse_position()
+		var new_h := _crane_filter_menu_hit_test(fmw)
+		if new_h != _crane_filter_menu_hovered:
+			_crane_filter_menu_hovered = new_h
+			queue_redraw()
 
 	# Update world menu hover
 	if _world_menu_open:
@@ -2217,6 +2307,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
+				if _handle_crane_link_click(event):
+					get_viewport().set_input_as_handled()
+					return
 				if main.selected_building == &"":
 					# World menu is open — check for cell click or outside click
 					if _world_menu_open:
@@ -2413,6 +2506,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Ctrl+right-click is unit control on macOS (ctrl+click = right-click)
 			if event.ctrl_pressed:
 				return
+			# Right-click while in crane link mode deletes the diamond under
+			# the cursor (and is consumed so it doesn't fall through to
+			# demolish).
+			if event.pressed and _crane_link_anchor != Vector2i(-1, -1):
+				if _handle_crane_link_right_click():
+					get_viewport().set_input_as_handled()
+					return
 			# Skip right-click entirely when the player is in unit mode
 			# with units selected (unit mode owns right-click for commands).
 			# Outside of unit mode, right-click goes to demolish even if
@@ -2581,6 +2681,20 @@ func _handle_link_click_on_anchor(anchor: Vector2i, data: BlockData) -> bool:
 		queue_redraw()
 		return true
 
+	# Range gate: linkable blocks with a non-zero `link_range` only
+	# accept partners within that euclidean tile distance (anchor to
+	# anchor). Out-of-range clicks reset the source rather than silently
+	# linking nothing.
+	var max_range: float = maxf(source_data.link_range, data.link_range)
+	if max_range > 0.0:
+		var dx: float = float(anchor.x - link_source.x)
+		var dy: float = float(anchor.y - link_source.y)
+		if sqrt(dx * dx + dy * dy) > max_range:
+			link_source = anchor
+			_link_just_linked = Vector2i(-1, -1)
+			queue_redraw()
+			return true
+
 	var power_sys = get_node_or_null("/root/Main/PowerSystem")
 	if power_sys:
 		# 1:1 — drop any existing partner on either endpoint first.
@@ -2599,6 +2713,289 @@ func _handle_link_click_on_anchor(anchor: Vector2i, data: BlockData) -> bool:
 	_link_just_linked = Vector2i(-1, -1)
 	queue_redraw()
 	return true
+
+
+## Returns true if the given block is a valid crane-link target (block-kind):
+## payload-handling blocks the autonomous crane AI knows how to interact with.
+func _is_crane_link_block(data: BlockData) -> bool:
+	if data == null:
+		return false
+	return data.tags.has("crane") \
+		or data.tags.has("mass_driver") \
+		or data.tags.has("payload") \
+		or data.tags.has("freight") \
+		or data.tags.has("constructor") \
+		or data.tags.has("refabricator")
+
+
+## Returns the world-space rectangle for a 3x3-tile diamond centered on `pos`
+## (ground-kind) or covering the block footprint (block-kind).
+func _crane_diamond_world_pos(spec: Dictionary) -> Vector2:
+	var gs: float = main.GRID_SIZE
+	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
+	if spec.get("kind", "") == "block":
+		var data = Registry.get_block(main.placed_buildings.get(p, &""))
+		if data:
+			return main.grid_to_world(p) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
+	# Ground: clicked tile is the center of the diamond
+	return main.grid_to_world(p) + Vector2(gs / 2.0, gs / 2.0)
+
+
+## Hit-test against an existing crane-link entry. Returns
+## { "kind": "input"|"output", "index": int } or empty dict if no hit.
+## A diamond covers ~3 tiles in radius for ground / block-anchored entries.
+func _crane_link_hit_at(world_pos: Vector2) -> Dictionary:
+	if _crane_link_anchor == Vector2i(-1, -1):
+		return {}
+	if not crane_links.has(_crane_link_anchor):
+		return {}
+	var gs: float = main.GRID_SIZE
+	var radius: float = gs * 1.5  # 3-tile diamond → half-width = 1.5 tiles
+	var entry: Dictionary = crane_links[_crane_link_anchor]
+	var inputs: Array = entry.get("inputs", [])
+	for i in range(inputs.size()):
+		var c: Vector2 = _crane_diamond_world_pos(inputs[i])
+		var d: Vector2 = world_pos - c
+		if absf(d.x) + absf(d.y) <= radius:
+			return {"kind": "input", "index": i}
+	var outputs: Array = entry.get("outputs", [])
+	for i in range(outputs.size()):
+		var c: Vector2 = _crane_diamond_world_pos(outputs[i])
+		var d: Vector2 = world_pos - c
+		if absf(d.x) + absf(d.y) <= radius:
+			return {"kind": "output", "index": i}
+	return {}
+
+
+## Centralized left-click handler for crane-link mode. Returns true iff the
+## click was consumed (caller should set_input_as_handled).
+func _handle_crane_link_click(event: InputEventMouseButton) -> bool:
+	var mouse_world := get_global_mouse_position()
+
+	# 1) Filter menu open: hit-test it, otherwise close on outside click.
+	if _crane_filter_menu_open:
+		var hit := _crane_filter_menu_hit_test(mouse_world)
+		if hit >= 0:
+			_apply_crane_filter_selection(hit)
+		else:
+			_close_crane_filter_menu()
+		return true
+
+	# 2) In link mode: handle add / shift+filter / toggle off.
+	if _crane_link_anchor != Vector2i(-1, -1):
+		# Don't intercept Ctrl+click — that's reserved for unit/turret/crane
+		# direct-control. Let it fall through (control will exit link mode
+		# implicitly the next time the player Esc's or clicks).
+		if event.ctrl_pressed:
+			return false
+
+		var click_pos: Vector2i = main.world_to_grid(mouse_world)
+
+		# Shift+click on existing diamond: open filter menu.
+		if event.shift_pressed:
+			var hit_existing: Dictionary = _crane_link_hit_at(mouse_world)
+			if not hit_existing.is_empty():
+				_open_crane_filter_menu(hit_existing.get("kind", "input"), int(hit_existing.get("index", 0)))
+				return true
+			# Shift+click empty space — ignore (don't add).
+			return true
+
+		# Click on the source crane itself: exit link mode.
+		var src_anchor: Vector2i = main.building_origins.get(click_pos, click_pos)
+		if main.placed_buildings.has(click_pos):
+			var src_data = Registry.get_block(main.placed_buildings[click_pos])
+			if src_data and src_data.tags.has("crane") and src_anchor == _crane_link_anchor:
+				_crane_link_anchor = Vector2i(-1, -1)
+				_crane_link_next_kind = "input"
+				queue_redraw()
+				return true
+
+		# Left-click on existing diamond (no shift): cycle input ↔ output.
+		# (Right-click deletes; shift+click opens the filter menu.)
+		var hit_existing2: Dictionary = _crane_link_hit_at(mouse_world)
+		if not hit_existing2.is_empty():
+			var k: String = hit_existing2.get("kind", "input")
+			var idx: int = int(hit_existing2.get("index", 0))
+			var entry: Dictionary = crane_links.get(_crane_link_anchor, {})
+			var src_arr: Array = entry.get(k + "s", [])
+			if idx >= 0 and idx < src_arr.size():
+				var spec: Dictionary = src_arr[idx]
+				src_arr.remove_at(idx)
+				var other_key: String = "output" if k == "input" else "input"
+				(entry[other_key + "s"] as Array).append(spec)
+				# If the filter menu was tracking this entry, close it (the
+				# index is stale now).
+				if _crane_filter_menu_open and _crane_filter_menu_anchor == _crane_link_anchor:
+					_close_crane_filter_menu()
+			queue_redraw()
+			return true
+
+		# Otherwise, add a new entry (alternating input → output).
+		var spec := {}
+		if main.placed_buildings.has(click_pos):
+			var anchor: Vector2i = main.building_origins.get(click_pos, click_pos)
+			var bdata = Registry.get_block(main.placed_buildings[anchor])
+			if _is_crane_link_block(bdata):
+				spec = {"kind": "block", "pos": anchor, "filter": []}
+			else:
+				# Clicked a non-payload block — ignore (don't add anything).
+				return true
+		else:
+			spec = {"kind": "ground", "pos": click_pos, "filter": []}
+
+		if not crane_links.has(_crane_link_anchor):
+			crane_links[_crane_link_anchor] = {"inputs": [], "outputs": []}
+		var entry2: Dictionary = crane_links[_crane_link_anchor]
+		if _crane_link_next_kind == "input":
+			(entry2["inputs"] as Array).append(spec)
+			_crane_link_next_kind = "output"
+		else:
+			(entry2["outputs"] as Array).append(spec)
+			_crane_link_next_kind = "input"
+		queue_redraw()
+		return true
+
+	# 3) Not in link mode — clicking a LUMINA crane enters link mode for it.
+	if event.ctrl_pressed:
+		return false  # Ctrl+click = direct control, handled by UnitManager
+	if main.selected_building != &"":
+		return false  # Don't steal placement clicks
+	var click_pos2: Vector2i = main.world_to_grid(mouse_world)
+	if main.placed_buildings.has(click_pos2):
+		var bdata2 = Registry.get_block(main.placed_buildings[click_pos2])
+		if bdata2 and bdata2.tags.has("crane"):
+			var anchor2: Vector2i = main.building_origins.get(click_pos2, click_pos2)
+			var faction: int = main.get_building_faction(anchor2) if main.has_method("get_building_faction") else FACTION_LUMINA
+			if faction == FACTION_LUMINA:
+				# Crane is mid-build, mid-deconstruct, or in the work queue:
+				# defer to the work-queue click handler (pause / promote /
+				# reverse) instead of entering link mode.
+				var has_build: bool = "building_build_progress" in main and main.building_build_progress.has(anchor2)
+				var has_decon: bool = "building_deconstruct_progress" in main and main.building_deconstruct_progress.has(anchor2)
+				var in_queue: bool = "work_order" in main and main.work_order.has(anchor2)
+				if has_build or has_decon or in_queue:
+					return false
+				_crane_link_anchor = anchor2
+				_crane_link_next_kind = "input"
+				if not crane_links.has(anchor2):
+					crane_links[anchor2] = {"inputs": [], "outputs": []}
+				queue_redraw()
+				return true
+
+	return false
+
+
+## Right-click while in link mode: delete the diamond under the cursor.
+## Returns true iff a diamond was deleted (caller consumes the click).
+func _handle_crane_link_right_click() -> bool:
+	if _crane_link_anchor == Vector2i(-1, -1):
+		return false
+	var hit: Dictionary = _crane_link_hit_at(get_global_mouse_position())
+	if hit.is_empty():
+		return false
+	var k: String = hit.get("kind", "input")
+	var idx: int = int(hit.get("index", 0))
+	var entry: Dictionary = crane_links.get(_crane_link_anchor, {})
+	var arr: Array = entry.get(k + "s", [])
+	if idx >= 0 and idx < arr.size():
+		arr.remove_at(idx)
+	# If we deleted the entry whose filter menu is open, close it.
+	if _crane_filter_menu_open and _crane_filter_menu_kind == k and _crane_filter_menu_index == idx:
+		_close_crane_filter_menu()
+	queue_redraw()
+	return true
+
+
+## Opens the in-world filter menu for an existing crane link entry.
+func _open_crane_filter_menu(kind: String, index: int) -> void:
+	_crane_filter_menu_open = true
+	_crane_filter_menu_anchor = _crane_link_anchor
+	_crane_filter_menu_kind = kind
+	_crane_filter_menu_index = index
+	_crane_filter_menu_hovered = -1
+	_crane_filter_menu_items.clear()
+
+	var entry: Dictionary = crane_links.get(_crane_link_anchor, {})
+	var arr: Array = entry.get(kind + "s", [])
+	if index < 0 or index >= arr.size():
+		_close_crane_filter_menu()
+		return
+	var spec: Dictionary = arr[index]
+	_crane_filter_menu_world_pos = _crane_diamond_world_pos(spec)
+
+	# Populate items: unlocked units always, plus unlocked ≥3x3 blocks if
+	# the spec is anchored on a payload block (block-kind). Items without a
+	# tech-tree node are treated as always-unlocked (mirrors the build menu's
+	# `TechTree.nodes.has(id) and not is_researched(id)` gate).
+	var include_blocks: bool = spec.get("kind", "ground") == "block"
+
+	for u in Registry.units_list:
+		if u == null:
+			continue
+		if TechTree.nodes.has(u.id) and not TechTree.is_researched(u.id):
+			continue
+		_crane_filter_menu_items.append({"id": u.id, "icon": u.icon, "name": u.display_name})
+
+	if include_blocks:
+		for b in Registry.blocks_list:
+			if b == null:
+				continue
+			if b.grid_size.x < 3 or b.grid_size.y < 3:
+				continue
+			if TechTree.nodes.has(b.id) and not TechTree.is_researched(b.id):
+				continue
+			_crane_filter_menu_items.append({"id": b.id, "icon": b.icon, "name": b.display_name})
+
+	queue_redraw()
+
+
+func _close_crane_filter_menu() -> void:
+	_crane_filter_menu_open = false
+	_crane_filter_menu_anchor = Vector2i(-1, -1)
+	_crane_filter_menu_index = -1
+	_crane_filter_menu_items.clear()
+	_crane_filter_menu_hovered = -1
+	queue_redraw()
+
+
+## Hit-test the filter menu grid; returns clicked item index or -1.
+func _crane_filter_menu_hit_test(world_pos: Vector2) -> int:
+	if not _crane_filter_menu_open or _crane_filter_menu_items.is_empty():
+		return -1
+	var cell: float = _crane_filter_menu_cell
+	var cols: int = mini(_crane_filter_menu_columns, _crane_filter_menu_items.size())
+	var rows: int = ceili(float(_crane_filter_menu_items.size()) / float(cols))
+	var grid_w: float = cell * cols
+	var grid_h: float = cell * rows
+	var origin: Vector2 = _crane_filter_menu_world_pos + Vector2(-grid_w / 2.0, main.GRID_SIZE * 1.7)
+	for i in range(_crane_filter_menu_items.size()):
+		var col: int = i % cols
+		var row: int = i / cols
+		var r := Rect2(origin + Vector2(col * cell, row * cell), Vector2(cell, cell))
+		if r.has_point(world_pos):
+			return i
+	return -1
+
+
+## Toggles the clicked item in the link's filter list.
+func _apply_crane_filter_selection(idx: int) -> void:
+	if idx < 0 or idx >= _crane_filter_menu_items.size():
+		return
+	if _crane_filter_menu_anchor == Vector2i(-1, -1):
+		return
+	var entry: Dictionary = crane_links.get(_crane_filter_menu_anchor, {})
+	var arr: Array = entry.get(_crane_filter_menu_kind + "s", [])
+	if _crane_filter_menu_index < 0 or _crane_filter_menu_index >= arr.size():
+		return
+	var spec: Dictionary = arr[_crane_filter_menu_index]
+	var item_id: StringName = _crane_filter_menu_items[idx].get("id", &"")
+	var filter: Array = spec.get("filter", [])
+	if filter.has(item_id):
+		filter.erase(item_id)
+	else:
+		filter.append(item_id)
+	spec["filter"] = filter
+	queue_redraw()
 
 
 ## Opens the in-world selection menu for a sorter or constructor block.
@@ -2720,6 +3117,12 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 	else:
 		_close_storage_panel()
 	queue_redraw()
+	# In the map editor BuildingSystem._process is disabled, so the
+	# per-frame `_popup_overlay.queue_redraw()` chain at the end of
+	# `_draw` doesn't run reliably between user actions. Kick the popup
+	# overlay directly so the menu paints the moment it opens.
+	if _popup_overlay:
+		_popup_overlay.queue_redraw()
 
 
 ## Opens the secondary resource panel for a block. Snapshots its current
@@ -2759,6 +3162,11 @@ func _close_world_menu() -> void:
 	_world_menu_hovered = -1
 	_close_storage_panel()
 	queue_redraw()
+	# Mirrors `_open_world_menu` — needed for the editor where the
+	# popup-overlay redraw chain at the end of `_draw` doesn't run
+	# every frame.
+	if _popup_overlay:
+		_popup_overlay.queue_redraw()
 
 
 ## Applies the selection from the world menu.
@@ -3147,6 +3555,7 @@ func _draw() -> void:
 	_draw_placed_buildings()
 	_draw_block_hitboxes()
 	_draw_cranes()
+	_draw_crane_link_overlays()
 	_draw_archive_scan_overlay()
 	_draw_paused_queue()
 	_draw_preview()
@@ -4415,8 +4824,22 @@ func _transport_outputs_to(from_pos: Vector2i, to_pos: Vector2i) -> bool:
 	var rot: int = main.building_rotation.get(origin, 0)
 	var dir: Vector2i = DIR_VECTORS[rot]
 
-	# Transport blocks: output in their facing direction only
+	# Transport blocks: output in their facing direction only — except
+	# routers (split flow across every face EXCEPT the back) and
+	# junctions (passthrough on all 4 axes). Without these, neighbouring
+	# belts can't detect the splitter and stay straight instead of
+	# picking up their corner / junction texture variants.
 	if data.is_transport():
+		if data.tags.has("router"):
+			var back: Vector2i = -dir
+			var rel: Vector2i = to_pos - from_pos
+			return rel != back and (rel == dir \
+				or rel == Vector2i(dir.y, -dir.x) \
+				or rel == Vector2i(-dir.y, dir.x))
+		if data.tags.has("junction"):
+			var rel2: Vector2i = to_pos - from_pos
+			return rel2 == Vector2i(1, 0) or rel2 == Vector2i(-1, 0) \
+				or rel2 == Vector2i(0, 1) or rel2 == Vector2i(0, -1)
 		return from_pos + dir == to_pos
 
 	# Pumps: extract from underneath, output in all 4 directions
@@ -6230,6 +6653,21 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 	if terrain_ref and terrain_ref.wall_tiles.has(_grid_pos):
 		_walls_dirty = true
 	crane_states.erase(_grid_pos)
+	# Remove this crane's link plan AND any references to it from other
+	# cranes' inputs/outputs (block-kind specs that point at this anchor).
+	if crane_links.has(_grid_pos):
+		crane_links.erase(_grid_pos)
+	for ca in crane_links.keys():
+		var ce: Dictionary = crane_links[ca]
+		for arr_key in ["inputs", "outputs"]:
+			var arr: Array = ce.get(arr_key, [])
+			for i in range(arr.size() - 1, -1, -1):
+				var spec: Dictionary = arr[i]
+				if spec.get("kind", "") == "block" and Vector2i(spec.get("pos", Vector2i.ZERO)) == _grid_pos:
+					arr.remove_at(i)
+	if _crane_link_anchor == _grid_pos:
+		_crane_link_anchor = Vector2i(-1, -1)
+		_crane_link_next_kind = "input"
 	archive_holdings.erase(_grid_pos)
 	archive_decoder_state.erase(_grid_pos)
 	# Clean up links involving this building
@@ -6246,6 +6684,137 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 
 
 ## Draws visual lines between linked blocks and linking-mode highlights.
+## Renders a single payload at `pos` (rotated by `angle` for buildings).
+## When the payload is a crane carrying its own held_payload (because
+## another crane picked it up mid-haul), recurses with a smaller scale
+## so the player can see what's nested inside the grabber.
+##   `gs`    — current grid size in pixels.
+##   `scale` — multiplier on the visible footprint, lets the recursive
+##             call shrink the inner payload so it visibly sits "inside"
+##             the outer crane's icon.
+func _draw_crane_payload(payload: Dictionary, pos: Vector2, angle: float, gs: float, scale: float) -> void:
+	if payload == null or payload.is_empty():
+		return
+	var ptype: String = payload.get("type", "")
+	if ptype == "building":
+		var block_data = Registry.get_block(StringName(payload.get("block_id", "")))
+		if block_data == null:
+			return
+		var bw: float = block_data.grid_size.x * gs * scale
+		var bh: float = block_data.grid_size.y * gs * scale
+		if block_data.icon:
+			var visual_angle: float = angle + PI / 2.0
+			if block_data.tags.has("shaft"):
+				visual_angle += PI / 2.0
+			draw_set_transform(pos, visual_angle)
+			draw_texture_rect(block_data.icon, Rect2(-bw / 2.0, -bh / 2.0, bw, bh), false, Color(1, 1, 1, 1.0))
+			draw_set_transform(Vector2.ZERO, 0.0)
+		else:
+			draw_rect(Rect2(pos.x - bw / 2.0, pos.y - bh / 2.0, bw, bh), Color(block_data.color.r, block_data.color.g, block_data.color.b, 1.0), true)
+		draw_rect(Rect2(pos.x - bw / 2.0, pos.y - bh / 2.0, bw, bh), Color(1, 1, 1, 0.25), false, 2.0)
+		# If this building is itself a crane, draw a scaled-down version
+		# of its arm + grabber so the player can see where its head was
+		# when it got picked up. If it was holding something, that inner
+		# payload renders at the inner grabber's head position. Recurses
+		# for nested cranes (crane → crane → …).
+		if block_data.tags.has("crane"):
+			var inner_state: Dictionary = payload.get("crane_state", {})
+			if not inner_state.is_empty():
+				var inner_arm_angle: float = float(inner_state.get("arm_angle", 0.0)) + angle
+				var inner_arm_ext: float = float(inner_state.get("arm_extension", CRANE_ARM_MIN_TOTAL))
+				var inner_dir: Vector2 = Vector2(cos(inner_arm_angle), sin(inner_arm_angle))
+				var inner_grabber: Vector2 = pos + inner_dir * inner_arm_ext
+				# Thin arm
+				var arm_thickness: float = 4.0 * main.SPRITE_SCALE_FACTOR
+				var arm_mid: Vector2 = (pos + inner_grabber) / 2.0
+				draw_set_transform(arm_mid, inner_arm_angle)
+				draw_rect(Rect2(-inner_arm_ext / 2.0, -arm_thickness / 2.0, inner_arm_ext, arm_thickness), Color(0.45, 0.45, 0.45, 0.95), true)
+				draw_set_transform(Vector2.ZERO, 0.0)
+				# Cross grabber
+				var inner_g_angle: float = float(inner_state.get("grabber_angle", 0.0)) + angle
+				var inner_held = inner_state.get("held_payload", null)
+				var inner_holding: bool = inner_held != null and inner_held is Dictionary and not (inner_held as Dictionary).is_empty()
+				var inner_cs: float = CRANE_GRABBER_SIZE * (0.7 if inner_holding else 1.0)
+				var inner_thickness: float = 6.0 * main.SPRITE_SCALE_FACTOR
+				# Draw inner held payload first (under grabber)
+				if inner_holding:
+					_draw_crane_payload(inner_held, inner_grabber, inner_g_angle, gs, scale)
+				draw_set_transform(inner_grabber, inner_g_angle)
+				draw_rect(Rect2(-inner_cs, -inner_thickness / 2.0, inner_cs * 2, inner_thickness), Color(0.6, 0.5, 0.2, 0.9), true)
+				draw_rect(Rect2(-inner_thickness / 2.0, -inner_cs, inner_thickness, inner_cs * 2), Color(0.6, 0.5, 0.2, 0.9), true)
+				draw_set_transform(Vector2.ZERO, 0.0)
+				# Base pivot dot
+				draw_circle(pos, 3.0, Color(0.6, 0.6, 0.6, 0.9))
+	elif ptype == "unit":
+		var unit_data = Registry.get_unit(StringName(payload.get("unit_id", "")))
+		if unit_data:
+			if unit_data.icon:
+				var tex_size: Vector2 = _fit_texture_size(unit_data.icon, gs * scale)
+				draw_texture_rect(unit_data.icon, Rect2(pos.x - tex_size.x / 2.0, pos.y - tex_size.y / 2.0, tex_size.x, tex_size.y), false, Color(1, 1, 1, 1.0))
+			else:
+				var us: float = (unit_data.visual_size if unit_data.visual_size > 0 else 8.0) * scale
+				var uc: Color = unit_data.color if unit_data.color != Color() else Color(0.5, 0.8, 0.3)
+				uc.a = 1.0
+				draw_circle(pos, us, uc)
+				draw_arc(pos, us, 0, TAU, 24, uc.lightened(0.3), 1.5)
+		else:
+			draw_circle(pos, 8.0 * scale, Color(0.3, 0.5, 0.9, 1.0))
+
+
+## Draws every active cable-node / cable-tower connection onto
+## `canvas`. Hosted on the `_cable_overlay` child (z 52) so the wires
+## render above the LogisticsSystem layer (51) and items running on
+## conveyors underneath a cable line never visually clip the wire.
+func _draw_cable_links(canvas: CanvasItem) -> void:
+	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	if power_sys == null:
+		return
+	if _wire_texture == null:
+		return
+	if not ("cable_connections" in power_sys):
+		return
+	var _ss_link = get_node_or_null("/root/Main/SectorScript")
+	var gs: float = main.GRID_SIZE
+	var half_tile := Vector2(gs / 2.0, gs / 2.0)
+	var cable_tint := Color(1.0, 1.0, 1.0, 1.0)
+	var wire_scale := 1.0
+	var tex_w: float = 15.0 * main.SPRITE_SCALE_FACTOR
+	var tex_h: float = _wire_texture.get_height()
+	var draw_w: float = tex_w * wire_scale
+	for pair in power_sys.cable_connections:
+		var ca: Vector2i = pair[0]
+		var cb: Vector2i = pair[1]
+		if not main.placed_buildings.has(ca) or not main.placed_buildings.has(cb):
+			continue
+		if _ss_link and (_ss_link.is_tile_hidden(ca) or _ss_link.is_tile_hidden(cb)):
+			continue
+		var wa: Vector2 = main.grid_to_world(ca) + half_tile + _get_top_offset(main.grid_to_world(ca))
+		var wb: Vector2 = main.grid_to_world(cb) + half_tile + _get_top_offset(main.grid_to_world(cb))
+		var dir: Vector2 = wb - wa
+		var full_len: float = dir.length()
+		if full_len < 0.01:
+			continue
+		var norm: Vector2 = dir / full_len
+		wa += norm * (gs / 2.0)
+		wb -= norm * (gs / 2.0)
+		dir = wb - wa
+		var length: float = dir.length()
+		if length < 0.01:
+			continue
+		var forward: Vector2 = dir / length
+		var angle: float = forward.angle() - PI / 2.0
+		var hw: float = draw_w / 2.0
+		var segments: int = ceili(length / tex_h)
+		for i in range(segments):
+			var t0: float = i * tex_h
+			var this_len: float = minf(tex_h, length - t0)
+			var center: Vector2 = wa + forward * (t0 + this_len / 2.0)
+			canvas.draw_set_transform(center, angle)
+			var src := Rect2(0, 0, tex_w, this_len)
+			canvas.draw_texture_rect_region(_wire_texture, Rect2(-hw, -this_len / 2.0, draw_w, this_len), src, cable_tint)
+			canvas.draw_set_transform(Vector2.ZERO, 0.0)
+
+
 func _draw_links() -> void:
 	var power_sys = get_node_or_null("/root/Main/PowerSystem")
 	if power_sys == null:
@@ -6276,50 +6845,11 @@ func _draw_links() -> void:
 		draw_circle(world_a, 4.0, link_color)
 		draw_circle(world_b, 4.0, link_color)
 
-	# Draw cable node connections using copper wire texture (tiled, pixel-perfect)
-	# Lines go from/to the exact tile each connection touches, not the block center
-	var cable_tint := Color(1.0, 1.0, 1.0, 1.0)
-	var wire_scale := 1.0  # Scale down the wire width (1.0 = native texture size)
-	var half_tile := Vector2(gs / 2.0, gs / 2.0)
-	if power_sys and "cable_connections" in power_sys and _wire_texture:
-		var tex_w: float = 15.0 * main.SPRITE_SCALE_FACTOR  # wire thickness, scales with grid
-		var tex_h: float = _wire_texture.get_height()  # wire length per tile (in source px)
-		var draw_w: float = tex_w * wire_scale  # Scaled wire thickness
-		for pair in power_sys.cable_connections:
-			var ca: Vector2i = pair[0]
-			var cb: Vector2i = pair[1]
-			if not main.placed_buildings.has(ca) or not main.placed_buildings.has(cb):
-				continue
-			if _ss_link and (_ss_link.is_tile_hidden(ca) or _ss_link.is_tile_hidden(cb)):
-				continue
-			var wa: Vector2 = main.grid_to_world(ca) + half_tile + _get_top_offset(main.grid_to_world(ca))
-			var wb: Vector2 = main.grid_to_world(cb) + half_tile + _get_top_offset(main.grid_to_world(cb))
-			var dir: Vector2 = wb - wa
-			var full_len: float = dir.length()
-			if full_len < 0.01:
-				continue
-			# Pull both endpoints to the edge of their tiles
-			var norm: Vector2 = dir / full_len
-			wa += norm * (gs / 2.0)
-			wb -= norm * (gs / 2.0)
-			dir = wb - wa
-			var length: float = dir.length()
-			if length < 0.01:
-				continue
-			var forward: Vector2 = dir / length
-			var angle: float = forward.angle() - PI / 2.0
-			var hw: float = draw_w / 2.0
-			var segments: int = ceili(length / tex_h)
-			for i in range(segments):
-				var t0: float = i * tex_h
-				var this_len: float = minf(tex_h, length - t0)
-				var center: Vector2 = wa + forward * (t0 + this_len / 2.0)
-				draw_set_transform(center, angle)
-				# Source rect: full width, cropped height for last segment
-				var src := Rect2(0, 0, tex_w, this_len)
-				# Dest rect: texture Y runs along the wire, texture X is thickness
-				draw_texture_rect_region(_wire_texture, Rect2(-hw, -this_len / 2.0, draw_w, this_len), src, cable_tint)
-				draw_set_transform(Vector2.ZERO, 0.0)
+	# Cable wires are now drawn by `_cable_overlay` (z 52, above the
+	# LogisticsSystem layer at 51) so items running on conveyors
+	# underneath a cable line don't render on top of the wire.
+	# `_draw_cable_links(canvas)` is the shared implementation; the
+	# overlay calls it with itself as the target canvas.
 
 	# --- Mindustry-style linking highlights ---
 	# Colors describe ROLE in the link, not which side was clicked:
@@ -6376,6 +6906,12 @@ func _draw_links() -> void:
 	src_world += _get_top_offset(main.grid_to_world(link_source))
 	_draw_dashed_line(src_world, get_global_mouse_position(),
 		Color(1.0, 0.9, 0.3, 0.6), 2.0, 6.0)
+
+	# Range circle: shows the block's `link_range` (in tiles) as a faint
+	# disc the player can use to gauge where a partner is reachable.
+	if src_data.link_range > 0.0:
+		draw_arc(src_world, src_data.link_range * gs, 0.0, TAU, 96,
+			Color(1.0, 0.9, 0.3, 0.5), 1.5)
 
 
 ## Draws a dashed line between two points.
@@ -6676,6 +7212,379 @@ func _execute_schematic_placement() -> void:
 const CRANE_ROTATE_SPEED := 1    # Radians per second
 const CRANE_EXTEND_SPEED := 300.0 # Pixels per second
 
+## Returns the world-space head/grabber position of a crane right now.
+func crane_head_world(anchor: Vector2i) -> Vector2:
+	if not crane_states.has(anchor):
+		return Vector2.ZERO
+	var state: Dictionary = crane_states[anchor]
+	var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null:
+		return Vector2.ZERO
+	var gs: float = main.GRID_SIZE
+	var base: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
+	var arm_angle: float = state.get("arm_angle", 0.0)
+	var ext: float = state.get("arm_extension", CRANE_ARM_MIN_TOTAL)
+	var arm_dir: Vector2 = Vector2(cos(arm_angle), sin(arm_angle))
+	var tp_v = state.get("target_pos", base)
+	var target: Vector2 = tp_v if tp_v is Vector2 else base
+	var to_target: float = (target - base).length()
+	var grabber_t: float = clampf(to_target / ext, 0.0, 1.0) if ext > 1.0 else 1.0
+	return base + arm_dir * (grabber_t * ext)
+
+
+## AI-time target position for `spec` from the perspective of `my_anchor`.
+## Crane → crane links return the midpoint between the two cranes' centers
+## (so both cranes converging on this same point cause their heads to meet).
+## Everything else falls back to the diamond's visual center.
+func _crane_ai_target_pos(my_anchor: Vector2i, spec: Dictionary) -> Vector2:
+	if spec.get("kind", "") == "block":
+		var p: Vector2i = spec.get("pos", Vector2i.ZERO)
+		if main.placed_buildings.has(p) and main.placed_buildings.has(my_anchor):
+			var bdata = Registry.get_block(main.placed_buildings[p])
+			if bdata and bdata.tags.has("crane"):
+				var my_data = Registry.get_block(main.placed_buildings[my_anchor])
+				if my_data:
+					var gs: float = main.GRID_SIZE
+					var my_center: Vector2 = main.grid_to_world(my_anchor) + Vector2(my_data.grid_size.x * gs / 2.0, my_data.grid_size.y * gs / 2.0)
+					var other_center: Vector2 = main.grid_to_world(p) + Vector2(bdata.grid_size.x * gs / 2.0, bdata.grid_size.y * gs / 2.0)
+					return (my_center + other_center) / 2.0
+	return _crane_diamond_world_pos(spec)
+
+
+## Per-frame autonomous AI for cranes that have configured links and aren't
+## currently being directly controlled by the player. Crane state machine:
+##   - held_payload == null  → seek next available input
+##   - held_payload != null  → seek next acceptable output
+## When the head is "over" a target tile and the precondition is met, the
+## interaction (pickup/drop) fires. Targets are visited in declaration order.
+func _tick_autonomous_cranes(delta: float) -> void:
+	if crane_states.is_empty():
+		return
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var gs: float = main.GRID_SIZE
+	var arrive_radius: float = gs * 0.5
+
+	for anchor in crane_states.keys():
+		# Skip if not a real placed crane any more.
+		if not main.placed_buildings.has(anchor):
+			continue
+		# Player-controlled cranes are driven by UnitManager exclusively.
+		if unit_mgr and unit_mgr.controlled_type == "crane" and unit_mgr.controlled_entity == anchor:
+			continue
+		# Even cranes without their own link plan still passively respond
+		# to other cranes that have THEM as an output target — the sender's
+		# drop logic needs both heads to meet.
+		var entry: Dictionary = crane_links.get(anchor, {"inputs": [], "outputs": []})
+		var inputs: Array = entry.get("inputs", [])
+		var outputs: Array = entry.get("outputs", [])
+
+		var state: Dictionary = crane_states[anchor]
+		var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if data == null:
+			continue
+		var base: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
+		var max_reach: float = data.crane_range * gs
+
+		var head_pos: Vector2 = crane_head_world(anchor)
+
+		if state.get("held_payload", null) == null:
+			# --- Seeking input ---
+			var picked := false
+			for spec in inputs:
+				var available: bool = _crane_input_has_payload(spec)
+				if not available:
+					continue
+				var t_pos: Vector2 = _crane_ai_target_pos(anchor, spec)
+				var t_clamped: Vector2 = _clamp_to_reach(base, t_pos, max_reach)
+				state["target_pos"] = t_clamped
+				update_crane_telescope(anchor, t_clamped, delta)
+				if (head_pos - t_pos).length() <= arrive_radius:
+					_crane_autonomous_pickup(anchor, state, head_pos, spec)
+				picked = true
+				break
+			if not picked:
+				# No input has a payload yet. Before parking on a ground
+				# input, check if any OTHER crane has us configured as an
+				# output AND is currently holding — passively rendezvous so
+				# the sender's drop logic can fire when both heads meet.
+				var sender_anchor: Vector2i = _crane_find_incoming_sender(anchor)
+				if sender_anchor != Vector2i(-1, -1):
+					var meet: Vector2 = _crane_midpoint(anchor, sender_anchor)
+					var meet_clamped: Vector2 = _clamp_to_reach(base, meet, max_reach)
+					state["target_pos"] = meet_clamped
+					update_crane_telescope(anchor, meet_clamped, delta)
+				else:
+					# Otherwise park near first ground input (if any), so the
+					# head hovers in place waiting for a unit to arrive.
+					for spec in inputs:
+						if spec.get("kind", "") == "ground":
+							var t_pos2: Vector2 = _crane_ai_target_pos(anchor, spec)
+							var t_clamped2: Vector2 = _clamp_to_reach(base, t_pos2, max_reach)
+							state["target_pos"] = t_clamped2
+							update_crane_telescope(anchor, t_clamped2, delta)
+							break
+		else:
+			# --- Seeking output for currently held payload ---
+			var payload: Dictionary = state["held_payload"]
+			# Prefer the first output that's actually ready to accept right
+			# now. If none are ready, fall back to the first filter-matching
+			# output and park there (head-over-target, waiting).
+			var chosen_spec: Dictionary = {}
+			for spec in outputs:
+				if not _crane_payload_matches_filter(payload, spec):
+					continue
+				if _crane_output_ready(spec):
+					chosen_spec = spec
+					break
+			if chosen_spec.is_empty():
+				for spec in outputs:
+					if _crane_payload_matches_filter(payload, spec):
+						chosen_spec = spec
+						break
+			if not chosen_spec.is_empty():
+				var t_pos3: Vector2 = _crane_ai_target_pos(anchor, chosen_spec)
+				var t_clamped3: Vector2 = _clamp_to_reach(base, t_pos3, max_reach)
+				state["target_pos"] = t_clamped3
+				update_crane_telescope(anchor, t_clamped3, delta)
+				if (head_pos - t_pos3).length() <= arrive_radius:
+					_crane_autonomous_drop(anchor, state, head_pos, chosen_spec)
+
+
+## Returns the midpoint of two cranes' centers (in world space).
+func _crane_midpoint(a_anchor: Vector2i, b_anchor: Vector2i) -> Vector2:
+	var gs: float = main.GRID_SIZE
+	var a_data = Registry.get_block(main.placed_buildings.get(a_anchor, &""))
+	var b_data = Registry.get_block(main.placed_buildings.get(b_anchor, &""))
+	if a_data == null or b_data == null:
+		return Vector2.ZERO
+	var a_c: Vector2 = main.grid_to_world(a_anchor) + Vector2(a_data.grid_size.x * gs / 2.0, a_data.grid_size.y * gs / 2.0)
+	var b_c: Vector2 = main.grid_to_world(b_anchor) + Vector2(b_data.grid_size.x * gs / 2.0, b_data.grid_size.y * gs / 2.0)
+	return (a_c + b_c) / 2.0
+
+
+## Finds another crane whose output points at `me` and is currently holding
+## a payload (so it's ready to deliver). Returns its anchor or (-1, -1).
+func _crane_find_incoming_sender(me: Vector2i) -> Vector2i:
+	for other_anchor in crane_states.keys():
+		if other_anchor == me:
+			continue
+		if not crane_links.has(other_anchor):
+			continue
+		var ostate: Dictionary = crane_states[other_anchor]
+		if ostate.get("held_payload", null) == null:
+			continue
+		var olinks: Dictionary = crane_links[other_anchor]
+		for spec in olinks.get("outputs", []):
+			if spec.get("kind", "") != "block":
+				continue
+			if Vector2i(spec.get("pos", Vector2i.ZERO)) == me:
+				return other_anchor
+	return Vector2i(-1, -1)
+
+
+func _clamp_to_reach(base: Vector2, target: Vector2, max_reach: float) -> Vector2:
+	var d: Vector2 = target - base
+	var L: float = d.length()
+	if L <= max_reach:
+		return target
+	if L < 0.01:
+		return base + Vector2(max_reach, 0)
+	return base + d / L * max_reach
+
+
+## True iff this crane-link spec currently has a payload available to pick up.
+func _crane_input_has_payload(spec: Dictionary) -> bool:
+	var kind: String = spec.get("kind", "")
+	if kind == "ground":
+		# A player unit standing within the diamond is the "available payload".
+		var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+		if unit_mgr == null:
+			return false
+		var c: Vector2 = _crane_diamond_world_pos(spec)
+		var r: float = main.GRID_SIZE * 1.5
+		for u in unit_mgr.player_units:
+			if u == null or not is_instance_valid(u):
+				continue
+			if (u.position - c).length() <= r:
+				if _crane_payload_matches_filter({"type": "unit", "unit_id": str(u.data.id) if u.data else ""}, spec):
+					return true
+		return false
+	# kind == "block"
+	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
+	if not main.placed_buildings.has(p):
+		return false
+	var bdata = Registry.get_block(main.placed_buildings[p])
+	if bdata == null:
+		return false
+	# Other crane: payload is available when that crane is holding something
+	# AND its head is reachable / "meeting" ours.
+	if bdata.tags.has("crane"):
+		var other_state: Dictionary = crane_states.get(p, {})
+		return other_state.get("held_payload", null) != null
+	# Mass driver / payload conveyor / router / constructor: rely on
+	# logistics_system's payload_items map (the cell holds a stalled payload).
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if logistics and "payload_items" in logistics:
+		if logistics.payload_items.has(p):
+			return true
+	return false
+
+
+## True iff dropping a payload at this output spec right now would succeed.
+## Used to skip blocked outputs (full conveyor, busy crane, …) so the holding
+## crane moves on to the next configured output instead of stalling.
+func _crane_output_ready(spec: Dictionary) -> bool:
+	var kind: String = spec.get("kind", "")
+	if kind == "ground":
+		return true
+	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
+	if not main.placed_buildings.has(p):
+		return false
+	var bdata = Registry.get_block(main.placed_buildings[p])
+	if bdata == null:
+		return false
+	if bdata.tags.has("crane"):
+		# Receiver crane must be empty (transfer fires when heads meet).
+		return crane_states.get(p, {}).get("held_payload", null) == null
+	# Conveyor / router / mass driver / constructor: ready iff the cell
+	# has no stalled payload sitting on it.
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if logistics and "payload_items" in logistics:
+		return not logistics.payload_items.has(p)
+	return true
+
+
+## True iff the held payload is allowed by the spec's filter (empty = any).
+func _crane_payload_matches_filter(payload: Dictionary, spec: Dictionary) -> bool:
+	var filter: Array = spec.get("filter", [])
+	if filter.is_empty():
+		return true
+	var t: String = payload.get("type", "")
+	var pid: StringName = &""
+	if t == "unit":
+		pid = StringName(payload.get("unit_id", ""))
+	elif t == "building":
+		pid = StringName(payload.get("block_id", ""))
+	return filter.has(pid)
+
+
+func _crane_autonomous_pickup(anchor: Vector2i, state: Dictionary, head_pos: Vector2, spec: Dictionary) -> void:
+	var kind: String = spec.get("kind", "")
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if kind == "ground":
+		if unit_mgr == null:
+			return
+		var c: Vector2 = _crane_diamond_world_pos(spec)
+		var r: float = main.GRID_SIZE * 1.5
+		for u in unit_mgr.player_units.duplicate():
+			if u == null or not is_instance_valid(u):
+				continue
+			if (u.position - c).length() > r:
+				continue
+			if not _crane_payload_matches_filter({"type": "unit", "unit_id": str(u.data.id) if u.data else ""}, spec):
+				continue
+			var unit_payload := {
+				"type": "unit",
+				"unit_id": str(u.data.id) if u.data else "",
+				"health": u.health,
+				"team": u.team if "team" in u else 0,
+			}
+			unit_mgr.player_units.erase(u)
+			u.queue_free()
+			state["held_payload"] = unit_payload
+			state["grabber_open"] = false
+			return
+		return
+	# kind == "block"
+	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
+	if not main.placed_buildings.has(p):
+		return
+	var bdata = Registry.get_block(main.placed_buildings[p])
+	if bdata == null:
+		return
+	if bdata.tags.has("crane"):
+		# Crane-to-crane handoff: only when both heads are coincident.
+		var other_state: Dictionary = crane_states.get(p, {})
+		if other_state.get("held_payload", null) == null:
+			return
+		var other_head: Vector2 = crane_head_world(p)
+		if (head_pos - other_head).length() > main.GRID_SIZE * 0.6:
+			return
+		var p2: Dictionary = other_state["held_payload"]
+		if not _crane_payload_matches_filter(p2, spec):
+			return
+		state["held_payload"] = p2
+		other_state["held_payload"] = null
+		other_state["grabber_open"] = true
+		state["grabber_open"] = false
+		return
+	# Conveyor / router / mass-driver / constructor with stalled payload
+	if logistics and "payload_items" in logistics and logistics.payload_items.has(p):
+		var pdata: Dictionary = logistics.payload_items[p].get("payload_data", {})
+		if not _crane_payload_matches_filter(pdata, spec):
+			return
+		state["held_payload"] = pdata.duplicate(true)
+		logistics.payload_items.erase(p)
+		state["grabber_open"] = false
+
+func _crane_autonomous_drop(anchor: Vector2i, state: Dictionary, head_pos: Vector2, spec: Dictionary) -> void:
+	var kind: String = spec.get("kind", "")
+	var payload: Dictionary = state["held_payload"]
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if kind == "ground":
+		var c: Vector2 = _crane_diamond_world_pos(spec)
+		if payload.get("type", "") == "unit":
+			# Drop unit at center; spawn via UnitManager.
+			if unit_mgr == null:
+				return
+			var unit_id := StringName(payload.get("unit_id", ""))
+			if unit_id != &"":
+				unit_mgr.spawn_player_unit(c, unit_id)
+				if not unit_mgr.player_units.is_empty():
+					var spawned = unit_mgr.player_units[-1]
+					if is_instance_valid(spawned):
+						spawned.health = float(payload.get("health", spawned.health))
+				state["held_payload"] = null
+				state["grabber_open"] = true
+		elif payload.get("type", "") == "building":
+			# Try to place onto the ground tile (centered on the diamond).
+			var grid_target: Vector2i = main.world_to_grid(c)
+			var gsx: int = int(payload.get("grid_size_x", 1))
+			var gsy: int = int(payload.get("grid_size_y", 1))
+			var center_pos := Vector2i(grid_target.x - gsx / 2, grid_target.y - gsy / 2)
+			if main.has_method("place_payload_building") and main.place_payload_building(payload, center_pos):
+				state["held_payload"] = null
+				state["grabber_open"] = true
+		return
+	# kind == "block"
+	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
+	if not main.placed_buildings.has(p):
+		return
+	var bdata = Registry.get_block(main.placed_buildings[p])
+	if bdata == null:
+		return
+	if bdata.tags.has("crane"):
+		# Crane-to-crane: hold until receiving crane's head meets ours.
+		var other_state: Dictionary = crane_states.get(p, {})
+		if other_state.get("held_payload", null) != null:
+			return  # they're full, hold
+		var other_head: Vector2 = crane_head_world(p)
+		if (head_pos - other_head).length() > main.GRID_SIZE * 0.6:
+			return
+		other_state["held_payload"] = state["held_payload"]
+		state["held_payload"] = null
+		state["grabber_open"] = true
+		other_state["grabber_open"] = false
+		return
+	# Conveyor / router / mass-driver / constructor: push via logistics.
+	if logistics and logistics.has_method("_is_payload_cell") and logistics._is_payload_cell(p):
+		if logistics.has_method("_try_push_payload") and logistics._try_push_payload(p, payload):
+			state["held_payload"] = null
+			state["grabber_open"] = true
+
+
 ## Updates crane arm angle and extension toward target at constant speed.
 func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> void:
 	if not crane_states.has(anchor):
@@ -6750,7 +7659,12 @@ func _draw_cranes() -> void:
 
 		# --- Grabber position: slides along the arm to reach the mouse ---
 		# The grabber can travel anywhere from the base to arm_end
-		var target: Vector2 = state["target_pos"]
+		# (Defensive: a held inner crane's serialized target_pos round-trips
+		# through JSON as a String, so reset to base when not a Vector2.)
+		var tp_raw = state.get("target_pos", base)
+		var target: Vector2 = tp_raw if tp_raw is Vector2 else base
+		if not (tp_raw is Vector2):
+			state["target_pos"] = target
 		var to_target_dist: float = (target - base).length()
 		var total_arm_len: float = seg1_len + seg2_len + seg3_len
 		var grabber_t: float = clampf(to_target_dist / total_arm_len, 0.0, 1.0)
@@ -6764,39 +7678,7 @@ func _draw_cranes() -> void:
 
 		# --- Draw held payload UNDER everything (first) ---
 		if holding:
-			var payload: Dictionary = state["held_payload"]
-			if payload.get("type", "") == "building":
-				var block_data = Registry.get_block(StringName(payload.get("block_id", "")))
-				if block_data:
-					var bw: float = block_data.grid_size.x * gs
-					var bh: float = block_data.grid_size.y * gs
-					if block_data.icon:
-						# Use smooth grabber_angle for directional blocks, fixed for non-directional
-						var visual_angle: float = g_angle + PI / 2.0  # +90° base offset for textures
-						if block_data.tags.has("shaft"):
-							visual_angle += PI / 2.0  # Extra +90° for shafts
-						draw_set_transform(grabber_pos, visual_angle)
-						draw_texture_rect(block_data.icon, Rect2(-bw / 2.0, -bh / 2.0, bw, bh), false, Color(1, 1, 1, 0.55))
-						draw_set_transform(Vector2.ZERO, 0.0)
-					else:
-						draw_rect(Rect2(grabber_pos.x - bw / 2.0, grabber_pos.y - bh / 2.0, bw, bh), Color(block_data.color.r, block_data.color.g, block_data.color.b, 0.45), true)
-					# Outline (axis-aligned)
-					draw_rect(Rect2(grabber_pos.x - bw / 2.0, grabber_pos.y - bh / 2.0, bw, bh), Color(1, 1, 1, 0.25), false, 2.0)
-			elif payload.get("type", "") == "unit":
-				var unit_data = Registry.get_unit(StringName(payload.get("unit_id", "")))
-				if unit_data:
-					if unit_data.icon:
-						var tex_size: Vector2 = _fit_texture_size(unit_data.icon, gs)
-						draw_texture_rect(unit_data.icon, Rect2(grabber_pos.x - tex_size.x / 2.0, grabber_pos.y - tex_size.y / 2.0, tex_size.x, tex_size.y), false, Color(1, 1, 1, 0.6))
-					else:
-						# Draw the unit's actual shape and color
-						var us: float = unit_data.visual_size if unit_data.visual_size > 0 else 8.0
-						var uc: Color = unit_data.color if unit_data.color != Color() else Color(0.5, 0.8, 0.3)
-						uc.a = 0.7
-						draw_circle(grabber_pos, us, uc)
-						draw_arc(grabber_pos, us, 0, TAU, 24, uc.lightened(0.3), 1.5)
-				else:
-					draw_circle(grabber_pos, 8.0, Color(0.3, 0.5, 0.9, 0.45))
+			_draw_crane_payload(state["held_payload"], grabber_pos, g_angle, gs, 1.0)
 
 		# --- Draw cross grabber UNDER the arm (rotates with grabber_angle) ---
 		draw_set_transform(grabber_pos, g_angle)
@@ -6835,6 +7717,123 @@ func _draw_cranes() -> void:
 
 		# Draw base pivot circle
 		draw_circle(base, 5.0, Color(0.6, 0.6, 0.6, 0.7))
+
+
+# =========================
+# CRANE LINK OVERLAYS
+# =========================
+
+## Draws blue (input) / yellow (output) 3-tile diamonds for the currently
+## selected crane in link mode, plus a subtle highlight on the source crane
+## itself, plus the in-world filter menu when shift+click opened it.
+func _draw_crane_link_overlays() -> void:
+	# Diamonds are only visible while the player is actively linking the
+	# crane they belong to — outside link mode, the world is clean.
+	if _crane_link_anchor != Vector2i(-1, -1) and crane_links.has(_crane_link_anchor) \
+			and main.placed_buildings.has(_crane_link_anchor):
+		var entry: Dictionary = crane_links[_crane_link_anchor]
+		for spec in entry.get("inputs", []):
+			_draw_crane_link_diamond(spec, Color(0.25, 0.55, 1.0, 0.85), true)
+		for spec in entry.get("outputs", []):
+			_draw_crane_link_diamond(spec, Color(1.0, 0.85, 0.15, 0.85), true)
+
+	# Highlight the source crane.
+	if _crane_link_anchor != Vector2i(-1, -1) and main.placed_buildings.has(_crane_link_anchor):
+		var sd = Registry.get_block(main.placed_buildings[_crane_link_anchor])
+		if sd:
+			var gs: float = main.GRID_SIZE
+			var w: Vector2 = main.grid_to_world(_crane_link_anchor)
+			var size := Vector2(sd.grid_size.x * gs, sd.grid_size.y * gs)
+			draw_rect(Rect2(w, size), Color(0.4, 0.9, 0.4, 0.25), true)
+			draw_rect(Rect2(w, size), Color(0.4, 1.0, 0.4, 0.9), false, 2.0)
+
+	# Filter menu.
+	if _crane_filter_menu_open:
+		_draw_crane_filter_menu()
+
+
+## Renders one 3-tile diamond at the spec's world position, plus a small
+## icon stack for any filter entries.
+func _draw_crane_link_diamond(spec: Dictionary, color: Color, active: bool) -> void:
+	var gs: float = main.GRID_SIZE
+	var c: Vector2 = _crane_diamond_world_pos(spec)
+	var r: float = gs * 1.5  # 3-tile diamond
+	var pts := PackedVector2Array([
+		c + Vector2(0, -r),
+		c + Vector2(r, 0),
+		c + Vector2(0, r),
+		c + Vector2(-r, 0),
+	])
+	var fill: Color = color
+	fill.a = color.a * 0.45
+	draw_colored_polygon(pts, fill)
+	var outline: Color = color
+	outline.a = color.a
+	# Polyline closed
+	var loop := PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]])
+	draw_polyline(loop, outline, 2.0, true)
+
+	# Filter icons (stacked under the diamond) — only when actively editing.
+	if active:
+		var filter: Array = spec.get("filter", [])
+		if not filter.is_empty():
+			var icon_size: float = gs * 0.6
+			var ox: float = c.x - (filter.size() * icon_size) / 2.0
+			var oy: float = c.y + r + 4.0
+			for i in range(filter.size()):
+				var fid: StringName = filter[i]
+				var tex: Texture2D = null
+				var u = Registry.get_unit(fid)
+				if u and u.icon:
+					tex = u.icon
+				else:
+					var b = Registry.get_block(fid)
+					if b and b.icon:
+						tex = b.icon
+				if tex:
+					draw_texture_rect(tex, Rect2(ox + i * icon_size, oy, icon_size, icon_size), false, Color(1, 1, 1, 0.95))
+				else:
+					draw_rect(Rect2(ox + i * icon_size, oy, icon_size, icon_size), Color(0.6, 0.6, 0.6, 0.7), true)
+
+
+## Renders the filter menu (icon grid) anchored under the diamond.
+func _draw_crane_filter_menu() -> void:
+	if _crane_filter_menu_items.is_empty():
+		return
+	var cell: float = _crane_filter_menu_cell
+	var cols: int = mini(_crane_filter_menu_columns, _crane_filter_menu_items.size())
+	var rows: int = ceili(float(_crane_filter_menu_items.size()) / float(cols))
+	var grid_w: float = cell * cols
+	var grid_h: float = cell * rows
+	var origin: Vector2 = _crane_filter_menu_world_pos + Vector2(-grid_w / 2.0, main.GRID_SIZE * 1.7)
+
+	# Background panel
+	draw_rect(Rect2(origin - Vector2(6, 6), Vector2(grid_w + 12, grid_h + 12)), Color(0.08, 0.08, 0.12, 0.92), true)
+	draw_rect(Rect2(origin - Vector2(6, 6), Vector2(grid_w + 12, grid_h + 12)), Color(0.7, 0.7, 0.8, 0.7), false, 1.0)
+
+	# Selected ids — currently in the spec's filter list (highlighted).
+	var selected: Array = []
+	if _crane_filter_menu_anchor != Vector2i(-1, -1):
+		var entry: Dictionary = crane_links.get(_crane_filter_menu_anchor, {})
+		var arr: Array = entry.get(_crane_filter_menu_kind + "s", [])
+		if _crane_filter_menu_index >= 0 and _crane_filter_menu_index < arr.size():
+			selected = arr[_crane_filter_menu_index].get("filter", [])
+
+	for i in range(_crane_filter_menu_items.size()):
+		var col: int = i % cols
+		var row: int = i / cols
+		var r := Rect2(origin + Vector2(col * cell, row * cell), Vector2(cell, cell))
+		var item: Dictionary = _crane_filter_menu_items[i]
+		var is_sel: bool = selected.has(item.get("id", &""))
+		var bg: Color = Color(0.25, 0.4, 0.7, 0.7) if is_sel else Color(0.18, 0.18, 0.22, 0.8)
+		if i == _crane_filter_menu_hovered:
+			bg = bg.lightened(0.15)
+		draw_rect(r, bg, true)
+		draw_rect(r, Color(0.6, 0.6, 0.7, 0.7), false, 1.0)
+		var tex: Texture2D = item.get("icon", null)
+		if tex:
+			var pad: float = cell * 0.1
+			draw_texture_rect(tex, Rect2(r.position + Vector2(pad, pad), Vector2(cell - pad * 2, cell - pad * 2)), false, Color(1, 1, 1, 1))
 
 
 # =========================
