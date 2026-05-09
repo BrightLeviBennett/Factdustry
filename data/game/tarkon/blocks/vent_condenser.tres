@@ -1,20 +1,24 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://da3aickqnluh5"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://c1he5cedlo20h" path="res://textures/blocks/power/VentTurbine.png" id="1_70fbi"]
 
 [resource]
 script = ExtResource("1")
 id = &"vent_condenser"
 display_name = "Vent Condenser"
 description = "Condenses thermal-vent and geyser steam into clean water. Outputs 4/s on a vent, 8/s on a geyser. Pipes accept the water on any side."
+icon = ExtResource("1_70fbi")
 category = 9
+tags = PackedStringArray("fluid", "transport", "pump", "condenser", "omnidirectional")
 color = Color(0.3, 0.6, 0.9, 1)
 grid_size = Vector2i(3, 3)
 max_health = 240.0
-build_cost = { "copper": 60, "graphite": 20 }
+build_cost = {
+"copper": 60,
+"graphite": 20
+}
 build_time = 1.5
 transport_speed = 5.0
 transports_fluid = true
-production_time = 1.0
 max_stored_fluids = 50.0
-tags = PackedStringArray("fluid", "transport", "pump", "condenser")

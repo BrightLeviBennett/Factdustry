@@ -21,4 +21,5 @@ wave_units_data = PackedStringArray()
 objective = 1
 unlocks = PackedStringArray("aluminum_mountains")
 required_sectors = PackedStringArray("nightfall_depths")
+map_path = "res://data/game/tarkon/maps/ZD.sector.json"
 tags = PackedStringArray("campaign", "sector")

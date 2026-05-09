@@ -970,9 +970,10 @@ func place_building_with_faction(grid_pos: Vector2i, block_id: StringName, rotat
 ## replace a Belt Junction with a Conveyor Belt by just clicking on it.
 ##
 ## Groups:
-##   &"belt"        — conveyor_belt and all its variants (junctions, routers,
-##                    sorters, bridges, overflow/underflow)
-##   &"duct"        — ducts and their variants
+##   &"belt_duct"   — conveyor_belt + duct and all their variants (junctions,
+##                    routers, sorters, bridges, overflow/underflow). Belts
+##                    and ducts share a group so either can swap onto the
+##                    other in place.
 ##   &"conduit"     — fluid conduits and their variants
 ##   &"payload"     — payload transport parts
 ##   &"freight"     — freight transport parts
@@ -981,16 +982,16 @@ func _get_swap_group(data: BlockData) -> StringName:
 	if data == null:
 		return &""
 	var id_str := String(data.id)
-	# Belts
+	# Belts and ducts share a single swap family so a duct can be
+	# dragged over a belt (or vice versa) and replace it in-place,
+	# matching how the same family lets bridges swap with junctions.
 	if id_str == "conveyor_belt" or id_str.begins_with("belt_") \
 			or id_str == "overflow_belt" or id_str == "underflow_belt" \
-			or id_str == "inverted_belt_sorter":
-		return &"belt"
-	# Ducts
-	if id_str == "duct" or id_str.begins_with("duct_") \
+			or id_str == "inverted_belt_sorter" \
+			or id_str == "duct" or id_str.begins_with("duct_") \
 			or id_str == "overflow_duct" or id_str == "underflow_duct" \
 			or id_str == "inverted_duct_sorter":
-		return &"duct"
+		return &"belt_duct"
 	# Fluid conduits
 	if id_str == "fluid_conduit" or id_str.begins_with("conduit_") \
 			or id_str == "overflow_conduit" or id_str == "underflow_conduit" \
@@ -1486,10 +1487,15 @@ func place_building_for_schematic(grid_pos: Vector2i, block_id: StringName, rot:
 			building_origins[tile_pos] = grid_pos
 			building_factions[tile_pos] = Faction.LUMINA
 
-	# Start build animation
+	# Start build with progressive resource consumption — same path as
+	# `try_place_building` so the drone actually picks the schematic
+	# blocks up. Without `work_order.append` the queued blocks stayed
+	# visible as ghosts forever; only `build_order` (deprecated, kept
+	# for save compat) was being seeded.
 	if data.build_time > 0:
 		building_build_progress[grid_pos] = 0.0
-		build_order.append(grid_pos)
+		building_resources_consumed[grid_pos] = {}
+		work_order.append(grid_pos)
 
 	resources_changed.emit(resources)
 	building_placed.emit(block_id, grid_pos)

@@ -1523,7 +1523,10 @@ func _draw() -> void:
 	# Projectiles render on `_projectile_overlay` (z_index 4095) so
 	# they always sit above the chassis / buildings / terrain overlay,
 	# regardless of how those siblings configure their own z_indices.
-	_draw_turret_ranges()
+	# (The faint-red turret-range circle this used to call has been
+	# replaced by BuildingSystem's dashed white indicator — kept the
+	# function below for any external callers, but no longer drive it
+	# from here.)
 
 func _draw_turret_heads() -> void:
 	var building_sys = _building_sys_ref()
@@ -1670,14 +1673,8 @@ func _draw_projectiles(canvas: CanvasItem) -> void:
 				canvas.draw_arc(pos, aoe_r, 0, TAU, 48, Color(1.0, 0.5, 0.0, 0.7), 1.0)
 
 
+## Legacy turret-range circle. No longer wired to `_draw` — superseded
+## by BuildingSystem's dashed white indicator. Kept as a no-op stub in
+## case anything still references it.
 func _draw_turret_ranges() -> void:
-	# Only draw range circles when hovering over a turret or when
-	# a turret block is selected for placement
-	if main.selected_building != &"":
-		var data = Registry.get_block(main.selected_building)
-		if data and data.is_turret():
-			var mouse_world = get_global_mouse_position()
-			var grid_pos = main.world_to_grid(mouse_world)
-			var center = main.grid_to_world(grid_pos) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-			var range_px = data.attack_range * main.GRID_SIZE
-			draw_arc(center, range_px, 0, TAU, 48, Color(1, 0.3, 0.3, 0.25), 1.5)
+	pass

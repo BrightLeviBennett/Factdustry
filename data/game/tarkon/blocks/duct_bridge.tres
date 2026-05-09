@@ -1,17 +1,22 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bblekg1i07rud"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://d0jycfw7dxjcr" path="res://textures/blocks/item transportation/BeltBridge.png" id="1_ejmak"]
 
 [resource]
 script = ExtResource("1")
 id = &"duct_bridge"
 display_name = "Duct Bridge"
 description = "Carries items through ducts over obstacles."
-category = 8
+icon = ExtResource("1_ejmak")
+tags = PackedStringArray("duct", "transport")
 color = Color(0.7, 0.8, 0.4, 1)
+top_sprite = ExtResource("1_ejmak")
 max_health = 290.0
-link_range = 9.5
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
 build_time = 0.5
 transport_speed = 7.0
-tags = PackedStringArray("duct", "transport")
+link_range = 9.5

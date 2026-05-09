@@ -111,6 +111,7 @@ const DIR_NAMES := ["→", "↓", "←", "↑"]
 # --- BELT AUTO-TILE TEXTURES ---
 # Loaded in _ready(). Used to pick the right visual based on neighboring belts.
 var _belt_textures := {}
+var _duct_textures := {}
 # Phase for the conveyor scroll effect (pixels). Advances every unpaused
 # frame so the belt texture appears to move in its travel direction;
 # rendering wraps via texture_repeat so a single tile of art tiles
@@ -162,6 +163,42 @@ const SCRAPER_HEAD_SPIN := -4.5    # radians/sec target (negative = CCW)
 const SCRAPER_HEAD_ACCEL := 5.0    # eases to/from target (rad/s²)
 # Per-scraper state. Key = anchor. Value: {"angle": float, "vel": float}.
 var _scraper_head_state: Dictionary = {}
+
+# Vent turbine: layered render with two spinning inner blade discs under
+# a static base plate. Same inertia model as the scraper head — `vel` eases
+# toward `VENT_TURBINE_SPIN` while the building is active, drops back to
+# zero when it isn't, then `angle` integrates from `vel`.
+var _vent_turbine_base_texture: Texture2D
+var _vent_turbine_inner_texture: Texture2D
+const VENT_TURBINE_SPIN := 7.5    # radians/sec target
+const VENT_TURBINE_ACCEL := 5.0   # rad/s²
+var _vent_turbine_state: Dictionary = {}
+
+# Vent condenser: same layered base + spinning inner pattern as the
+# vent turbine, with its own textures. The condenser carries the `pump`
+# tag so without this override the regular draw flow would route it
+# through the generic `FluidPump.png` instead.
+var _vent_condenser_base_texture: Texture2D
+var _vent_condenser_inner_texture: Texture2D
+const VENT_CONDENSER_SPIN := 7.5
+const VENT_CONDENSER_ACCEL := 5.0
+var _vent_condenser_state: Dictionary = {}
+
+# Pre-baked composite of inner@0 + inner@45 + base, captured in a
+# SubViewport at startup. Drawn as a single semi-transparent layer in
+# the placement preview so the alpha-blended overlaps between the
+# layered sprites don't stack into dark blobs (which is what happened
+# when each layer was painted separately at preview alpha).
+var _vent_turbine_preview_texture: Texture2D = null
+var _vent_condenser_preview_texture: Texture2D = null
+
+# Generic cache for per-block layered-preview composites. Keyed by
+# `"<block_id>|<rotation>"`. Populated lazily on first request and reused
+# every frame thereafter — same idea as the turbine / condenser bakes
+# above, but generalized so cores (base + faction overlay) and turrets
+# (chassis + heads + body sprites) can share the path.
+var _preview_bake_cache: Dictionary = {}
+var _preview_bake_pending: Dictionary = {}
 
 # Archive-scan reveal-line phase. Advanced in _process when the world
 # isn't paused so the scan line freezes in place during pause. Used as a
@@ -350,6 +387,12 @@ var link_source := Vector2i(-1, -1)
 ## change. Anchor of the previous source after a successful link.
 var _link_just_linked := Vector2i(-1, -1)
 
+# Anchor of the turret currently sitting under the cursor (or
+# `Vector2i(-1, -1)` if none). Used to drive the hover range circle —
+# `_process` queues a redraw whenever this flips so the circle appears
+# / disappears as the cursor enters / leaves a turret tile.
+var _last_hovered_turret_anchor := Vector2i(-1, -1)
+
 
 func _ready() -> void:
 	# Mindustry-style smooth filtering on every in-world draw. Was
@@ -422,6 +465,12 @@ func _ready() -> void:
 	# Connect terrain changes to invalidate wall cache
 	if _terrain:
 		_terrain.connect("walls_changed", _on_walls_changed)
+	# Pre-bake the layered-spinner preview textures (vent turbine /
+	# condenser). Done once at startup, off the main draw path, so the
+	# placement ghost can paint a single composite layer instead of
+	# stacking two semi-transparent inner copies (which alpha-doubles
+	# at every spoke crossing).
+	_bake_spinner_preview_textures()
 
 
 func _on_walls_changed() -> void:
@@ -684,6 +733,14 @@ const _BELT_TEX_PATHS := {
 	"ca":       "res://textures/blocks/item transportation/Belt/Belt-CA.png",
 	"cb":       "res://textures/blocks/item transportation/Belt/Belt-CB.png",
 }
+const _DUCT_TEX_PATHS := {
+	"straight": "res://textures/blocks/item transportation/Duct/Duct.png",
+	"jr":       "res://textures/blocks/item transportation/Duct/Duct-JR.png",
+	"jl":       "res://textures/blocks/item transportation/Duct/Duct-JL.png",
+	"ja":       "res://textures/blocks/item transportation/Duct/Duct-JA.png",
+	"ca":       "res://textures/blocks/item transportation/Duct/Duct-CA.png",
+	"cb":       "res://textures/blocks/item transportation/Duct/Duct-CB.png",
+}
 const _DRILL_HEAD_TEX_PATHS := {
 	"N": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-N.png",
 	"R": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R.png",
@@ -695,6 +752,10 @@ const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.pn
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
 const _SCRAPER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/Ground Scraper/GroundScraperHead.png"
+const _VENT_TURBINE_BASE_TEX_PATH := "res://textures/blocks/power/VentTurbineBase.png"
+const _VENT_TURBINE_INNER_TEX_PATH := "res://textures/blocks/power/VentTurbineInner.png"
+const _VENT_CONDENSER_BASE_TEX_PATH := "res://textures/blocks/resource extractors/Vent Condenser/VentCondenserBase.png"
+const _VENT_CONDENSER_INNER_TEX_PATH := "res://textures/blocks/resource extractors/Vent Condenser/VentCondenserInner.png"
 # Generic faction-overlay sprites stamped on top of the building's base
 # instead of tinting the whole footprint a flat colour. Centered on the
 # bottom-left tile of multi-tile buildings (and on the only tile of 1×1
@@ -718,6 +779,8 @@ var _textures_ready: bool = false
 func _queue_texture_loads() -> void:
 	for key in _BELT_TEX_PATHS:
 		ResourceLoader.load_threaded_request(_BELT_TEX_PATHS[key])
+	for key in _DUCT_TEX_PATHS:
+		ResourceLoader.load_threaded_request(_DUCT_TEX_PATHS[key])
 	for key in _DRILL_HEAD_TEX_PATHS:
 		ResourceLoader.load_threaded_request(_DRILL_HEAD_TEX_PATHS[key])
 	ResourceLoader.load_threaded_request(_PIPE_TEX_PATH)
@@ -725,6 +788,10 @@ func _queue_texture_loads() -> void:
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_SCRAPER_HEAD_TEX_PATH)
+	ResourceLoader.load_threaded_request(_VENT_TURBINE_BASE_TEX_PATH)
+	ResourceLoader.load_threaded_request(_VENT_TURBINE_INNER_TEX_PATH)
+	ResourceLoader.load_threaded_request(_VENT_CONDENSER_BASE_TEX_PATH)
+	ResourceLoader.load_threaded_request(_VENT_CONDENSER_INNER_TEX_PATH)
 	ResourceLoader.load_threaded_request(_FACTION_OVERLAY_FEROX_PATH)
 	ResourceLoader.load_threaded_request(_FACTION_OVERLAY_DERELICT_PATH)
 	for key in _PAYLOAD_CONV_TEX_PATHS:
@@ -739,6 +806,8 @@ func _ensure_textures_loaded() -> void:
 		return
 	for key in _BELT_TEX_PATHS:
 		_belt_textures[key] = ResourceLoader.load_threaded_get(_BELT_TEX_PATHS[key])
+	for key in _DUCT_TEX_PATHS:
+		_duct_textures[key] = ResourceLoader.load_threaded_get(_DUCT_TEX_PATHS[key])
 	for key in _DRILL_HEAD_TEX_PATHS:
 		_drill_head_textures[key] = ResourceLoader.load_threaded_get(_DRILL_HEAD_TEX_PATHS[key])
 	_pipe_texture = ResourceLoader.load_threaded_get(_PIPE_TEX_PATH)
@@ -746,6 +815,10 @@ func _ensure_textures_loaded() -> void:
 	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
 	_scraper_head_texture = ResourceLoader.load_threaded_get(_SCRAPER_HEAD_TEX_PATH)
+	_vent_turbine_base_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_BASE_TEX_PATH)
+	_vent_turbine_inner_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_INNER_TEX_PATH)
+	_vent_condenser_base_texture = ResourceLoader.load_threaded_get(_VENT_CONDENSER_BASE_TEX_PATH)
+	_vent_condenser_inner_texture = ResourceLoader.load_threaded_get(_VENT_CONDENSER_INNER_TEX_PATH)
 	_faction_overlay_ferox = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_FEROX_PATH)
 	_faction_overlay_derelict = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_DERELICT_PATH)
 	for key in _PAYLOAD_CONV_TEX_PATHS:
@@ -1078,6 +1151,522 @@ func _draw_scraper_head(grid_pos: Vector2i, top_pos: Vector2, width: float, heig
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Per-frame tick for vent turbines. Mirrors `_tick_scraper_head_states` —
+## each anchor's angular velocity eases toward `VENT_TURBINE_SPIN` while
+## the building is active and back to zero when inactive, with the angle
+## integrated from the velocity each frame.
+func _tick_vent_turbine_states(delta: float) -> void:
+	if _vent_turbine_state.is_empty():
+		return
+	var to_erase: Array[Vector2i] = []
+	for anchor in _vent_turbine_state:
+		if not main.placed_buildings.has(anchor):
+			to_erase.append(anchor)
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
+		if data == null or data.id != &"vent_turbine":
+			to_erase.append(anchor)
+			continue
+		var active: bool = not (main.has_method("is_building_inactive") \
+			and main.is_building_inactive(anchor))
+		var target: float = VENT_TURBINE_SPIN if active else 0.0
+		var s: Dictionary = _vent_turbine_state[anchor]
+		var step: float = VENT_TURBINE_ACCEL * delta
+		s["vel"] = move_toward(float(s["vel"]), target, step)
+		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
+	for a in to_erase:
+		_vent_turbine_state.erase(a)
+
+
+## Draws a dashed circle at `radius` around `center`. Used by the
+## turret-range visualisers (placement preview + hover-over-existing).
+## Each dash is a `draw_polyline` rather than a `draw_arc` so the line
+## caps and segment joins are flat — `draw_arc` was leaving slight
+## connector slivers between adjacent calls that read as a faint gray
+## ring under the white dashes.
+func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: float, dashes: int = 48) -> void:
+	if radius <= 0.0 or dashes <= 0:
+		return
+	var slot: float = TAU / float(dashes)
+	# Each dash spans 60% of its slot; the remaining 40% is the gap.
+	var dash_arc: float = slot * 0.6
+	var samples: int = 5  # vertices per dash; 4 segments
+	for i in range(dashes):
+		var a0: float = slot * float(i)
+		var pts: PackedVector2Array = PackedVector2Array()
+		pts.resize(samples)
+		for j in range(samples):
+			var t: float = float(j) / float(samples - 1)
+			var a: float = a0 + dash_arc * t
+			pts[j] = center + Vector2(cos(a), sin(a)) * radius
+		draw_polyline(pts, color, width, false)
+
+
+## Hover-over-turret range indicator: when the cursor is sitting on a
+## placed turret, paint its `attack_range` as a dashed white circle so
+## the player can see how far it'll shoot. Skipped while placement /
+## drag preview is showing the same circle for the selected block.
+func _draw_hovered_turret_range() -> void:
+	# Don't compete with the placement preview's range circle.
+	if main.selected_building != &"":
+		return
+	# UI-blocking states freeze world hover (matches the existing
+	# input-gating in `_unhandled_input`).
+	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
+		return
+	var mouse_world: Vector2 = get_global_mouse_position()
+	var grid_pos: Vector2i = main.world_to_grid(mouse_world)
+	if not main.placed_buildings.has(grid_pos):
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or not data.is_turret() or data.attack_range <= 0.0:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var center: Vector2 = main.grid_to_world(anchor) + Vector2(
+		data.grid_size.x * gs * 0.5,
+		data.grid_size.y * gs * 0.5,
+	)
+	var range_px: float = data.attack_range * gs
+	_draw_dashed_circle(center, range_px, Color(1, 1, 1, 0.85), 3.0)
+
+
+## Crane placement preview: draws the arm + cross grabber + base pivot
+## at the default pose (arm pointing up, fully retracted) on top of
+## whatever block sprite the standard preview path already painted.
+## Uses the same constants the live `_draw_cranes` uses so the silhouette
+## matches the placed crane.
+func _draw_crane_preview(top_pos: Vector2, width: float, height: float, tint: Color = Color(1, 1, 1, 0.6)) -> void:
+	# Default pose used in `_on_building_placed` for crane initialisation.
+	var angle: float = -PI / 2.0
+	var ext: float = CRANE_ARM_MIN_TOTAL
+	var arm_dir: Vector2 = Vector2(cos(angle), sin(angle))
+
+	var base: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+
+	# Distribute the minimum extension across the three telescoping
+	# segments, mirroring `_draw_cranes` so the preview's silhouette
+	# matches the placed crane.
+	var remaining: float = maxf(ext - CRANE_ARM_MIN_TOTAL, 0.0)
+	var arm3_extra: float = minf(remaining, CRANE_ARM3_MAX - CRANE_ARM3_MIN)
+	remaining -= arm3_extra
+	var arm2_extra: float = minf(remaining, CRANE_ARM2_MAX - CRANE_ARM2_MIN)
+	remaining -= arm2_extra
+	var arm1_extra: float = minf(remaining, CRANE_ARM1_MAX - CRANE_ARM1_MIN)
+	var seg1_len: float = CRANE_ARM1_MIN + arm1_extra
+	var seg2_len: float = CRANE_ARM2_MIN + arm2_extra
+	var seg3_len: float = CRANE_ARM3_MIN + arm3_extra
+
+	var seg1_end: Vector2 = base + arm_dir * seg1_len
+	var seg2_end: Vector2 = seg1_end + arm_dir * seg2_len
+	var seg3_end: Vector2 = seg2_end + arm_dir * seg3_len
+
+	var grabber_pos: Vector2 = seg3_end
+	var grabber_size: float = CRANE_GRABBER_SIZE
+	var grabber_thickness: float = 6.0 * main.SPRITE_SCALE_FACTOR
+	var grabber_color := Color(0.6, 0.5, 0.2, 0.9)
+	grabber_color.a *= tint.a
+
+	# Cross grabber UNDER the arm (default grabber_angle = 0).
+	draw_set_transform(grabber_pos, 0.0)
+	draw_rect(Rect2(-grabber_size, -grabber_thickness * 0.5,
+		grabber_size * 2.0, grabber_thickness), grabber_color, true)
+	draw_rect(Rect2(-grabber_thickness * 0.5, -grabber_size,
+		grabber_thickness, grabber_size * 2.0), grabber_color, true)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+	# Arm segments — outermost first (widest), then middle, then innermost.
+	var seg1_fill := Color(0.5, 0.5, 0.5, 0.85)
+	var seg2_fill := Color(0.42, 0.42, 0.42, 0.9)
+	var seg3_fill := Color(0.35, 0.35, 0.35, 0.95)
+	seg1_fill.a *= tint.a
+	seg2_fill.a *= tint.a
+	seg3_fill.a *= tint.a
+
+	var c1: Vector2 = (base + seg1_end) * 0.5
+	draw_set_transform(c1, angle)
+	draw_rect(Rect2(-seg1_len * 0.5, -CRANE_ARM1_WIDTH * 0.5,
+		seg1_len, CRANE_ARM1_WIDTH), seg1_fill, true)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+	var c2: Vector2 = (seg1_end + seg2_end) * 0.5
+	draw_set_transform(c2, angle)
+	draw_rect(Rect2(-seg2_len * 0.5, -CRANE_ARM2_WIDTH * 0.5,
+		seg2_len, CRANE_ARM2_WIDTH), seg2_fill, true)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+	var c3: Vector2 = (seg2_end + seg3_end) * 0.5
+	draw_set_transform(c3, angle)
+	draw_rect(Rect2(-seg3_len * 0.5, -CRANE_ARM3_WIDTH * 0.5,
+		seg3_len, CRANE_ARM3_WIDTH), seg3_fill, true)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+	# Base pivot circle.
+	var pivot_color := Color(0.6, 0.6, 0.6, 0.7)
+	pivot_color.a *= tint.a
+	draw_circle(base, 5.0, pivot_color)
+
+
+## Static (frozen) vent-turbine layered preview, used by the placement
+## ghost. Paints a single pre-baked composite (inner@0 + inner@45 +
+## base) so the preview is one semi-transparent layer — no alpha
+## stacking between layers. Falls back to drawing the layers separately
+## while the bake is still pending.
+func _draw_vent_turbine_preview(top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	var size := Vector2(width, height)
+	if _vent_turbine_preview_texture:
+		draw_texture_rect(_vent_turbine_preview_texture, Rect2(top_pos, size), false, tint)
+		return
+	if _vent_turbine_base_texture == null:
+		return
+	if _vent_turbine_inner_texture:
+		draw_texture_rect(_vent_turbine_inner_texture, Rect2(top_pos, size), false, tint)
+	draw_texture_rect(_vent_turbine_base_texture, Rect2(top_pos, size), false, tint)
+
+
+## Asynchronously composes the layered-spinner preview textures by
+## rendering inner@0° + inner@45° + base into a SubViewport for each
+## block, then capturing the result as a single ImageTexture. The
+## placement preview then paints that composite as one semi-transparent
+## layer — no alpha-doubling at the spoke crossings, no stacking dark
+## blobs at the base/inner overlap.
+func _bake_spinner_preview_textures() -> void:
+	# Wait until the threaded texture loads have resolved.
+	while not _textures_ready:
+		await get_tree().process_frame
+	if _vent_turbine_inner_texture and _vent_turbine_base_texture:
+		_vent_turbine_preview_texture = await _bake_spinner_preview_composite(
+			_vent_turbine_inner_texture, _vent_turbine_base_texture)
+	if _vent_condenser_inner_texture and _vent_condenser_base_texture:
+		_vent_condenser_preview_texture = await _bake_spinner_preview_composite(
+			_vent_condenser_inner_texture, _vent_condenser_base_texture)
+
+
+## Generic layered-preview bake. Returns a cached composite for
+## (`block_id`, `rot`) if available, otherwise kicks off an async bake.
+## Cached value is a Dictionary with three keys:
+##   tex         — the captured ImageTexture
+##   rect_offset — Vector2 offset from the block's top_pos to where the
+##                 texture should be painted (negative when the bake
+##                 padded outside the block footprint, e.g. so turret
+##                 heads pointing past the edge aren't clipped)
+##   rect_size   — Vector2 the texture should be painted at
+## An empty dictionary means the bake hasn't resolved yet — caller paints
+## a fallback for that frame.
+func _request_preview_composite(block_id: StringName, rot: int) -> Dictionary:
+	var key := "%s|%d" % [String(block_id), rot]
+	if _preview_bake_cache.has(key):
+		return _preview_bake_cache[key]
+	if not _preview_bake_pending.has(key):
+		_preview_bake_pending[key] = true
+		_run_preview_bake.call_deferred(block_id, rot, key)
+	return {}
+
+
+## Returns the per-side padding (in pixels) the bake should add around
+## the block's footprint so the layered draw can extend past the block
+## without getting clipped. Currently only turret heads need padding —
+## the rest of the bakeable block types fit inside their footprint.
+func _preview_bake_padding_for(data: BlockData) -> float:
+	if data == null:
+		return 0.0
+	if data.is_turret() and data.turret_head_sprite:
+		var head_size: Vector2 = data.turret_head_sprite.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+		var bcount: int = maxi(data.barrel_count, 1)
+		# Multi-barrel pivots can sit `(bcount-1)/2 * spacing` off-center
+		# along one axis; the head can extend `head_size.length()` from
+		# the pivot in any direction (because rotation is unconstrained).
+		var max_lateral: float = (float(bcount) - 1.0) * 0.5 * data.barrel_spacing
+		var head_reach: float = head_size.length()
+		return max_lateral + head_reach
+	return 0.0
+
+
+## Async bake worker. Sets up a SubViewport with the right Sprite2D
+## layers for `block_id` at `rot`, waits one frame for it to render,
+## captures the result, and stows it in `_preview_bake_cache[key]`.
+func _run_preview_bake(block_id: StringName, rot: int, key: String) -> void:
+	var data := Registry.get_block(block_id)
+	if data == null:
+		_preview_bake_pending.erase(key)
+		return
+	while not _textures_ready:
+		await get_tree().process_frame
+	var gs: float = float(main.GRID_SIZE)
+	var pad: float = _preview_bake_padding_for(data)
+	var block_size := Vector2i(int(data.grid_size.x * gs), int(data.grid_size.y * gs))
+	# Round padding up to a whole pixel so SubViewport size stays integer.
+	var pad_i: int = int(ceil(pad))
+	var sv_size: Vector2i = block_size + Vector2i(pad_i * 2, pad_i * 2)
+	if sv_size.x <= 0 or sv_size.y <= 0:
+		_preview_bake_pending.erase(key)
+		return
+	var sv := SubViewport.new()
+	sv.size = sv_size
+	sv.transparent_bg = true
+	sv.disable_3d = true
+	sv.render_target_update_mode = SubViewport.UPDATE_ONCE
+	add_child(sv)
+
+	_populate_preview_layers(sv, data, rot, Vector2(pad_i, pad_i))
+
+	# Two `frame_post_draw`s — Godot needs one for child nodes to register
+	# in the SubViewport's tree and another for the actual capture.
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+
+	var img: Image = sv.get_texture().get_image()
+	if img:
+		_preview_bake_cache[key] = {
+			"tex": ImageTexture.create_from_image(img),
+			"rect_offset": Vector2(-float(pad_i), -float(pad_i)),
+			"rect_size": Vector2(sv_size),
+		}
+	sv.queue_free()
+	_preview_bake_pending.erase(key)
+	queue_redraw()
+
+
+## Populates `sv` with the Sprite2D children that compose the layered
+## preview for `data` at `rot`. Branches on block type — each branch
+## adds the same set of layers the live render would paint, in the
+## same order, so the captured texture matches the in-game appearance.
+## `pad` is the per-side padding the SubViewport was sized with — body
+## sprites sit at +pad inside the SV so the block footprint stays
+## centered while turret heads have room to extend outside it.
+func _populate_preview_layers(sv: SubViewport, data: BlockData, rot: int, pad: Vector2 = Vector2.ZERO) -> void:
+	var sv_size := Vector2(sv.size)
+	var gs: float = float(main.GRID_SIZE)
+	var block_size := Vector2(data.grid_size.x * gs, data.grid_size.y * gs)
+	var center := pad + block_size * 0.5
+	# Helper: add a Sprite2D scaled to fill a given rect inside the SV
+	# (in SubViewport-pixel coordinates).
+	var add_fill := func(tex: Texture2D, pos: Vector2, fill_size: Vector2, rotation: float = 0.0):
+		if tex == null:
+			return
+		var s := Sprite2D.new()
+		s.texture = tex
+		s.centered = true
+		s.position = pos + fill_size * 0.5
+		s.rotation = rotation
+		var ts := tex.get_size()
+		if ts.x > 0 and ts.y > 0:
+			s.scale = Vector2(fill_size.x / ts.x, fill_size.y / ts.y)
+		sv.add_child(s)
+
+	# --- Cores: base sprite + faction overlay (LUMINA in placement). ---
+	if data.tags.has("core"):
+		if data.base_sprite:
+			add_fill.call(data.base_sprite, pad, block_size)
+		var overlay_tex: Texture2D = data.lumina_overlay
+		if overlay_tex:
+			var overlay_scale := 0.7
+			var ow: float = block_size.x * overlay_scale
+			var oh: float = block_size.y * overlay_scale
+			add_fill.call(overlay_tex,
+				pad + Vector2((block_size.x - ow) * 0.5, (block_size.y - oh) * 0.5),
+				Vector2(ow, oh))
+		return
+
+	# --- Turrets: body (base/top) + chassis (multi-barrel) + heads. ---
+	if data.is_turret():
+		if data.base_sprite:
+			add_fill.call(data.base_sprite, pad, block_size)
+		if data.top_sprite and data.top_sprite != data.base_sprite:
+			add_fill.call(data.top_sprite, pad, block_size)
+		var aim_angle: float = float(rot) * (PI / 2.0)
+		var draw_angle: float = aim_angle + PI / 2.0
+		var bcount: int = maxi(data.barrel_count, 1)
+		var head_tex: Texture2D = data.turret_head_sprite
+		if head_tex:
+			var tex_size: Vector2 = head_tex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+			var chassis_dir := Vector2.from_angle(aim_angle)
+			var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
+			# Chassis plate (multi-barrel only).
+			if bcount > 1 and data.turret_chassis_sprite:
+				var ctex: Texture2D = data.turret_chassis_sprite
+				var csize: Vector2 = ctex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+				var cs := Sprite2D.new()
+				cs.texture = ctex
+				cs.centered = true
+				cs.position = center
+				cs.rotation = draw_angle
+				var cts := ctex.get_size()
+				cs.scale = Vector2(csize.x / cts.x, csize.y / cts.y)
+				sv.add_child(cs)
+			# Heads — one per barrel. Wraps each head Sprite2D in a
+			# Node2D pivot so rotation happens around the chassis pivot
+			# (`pivot`) and the head's offset from that pivot is in the
+			# pivot's *local* space — same composition as the live
+			# `_draw_turret_preview_heads` rect.
+			var hts := head_tex.get_size()
+			for i in range(bcount):
+				var lateral: float = 0.0
+				if bcount > 1:
+					lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * data.barrel_spacing
+				var pivot: Vector2 = center + chassis_perp * lateral
+				var pivot_node := Node2D.new()
+				pivot_node.position = pivot
+				pivot_node.rotation = draw_angle
+				sv.add_child(pivot_node)
+				var hs := Sprite2D.new()
+				hs.texture = head_tex
+				hs.centered = true
+				# Live render rect:
+				#   Rect2((-tex_size.x*0.5, -tex_size.y + 14*sf), tex_size)
+				# Center of that rect in pivot-local: (0, -tex_size.y*0.5 + 14*sf)
+				hs.position = Vector2(0.0, -tex_size.y * 0.5 + 14.0 * main.SPRITE_SCALE_FACTOR)
+				hs.scale = Vector2(tex_size.x / hts.x, tex_size.y / hts.y)
+				pivot_node.add_child(hs)
+		return
+
+	# Fallback: just paint whatever single sprite the block has — gives
+	# a safe baseline for any block type we ask to bake but haven't
+	# specialised yet.
+	if data.top_sprite:
+		add_fill.call(data.top_sprite, pad, block_size)
+	elif data.base_sprite:
+		add_fill.call(data.base_sprite, pad, block_size)
+
+
+## Renders inner@0 + inner@45 + base into a transparent SubViewport and
+## captures the composite as an ImageTexture. The output's size matches
+## the base texture's size — base is painted last so it sits on top of
+## the spinning blades, same draw order as the live render.
+func _bake_spinner_preview_composite(inner_tex: Texture2D, base_tex: Texture2D) -> Texture2D:
+	if inner_tex == null or base_tex == null:
+		return null
+	var size: Vector2i = base_tex.get_size()
+	if size.x <= 0 or size.y <= 0:
+		return null
+	var sv := SubViewport.new()
+	sv.size = size
+	sv.transparent_bg = true
+	sv.disable_3d = true
+	sv.render_target_update_mode = SubViewport.UPDATE_ONCE
+	add_child(sv)
+
+	var center := Vector2(size) * 0.5
+
+	# Inner @ 0° — drawn first (under everything).
+	var s1 := Sprite2D.new()
+	s1.texture = inner_tex
+	s1.centered = true
+	s1.position = center
+	sv.add_child(s1)
+
+	# Inner @ 45°.
+	var s2 := Sprite2D.new()
+	s2.texture = inner_tex
+	s2.centered = true
+	s2.position = center
+	s2.rotation = PI / 4.0
+	sv.add_child(s2)
+
+	# Base on top.
+	var s3 := Sprite2D.new()
+	s3.texture = base_tex
+	s3.centered = true
+	s3.position = center
+	sv.add_child(s3)
+
+	# Wait for the SubViewport to finish rendering this frame.
+	await RenderingServer.frame_post_draw
+
+	var img: Image = sv.get_texture().get_image()
+	var tex: ImageTexture = null
+	if img:
+		tex = ImageTexture.create_from_image(img)
+	sv.queue_free()
+	return tex
+
+
+## Per-frame tick for vent condensers. Same shape as the vent turbine
+## tick — each anchor's angular velocity eases toward `VENT_CONDENSER_SPIN`
+## while the building is active and back to zero when it isn't.
+func _tick_vent_condenser_states(delta: float) -> void:
+	if _vent_condenser_state.is_empty():
+		return
+	var to_erase: Array[Vector2i] = []
+	for anchor in _vent_condenser_state:
+		if not main.placed_buildings.has(anchor):
+			to_erase.append(anchor)
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
+		if data == null or data.id != &"vent_condenser":
+			to_erase.append(anchor)
+			continue
+		var active: bool = not (main.has_method("is_building_inactive") \
+			and main.is_building_inactive(anchor))
+		var target: float = VENT_CONDENSER_SPIN if active else 0.0
+		var s: Dictionary = _vent_condenser_state[anchor]
+		var step: float = VENT_CONDENSER_ACCEL * delta
+		s["vel"] = move_toward(float(s["vel"]), target, step)
+		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
+	for a in to_erase:
+		_vent_condenser_state.erase(a)
+
+
+## Static (frozen) vent-condenser layered preview. Mirrors the turbine
+## preview — uses the pre-baked composite when ready, falls back to
+## individual layers while the bake is still pending.
+func _draw_vent_condenser_preview(top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	var size := Vector2(width, height)
+	if _vent_condenser_preview_texture:
+		draw_texture_rect(_vent_condenser_preview_texture, Rect2(top_pos, size), false, tint)
+		return
+	if _vent_condenser_base_texture == null:
+		return
+	if _vent_condenser_inner_texture:
+		draw_texture_rect(_vent_condenser_inner_texture, Rect2(top_pos, size), false, tint)
+	draw_texture_rect(_vent_condenser_base_texture, Rect2(top_pos, size), false, tint)
+
+
+## Vent condenser: two spinning copies of `VentCondenserInner` under a
+## static `VentCondenserBase`. Mirrors the vent-turbine composition.
+func _draw_vent_condenser(grid_pos: Vector2i, top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	if _vent_condenser_base_texture == null:
+		return
+	if not _vent_condenser_state.has(grid_pos):
+		_vent_condenser_state[grid_pos] = {"angle": 0.0, "vel": 0.0}
+	var s: Dictionary = _vent_condenser_state[grid_pos]
+	var angle: float = float(s["angle"])
+	var center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+	var size := Vector2(width, height)
+	if _vent_condenser_inner_texture:
+		draw_set_transform(center, angle)
+		draw_texture_rect(_vent_condenser_inner_texture, Rect2(-size * 0.5, size), false, tint)
+		draw_set_transform(center, angle + PI / 4.0)
+		draw_texture_rect(_vent_condenser_inner_texture, Rect2(-size * 0.5, size), false, tint)
+		draw_set_transform(Vector2.ZERO, 0.0)
+	draw_texture_rect(_vent_condenser_base_texture, Rect2(top_pos, size), false, tint)
+
+
+## Vent turbine: two spinning copies of `VentTurbineInner` under a static
+## `VentTurbineBase`. The second inner copy is offset by 45° so the blades
+## look interleaved as they rotate. Both share the same `angle` so they
+## stay locked together.
+func _draw_vent_turbine(grid_pos: Vector2i, top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	if _vent_turbine_base_texture == null:
+		return
+	if not _vent_turbine_state.has(grid_pos):
+		_vent_turbine_state[grid_pos] = {"angle": 0.0, "vel": 0.0}
+	var s: Dictionary = _vent_turbine_state[grid_pos]
+	var angle: float = float(s["angle"])
+	var center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+	var size := Vector2(width, height)
+	# Spinning inner blades — drawn first so the static base plate sits
+	# on top, masking everything except the rim of the discs.
+	if _vent_turbine_inner_texture:
+		draw_set_transform(center, angle)
+		draw_texture_rect(_vent_turbine_inner_texture, Rect2(-size * 0.5, size), false, tint)
+		draw_set_transform(center, angle + PI / 4.0)
+		draw_texture_rect(_vent_turbine_inner_texture, Rect2(-size * 0.5, size), false, tint)
+		draw_set_transform(Vector2.ZERO, 0.0)
+	# Static base plate.
+	draw_texture_rect(_vent_turbine_base_texture, Rect2(top_pos, size), false, tint)
+
+
 ## Handles Q or R key to rotate, L key to toggle linking mode.
 func _input(event: InputEvent) -> void:
 	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
@@ -1204,6 +1793,8 @@ func _process(_delta: float) -> void:
 	if not ("world_paused" in main and main.world_paused):
 		_tick_crusher_head_states(_delta)
 		_tick_scraper_head_states(_delta)
+		_tick_vent_turbine_states(_delta)
+		_tick_vent_condenser_states(_delta)
 		_tick_autonomous_cranes(_delta)
 		if belt_scroll_enabled:
 			# Advance the conveyor scroll phase. Wrap on a 1024 px window —
@@ -1322,9 +1913,20 @@ func _process(_delta: float) -> void:
 				_storage_panel_hovered = sh
 				queue_redraw()
 
+	# When nothing is selected for placement, still tick the
+	# hover-over-turret range indicator: redraw whenever the hovered
+	# turret anchor changes (entering / leaving / different turret).
 	if main.selected_building == &"":
 		_drag_placing = false
 		_drag_cells.clear()
+		var idle_mw: Vector2 = get_global_mouse_position()
+		var idle_grid: Vector2i = main.world_to_grid(idle_mw)
+		var idle_anchor: Vector2i = main.building_origins.get(idle_grid, Vector2i(-1, -1))
+		var idle_data: BlockData = Registry.get_block(main.placed_buildings.get(idle_anchor, &""))
+		var hover_turret: Vector2i = idle_anchor if (idle_data != null and idle_data.is_turret()) else Vector2i(-1, -1)
+		if hover_turret != _last_hovered_turret_anchor:
+			_last_hovered_turret_anchor = hover_turret
+			queue_redraw()
 		return
 	var mouse_world = get_global_mouse_position()
 	preview_grid_pos = main.world_to_grid(mouse_world)
@@ -2846,12 +3448,11 @@ func _handle_crane_link_click(event: InputEventMouseButton) -> bool:
 		if not crane_links.has(_crane_link_anchor):
 			crane_links[_crane_link_anchor] = {"inputs": [], "outputs": []}
 		var entry2: Dictionary = crane_links[_crane_link_anchor]
-		if _crane_link_next_kind == "input":
-			(entry2["inputs"] as Array).append(spec)
-			_crane_link_next_kind = "output"
-		else:
-			(entry2["outputs"] as Array).append(spec)
-			_crane_link_next_kind = "input"
+		# Every new placement is an INPUT — the player toggles to output
+		# by left-clicking the diamond afterwards. Avoids the input/
+		# output alternation getting out of sync with what the player
+		# expects when they drop multiple diamonds in a row.
+		(entry2["inputs"] as Array).append(spec)
 		queue_redraw()
 		return true
 
@@ -3556,6 +4157,7 @@ func _draw() -> void:
 	_draw_block_hitboxes()
 	_draw_cranes()
 	_draw_crane_link_overlays()
+	_draw_hovered_turret_range()
 	_draw_archive_scan_overlay()
 	_draw_paused_queue()
 	_draw_preview()
@@ -4910,7 +5512,13 @@ func _get_belt_draw_info(grid_pos: Vector2i) -> Dictionary:
 	if tex_key == "cb":
 		angle += -(PI / 2.0)
 
-	return {"texture": _belt_textures.get(tex_key), "angle": angle, "key": tex_key}
+	# Pick the right texture set based on the block at this cell. Belts and
+	# ducts share the corner / junction logic but have different art.
+	var textures: Dictionary = _belt_textures
+	var bid: StringName = main.placed_buildings.get(grid_pos, &"")
+	if bid == &"duct":
+		textures = _duct_textures
+	return {"texture": textures.get(tex_key), "angle": angle, "key": tex_key}
 
 
 ## Like _transport_outputs_to but also checks virtual preview cells.
@@ -4959,7 +5567,12 @@ func _get_belt_draw_info_with_preview(grid_pos: Vector2i,
 	if tex_key == "cb":
 		angle += -(PI / 2.0)
 
-	return {"texture": _belt_textures.get(tex_key), "angle": angle, "key": tex_key}
+	# Pick the texture set based on the previewed block id. Belts and
+	# ducts share corner / junction logic but have different art.
+	var textures: Dictionary = _belt_textures
+	if preview_block_id == &"duct":
+		textures = _duct_textures
+	return {"texture": textures.get(tex_key), "angle": angle, "key": tex_key}
 
 
 func _draw_placed_buildings() -> void:
@@ -5261,8 +5874,10 @@ func _draw_placed_buildings() -> void:
 					main.building_rotation.get(grid_pos, 0))
 				continue
 
-		# Conveyor belts use auto-tiled textures based on neighbors
-		if block_id == &"conveyor_belt" and not _belt_textures.is_empty():
+		# Conveyor belts and ducts use auto-tiled textures based on neighbours.
+		var _is_belt_or_duct: bool = (block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
+				or (block_id == &"duct" and not _duct_textures.is_empty())
+		if _is_belt_or_duct:
 			var info: Dictionary = _get_belt_draw_info(grid_pos)
 			var texture: Texture2D = info["texture"]
 			var angle: float = info["angle"]
@@ -5272,9 +5887,12 @@ func _draw_placed_buildings() -> void:
 				draw_set_transform(center, angle)
 				var dst_rect := Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height))
 				if not belt_scroll_enabled:
-					# Animation disabled — straight static draw, no source
-					# rect math, no scroll-vector branching.
-					draw_texture_rect(texture, dst_rect, false)
+					# Animation disabled — static draw via the same region-
+					# sampling path as the scrolling branch so corner /
+					# junction tiles render identically (no subpixel-clamp
+					# gaps from draw_texture_rect rotated by 90/180°).
+					var s_tex_size: Vector2 = texture.get_size()
+					draw_texture_rect_region(texture, dst_rect, Rect2(Vector2.ZERO, s_tex_size))
 					draw_set_transform(Vector2.ZERO, 0.0)
 					continue
 				# Per-variant UV scroll vector. Belt textures are authored
@@ -5314,6 +5932,11 @@ func _draw_placed_buildings() -> void:
 				draw_rect(Rect2(top_pos, Vector2(width, height)), color, true)
 				draw_rect(Rect2(top_pos, Vector2(width, height)), color.lightened(0.3), false, 2.0)
 
+		# Vent condenser: same layered base + spinning inner pattern as
+		# the vent turbine. Hits before the generic pump draw because it
+		# carries the `pump` tag and would otherwise grab `_pump_texture`.
+		elif block_id == &"vent_condenser":
+			_draw_vent_condenser(grid_pos, top_pos, width, height)
 		# Fluid pumps: draw with pump texture (before pipes; pumps also transport_fluid)
 		elif data and data.tags.has("pump") and _pump_texture:
 			var rot: int = main.building_rotation.get(grid_pos, 0)
@@ -5420,6 +6043,12 @@ func _draw_placed_buildings() -> void:
 					_draw_block_texture(data.derelict_overlay, overlay_pos, ow, oh, rot, Color.WHITE, is_dir)
 				elif data.lumina_overlay:
 					_draw_block_texture(data.lumina_overlay, overlay_pos, ow, oh, rot, Color.WHITE, is_dir)
+			# Vent turbine: spinning inner-blade discs under a static base.
+			# Custom layered render — the .tres still sets a `top_sprite`
+			# but it's ignored in favour of the `VentTurbineBase` +
+			# `VentTurbineInner` pair loaded on this system.
+			elif block_id == &"vent_turbine":
+				_draw_vent_turbine(grid_pos, top_pos, width, height)
 			# Top sprite only (single-layer world texture)
 			elif data and data.top_sprite:
 				var draw_rot: int = (rot + 1) % 4 if data.tags.has("shaft") else rot
@@ -5593,8 +6222,12 @@ func _draw_placed_buildings() -> void:
 			var h_s: float = gs * new_data.grid_size.y
 			var top_pos_s: Vector2 = world_pos_s + off_s
 			var tint_s := Color(1, 1, 1, 0.55)
-			if new_id == &"conveyor_belt" and not _belt_textures.is_empty():
-				var info_s: Dictionary = _get_belt_draw_info(grid_pos)
+			if (new_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
+					or (new_id == &"duct" and not _duct_textures.is_empty()):
+				# Use the with-preview variant so the texture set is picked
+				# from `new_id` (the swapped-in block) rather than whatever
+				# is currently placed at this cell.
+				var info_s: Dictionary = _get_belt_draw_info_with_preview(grid_pos, {}, {}, new_id)
 				var texture_s: Texture2D = info_s["texture"]
 				var angle_s: float = info_s["angle"]
 				if texture_s:
@@ -5938,8 +6571,9 @@ func _draw_paused_queue() -> void:
 		var h: float = float(main.GRID_SIZE) * data.grid_size.y
 		var top_pos = world_pos + offset
 
-		# Draw belt texture preview or fallback ghost
-		var is_belt_q: bool = block_id == &"conveyor_belt" and not _belt_textures.is_empty()
+		# Draw belt / duct texture preview or fallback ghost
+		var is_belt_q: bool = (block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
+				or (block_id == &"duct" and not _duct_textures.is_empty())
 		if is_belt_q:
 			var info: Dictionary = _get_belt_draw_info_with_preview(grid_pos, queue_set, queue_rots, block_id)
 			var texture: Texture2D = info["texture"]
@@ -6010,9 +6644,11 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 	if data == null:
 		return
 	var tint := Color(1, 1, 1, 0.45)
-	# Conveyor belts use the auto-tile texture system so the ghost belt
-	# orients with its neighbours instead of always pointing the same way.
-	if block_id == &"conveyor_belt" and not _belt_textures.is_empty():
+	# Conveyor belts and ducts use the auto-tile texture system so the
+	# ghost orients with its neighbours instead of always pointing the
+	# same way.
+	if (block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
+			or (block_id == &"duct" and not _duct_textures.is_empty()):
 		var info: Dictionary = _get_belt_draw_info(grid_pos)
 		var texture: Texture2D = info["texture"]
 		var angle: float = info["angle"]
@@ -6066,7 +6702,8 @@ func _draw_preview() -> void:
 	# --- Drag-placing: draw a ghost at every cell in the line ---
 	if _drag_placing and not _drag_cells.is_empty():
 		var base_color = _get_block_color(main.selected_building)
-		var is_belt: bool = main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()
+		var is_belt: bool = (main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()) \
+				or (main.selected_building == &"duct" and not _duct_textures.is_empty())
 
 		# Build preview context for accurate belt textures
 		var preview_set: Dictionary = {}
@@ -6086,10 +6723,16 @@ func _draw_preview() -> void:
 			if _pathfind_bridge_cells.has(cell):
 				cell_block_id = _pathfind_bridge_cells[cell]
 			var cell_data: BlockData = Registry.get_block(cell_block_id)
-			var cell_is_belt: bool = cell_block_id == &"conveyor_belt" and not _belt_textures.is_empty()
+			var cell_is_belt: bool = (cell_block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
+					or (cell_block_id == &"duct" and not _duct_textures.is_empty())
 
 			var cell_valid := _can_place_at(cell, cell_block_id)
 			var cell_ok := cell_valid  # No affordability gate — progressive consumption
+
+			# Per-cell flag: set true when a baked composite painted all
+			# the layered content (body + heads, etc.), so the downstream
+			# turret-heads draw doesn't double-stamp.
+			var cell_used_bake := false
 
 			var cell_world: Vector2 = main.grid_to_world(cell)
 			var cell_offset := _get_top_offset(cell_world) * _get_height_scale(cell_block_id)
@@ -6117,14 +6760,36 @@ func _draw_preview() -> void:
 			else:
 				var cell_rot: int = preview_rots.get(cell, main.placement_rotation) if _is_directional(cell_block_id) else 0
 				var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				# Layered-render blocks get their own preview branch so the
+				# drag ghost matches what the live render will paint.
+				var cell_layered := false
+				if cell_block_id == &"vent_turbine":
+					_draw_vent_turbine_preview(cell_pos, w, h, tint)
+					cell_layered = true
+				elif cell_block_id == &"vent_condenser":
+					_draw_vent_condenser_preview(cell_pos, w, h, tint)
+					cell_layered = true
+				# Cores + turrets: paint the pre-baked composite when ready
+				# so layered overlays don't alpha-stack at preview tint.
+				if not cell_layered and cell_data and (cell_data.tags.has("core") or cell_data.is_turret()):
+					var cell_info: Dictionary = _request_preview_composite(cell_block_id, cell_rot)
+					if not cell_info.is_empty():
+						draw_texture_rect(
+							cell_info["tex"],
+							Rect2(cell_pos + cell_info["rect_offset"], cell_info["rect_size"]),
+							false, tint)
+						cell_layered = true
+						cell_used_bake = true
 				# Prefer world-facing top/base sprites. `icon` is UI-only.
 				var cell_tex: Texture2D = null
-				if cell_data:
+				if not cell_layered and cell_data:
 					if cell_data.top_sprite:
 						cell_tex = cell_data.top_sprite
 					elif cell_data.base_sprite:
 						cell_tex = cell_data.base_sprite
-				if cell_tex:
+				if cell_layered:
+					pass
+				elif cell_tex:
 					var draw_rot: int = (cell_rot + 1) % 4 if cell_data.tags.has("shaft") else cell_rot
 					_draw_block_texture(cell_tex, cell_pos, w, h, draw_rot, tint)
 				else:
@@ -6155,11 +6820,17 @@ func _draw_preview() -> void:
 				_draw_front_direction_arrow(cell, dl_grid_size, dl_rot)
 
 			# Turret heads / chassis preview: only the selected block shows
-			# these, not junction/bridge substitutions.
-			if cell_block_id == main.selected_building and cell_data and cell_data.is_turret():
+			# these, not junction/bridge substitutions. Skipped when the
+			# bake path already painted the heads.
+			if cell_block_id == main.selected_building and cell_data and cell_data.is_turret() and not cell_used_bake:
 				var t_rot_dl: int = preview_rots.get(cell, main.placement_rotation)
 				var t_tint_dl: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
 				_draw_turret_preview_heads(cell_data, cell_pos, w, h, t_rot_dl, t_tint_dl)
+			# Crane preview overlay — only the selected crane shows the
+			# arm silhouette, not junction/bridge substitutions.
+			if cell_block_id == main.selected_building and cell_data and cell_data.tags.has("crane"):
+				var c_tint_dl: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				_draw_crane_preview(cell_pos, w, h, c_tint_dl)
 			# Drill/crusher heads preview: only the selected block shows
 			# these, not junction/bridge substitutions.
 			if cell_block_id == main.selected_building and data and data.tags.has("drill_heads"):
@@ -6187,8 +6858,13 @@ func _draw_preview() -> void:
 	var height: float = float(main.GRID_SIZE) * grid_h
 	var top_pos = world_pos + offset
 
-	# Draw belt/pipe/duct texture preview or fallback rectangle
-	var is_belt_hover: bool = main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()
+	# Function-scope flag: set true when a baked composite painted all
+	# the layered content (body + heads, etc.), so the downstream
+	# turret-heads draw doesn't double-stamp.
+	var hover_used_bake := false
+	# Draw belt / duct texture preview or fallback rectangle
+	var is_belt_hover: bool = (main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()) \
+			or (main.selected_building == &"duct" and not _duct_textures.is_empty())
 	if is_belt_hover:
 		var hover_set: Dictionary = {preview_grid_pos: true}
 		var hover_rots: Dictionary = {preview_grid_pos: main.placement_rotation}
@@ -6214,7 +6890,42 @@ func _draw_preview() -> void:
 		# intentionally skipped here.
 		var hover_tex: Texture2D = null
 		var hover_layered := false
-		if data and data.base_sprite and data.top_sprite:
+		# Vent turbine / condenser: custom multi-layer preview (base +
+		# inner discs) matching the live render — overrides the generic
+		# single-sprite preview that would otherwise just show
+		# `top_sprite` (or, for the condenser, the pump fallback).
+		if main.selected_building == &"vent_turbine":
+			_draw_vent_turbine_preview(top_pos, width, height, tint)
+			hover_layered = true
+		elif main.selected_building == &"vent_condenser":
+			_draw_vent_condenser_preview(top_pos, width, height, tint)
+			hover_layered = true
+		# Cores + turrets paint a pre-baked composite (base + faction
+		# overlay for cores; body + chassis + heads for turrets). Falls
+		# back to the standard layered-draw path while the bake is still
+		# resolving on first use.
+		elif data and (data.tags.has("core") or data.is_turret()):
+			var composite_info: Dictionary = _request_preview_composite(main.selected_building, hover_rot)
+			if not composite_info.is_empty():
+				draw_texture_rect(
+					composite_info["tex"],
+					Rect2(top_pos + composite_info["rect_offset"], composite_info["rect_size"]),
+					false, tint)
+				hover_layered = true
+				hover_used_bake = true
+			elif data.base_sprite and data.top_sprite:
+				_draw_block_texture(data.base_sprite, top_pos, width, height, hover_rot, tint)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, hover_rot, tint)
+				hover_layered = true
+			elif data.base_sprite:
+				_draw_block_texture(data.base_sprite, top_pos, width, height, hover_rot, tint)
+				if data.lumina_overlay:
+					var ow: float = width * 0.7
+					var oh: float = height * 0.7
+					var op: Vector2 = top_pos + Vector2((width - ow) * 0.5, (height - oh) * 0.5)
+					_draw_block_texture(data.lumina_overlay, op, ow, oh, hover_rot, tint)
+				hover_layered = true
+		elif data and data.base_sprite and data.top_sprite:
 			var draw_rot_l: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
 			_draw_block_texture(data.base_sprite, top_pos, width, height, draw_rot_l, tint)
 			_draw_block_texture(data.top_sprite, top_pos, width, height, draw_rot_l, tint)
@@ -6256,9 +6967,24 @@ func _draw_preview() -> void:
 
 	# Turret heads / chassis preview overlay (mirrors the drag-line path
 	# below). Drawn after base/top so the heads sit on top of the body.
-	if data and data.is_turret():
+	# Skipped when the bake path already painted the heads as part of
+	# the composite — otherwise the heads would render twice.
+	if data and data.is_turret() and not hover_used_bake:
 		var t_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
 		_draw_turret_preview_heads(data, top_pos, width, height, main.placement_rotation, t_tint)
+
+	# Crane preview: arm + grabber + base pivot at the default pose so
+	# the player sees the silhouette before placing.
+	if data and data.tags.has("crane"):
+		var c_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		_draw_crane_preview(top_pos, width, height, c_tint)
+
+	# Turret attack-range circle in the placement preview — dashed, same
+	# look as the hover-over-existing-turret indicator.
+	if data and data.is_turret() and data.attack_range > 0.0:
+		var range_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+		var range_px: float = data.attack_range * float(main.GRID_SIZE)
+		_draw_dashed_circle(range_center, range_px, Color(1, 1, 1, 0.85), 3.0)
 
 	# Drill heads preview: falls back to "N" when placement is invalid.
 	if data and data.tags.has("drill_heads"):

@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://c1eak44fkkwg3"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -8,8 +8,9 @@ id = &"solar_array"
 display_name = "Solar Array"
 description = "Large solar collector array. Generates significant electrical power without needing a vent."
 category = 3
+tags = PackedStringArray("power", "solar")
 color = Color(0.25, 0.45, 0.85, 1)
-grid_size = Vector2i(2, 2)
+grid_size = Vector2i(4, 4)
 max_health = 300.0
 build_cost = {
 "copper": 120,
@@ -17,4 +18,3 @@ build_cost = {
 }
 build_time = 3.0
 electrical_power_gen = 30.0
-tags = PackedStringArray("power", "solar")

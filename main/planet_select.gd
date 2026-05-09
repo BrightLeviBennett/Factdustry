@@ -132,7 +132,7 @@ var _launch_seed_rows: Dictionary = {}       # StringName item_id -> HBoxContain
 ## Hard cap on what a single slider can request. Re-clamped down to
 ## the source sector's actual stockpile in `_refresh_launch_overlay_requirements`
 ## so the player can never request more than they have.
-const LAUNCH_SEED_HARD_MAX: int = 1000
+const LAUNCH_SEED_HARD_MAX: int = 2500
 var back_btn: Button
 var sector_name_label: Label
 var sector_desc_label: Label
@@ -898,6 +898,11 @@ func _update_camera() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# Zoom is disabled while the launch overlay is open — the modal
+	# should fully own the viewport, so wheel and trackpad pinch
+	# gestures don't dolly the camera underneath it.
+	if launch_overlay and launch_overlay.visible:
+		return
 	# Scroll zoom always works (even over UI panels)
 	if event is InputEventMouseButton:
 		var mb = event as InputEventMouseButton
@@ -1017,6 +1022,11 @@ func _find_nearest_cell(planet_id: StringName, surface_point: Vector3) -> int:
 
 func _update_hover() -> void:
 	if not current_planet:
+		return
+	# Freeze hover updates while the launch overlay is open — moving the
+	# cursor over the planet shouldn't keep re-highlighting hex cells
+	# behind the modal.
+	if launch_overlay and launch_overlay.visible:
 		return
 
 	var result = _raycast_planet_surface()
@@ -1177,16 +1187,21 @@ func _update_planet_tab_highlight() -> void:
 
 func _build_info_panel() -> void:
 	info_panel = PanelContainer.new()
-	# Bottom-center, compact
+	# Bottom-center: pinned to the bottom of the screen and grows UPWARD
+	# as content fills in (sector name, stats, launch button). Both
+	# anchors at 1.0 + grow_vertical = BEGIN keeps the bottom edge at a
+	# fixed offset from the screen's bottom edge regardless of how tall
+	# the content gets.
 	info_panel.anchor_left = 0.5
 	info_panel.anchor_right = 0.5
 	info_panel.anchor_top = 1.0
 	info_panel.anchor_bottom = 1.0
 	info_panel.offset_left = -250
 	info_panel.offset_right = 250
-	info_panel.offset_top = -160
+	info_panel.offset_top = -10
 	info_panel.offset_bottom = -10
 	info_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	info_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	info_panel.visible = false  # Hidden until a sector is selected
 
 	var style = StyleBoxFlat.new()
@@ -1601,24 +1616,18 @@ func _build_launch_overlay() -> void:
 	hud.add_child(launch_overlay)
 
 	launch_overlay_panel = PanelContainer.new()
+	# Centered both axes, sized to its content (no fixed offsets so the
+	# panel hugs whatever's inside).
 	launch_overlay_panel.anchor_left = 0.5
 	launch_overlay_panel.anchor_right = 0.5
 	launch_overlay_panel.anchor_top = 0.5
 	launch_overlay_panel.anchor_bottom = 0.5
-	launch_overlay_panel.offset_left = -220
-	launch_overlay_panel.offset_right = 220
-	launch_overlay_panel.offset_top = -160
-	launch_overlay_panel.offset_bottom = 160
-	var panel_style := StyleBoxFlat.new()
-	panel_style.bg_color = Color(0.04, 0.06, 0.04, 0.97)
-	panel_style.border_color = Color(0.2, 0.4, 0.22, 0.8)
-	panel_style.set_border_width_all(2)
-	panel_style.set_corner_radius_all(10)
-	panel_style.content_margin_left = 18
-	panel_style.content_margin_right = 18
-	panel_style.content_margin_top = 14
-	panel_style.content_margin_bottom = 14
-	launch_overlay_panel.add_theme_stylebox_override("panel", panel_style)
+	launch_overlay_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	launch_overlay_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	# Panel chrome stripped — the dim full-screen overlay is the only
+	# backdrop now. An empty StyleBoxEmpty prevents Godot's default
+	# panel skin from kicking in.
+	launch_overlay_panel.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
 	launch_overlay.add_child(launch_overlay_panel)
 
 	var vbox := VBoxContainer.new()
@@ -1628,30 +1637,19 @@ func _build_launch_overlay() -> void:
 	launch_overlay_title = Label.new()
 	launch_overlay_title.add_theme_font_size_override("font_size", 18)
 	launch_overlay_title.add_theme_color_override("font_color", Color(0.8, 1.0, 0.8))
+	launch_overlay_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(launch_overlay_title)
 
-	var req_label := Label.new()
-	req_label.text = "Requires:"
-	req_label.add_theme_font_size_override("font_size", 13)
-	req_label.add_theme_color_override("font_color", Color(0.55, 0.7, 0.55))
-	vbox.add_child(req_label)
-
+	# Combined cost / additional rows. Each entry shows
+	# "[have]/[required] + [additional]" so the player sees both the
+	# launch requirement and whatever they've dialed in to seed the
+	# destination sector. The two values stay visually separate.
 	launch_overlay_requirements = VBoxContainer.new()
 	launch_overlay_requirements.add_theme_constant_override("separation", 4)
 	vbox.add_child(launch_overlay_requirements)
 
-	# Optional starter-pack sliders. Each unlocked material gets an
-	# HSlider — moving it adds that amount to the launch cost (deducted
-	# from the source sector) and seeds it into the destination sector
-	# on landing. Sliders for materials whose tech node isn't yet
-	# researched stay hidden so the panel is short until the player
-	# unlocks late-game refinements.
-	var seed_label := Label.new()
-	seed_label.text = "Starter pack:"
-	seed_label.add_theme_font_size_override("font_size", 13)
-	seed_label.add_theme_color_override("font_color", Color(0.55, 0.7, 0.55))
-	vbox.add_child(seed_label)
-
+	# Per-resource seed sliders live here. Hidden / shown by tech-tree
+	# state in `_refresh_launch_overlay_requirements`.
 	launch_overlay_seed_container = VBoxContainer.new()
 	launch_overlay_seed_container.add_theme_constant_override("separation", 4)
 	vbox.add_child(launch_overlay_seed_container)
@@ -1675,7 +1673,7 @@ func _build_launch_overlay() -> void:
 		var slider := HSlider.new()
 		slider.min_value = 0
 		slider.max_value = LAUNCH_SEED_HARD_MAX
-		slider.step = 50
+		slider.step = 1
 		slider.value = 0
 		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		slider.custom_minimum_size = Vector2(180, 0)
@@ -1750,13 +1748,17 @@ func _refresh_launch_overlay_requirements() -> void:
 	for mat in _launch_seed_sliders.keys():
 		var row: HBoxContainer = _launch_seed_rows[mat]
 		var slider: HSlider = _launch_seed_sliders[mat]
-		var visible_now: bool = TechTree.is_researched(mat)
+		var have: int = int(src_for_clamp.get(mat, 0))
+		# Show a row only when the resource is researched AND the source
+		# sector actually has a non-zero stockpile of it. "Unlocked but
+		# never produced" materials would otherwise clutter the panel
+		# with empty sliders.
+		var visible_now: bool = TechTree.is_researched(mat) and have > 0
 		row.visible = visible_now
 		if not visible_now:
 			# Hidden rows shouldn't keep contributing to cost.
 			slider.value = 0
 			continue
-		var have: int = int(src_for_clamp.get(mat, 0))
 		var cap: int = mini(LAUNCH_SEED_HARD_MAX, have)
 		slider.editable = cap > 0
 		slider.max_value = float(maxi(cap, 1))
@@ -1766,21 +1768,54 @@ func _refresh_launch_overlay_requirements() -> void:
 		lbl.text = "%d" % int(slider.value)
 	for c in launch_overlay_requirements.get_children():
 		c.queue_free()
-	var cost: Dictionary = _get_launch_cost()
+	# Required cost = core_shard.build_cost ONLY (no slider contribution).
+	# Additional = per-resource slider amount, kept visually separate.
+	var base_cost: Dictionary = {}
+	var core_data := Registry.get_block(&"core_shard")
+	if core_data:
+		base_cost = core_data.build_cost.duplicate()
+	# Total payable cost (required + additional) — used for the
+	# afford-check that gates the LAUNCH button.
+	var total_cost: Dictionary = _get_launch_cost()
 	var src: Dictionary = _get_source_resources()
 	var all_met: bool = true
-	for short_id in cost:
-		var need: int = int(cost[short_id])
+	for short_id in total_cost:
 		var key: StringName = _resolve_cost_key(str(short_id))
 		var have: int = int(src.get(key, 0))
-		if have < need:
+		var total_need: int = int(total_cost[short_id])
+		if have < total_need:
 			all_met = false
+	# Render one row per unique resource that's either required or has an
+	# additional dial-in. Required-only rows show "have/need"; additional
+	# adds " + N" in a separate label so the two values stay visually
+	# distinct.
+	var seen_keys: Dictionary = {}
+	var row_keys: Array[StringName] = []
+	for short_id in base_cost.keys():
+		var k: StringName = _resolve_cost_key(str(short_id))
+		if not seen_keys.has(k):
+			seen_keys[k] = true
+			row_keys.append(k)
+	for mat in _launch_seed_sliders.keys():
+		if _launch_seed_amount(mat) > 0 and not seen_keys.has(mat):
+			seen_keys[mat] = true
+			row_keys.append(mat)
+
+	for key in row_keys:
+		var need: int = 0
+		# Resolve the required amount for this row from the unresolved
+		# base_cost dict (handles `copper` ↔ `mat_copper` short forms).
+		for short_id in base_cost.keys():
+			if _resolve_cost_key(str(short_id)) == key:
+				need = int(base_cost[short_id])
+				break
+		var extra: int = _launch_seed_amount(key)
+		var have: int = int(src.get(key, 0))
 		var item_data = Registry.get_item_or_fluid(key)
+
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 8)
 		row.alignment = BoxContainer.ALIGNMENT_BEGIN
-		# Item icon — replaces the text name. Tooltip keeps the display name
-		# discoverable for anyone who can't recognise the sprite.
 		var icon_rect := TextureRect.new()
 		icon_rect.custom_minimum_size = Vector2(24, 24)
 		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
@@ -1790,14 +1825,31 @@ func _refresh_launch_overlay_requirements() -> void:
 		if item_data:
 			icon_rect.tooltip_text = item_data.display_name
 		else:
-			icon_rect.tooltip_text = str(short_id).capitalize()
+			icon_rect.tooltip_text = String(key).capitalize()
 		row.add_child(icon_rect)
+
+		# "[have]/[required]" — coloured red when the source can't cover
+		# the required + additional total for this resource.
 		var val := Label.new()
-		val.text = "%d / %d" % [have, need]
+		val.text = "%d/%d" % [have, need]
 		val.add_theme_font_size_override("font_size", 13)
 		val.add_theme_color_override("font_color",
-			Color(0.6, 0.95, 0.6) if have >= need else Color(0.95, 0.45, 0.45))
+			Color(0.6, 0.95, 0.6) if have >= need + extra else Color(0.95, 0.45, 0.45))
 		row.add_child(val)
+
+		# "+ [additional]" — separate pill, only when extra > 0.
+		if extra > 0:
+			var sep := Label.new()
+			sep.text = "  +  "
+			sep.add_theme_font_size_override("font_size", 13)
+			sep.add_theme_color_override("font_color", Color(0.55, 0.7, 0.55))
+			row.add_child(sep)
+			var add_lbl := Label.new()
+			add_lbl.text = "%d" % extra
+			add_lbl.add_theme_font_size_override("font_size", 13)
+			add_lbl.add_theme_color_override("font_color", Color(0.55, 0.85, 1.0))
+			row.add_child(add_lbl)
+
 		launch_overlay_requirements.add_child(row)
 	# When the source sector can't cover the cost, the confirm button is
 	# disabled and tinted so it's clear the launch isn't possible yet.

@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dedf4jk5fiqtj"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -10,7 +10,7 @@ description = "Bigger solar collector. Generates moderate electrical power witho
 category = 3
 tags = PackedStringArray("power", "solar")
 color = Color(0.28, 0.48, 0.88, 1)
-grid_size = Vector2i(2, 2)
+grid_size = Vector2i(3, 3)
 max_health = 200.0
 build_cost = {
 "copper": 90,

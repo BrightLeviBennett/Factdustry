@@ -1,17 +1,21 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bt5r6hbjxk81g"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dpvdbpi2a3ovv" path="res://textures/blocks/item transportation/Duct/Duct.png" id="1_3prxx"]
 
 [resource]
 script = ExtResource("1")
 id = &"duct"
 display_name = "Duct"
 description = "Enclosed transport tube. Faster than belts but more expensive."
+icon = ExtResource("1_3prxx")
 tags = PackedStringArray("duct", "transport")
 color = Color(0.7, 0.8, 0.4, 1)
+top_sprite = ExtResource("1_3prxx")
 max_health = 210.0
 build_cost = {
 "copper": 15
 }
 build_time = 0.5
-transport_speed = 6.0
+transport_speed = 10.0
+link_range = null

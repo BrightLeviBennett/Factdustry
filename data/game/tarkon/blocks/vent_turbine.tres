@@ -10,13 +10,13 @@ display_name = "Vent Turbine"
 description = "Harnesses thermal vents for passive power generation."
 icon = ExtResource("2")
 category = 3
+tags = PackedStringArray("power", "vent_powered")
 color = Color(0.8, 0.6, 0.3, 1)
-top_sprite = ExtResource("2")
 grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("2")
 max_health = 240.0
 build_cost = {
 "copper": 15
 }
 build_time = 1.5
-electrical_power_gen = 20.0
-tags = PackedStringArray("power", "vent_powered")
+electrical_power_gen = 120.0

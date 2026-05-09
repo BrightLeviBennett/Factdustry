@@ -556,9 +556,9 @@ func _register_power() -> void:
 	_add(&"combustion_reactor",   "Combustion Reactor",   [&"combustion_generator"],    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(1, 3))
 	# Battery tier — chained off the combustion generator branch since
 	# fuel-burning is the first generator that benefits from a buffer.
-	_add(&"small_battery",        "Small Battery",        [&"combustion_generator"],    [], {&"mat_copper": 30, &"mat_silicon": 10}, Vector2(2, 4))
-	_add(&"large_battery",        "Large Battery",        [&"small_battery"],           [], {&"mat_copper": 100, &"mat_silicon": 40, &"mat_steel": 15}, Vector2(2, 5))
-	_add(&"huge_battery",         "Huge Battery",         [&"large_battery"],           [&"Not unlockable in campaign"], {&"mat_copper": 240, &"mat_silicon": 100, &"mat_steel": 60}, Vector2(2, 6))
+	_add(&"small_battery",        "Small Battery",        [&"combustion_generator"],    [], {&"mat_copper": 30, &"mat_silicon": 10}, Vector2(1, 4))
+	_add(&"large_battery",        "Large Battery",        [&"small_battery"],           [], {&"mat_copper": 100, &"mat_silicon": 40, &"mat_steel": 15}, Vector2(1, 5))
+	_add(&"huge_battery",         "Huge Battery",         [&"large_battery"],           [&"Not unlockable in campaign"], {&"mat_copper": 240, &"mat_silicon": 100, &"mat_steel": 60}, Vector2(1, 6))
 
 func _register_belt_transport() -> void:
 	_add(&"conveyor_belt",       "Conveyor Belt",       [&"core_shard"],        [&"mat_copper"], {&"mat_copper": 20}, Vector2(5, 1))
@@ -567,7 +567,6 @@ func _register_belt_transport() -> void:
 	_add(&"belt_bridge",         "Belt Bridge",         [&"conveyor_belt"],     [], {&"mat_copper": 80}, Vector2(5, 2))
 	_add(&"belt_sorter",         "Belt Sorter",         [&"conveyor_belt"],     [], {&"mat_copper": 80}, Vector2(6, 2))
 	_add(&"overflow_belt",       "Overflow Belt",       [&"conveyor_belt"],     [], {&"mat_copper": 70}, Vector2(7, 2))
-	_add(&"cargo_mass_driver",   "Cargo Mass Driver",   [&"belt_bridge"],       [], {&"mat_copper": 150}, Vector2(5, 3))
 	_add(&"inverted_belt_sorter","Inverted Belt Sorter", [&"belt_sorter"],      [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(6, 3))
 	_add(&"underflow_belt",      "Underflow Belt",      [&"overflow_belt"],     [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(7, 3))
 	
@@ -595,7 +594,6 @@ func _register_fluid_transport() -> void:
 	_add(&"conduit_bridge",             "Conduit Bridge",             [&"fluid_conduit"],       [], {&"mat_copper": 80, &"mat_graphite": 25, &"mat_silicon": 15}, Vector2(18, 2))
 	_add(&"conduit_sorter",             "Conduit Sorter",             [&"fluid_conduit"],       [], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_graphite": 15}, Vector2(19, 2))
 	_add(&"overflow_conduit",           "Overflow Conduit",           [&"fluid_conduit"],       [], {&"mat_copper": 70, &"mat_silicon": 25, &"mat_graphite": 15}, Vector2(20, 2))
-	_add(&"sealed_cargo_mass_driver",   "Sealed Cargo Mass Driver",   [&"conduit_bridge"],      [], {&"mat_copper": 180, &"mat_silicon": 70, &"mat_steel": 35}, Vector2(18, 3))
 	_add(&"inverted_conduit_sorter",    "Inverted Conduit Sorter",    [&"conduit_sorter"],      [], {&"mat_copper": 130, &"mat_silicon": 50, &"mat_steel": 20}, Vector2(19, 3))
 	_add(&"underflow_conduit",          "Underflow Conduit",          [&"overflow_conduit"],    [], {&"mat_copper": 130, &"mat_silicon": 50, &"mat_steel": 20}, Vector2(20, 3))
 
@@ -678,26 +676,26 @@ func _register_production() -> void:
 
 func _register_turrets() -> void:
 	# Single Barrel branch
-	_add(&"single_barrel",   "Single Barrel",   [&"core_shard"],                       [&"mat_silicon"], {&"mat_copper": 40, &"mat_silicon": 15}, Vector2(-11, 1))
-	_add(&"double_barrel",   "Double Barrel",   [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 90, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-11, 2))
-	_add(&"quad_barrel",     "Quad Barrel",     [&"double_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 30}, Vector2(-11, 3))
-	_add(&"octo_barrel",     "Octo Barrel",     [&"quad_barrel"],                      [&"mat_brass", &"-D-archive_brass_turrets"], {&"mat_copper": 280, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-11, 4))
+	_add(&"single_barrel",   "Single Barrel",   [&"core_shard"],                       [&"mat_silicon"], {&"mat_copper": 40, &"mat_silicon": 15}, Vector2(-12, 1))
+	_add(&"double_barrel",   "Double Barrel",   [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 90, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-12, 2))
+	_add(&"quad_barrel",     "Quad Barrel",     [&"double_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 30}, Vector2(-12, 3))
+	_add(&"octo_barrel",     "Octo Barrel",     [&"quad_barrel"],                      [&"mat_brass", &"-D-archive_brass_turrets"], {&"mat_copper": 280, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-12, 4))
 	
 	# Diffuse Branch
-	_add(&"diffuse",         "Diffuse",         [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25, &"mat_steel": 10}, Vector2(-10, 2))
-	_add(&"aegis_arc",       "Aegis Arc",       [&"diffuse"],                          [&"-L-ruins"], {&"mat_copper": 600, &"mat_silicon": 200, &"mat_steel": 200}, Vector2(-10, 3))
+	_add(&"diffuse",         "Diffuse",         [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25, &"mat_steel": 10}, Vector2(-11, 2))
+	_add(&"aegis_arc",       "Aegis Arc",       [&"diffuse"],                          [&"-L-ruins"], {&"mat_copper": 600, &"mat_silicon": 200, &"mat_steel": 200}, Vector2(-11, 3))
 	
 	# Destroy branch
-	_add(&"disarm",          "Disarm",          [&"destroy_turret"],                   [&"-D-archive_better_turrets"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(-13, 2))
-	_add(&"destroy_turret",  "Destroy",         [&"single_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 120, &"mat_steel": 40, &"mat_graphite": 20}, Vector2(-12, 2))
-	_add(&"annihilate",      "Annihilate",      [&"destroy_turret"],                   [&"mat_brass", &"-D-archive_brass_turrets"], {&"mat_copper": 300, &"mat_silicon": 60, &"mat_steel": 120}, Vector2(-12, 3))
-	_add(&"eclipse",         "Eclipse",         [&"annihilate"],                       [&"-L-ruins"], {&"mat_copper": 500, &"mat_steel": 240, &"mat_silicon": 100}, Vector2(-12, 4))
-	_add(&"missile_launcher","Missile Launcher",[&"annihilate"],                       [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 105}, Vector2(-13, 4))
+	_add(&"disarm",          "Disarm",          [&"destroy_turret"],                   [&"-D-archive_better_turrets"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(-14, 2))
+	_add(&"destroy_turret",  "Destroy",         [&"single_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 120, &"mat_steel": 40, &"mat_graphite": 20}, Vector2(-13, 2))
+	_add(&"annihilate",      "Annihilate",      [&"destroy_turret"],                   [&"mat_brass", &"-D-archive_brass_turrets"], {&"mat_copper": 300, &"mat_silicon": 60, &"mat_steel": 120}, Vector2(-13, 3))
+	_add(&"eclipse",         "Eclipse",         [&"annihilate"],                       [&"-L-ruins"], {&"mat_copper": 500, &"mat_steel": 240, &"mat_silicon": 100}, Vector2(-13, 4))
+	_add(&"missile_launcher","Missile Launcher",[&"annihilate"],                       [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 105}, Vector2(-14, 4))
 	
 	# Spritz/Wave/Lance Branch
-	_add(&"spritz",          "Spritz",          [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-13, 2))
-	_add(&"wave",            "Wave",            [&"spritz"],                           [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_steel": 25}, Vector2(-12, 2))
-	_add(&"lance",           "Lance",           [&"single_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(-13, 2))
+	_add(&"spritz",          "Spritz",          [&"single_barrel"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_steel": 15}, Vector2(-10, 2))
+	_add(&"wave",            "Wave",            [&"spritz"],                           [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_steel": 25}, Vector2(-10, 3))
+	_add(&"lance",           "Lance",           [&"single_barrel"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 30}, Vector2(-9, 2))
 
 func _register_support() -> void:
 	_add(&"build_tower",                    "Build Tower",                    [&"core_bastion"],                  [], {&"mat_copper": 150, &"mat_steel": 50}, Vector2(-8, 6))
@@ -721,7 +719,7 @@ func _register_support() -> void:
 	_add(&"interplanetary_launchpad",       "Interplanetary Launchpad",       [&"landing_pad"],                   [&"-D-archive_interplanetary_launch_systems"], {&"mat_copper": 750, &"mat_steel": 440, &"mat_aluminum": 40}, Vector2(-4, 9))
 	_add(&"interplanetary_core_launchpad",  "Interplanetary Core Launchpad",  [&"interplanetary_launchpad"],      [&"-D-archive_interplanetary_launch_systems"], {&"mat_copper": 250, &"mat_steel": 120}, Vector2(-4, 6))
 
-	_add(&"satellite_launchpad",            "Satellite Launchpad",            [&"launchpad"], [&"-D-archive_launch_systems", &"mat_aluminum"], {&"mat_copper": 500, &"mat_steel": 260, &"mat_graphite": 40}, Vector2(-3, 7))
+	_add(&"satellite_launchpad",            "Satellite Launchpad",            [&"launchpad"], [&"-D-archive_launch_systems", &"mat_zinc"], {&"mat_copper": 500, &"mat_steel": 260, &"mat_graphite": 40}, Vector2(-3, 7))
 
 func _register_units() -> void:
 	_add(&"tank_fabricator",          "Tank Fabricator",          [&"core_shard"],                [], {&"mat_copper": 60}, Vector2(-26, 1))

@@ -1,16 +1,21 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bx7gaitedglkp"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://fgby16ljfvc6" path="res://textures/blocks/item transportation/OverflowDuct.png" id="1_oe12y"]
 
 [resource]
 script = ExtResource("1")
 id = &"overflow_duct"
 display_name = "Overflow Duct"
 description = "Overflow routing for duct networks."
-category = 8
+icon = ExtResource("1_oe12y")
+tags = PackedStringArray("duct", "transport")
 color = Color(0.7, 0.8, 0.4, 1)
+top_sprite = ExtResource("1_oe12y")
 max_health = 290.0
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
 build_time = 0.5
 transport_speed = 7.0
-tags = PackedStringArray("duct", "transport")

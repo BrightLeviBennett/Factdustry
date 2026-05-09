@@ -10,6 +10,7 @@ description = "Generates a small amount of electrical power from sunlight. Works
 category = 3
 tags = PackedStringArray("power", "solar")
 color = Color(0.3, 0.5, 0.9, 1)
+grid_size = Vector2i(2, 2)
 max_health = 120.0
 build_cost = {
 "copper": 50,
@@ -17,4 +18,4 @@ build_cost = {
 "steel": 10
 }
 build_time = 2.0
-electrical_power_gen = 8.0
+electrical_power_gen = 30.0

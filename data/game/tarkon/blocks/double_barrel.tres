@@ -26,7 +26,7 @@ base_sprite = ExtResource("4_base")
 turret_head_sprite = ExtResource("5_ut8lg")
 turret_chassis_sprite = ExtResource("6_chassis")
 barrel_count = 2
-barrel_spacing = 40.0
+barrel_spacing = 80.0
 max_health = 260.0
 build_cost = {
 "copper": 100,
@@ -38,4 +38,6 @@ power_consumption = 3.0
 attack_speed = 0.5
 attack_range = 5.0
 ammo_types = Array[Resource]([SubResource("Resource_db_ammo")])
+link_range = null
+electrical_power_storage = null
 max_stored_items = 30

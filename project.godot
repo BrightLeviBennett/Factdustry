@@ -18,7 +18,9 @@ config/name="Factdustry"
 run/main_scene="res://main/MainMenu.tscn"
 config/auto_accept_quit=false
 config/features=PackedStringArray("4.6", "Mobile")
-config/icon="res://icon.svg"
+config/icon="uid://bkmy08mybjtx8"
+config/macos_native_icon="uid://bkmy08mybjtx8"
+config/windows_native_icon="uid://bkmy08mybjtx8"
 
 [autoload]
 

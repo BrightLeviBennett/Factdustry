@@ -1,16 +1,21 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://2jp1hiue1mek"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bl64obcpt2s6r" path="res://textures/blocks/item transportation/UnderflowDuct.png" id="1_dyvfh"]
 
 [resource]
 script = ExtResource("1")
 id = &"underflow_duct"
 display_name = "Underflow Duct"
 description = "Underflow routing for duct networks."
-category = 8
+icon = ExtResource("1_dyvfh")
+tags = PackedStringArray("duct", "transport")
 color = Color(0.7, 0.8, 0.4, 1)
+top_sprite = ExtResource("1_dyvfh")
 max_health = 370.0
-build_cost = { "copper": 350, "silicon": 150 }
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
 build_time = 0.5
 transport_speed = 8.0
-tags = PackedStringArray("duct", "transport")

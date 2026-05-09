@@ -1,16 +1,21 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bu462sc6elnr7"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dqpof3wd2gtn6" path="res://textures/blocks/item transportation/DuctSorter.png" id="1_a35rh"]
 
 [resource]
 script = ExtResource("1")
 id = &"duct_sorter"
 display_name = "Duct Sorter"
 description = "Filters specific items in the duct network."
-category = 8
+icon = ExtResource("1_a35rh")
+tags = PackedStringArray("duct", "transport")
 color = Color(0.7, 0.8, 0.4, 1)
+top_sprite = ExtResource("1_a35rh")
 max_health = 290.0
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
 build_time = 0.5
 transport_speed = 7.0
-tags = PackedStringArray("duct", "transport")
