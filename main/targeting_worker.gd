@@ -117,6 +117,7 @@ func _scan_turret_targets(snap: Dictionary) -> Array[Dictionary]:
 	var origins: Dictionary = snap["origins"]
 	var enemies: Array = snap["enemies"]
 	var player_units: Array = snap["player_units"]
+	var held_targets: Array = snap.get("held_targets", [])
 
 	for turret_info in snap["turrets"]:
 		var grid_pos: Vector2i = turret_info["grid_pos"]
@@ -163,31 +164,63 @@ func _scan_turret_targets(snap: Dictionary) -> Array[Dictionary]:
 				nearest_bldg = bldg_pos
 				nearest_bldg_world = bldg_world
 
-		# Pick closest overall
+		# Find nearest opposing held entity (held buildings/units in
+		# transit are valid targets — `target_type: "held"`).
+		var nearest_held_anchor := Vector2i(-9999, -9999)
+		var nearest_held_depth: int = 0
+		var nearest_held_pos := Vector2.ZERO
+		var nearest_held_dist_sq := INF
+		for ht in held_targets:
+			if int(ht["faction"]) != opposing_faction:
+				continue
+			var hp: Vector2 = ht["pos"]
+			var dh: float = turret_world.distance_squared_to(hp)
+			if dh <= range_sq and dh < nearest_held_dist_sq:
+				nearest_held_dist_sq = dh
+				nearest_held_anchor = ht["anchor"]
+				nearest_held_depth = int(ht.get("depth", 0))
+				nearest_held_pos = hp
+
+		# Pick closest overall across units / buildings / held entities.
 		var has_unit := nearest_unit_id != -1
 		var has_bldg := nearest_bldg != Vector2i(-1, -1)
-		if not has_unit and not has_bldg:
+		var has_held := nearest_held_anchor != Vector2i(-9999, -9999)
+		if not has_unit and not has_bldg and not has_held:
 			continue
 
-		var shoot_at_unit := false
-		if has_unit and has_bldg:
-			shoot_at_unit = nearest_unit_dist_sq <= nearest_bldg_dist_sq
-		elif has_unit:
-			shoot_at_unit = true
+		var best_dist := INF
+		var best_kind := ""
+		if has_unit and nearest_unit_dist_sq < best_dist:
+			best_dist = nearest_unit_dist_sq
+			best_kind = "unit"
+		if has_bldg and nearest_bldg_dist_sq < best_dist:
+			best_dist = nearest_bldg_dist_sq
+			best_kind = "building"
+		if has_held and nearest_held_dist_sq < best_dist:
+			best_dist = nearest_held_dist_sq
+			best_kind = "held"
 
-		if shoot_at_unit:
+		if best_kind == "unit":
 			results.append({
 				"grid_pos": grid_pos,
 				"target_type": "unit",
 				"target_id": nearest_unit_id,
 				"target_pos": nearest_unit_pos,
 			})
-		else:
+		elif best_kind == "building":
 			results.append({
 				"grid_pos": grid_pos,
 				"target_type": "building",
 				"target_bldg": nearest_bldg,
 				"target_pos": nearest_bldg_world,
+			})
+		else:
+			results.append({
+				"grid_pos": grid_pos,
+				"target_type": "held",
+				"target_anchor": nearest_held_anchor,
+				"target_depth": nearest_held_depth,
+				"target_pos": nearest_held_pos,
 			})
 
 	return results

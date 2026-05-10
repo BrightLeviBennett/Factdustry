@@ -630,13 +630,11 @@ func _register_materials() -> void:
 	_add(&"mat_zinc",     "Zinc",     [&"mat_copper"],  [], {}, Vector2(31, 2), true)
 	_add(&"mat_silver",   "Silver",   [&"mat_copper"],  [], {}, Vector2(32, 2), true)
 
-	# Row 3 — First-pass refinements sitting directly above their
+	# Row 3 — Refinements sitting directly above their
 	# source extractable.
 	_add(&"mat_silicon",  "Silicon",  [&"mat_sand"],    [], {}, Vector2(28, 3), true)
 	_add(&"mat_steel",    "Steel",    [&"mat_iron"],    [], {}, Vector2(29, 3), true)
 	_add(&"mat_brass",    "Brass",    [&"mat_zinc"],    [], {}, Vector2(31, 3), true)
-
-	# Row 4 — Second-pass refinement. Aluminum sits above Alumina.
 	_add(&"mat_aluminum", "Aluminum", [&"mat_bauxite"], [], {}, Vector2(30, 3), true)
 
 	# Keep the legacy nodes in the data model but mark them hidden so

@@ -235,6 +235,17 @@ func _power_sys_ref() -> Node:
 	return _power_sys
 
 
+## "Stored Power: 12 B (20 power for 36 s)" — total internal-battery
+## charge across the network, plus the implied discharge rating using
+## the user-facing 1B = 20 power × 3s convention.
+func _format_stored_power_label(ps: Node, cell: Vector2i) -> String:
+	if ps == null or not ps.has_method("get_network_total_internal_battery_units"):
+		return "Stored Power: 0 B (20 power for 0 s)"
+	var info: Dictionary = ps.get_network_total_internal_battery_units(cell)
+	var b: float = float(info.get("charge_b", 0.0))
+	return "Stored Power: %.0f B (20 power for %.0f s)" % [b, b * 3.0]
+
+
 func _ready() -> void:
 	await get_tree().process_frame
 	main = get_node("/root/Main")
@@ -1012,10 +1023,10 @@ func _create_block_menu() -> void:
 	misc_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
 	misc_panel.add_child(misc_hbox)
 
-	_add_misc_button("⬡", "Tech Tree", _on_misc_tech_tree)
+	_add_misc_button("⬡", "Tech Tree", _on_misc_tech_tree, preload("res://textures/UI/TechTreeIcon.png"))
 	_add_misc_button("📋", "Schematics", _on_misc_schematics)
-	_add_misc_button("📖", "Database", _on_misc_database)
-	_add_misc_button("🌍", "Planet Map", _on_misc_planet_map)
+	_add_misc_button("📖", "Database", _on_misc_database, preload("res://textures/UI/CoreDatabaseIcon.png"))
+	_add_misc_button("🌍", "Planet Map", _on_misc_planet_map, preload("res://textures/UI/TarkonIcon.png"))
 
 	# --- Right Column: Category Tabs ---
 	var cat_grid = GridContainer.new()
@@ -1054,12 +1065,19 @@ func _add_category_button(cat: int) -> void:
 	category_buttons[cat] = btn
 
 
-func _add_misc_button(icon_text: String, tooltip: String, callback: Callable) -> void:
+func _add_misc_button(icon_text: String, tooltip: String, callback: Callable, icon_tex: Texture2D = null) -> void:
 	var btn = Button.new()
-	btn.text = icon_text
-	btn.tooltip_text = tooltip
 	btn.custom_minimum_size = Vector2(BLOCK_BTN_SIZE, BLOCK_BTN_SIZE)
-	btn.add_theme_font_size_override("font_size", 18)
+
+	if icon_tex != null:
+		btn.icon = icon_tex
+		btn.expand_icon = true
+		btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		btn.add_theme_constant_override("icon_max_width", 22)
+	else:
+		btn.text = icon_text
+		btn.tooltip_text = tooltip
+		btn.add_theme_font_size_override("font_size", 18)
 
 	var style = _make_cat_style(Color(0.06, 0.08, 0.12, 0.8))
 	var hover = _make_cat_style(Color(0.1, 0.14, 0.2, 0.9))
@@ -1153,9 +1171,26 @@ func _add_block_button(block: BlockData) -> void:
 		btn.text = block.display_name.left(3)
 		btn.add_theme_font_size_override("font_size", 10)
 
-	var normal_style = _make_block_style(block.color.darkened(0.6))
-	var hover_style = _make_block_style(block.color.darkened(0.3))
-	var pressed_style = _make_block_style(block.color.darkened(0.1))
+	var normal_style: StyleBox
+	var hover_style: StyleBox
+	var pressed_style: StyleBox
+	if block.icon:
+		# Icon already reads as the block — drop the swatch backdrop so
+		# textured tiles sit on transparent buttons. Hover / pressed
+		# darken the cell with a translucent black overlay (instead of
+		# brightening, which read as "lit up the empty button").
+		var empty := StyleBoxEmpty.new()
+		empty.content_margin_left = 2
+		empty.content_margin_right = 2
+		empty.content_margin_top = 2
+		empty.content_margin_bottom = 2
+		normal_style = empty
+		hover_style = _make_block_style(Color(0, 0, 0, 0.25))
+		pressed_style = _make_block_style(Color(0, 0, 0, 0.4))
+	else:
+		normal_style = _make_block_style(block.color.darkened(0.6))
+		hover_style = _make_block_style(block.color.darkened(0.3))
+		pressed_style = _make_block_style(block.color.darkened(0.1))
 	btn.add_theme_stylebox_override("normal", normal_style)
 	btn.add_theme_stylebox_override("hover", hover_style)
 	btn.add_theme_stylebox_override("pressed", pressed_style)
@@ -2374,7 +2409,24 @@ func _on_building_selected(block_id: StringName) -> void:
 		if not block:
 			continue
 		if bid == block_id:
-			btn.add_theme_stylebox_override("normal", _make_block_style(block.color.darkened(0.1)))
+			if block.icon:
+				# Selected textured tile: dark overlay + bright border so
+				# the icon reads as picked without lightening the swatch.
+				var sel := _make_block_style(Color(0, 0, 0, 0.35))
+				sel.border_color = block.color.lightened(0.4)
+				sel.set_border_width_all(2)
+				btn.add_theme_stylebox_override("normal", sel)
+			else:
+				btn.add_theme_stylebox_override("normal", _make_block_style(block.color.darkened(0.1)))
+		elif block.icon:
+			# Textured tiles use a transparent normal so the icon reads
+			# without a coloured swatch behind it.
+			var empty := StyleBoxEmpty.new()
+			empty.content_margin_left = 2
+			empty.content_margin_right = 2
+			empty.content_margin_top = 2
+			empty.content_margin_bottom = 2
+			btn.add_theme_stylebox_override("normal", empty)
 		else:
 			btn.add_theme_stylebox_override("normal", _make_block_style(block.color.darkened(0.6)))
 
@@ -3745,15 +3797,15 @@ func _update_network_info_panel(hovered_grid: Vector2i) -> void:
 		use_lbl.text = "Consumption: %.0f" % float(net.get("use", 0.0))
 		use_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		network_info_left.add_child(use_lbl)
-		# Rolling 1-minute average power use.
+		# Sum of every block's internal-battery reservoir in this network.
+		# Replaces the old 1-minute average draw — the stored buffer is
+		# more actionable (it directly tells the player how long the
+		# network can ride out a brownout).
 		var avg_lbl := Label.new()
 		avg_lbl.add_theme_font_size_override("font_size", 12)
 		avg_lbl.add_theme_color_override("font_color", Color(0.85, 0.7, 0.95))
 		avg_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var avg_use_now: float = 0.0
-		if ps.has_method("get_network_avg_use"):
-			avg_use_now = float(ps.get_network_avg_use(effective_cell, 60.0))
-		avg_lbl.text = "Average Consumption: %.0f" % avg_use_now
+		avg_lbl.text = _format_stored_power_label(ps, effective_cell)
 		network_info_left.add_child(avg_lbl)
 		_network_info_avg_lbl = avg_lbl
 		# Graph button.
@@ -3773,9 +3825,8 @@ func _update_network_info_panel(hovered_grid: Vector2i) -> void:
 		if children.size() >= 2:
 			(children[0] as Label).text = "Production: %.0f" % float(net.get("gen", 0.0))
 			(children[1] as Label).text = "Consumption: %.0f" % float(net.get("use", 0.0))
-		if _network_info_avg_lbl != null and is_instance_valid(_network_info_avg_lbl) \
-				and ps.has_method("get_network_avg_use"):
-			_network_info_avg_lbl.text = "Average Consumption: %.0f" % float(ps.get_network_avg_use(effective_cell, 60.0))
+		if _network_info_avg_lbl != null and is_instance_valid(_network_info_avg_lbl):
+			_network_info_avg_lbl.text = _format_stored_power_label(ps, effective_cell)
 		_refresh_network_info_status(net)
 
 
@@ -4237,11 +4288,13 @@ func _draw_network_graph() -> void:
 	# (samples don't get pushed AND the X-axis doesn't slide forward).
 	var now: float = _network_graph_clock
 	var t_start: float = now - 600.0
-	# Find max y for scaling: use whichever of gen/use is larger.
+	# Find max y for scaling: use whichever of gen/use/stored is largest.
+	# Stored is in B units (1B = 60 ps), plotted on the same axis.
 	var y_max: float = 1.0
 	for s in samples:
 		y_max = maxf(y_max, float(s["gen"]))
 		y_max = maxf(y_max, float(s["use"]))
+		y_max = maxf(y_max, float(s.get("stored", 0.0)))
 	# Round up to a nice step.
 	var step: float = pow(10.0, floor(log(y_max) / log(10.0)))
 	if step < 1.0:
@@ -4273,6 +4326,7 @@ func _draw_network_graph() -> void:
 	# Build polylines.
 	var gen_pts: PackedVector2Array = []
 	var use_pts: PackedVector2Array = []
+	var stored_pts: PackedVector2Array = []
 	for s in samples:
 		var t: float = float(s["t"])
 		if t < t_start:
@@ -4281,12 +4335,16 @@ func _draw_network_graph() -> void:
 		var x: float = plot_rect.position.x + plot_rect.size.x * fx
 		var fy_g: float = clampf(float(s["gen"]) / y_max, 0.0, 1.0)
 		var fy_u: float = clampf(float(s["use"]) / y_max, 0.0, 1.0)
+		var fy_s: float = clampf(float(s.get("stored", 0.0)) / y_max, 0.0, 1.0)
 		gen_pts.append(Vector2(x, plot_rect.position.y + plot_rect.size.y * (1.0 - fy_g)))
 		use_pts.append(Vector2(x, plot_rect.position.y + plot_rect.size.y * (1.0 - fy_u)))
+		stored_pts.append(Vector2(x, plot_rect.position.y + plot_rect.size.y * (1.0 - fy_s)))
 	if gen_pts.size() >= 2:
 		canvas.draw_polyline(gen_pts, Color(0.5, 0.85, 1.0, 0.95), 2.0, true)
 	if use_pts.size() >= 2:
 		canvas.draw_polyline(use_pts, Color(1.0, 0.75, 0.4, 0.95), 2.0, true)
+	if stored_pts.size() >= 2:
+		canvas.draw_polyline(stored_pts, Color(0.85, 0.55, 1.0, 0.95), 2.0, true)
 
 	# Legend
 	var lx: float = plot_rect.position.x + plot_rect.size.x - 130
@@ -4297,6 +4355,9 @@ func _draw_network_graph() -> void:
 	canvas.draw_line(Vector2(lx, ly + 16), Vector2(lx + 18, ly + 16), Color(1.0, 0.75, 0.4), 2.0)
 	canvas.draw_string(font, Vector2(lx + 24, ly + 20), "Consumption",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(1.0, 0.85, 0.7))
+	canvas.draw_line(Vector2(lx, ly + 32), Vector2(lx + 18, ly + 32), Color(0.85, 0.55, 1.0), 2.0)
+	canvas.draw_string(font, Vector2(lx + 24, ly + 36), "Stored (B)",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.92, 0.78, 1.0))
 
 	# --- Hover overlay: horizontal white line at the cursor's Y, with a
 	# stack of icons rising from the bottom of the chart at the cursor's

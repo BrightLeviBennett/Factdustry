@@ -157,6 +157,13 @@ func _release_shot_id(sid: int) -> void:
 
 # --- THREADING ---
 var _targeting_worker: TargetingWorker
+
+# Per-crane-anchor cooldown for held LUMINA turrets that fire at
+# enemies while in transit. Anchor → seconds remaining; entries decay
+# each frame and are dropped on payload drop / pickup.
+var held_turret_cooldowns: Dictionary = {}
+# Same idea, for held LUMINA units that fire at enemies in transit.
+var held_unit_cooldowns: Dictionary = {}
 ## Cached turret scan results from the worker thread (keyed by grid_pos)
 var _turret_targets: Dictionary = {}  # Vector2i -> Dictionary
 ## Cached unit scan results from the worker thread (keyed by unit instance ID)
@@ -250,6 +257,8 @@ func _process(delta: float) -> void:
 	_poll_targeting_results()
 	_push_targeting_snapshot()
 	_update_turrets(delta)
+	_update_held_turrets(delta)
+	_update_held_units(delta)
 	_update_drone_combat(delta)
 	_update_projectiles(delta)
 	queue_redraw()
@@ -359,8 +368,42 @@ func _push_targeting_snapshot() -> void:
 		if bd_f and bd_f.tags.has("platform"):
 			continue
 		filtered_buildings[cell] = bid_f
+	# Held entities: every crane state with a held payload contributes a
+	# world-positioned target. Held LUMINA pieces sit in the player_units-
+	# equivalent slot (FEROX turrets shoot at them); held FEROX pieces
+	# (rare/unsupported in current setup) sit in the enemies slot. Each
+	# entry uses the holding crane's anchor as a stable id, plus the
+	# grabber's live world position.
+	# Each crane contributes ONE entry per layer of its nested cargo.
+	# A bullet can target a specific layer (the crane being held vs.
+	# the block at the tip), so destroying a crane mid-chain doesn't
+	# happen accidentally just because the projectile reached the tip.
+	var held_targets_snap: Array = []
+	var building_sys_snap = get_node_or_null("/root/Main/BuildingSystem")
+	if building_sys_snap and building_sys_snap.has_method("collect_held_chain"):
+		for ca in building_sys_snap.crane_states:
+			var chain: Array = building_sys_snap.collect_held_chain(ca)
+			for entry in chain:
+				var pdict: Dictionary = entry["payload"]
+				var ckind: String = String(pdict.get("type", ""))
+				if ckind != "building" and ckind != "unit":
+					continue
+				var faction_h: int
+				if ckind == "building":
+					faction_h = int(pdict.get("faction", main.Faction.LUMINA))
+				else:
+					faction_h = main.get_building_faction(ca)
+				held_targets_snap.append({
+					"anchor": ca,
+					"depth": int(entry["depth"]),
+					"pos": entry["pos"],
+					"faction": faction_h,
+					"kind": ckind,
+					"size": float(main.GRID_SIZE),
+				})
 	_targeting_worker.push_snapshot({
 		"enemies": enemies_snap,
+		"held_targets": held_targets_snap,
 		"player_units": player_snap,
 		"buildings": filtered_buildings,
 		"factions": main.building_factions.duplicate(),
@@ -482,11 +525,15 @@ func _update_turrets(delta: float) -> void:
 		var turret_faction: int = main.get_building_faction(turret_anchor)
 
 		var target_world: Vector2 = target_info["target_pos"]
-		var shoot_at_unit: bool = target_info["target_type"] == "unit"
+		var target_type_str: String = String(target_info["target_type"])
+		var shoot_at_unit: bool = target_type_str == "unit"
+		var shoot_at_held: bool = target_type_str == "held"
 
 		# Resolve live target references
 		var nearest_unit: Node2D = null
 		var nearest_bldg := Vector2i(-1, -1)
+		var held_target_anchor := Vector2i(-9999, -9999)
+		var held_target_depth: int = 0
 		if shoot_at_unit:
 			var target_id: int = target_info["target_id"]
 			var obj = instance_from_id(target_id)
@@ -495,6 +542,20 @@ func _update_turrets(delta: float) -> void:
 				target_world = nearest_unit.position  # Use live position
 			else:
 				continue  # Target died since scan
+		elif shoot_at_held:
+			held_target_anchor = target_info.get("target_anchor", Vector2i(-9999, -9999))
+			held_target_depth = int(target_info.get("target_depth", 0))
+			# Confirm the layer the worker tagged is still in the chain
+			# — payload may have been dropped or destroyed since.
+			var bsys_h = get_node_or_null("/root/Main/BuildingSystem")
+			if bsys_h == null or not bsys_h.has_method("get_held_payload_at_depth"):
+				continue
+			var live_layer: Dictionary = bsys_h.get_held_payload_at_depth(held_target_anchor, held_target_depth)
+			if live_layer.is_empty():
+				continue
+			# Track the layer's live world position (each level walks
+			# the crane chain through `held_entity_world_at_depth`).
+			target_world = bsys_h.held_entity_world_at_depth(held_target_anchor, held_target_depth)
 		else:
 			nearest_bldg = target_info["target_bldg"]
 			if not main.placed_buildings.has(nearest_bldg):
@@ -511,6 +572,10 @@ func _update_turrets(delta: float) -> void:
 		if shoot_at_unit:
 			if nearest_unit and "team" in nearest_unit:
 				target_faction = main.Faction.LUMINA if nearest_unit.team == UnitData.Team.PLAYER else main.Faction.FEROX
+		elif shoot_at_held:
+			# Held entity faction = its holder's faction (the cargo
+			# inherits side from the crane carrying it).
+			target_faction = main.get_building_faction(held_target_anchor)
 		else:
 			var bldg_anchor: Vector2i = main.building_origins.get(nearest_bldg, nearest_bldg)
 			target_faction = main.get_building_faction(bldg_anchor)
@@ -692,10 +757,13 @@ func _update_turrets(delta: float) -> void:
 		# turret's centre the instant it spawned, which visually reads as
 		# "all bullets come from the middle". Travelling along aim_dir
 		# keeps each bullet in a straight line out of its own barrel.
+		# Bullets always travel along the turret's aim axis for the
+		# full attack_range, regardless of how close the target is.
+		# A target hit registers when the projectile reaches its
+		# `target_pos` (handled by `_on_projectile_hit`) or via
+		# along-path collision (walls / direct-fire path).
 		var base_shot_dir: Vector2 = aim_dir
-		if lateral_offset == 0.0 and (target_world - fire_pos).length() > 0.001:
-			base_shot_dir = (target_world - fire_pos).normalized()
-		var shot_distance: float = maxf((target_world - fire_pos).length(), 1.0)
+		var shot_distance: float = data.attack_range * main.GRID_SIZE
 		var pellet_total: int = maxi(fire_pellets, 1)
 		# Multi-pellet salvos share a shot_id so repeat hits on the same
 		# target halve damage per extra pellet.
@@ -718,20 +786,18 @@ func _update_turrets(delta: float) -> void:
 			var pellet_angle: float = base_shot_dir.angle() + spread_rad
 			var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * shot_distance
 
-			# Turret effective range in pixels (base range in grid tiles + any
-			# ammo range bonus). Projectiles despawn once they've traveled this
-			# far from their spawn point.
-			var fire_max_range: float = (data.attack_range * main.GRID_SIZE) + fire_range_bonus
+			# Bullets fly to the end of the turret's range; ammo's
+			# `range_bonus` is intentionally ignored so the visible
+			# travel distance matches the turret stat the player sees.
+			var fire_max_range: float = data.attack_range * main.GRID_SIZE
 
 			if shoot_at_unit:
-				# Multi-barrel turrets need their projectiles to travel
-				# along the aim axis so each bullet visibly comes out of
-				# its own barrel instead of snapping back toward the
-				# centre. For single-barrel / centred turrets we preserve
-				# the historical "aim at actual target" behaviour so the
-				# bullet lands exactly on the unit.
-				var proj_target: Vector2 = pellet_target if lateral_offset != 0.0 else \
-					(nearest_unit.position if pellet_i == 0 and fire_pellets == 1 else pellet_target)
+				# Always fly the full range along the aim axis — every
+				# bullet's `target_pos` is the end-of-range point, and
+				# damage to `nearest_unit` is delivered when the
+				# projectile reaches that point (or via along-path
+				# collision for walls / direct-fire bullets).
+				var proj_target: Vector2 = pellet_target
 				_spawn_projectile(
 					fire_pos,
 					nearest_unit,
@@ -759,9 +825,42 @@ func _update_turrets(delta: float) -> void:
 						"shot_id": salvo_shot_id,
 					},
 				)
+			elif shoot_at_held:
+				# Held entity at a SPECIFIC layer of the cargo chain.
+				# `target_ref` carries both the holding crane's anchor
+				# and the depth so damage routes only to that layer —
+				# a hit on the held crane shouldn't destroy the block
+				# at the tip and vice versa.
+				var proj_target_h: Vector2 = pellet_target
+				_spawn_projectile(
+					fire_pos,
+					{"anchor": held_target_anchor, "depth": held_target_depth},
+					proj_target_h,
+					"held",
+					fire_speed,
+					fire_damage * fire_unit_mult,
+					fire_color,
+					"turret",
+					fire_aoe,
+					fire_aoe_radius,
+					turret_faction,
+					{
+						"lifetime": fire_lifetime,
+						"radius": fire_radius,
+						"pierce": fire_pierce,
+						"homing": fire_homing,
+						"knockback": fire_knockback,
+						"trail_color": fire_trail_color,
+						"collides_air": fire_collides_air,
+						"collides_ground": fire_collides_ground,
+						"status": fire_status,
+						"splash_mult": fire_splash_mult,
+						"max_range": fire_max_range,
+						"shot_id": salvo_shot_id,
+					},
+				)
 			else:
-				var proj_target_b: Vector2 = pellet_target if lateral_offset != 0.0 else \
-					(target_world if pellet_i == 0 and fire_pellets == 1 else pellet_target)
+				var proj_target_b: Vector2 = pellet_target
 				_spawn_projectile(
 					fire_pos,
 					nearest_bldg,
@@ -879,11 +978,11 @@ func _update_drone_combat(delta: float) -> void:
 		return
 
 	# Manual shoot is active only in default mode AND while LMB is held
-	# (with no GUI hover / no building selected). Outside that window
-	# the drone falls through to the AI auto-shoot branch — but ONLY if
-	# we're in shooting mode. In heal mode, auto-shoot is suppressed so
-	# the two modes are properly siloed (heal mode = healing only,
-	# shooting mode = shooting only).
+	# (with no GUI hover / no building selected). Outside that window —
+	# AND only while we're in HEAL mode — the drone falls through to AI
+	# auto-shoot. The two modes complement each other: in heal mode the
+	# player drives the heal beam and the AI handles shooting; in shoot
+	# mode the player drives the gun and the AI handles healing.
 	var heal_active: bool = "heal_mode" in drone and bool(drone.heal_mode)
 	var manual_shoot_active: bool = false
 	if not heal_active:
@@ -895,7 +994,14 @@ func _update_drone_combat(delta: float) -> void:
 		manual_shoot_active = lmb
 	drone_is_shooting = manual_shoot_active
 
-	if heal_active:
+	# Branch:
+	#  - Manual shoot active (always shoot mode + LMB) → fire from cursor
+	#    aim at the bottom of this function.
+	#  - Otherwise, AI auto-shoot only runs in heal mode (player is busy
+	#    healing, AI handles enemies). In shoot mode without LMB held the
+	#    drone simply holds fire — no auto-shoot, since manual shoot is
+	#    the player's job in this mode.
+	if not manual_shoot_active and not heal_active:
 		return
 
 	if not manual_shoot_active:
@@ -1118,11 +1224,12 @@ func _update_projectiles(delta: float) -> void:
 	for i in range(projectiles.size()):
 		var proj = projectiles[i]
 
-		# Lifetime expiry — Mindustry-style despawn after N seconds.
+		# Lifetime is no longer the despawn driver — bullets always
+		# fly the turret's `attack_range` and die there (or sooner on
+		# wall / direct-fire collision). Age still advances so any
+		# downstream visual effect that reads it (trail fade, etc.)
+		# keeps working.
 		proj["age"] = proj.get("age", 0.0) + delta
-		if proj["age"] >= proj.get("lifetime", 999.0):
-			to_remove.append(i)
-			continue
 
 		# Max-range despawn — stop the projectile once it has travelled further
 		# than the turret's effective range from where it was fired.
@@ -1226,6 +1333,22 @@ func _update_target_pos(proj: Dictionary) -> void:
 			if drone:
 				proj["target_pos"] = drone.position
 
+		"held":
+			# target_ref = {anchor: Vector2i, depth: int}. Track the
+			# layer's live world position so the projectile follows it
+			# through the chain.
+			var ref_h = proj["target_ref"]
+			if ref_h is Dictionary:
+				var anchor_h = (ref_h as Dictionary).get("anchor", Vector2i(-9999, -9999))
+				var depth_h: int = int((ref_h as Dictionary).get("depth", 0))
+				if anchor_h is Vector2i:
+					var bsys_p = get_node_or_null("/root/Main/BuildingSystem")
+					if bsys_p and bsys_p.has_method("held_entity_world_at_depth") \
+							and bsys_p.has_method("get_held_payload_at_depth"):
+						var live_p: Dictionary = bsys_p.get_held_payload_at_depth(anchor_h, depth_h)
+						if not live_p.is_empty():
+							proj["target_pos"] = bsys_p.held_entity_world_at_depth(anchor_h, depth_h)
+
 
 func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 	var splash_mult: float = float(proj.get("splash_mult", 1.0))
@@ -1282,6 +1405,19 @@ func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 			if drone:
 				drone.take_damage(proj["damage"])
 
+		"held":
+			# Damage routes only to the layer the projectile was aimed
+			# at — a bullet at the tip damages the tip, not the crane
+			# carrying it.
+			var ref_hit = proj["target_ref"]
+			if ref_hit is Dictionary:
+				var anchor_hit = (ref_hit as Dictionary).get("anchor", Vector2i(-9999, -9999))
+				var depth_hit: int = int((ref_hit as Dictionary).get("depth", 0))
+				if anchor_hit is Vector2i:
+					var bsys_h2 = get_node_or_null("/root/Main/BuildingSystem")
+					if bsys_h2 and bsys_h2.has_method("damage_held_entity"):
+						bsys_h2.damage_held_entity(anchor_hit, proj["damage"], depth_hit)
+
 
 ## Returns true if this projectile is allowed to hit the given unit, based on
 ## its collides_air / collides_ground filters.
@@ -1322,6 +1458,215 @@ func _apply_status(unit: Node2D, effect: Resource) -> void:
 # =========================
 # HELPERS
 # =========================
+
+## Walks every crane state with a LUMINA building turret as held
+## payload and lets it fire at nearby enemy units (and enemy buildings
+## when no units are nearby). Held turrets fire from the grabber's
+## current world position with their saved aim offset, drain their
+## payload `internal_battery_charge` per shot, and use a per-anchor
+## cooldown stored in `held_cooldowns` so they don't spam.
+func _update_held_turrets(delta: float) -> void:
+	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	if building_sys == null or not ("crane_states" in building_sys):
+		return
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr == null:
+		return
+	var crane_states: Dictionary = building_sys.crane_states
+	# Tick down cooldowns + drop stale entries (anchor no longer holding
+	# a building, or anchor itself was destroyed).
+	for k in held_turret_cooldowns.keys():
+		var still_holding: bool = false
+		if crane_states.has(k):
+			var stk: Dictionary = crane_states[k]
+			var pk = stk.get("held_payload", null)
+			if pk is Dictionary and (pk as Dictionary).get("type", "") == "building":
+				still_holding = true
+		if not still_holding:
+			held_turret_cooldowns.erase(k)
+			continue
+		held_turret_cooldowns[k] = maxf(0.0, float(held_turret_cooldowns[k]) - delta)
+	for anchor in crane_states:
+		var state: Dictionary = crane_states[anchor]
+		var payload: Variant = state.get("held_payload", null)
+		if payload == null or not (payload is Dictionary):
+			continue
+		var p: Dictionary = payload
+		if p.get("type", "") != "building":
+			continue
+		if int(p.get("faction", main.Faction.LUMINA)) != main.Faction.LUMINA:
+			continue
+		var data := Registry.get_block(StringName(p.get("block_id", "")))
+		if data == null or not data.is_turret() or data.turret_head_sprite == null:
+			continue
+		# Resolve world muzzle position from the crane's live grabber.
+		if not building_sys.has_method("held_entity_world"):
+			continue
+		var muzzle_pos: Vector2 = building_sys.held_entity_world(anchor)
+		var range_px: float = data.attack_range * main.GRID_SIZE
+		# Find a target — nearest enemy unit, then nearest enemy building.
+		var target_ref: Node2D = null
+		var target_world: Vector2 = Vector2.ZERO
+		var target_kind: String = ""
+		var nearest: Node2D = _find_nearest_enemy(muzzle_pos, unit_mgr.enemies)
+		if nearest != null and muzzle_pos.distance_to(nearest.position) <= range_px:
+			target_ref = nearest
+			target_world = nearest.position
+			target_kind = "enemy"
+		else:
+			var hb: Vector2i = _find_nearest_enemy_building(muzzle_pos, range_px)
+			if hb != Vector2i(-9999, -9999):
+				target_world = main.grid_to_world(hb) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+				target_kind = "building"
+		if target_kind == "":
+			continue
+		# Track the target with the heads even if the turret can't fire
+		# this frame (cooldown / no battery / no ammo). The held draw
+		# math reverses outer-grabber rotation, so we have to compensate
+		# when writing the saved aim back: held_aim_world = grabber_angle
+		# + (saved_aim - chassis_at_pickup) → invert for saved_aim.
+		var grabber_angle: float = float(state.get("grabber_angle", 0.0))
+		var rot_at_pickup: int = int(p.get("rotation", 0))
+		var chassis_at_pickup: float = float(rot_at_pickup) * (PI / 2.0)
+		var desired_world: float = (target_world - muzzle_pos).angle()
+		var new_saved_aim: float = wrapf(desired_world - grabber_angle + chassis_at_pickup, -PI, PI)
+		p["turret_aim_angle"] = new_saved_aim
+		# Per-barrel snap to the same heading — held turrets skip toe-in
+		# (no live `turret_world` reference) so every barrel just points
+		# at the target alongside the chassis.
+		var bcount: int = maxi(data.barrel_count, 1)
+		var per_barrel: Array = []
+		for _bi in range(bcount):
+			per_barrel.append(new_saved_aim)
+		p["turret_barrel_angles"] = per_barrel
+		# Battery gate — held turrets only fire while the 10B reservoir
+		# has power left to spend on this shot.
+		if data.electrical_power_use > 0.0 and float(p.get("internal_battery_charge", 0.0)) <= 0.0:
+			continue
+		# Cooldown gate.
+		if held_turret_cooldowns.get(anchor, 0.0) > 0.0:
+			continue
+		# Drain battery for this shot.
+		if data.electrical_power_use > 0.0:
+			# One full second of consumption per shot is a reasonable
+			# proxy for "ammo cost" — the held turret pays the same
+			# energy a placed one would pay over `attack_speed` of work.
+			var draw_cost: float = data.electrical_power_use * maxf(data.attack_speed, 0.1)
+			p["internal_battery_charge"] = maxf(0.0, float(p.get("internal_battery_charge", 0.0)) - draw_cost)
+		# Ammo: held turrets pull from `payload.stored_items` (the
+		# block's frozen inventory at pickup, plus anything its held
+		# factory has produced since). No ammo → can't fire.
+		var stored_items: Dictionary = p.get("stored_items", {})
+		var ammo_data: AmmoType = null
+		if data.ammo_types.size() == 0:
+			continue
+		for ammo in data.ammo_types:
+			if ammo == null or not (ammo is AmmoType):
+				continue
+			var atype: AmmoType = ammo as AmmoType
+			var key := String(atype.item_id)
+			var amt: int = maxi(atype.amount_per_shot, 1)
+			if int(stored_items.get(key, 0)) >= amt:
+				stored_items[key] = int(stored_items[key]) - amt
+				ammo_data = atype
+				break
+		if ammo_data == null:
+			continue
+		p["stored_items"] = stored_items
+		# Drain battery for this shot.
+		if data.electrical_power_use > 0.0:
+			var draw_cost: float = data.electrical_power_use * maxf(data.attack_speed, 0.1)
+			p["internal_battery_charge"] = maxf(0.0, float(p.get("internal_battery_charge", 0.0)) - draw_cost)
+		# Spawn projectile — always aimed at the end of the turret's
+		# range along the muzzle's aim axis. Damage to `target_ref`
+		# resolves on arrival via `_on_projectile_hit`.
+		var proj_dir: Vector2 = (target_world - muzzle_pos)
+		if proj_dir.length() < 0.01:
+			continue
+		proj_dir = proj_dir.normalized()
+		var end_pos: Vector2 = muzzle_pos + proj_dir * range_px
+		if target_kind == "enemy":
+			_spawn_projectile(muzzle_pos, target_ref, end_pos, "enemy",
+				ammo_data.projectile_speed, ammo_data.damage * ammo_data.unit_damage_mult,
+				ammo_data.projectile_color, "turret", ammo_data.is_splash,
+				ammo_data.splash_radius if ammo_data.is_splash else 0.0,
+				main.Faction.LUMINA, {"max_range": range_px})
+		else:
+			_spawn_projectile(muzzle_pos, null, end_pos, "none",
+				ammo_data.projectile_speed, ammo_data.damage * ammo_data.building_damage_mult,
+				ammo_data.projectile_color, "turret", ammo_data.is_splash,
+				ammo_data.splash_radius if ammo_data.is_splash else 0.0,
+				main.Faction.LUMINA, {"max_range": range_px})
+		held_turret_cooldowns[anchor] = data.attack_speed * ammo_data.reload_multiplier
+
+
+## Held LUMINA units fire at enemies. Mirrors `_update_held_turrets`
+## but uses unit attack stats (no ammo, no battery — units don't have
+## a battery field), and aims from the live grabber position.
+func _update_held_units(delta: float) -> void:
+	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	if building_sys == null or not ("crane_states" in building_sys):
+		return
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr == null:
+		return
+	var crane_states: Dictionary = building_sys.crane_states
+	for k in held_unit_cooldowns.keys():
+		var still: bool = false
+		if crane_states.has(k):
+			var sk: Dictionary = crane_states[k]
+			var pk = sk.get("held_payload", null)
+			if pk is Dictionary and (pk as Dictionary).get("type", "") == "unit":
+				still = true
+		if not still:
+			held_unit_cooldowns.erase(k)
+			continue
+		held_unit_cooldowns[k] = maxf(0.0, float(held_unit_cooldowns[k]) - delta)
+	for anchor in crane_states:
+		var state: Dictionary = crane_states[anchor]
+		var payload = state.get("held_payload", null)
+		if not (payload is Dictionary):
+			continue
+		var p: Dictionary = payload
+		if p.get("type", "") != "unit":
+			continue
+		var unit_data: UnitData = Registry.get_unit(StringName(p.get("unit_id", "")))
+		if unit_data == null:
+			continue
+		# Units with no attack stats can't shoot — skip the worker, the
+		# medic, etc. (anything carrier-only).
+		if unit_data.attack_damage <= 0.0 or unit_data.attack_range <= 0.0:
+			continue
+		# Faction inherits from the holding crane.
+		var holder_faction: int = main.get_building_faction(anchor)
+		if holder_faction != main.Faction.LUMINA:
+			continue
+		if held_unit_cooldowns.get(anchor, 0.0) > 0.0:
+			continue
+		var muzzle_pos: Vector2 = building_sys.held_entity_world(anchor) if building_sys.has_method("held_entity_world") else Vector2.ZERO
+		var range_px: float = unit_data.attack_range
+		var nearest: Node2D = _find_nearest_enemy(muzzle_pos, unit_mgr.enemies)
+		if nearest == null or muzzle_pos.distance_to(nearest.position) > range_px:
+			continue
+		var dir: Vector2 = (nearest.position - muzzle_pos)
+		if dir.length() < 0.01:
+			continue
+		var aim_dir: Vector2 = dir.normalized()
+		var end_pos_u: Vector2 = muzzle_pos + aim_dir * range_px
+		_spawn_projectile(
+			muzzle_pos,
+			nearest,
+			end_pos_u,
+			"enemy",
+			500.0,
+			unit_data.attack_damage,
+			Color(0.6, 1.0, 0.6, 1.0),
+			"unit",
+			false, 0.0,
+			main.Faction.LUMINA,
+			{"max_range": range_px})
+		held_unit_cooldowns[anchor] = unit_data.attack_speed
+
 
 func _find_nearest_enemy(from_pos: Vector2, enemies: Array[Node2D]) -> Node2D:
 	var nearest: Node2D = null

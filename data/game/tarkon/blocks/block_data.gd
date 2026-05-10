@@ -132,6 +132,14 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## network browns out.
 @export var electrical_power_storage: float = 0.0
 
+## Per-block internal battery capacity in "B" units. 1B = 20 power for
+## 3 seconds (60 power-seconds); charging 1B from empty also takes 3
+## seconds. Used to keep a block running while disconnected (network
+## browned out, carried by a crane). When 0, power-consuming blocks
+## (electrical_power_use > 0) auto-default to 10B at runtime; set this
+## explicitly to override.
+@export var internal_battery_units: int = 0
+
 
 @export_group("Directional IO")
 ## Relative direction (0=right,1=down,2=left,3=up) -> accepted item_id.

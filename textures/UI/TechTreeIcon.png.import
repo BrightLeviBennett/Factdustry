@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://wt1uuwx7eam8"
-path="res://.godot/imported/Takon_preview.png-ca6b2a46f673af00df8985ad6092d8c2.ctex"
+uid="uid://lawpw6eylyvy"
+path="res://.godot/imported/TechTreeIcon.png-9eb0fe4d4ad62896132a0fd1abc9f58c.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/UI/Takon_preview.png"
-dest_files=["res://.godot/imported/Takon_preview.png-ca6b2a46f673af00df8985ad6092d8c2.ctex"]
+source_file="res://textures/UI/TechTreeIcon.png"
+dest_files=["res://.godot/imported/TechTreeIcon.png-9eb0fe4d4ad62896132a0fd1abc9f58c.ctex"]
 
 [params]
 

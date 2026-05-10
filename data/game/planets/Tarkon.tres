@@ -1,6 +1,6 @@
 [gd_resource type="Resource" script_class="PlanetData" format=3 uid="uid://cw1gi8evmq1lj"]
 
-[ext_resource type="Texture2D" uid="uid://wt1uuwx7eam8" path="res://textures/UI/Takon_preview.png" id="1_jh7jy"]
+[ext_resource type="Texture2D" uid="uid://dghc10lnrif0p" path="res://textures/UI/TarkonIcon.png" id="1_jh7jy"]
 [ext_resource type="Script" uid="uid://faqlrfldd46n" path="res://data/game/planets/planet_data.gd" id="1_l8m41"]
 
 [resource]

@@ -1740,6 +1740,28 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 			and building_sys.crane_states.has(anchor):
 		crane_state_snapshot = (building_sys.crane_states[anchor] as Dictionary).duplicate(true)
 
+	# Capture turret aim angles so the held visual freezes the heads
+	# at exactly where they were pointing the moment the crane closed —
+	# instead of snapping back to a default rot=0 pose.
+	var turret_aim_angle: float = 0.0
+	var turret_barrel_angles_snapshot: Array = []
+	var combat_sys = get_node_or_null("CombatSystem")
+	if combat_sys:
+		if "turret_angles" in combat_sys and combat_sys.turret_angles.has(anchor):
+			turret_aim_angle = float(combat_sys.turret_angles[anchor])
+		if "turret_barrel_angles" in combat_sys and combat_sys.turret_barrel_angles.has(anchor):
+			turret_barrel_angles_snapshot = (combat_sys.turret_barrel_angles[anchor] as Array).duplicate()
+
+	# Pull the block's internal-battery charge (10B reservoir) into the
+	# payload so the held simulation can drain it while detached, and
+	# `place_payload_building` can write it back when dropped.
+	var internal_battery_charge: float = 0.0
+	var power_sys_pickup = get_node_or_null("PowerSystem")
+	if power_sys_pickup and power_sys_pickup.has_method("block_internal_battery_charge"):
+		internal_battery_charge = power_sys_pickup.block_internal_battery_charge(anchor)
+		if "_block_internal_battery" in power_sys_pickup:
+			power_sys_pickup._block_internal_battery.erase(anchor)
+
 	# Build payload data
 	var payload := {
 		"type": "building",
@@ -1756,6 +1778,9 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 		"sorter_filter": str(sorter_filter),
 		"drill_timer": drill_timer,
 		"crane_state": crane_state_snapshot,
+		"turret_aim_angle": turret_aim_angle,
+		"turret_barrel_angles": turret_barrel_angles_snapshot,
+		"internal_battery_charge": internal_battery_charge,
 	}
 
 	# Silently remove all tiles of this building
@@ -1952,6 +1977,30 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 			if not (restored.get("target_pos", Vector2.ZERO) is Vector2):
 				restored["target_pos"] = Vector2.ZERO
 			building_sys2.crane_states[grid_pos] = restored
+
+	# Restore turret aim angles so a placed-back turret resumes pointing
+	# the way it was when picked up, instead of snapping to angle 0.
+	if data.is_turret():
+		var combat_sys2 = get_node_or_null("CombatSystem")
+		if combat_sys2:
+			if "turret_angles" in combat_sys2 and payload.has("turret_aim_angle"):
+				combat_sys2.turret_angles[grid_pos] = float(payload["turret_aim_angle"])
+			var bsnap: Array = payload.get("turret_barrel_angles", [])
+			if "turret_barrel_angles" in combat_sys2 and not bsnap.is_empty():
+				combat_sys2.turret_barrel_angles[grid_pos] = bsnap.duplicate()
+
+	# Restore the block's internal-battery charge that was draining
+	# while the block was carried. Power-only blocks don't ship a
+	# `internal_battery_charge` field — defaults to 0 (network charges
+	# it back up).
+	var power_sys_drop = get_node_or_null("PowerSystem")
+	if power_sys_drop and "_block_internal_battery" in power_sys_drop:
+		var saved_charge: float = float(payload.get("internal_battery_charge", 0.0))
+		var cap_drop: float = 0.0
+		if power_sys_drop.has_method("resolve_block_battery_capacity"):
+			cap_drop = power_sys_drop.resolve_block_battery_capacity(data)
+		if cap_drop > 0.0:
+			power_sys_drop._block_internal_battery[grid_pos] = clampf(saved_charge, 0.0, cap_drop)
 	return true
 
 

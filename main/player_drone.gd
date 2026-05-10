@@ -60,6 +60,12 @@ var _next_muzzle_is_right: bool = false
 ## as the lasers do.
 var _thruster_phase: float = 0.0
 
+# Anchors of cores already used as respawn targets in the current cycle.
+# `_move_to_core` walks cores in nearest-first order, skipping anything
+# in this list; once every existing core has been visited the list is
+# reset so the cycle starts again at the nearest.
+var _used_respawn_cores: Array[Vector2i] = []
+
 # --- DATA ---
 # The UnitData resource loaded from player_drone.tres
 var data: UnitData
@@ -853,17 +859,18 @@ func _clear_inventory() -> void:
 
 
 func _move_to_core() -> void:
-	# Prefer the closest LUMINA core to the drone's current position so a
-	# respawn from the far side of the map doesn't teleport back to the
-	# original spawn core when a nearer one exists. Falls back to the
-	# legacy `main.core_position` if no LUMINA core is reachable (e.g.
-	# during initial sector load before building_factions is populated).
-	var anchor: Vector2i = main.get_nearest_lumina_core_anchor(position)
+	# Cycle through cores across consecutive respawns: first respawn picks
+	# the nearest core, subsequent ones step to the next-nearest core that
+	# hasn't been used yet, and once every core has been used the cycle
+	# resets and starts again at the nearest. Falls back to the legacy
+	# `main.core_position` if no LUMINA core is reachable.
+	var anchor: Vector2i = _next_respawn_core_anchor(position)
 	var core_pos: Vector2i
 	var core_data: BlockData = null
 	if anchor != Vector2i(-1, -1):
 		core_pos = anchor
 		core_data = Registry.get_block(main.placed_buildings[anchor])
+		_used_respawn_cores.append(anchor)
 	else:
 		core_pos = main.core_position
 		core_data = Registry.get_block(&"core")
@@ -874,6 +881,54 @@ func _move_to_core() -> void:
 	)
 	_velocity_smooth = Vector2.ZERO
 	_reset_orientation()
+
+
+## Picks the next respawn-target core: nearest LUMINA core not already
+## used in the current cycle. If every existing core has been used (or
+## the used list contains stale anchors that no longer exist), the
+## cycle resets and the nearest core is picked. Returns Vector2i(-1,-1)
+## if no LUMINA cores exist.
+func _next_respawn_core_anchor(world_pos: Vector2) -> Vector2i:
+	var anchors: Array = main.get_lumina_core_anchors()
+	if anchors.is_empty():
+		_used_respawn_cores.clear()
+		return Vector2i(-1, -1)
+
+	# Drop tracked anchors whose cores were destroyed/deconstructed so a
+	# vanished core doesn't permanently shrink the active rotation.
+	var live: Dictionary = {}
+	for a in anchors:
+		live[a] = true
+	var pruned: Array[Vector2i] = []
+	for a in _used_respawn_cores:
+		if live.has(a):
+			pruned.append(a)
+	_used_respawn_cores = pruned
+
+	# Cycle complete: every live core has been visited. Reset.
+	if _used_respawn_cores.size() >= anchors.size():
+		_used_respawn_cores.clear()
+
+	var used: Dictionary = {}
+	for a in _used_respawn_cores:
+		used[a] = true
+
+	var best := Vector2i(-1, -1)
+	var best_dist_sq := INF
+	for anchor in anchors:
+		if used.has(anchor):
+			continue
+		var data = Registry.get_block(main.placed_buildings[anchor])
+		var sz: Vector2i = data.grid_size if data else Vector2i(3, 3)
+		var center := Vector2(
+			(anchor.x + sz.x / 2.0) * main.GRID_SIZE,
+			(anchor.y + sz.y / 2.0) * main.GRID_SIZE
+		)
+		var d_sq: float = world_pos.distance_squared_to(center)
+		if d_sq < best_dist_sq:
+			best_dist_sq = d_sq
+			best = anchor
+	return best
 
 
 ## Restores the chassis + head rotations to neutral. Called on any
@@ -1238,10 +1293,10 @@ func _handle_healing(delta: float) -> void:
 		aim_pos = get_global_mouse_position()
 		have_aim = true
 	else:
-		# AI auto-heal is gated to heal mode only. In shooting mode the
-		# beam stays off so the two modes are properly siloed (shooting
-		# mode = shooting only, heal mode = healing only).
-		if not heal_mode:
+		# AI auto-heal only runs in shooting mode — the player is busy
+		# manually firing, so the AI takes over healing. In heal mode
+		# the laser is driven manually only.
+		if heal_mode:
 			heal_target = null
 			_heal_beam_active = false
 			return

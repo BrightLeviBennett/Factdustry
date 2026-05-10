@@ -53,6 +53,23 @@ var elec_networks: Array = []
 # rebuild reads this dict to seed each network's `stored` field. Cleared
 # on building destroy (see _on_building_destroyed).
 var _battery_stored: Dictionary = {}
+# Per-anchor INTERNAL battery (in power-seconds). Independent of
+# `_battery_stored` (which is the network-wide buffer contributed by
+# explicit battery blocks). This is each block's own private reservoir
+# (defaulted to 10B = 600 ps for any block with electrical_power_use > 0)
+# that keeps the block running while detached from the network — carried
+# by a crane, or during a brief brownout. Charges from network surplus
+# at BATTERY_CHARGE_RATE; drains at the block's own consumption rate
+# while detached.
+var _block_internal_battery: Dictionary = {}
+
+## 1B = 60 power-seconds (20 power × 3 s).
+const BATTERY_UNIT_PS := 60.0
+## Charge rate (power-seconds per real-world second) — fills 1B in 3 s.
+const BATTERY_CHARGE_RATE := 20.0
+## Default capacity in B units for blocks that consume power without an
+## explicit `internal_battery_units` override.
+const BATTERY_DEFAULT_UNITS := 10
 # Per-anchor dynamic power-use override. When a block needs a draw that
 # changes at runtime (mass driver weight, future variable-load
 # machines, etc.) the owning system writes a value here and PowerSystem
@@ -168,6 +185,9 @@ func _sample_network_history(delta: float) -> void:
 			"t": now,
 			"gen": float(net.get("gen", 0.0)),
 			"use": float(net.get("use", 0.0)),
+			# Total stored power across every block in the network's
+			# 10B internal-battery reservoirs, in B units (1B = 60 ps).
+			"stored": _sum_internal_battery_units(net),
 		})
 		# Prune old samples (keep only the 10-minute window).
 		while samples.size() > 0 and float(samples[0]["t"]) < cutoff:
@@ -317,6 +337,96 @@ func _process(delta: float) -> void:
 
 ## Returns true if the building at grid_pos is in an electrical network
 ## with enough generation to cover all consumption.
+## Returns the total internal-battery charge in B units across every
+## anchor in `net`'s cells (deduped). 1B = 60 power-seconds; the
+## network info panel + power graph display the result directly.
+func _sum_internal_battery_units(net: Dictionary) -> float:
+	var seen: Dictionary = {}
+	var total_ps: float = 0.0
+	for cell in net.get("cells", []):
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen.has(anchor):
+			continue
+		seen[anchor] = true
+		total_ps += float(_block_internal_battery.get(anchor, 0.0))
+	return total_ps / BATTERY_UNIT_PS
+
+
+## Public accessor — total stored B in the network the cell belongs to,
+## along with the matching capacity. Used by the HUD's network panel.
+func get_network_total_internal_battery_units(grid_pos: Vector2i) -> Dictionary:
+	if not elec_cell_to_net.has(grid_pos):
+		return {"charge_b": 0.0, "capacity_b": 0.0}
+	var net_idx: int = elec_cell_to_net[grid_pos]
+	if net_idx < 0 or net_idx >= elec_networks.size():
+		return {"charge_b": 0.0, "capacity_b": 0.0}
+	var net: Dictionary = elec_networks[net_idx]
+	var seen: Dictionary = {}
+	var charge_ps: float = 0.0
+	var cap_ps: float = 0.0
+	for cell in net.get("cells", []):
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen.has(anchor):
+			continue
+		seen[anchor] = true
+		var d: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if d == null:
+			continue
+		var c: float = resolve_block_battery_capacity(d)
+		if c <= 0.0:
+			continue
+		cap_ps += c
+		charge_ps += float(_block_internal_battery.get(anchor, 0.0))
+	return {"charge_b": charge_ps / BATTERY_UNIT_PS, "capacity_b": cap_ps / BATTERY_UNIT_PS}
+
+
+## Resolves the effective internal-battery capacity (in power-seconds)
+## for a block, applying the auto-default for blocks that consume power
+## without an explicit override.
+func resolve_block_battery_capacity(data: BlockData) -> float:
+	if data == null:
+		return 0.0
+	var units: int = data.internal_battery_units
+	if units <= 0:
+		if data.electrical_power_use > 0.0:
+			units = BATTERY_DEFAULT_UNITS
+		else:
+			return 0.0
+	return float(units) * BATTERY_UNIT_PS
+
+
+## Current internal battery charge (in power-seconds) for a placed
+## block. 0 if no battery / no charge.
+func block_internal_battery_charge(grid_pos: Vector2i) -> float:
+	return float(_block_internal_battery.get(grid_pos, 0.0))
+
+
+## Internal battery capacity (in power-seconds) for a placed block.
+func block_internal_battery_capacity(grid_pos: Vector2i) -> float:
+	var d: BlockData = Registry.get_block(main.placed_buildings.get(grid_pos, &""))
+	return resolve_block_battery_capacity(d)
+
+
+## True if the block at `grid_pos` is powered, either by its electrical
+## network OR by its own internal battery reserve.
+func is_powered_or_battery(grid_pos: Vector2i) -> bool:
+	if is_electrical_powered(grid_pos):
+		return true
+	return block_internal_battery_charge(grid_pos) > 0.0
+
+
+## Drains `amount_ps` power-seconds from the block's internal battery
+## (clamped at 0). Returns the amount actually drained.
+func drain_block_internal_battery(grid_pos: Vector2i, amount_ps: float) -> float:
+	if amount_ps <= 0.0:
+		return 0.0
+	var cur: float = float(_block_internal_battery.get(grid_pos, 0.0))
+	var taken: float = minf(cur, amount_ps)
+	if taken > 0.0:
+		_block_internal_battery[grid_pos] = cur - taken
+	return taken
+
+
 func is_electrical_powered(grid_pos: Vector2i) -> bool:
 	if not elec_cell_to_net.has(grid_pos):
 		return false
@@ -581,6 +691,7 @@ func _compute_efficiency_with_storage(gen: float, use: float, stored: float, cap
 func _tick_batteries(delta: float) -> void:
 	if delta <= 0.0:
 		return
+	_tick_block_internal_batteries(delta)
 	for net in elec_networks:
 		var capacity: float = float(net.get("capacity", 0.0))
 		if capacity <= 0.0:
@@ -627,6 +738,42 @@ func _tick_batteries(delta: float) -> void:
 			_battery_stored[a2] = clampf(
 				float(_battery_stored.get(a2, 0.0)) + share,
 				0.0, d2.electrical_power_storage)
+
+
+## Per-frame charge for every placed block's private internal battery.
+##   - When the cell is powered AND battery isn't full: charge by
+##     BATTERY_CHARGE_RATE × delta (capped at capacity).
+##   - When the cell is unpowered AND the block has consumption: drain
+##     at `electrical_power_use` × delta down to 0. Consumers that want
+##     to "fall through" to battery during a brownout call
+##     `is_powered_or_battery` and the drain is handled here uniformly.
+##   - Blocks without consumption (cable nodes etc.) just hold their
+##     last charge.
+func _tick_block_internal_batteries(delta: float) -> void:
+	# Only iterate placed-building anchors so we don't repeat work for
+	# each tile of a multi-tile block. Track which anchors we've seen.
+	var seen: Dictionary = {}
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen.has(anchor):
+			continue
+		seen[anchor] = true
+		var d: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if d == null:
+			continue
+		var cap: float = resolve_block_battery_capacity(d)
+		if cap <= 0.0:
+			continue
+		var cur: float = float(_block_internal_battery.get(anchor, 0.0))
+		if is_electrical_powered(anchor):
+			# Charge from network surplus.
+			if cur < cap:
+				cur = minf(cap, cur + BATTERY_CHARGE_RATE * delta)
+		else:
+			# Brownout / disconnected. Drain to keep the block alive.
+			if d.electrical_power_use > 0.0 and cur > 0.0:
+				cur = maxf(0.0, cur - d.electrical_power_use * delta)
+		_block_internal_battery[anchor] = cur
 
 
 ## Lightweight rewalk of each network's cells to sum gen/use counting only
@@ -725,6 +872,15 @@ func _get_effective_elec_gen(grid_pos: Vector2i, data: BlockData) -> float:
 		# the generator visibly blinks to 0 power between fuel ticks.
 		if phase != "processing" and phase != "outputting":
 			return 0.0
+	# Sun-deprived sectors (Nightfall Depths, Dark Valley) starve solar
+	# AND vent-driven generators of their full output — vent turbines
+	# only manage 40 power instead of the usual 120 there. Lore: the
+	# whole side of the planet sees almost no sun, so the vents run
+	# colder / weaker. Other generator types are unaffected.
+	if data.id == &"vent_turbine":
+		var sid: StringName = SaveManager.active_sector_id
+		if sid == &"nightfall_depths" or sid == &"dark_valley":
+			return 40.0
 	return data.electrical_power_gen
 
 
@@ -769,4 +925,6 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 	# across rebuilds is intentional, but a destroyed battery's charge is
 	# gone for good (no salvage refund).
 	_battery_stored.erase(_grid_pos)
+	# Per-block internal battery is bound to the placement; gone with it.
+	_block_internal_battery.erase(_grid_pos)
 	_networks_dirty = true

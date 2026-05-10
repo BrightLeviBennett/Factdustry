@@ -32,7 +32,7 @@ extends Node
 # live separately under `SAVES_DIR`.
 const SAVE_DIR := "user://maps/"
 const SAVES_DIR := "user://saves/"
-const SCHEMATIC_DIR := "res://data/user/Schematics/"
+const SCHEMATIC_DIR := "user://schematics/"
 ## Global hints are authored once and active in every sector — stored
 ## here so any sector landing can pull the same list. Bundled fallback
 ## at `res://data/game/global_hints.json` is consulted when the user
@@ -259,6 +259,9 @@ func reset_campaign() -> void:
 		if power_sys and "_battery_stored" in power_sys \
 				and power_sys._battery_stored is Dictionary:
 			power_sys._battery_stored.clear()
+		if power_sys and "_block_internal_battery" in power_sys \
+				and power_sys._block_internal_battery is Dictionary:
+			power_sys._block_internal_battery.clear()
 	# Wipe everything under /saves.
 	var dir = DirAccess.open(SAVES_DIR)
 	if dir != null:

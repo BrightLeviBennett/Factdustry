@@ -28,6 +28,12 @@ var _popup_overlay: PopupOverlay = null
 ## overlay; calls back to `_draw_cable_links(self)` for the actual
 ## drawing so all the texture / state still lives on BuildingSystem.
 var _cable_overlay: Node2D = null
+var _crane_overlay: Node2D = null
+# When non-null (set by _crane_overlay before invoking the crane
+# draw routines), all crane / held-payload draw calls go to this
+# canvas instead of `self`. Lets the overlay paint cranes on a much
+# higher z_index without duplicating any of the draw code.
+var _crane_draw_canvas: CanvasItem = null
 
 # ============================================================
 # BUILDING_SYSTEM.GD - Building Placement & Rendering
@@ -443,6 +449,22 @@ func _ready() -> void:
 	_cable_overlay.set_script(preload("res://main/cable_overlay.gd"))
 	_cable_overlay.set("building_sys", self)
 	add_child(_cable_overlay)
+	# Crane overlay: arms + grabbers + held cargo render here, on top
+	# of every in-world layer (units, turret heads, projectiles) so a
+	# crane carrying something never visually disappears underneath
+	# whatever's at its grabber.
+	_crane_overlay = Node2D.new()
+	_crane_overlay.name = "CraneOverlay"
+	# Godot caps z_index at 4096; 4097 was silently rejected and the
+	# overlay fell back to z=0, dropping the cranes UNDER blocks (z=50)
+	# and terrain walls (z≈52). 4096 is the documented max — same z as
+	# popup_overlay, but our overlay is added AFTER popup so siblings
+	# break the tie in our favour.
+	_crane_overlay.z_index = 4096
+	_crane_overlay.z_as_relative = false
+	_crane_overlay.set_script(preload("res://main/crane_overlay.gd"))
+	_crane_overlay.set("building_sys", self)
+	add_child(_crane_overlay)
 	# Lift the building layer above ground/crawler/hover units so
 	# placed buildings AND placement previews paint over them. Without
 	# this a 2×2 ghost can completely vanish behind a stray crawler in
@@ -1796,6 +1818,7 @@ func _process(_delta: float) -> void:
 		_tick_vent_turbine_states(_delta)
 		_tick_vent_condenser_states(_delta)
 		_tick_autonomous_cranes(_delta)
+		_tick_held_payload_simulation(_delta)
 		if belt_scroll_enabled:
 			# Advance the conveyor scroll phase. Wrap on a 1024 px window —
 			# big enough that no single belt segment hits the modulus,
@@ -4155,7 +4178,10 @@ func _draw() -> void:
 		_ensure_textures_loaded()
 	_draw_placed_buildings()
 	_draw_block_hitboxes()
-	_draw_cranes()
+	# `_draw_cranes` now runs on `_crane_overlay` (z_index 4097) so
+	# arms / grabbers / held cargo paint above units, turret heads,
+	# and bullets. The overlay calls into us with `_crane_draw_canvas`
+	# set so every draw call lands on its higher-z surface.
 	_draw_crane_link_overlays()
 	_draw_hovered_turret_range()
 	_draw_archive_scan_overlay()
@@ -6383,6 +6409,50 @@ func _draw_placed_buildings() -> void:
 			)
 
 
+## Stamps a held turret's chassis plate (multi-barrel) and head
+## sprite(s) on top of the picked-up icon at the saved world-space
+## aim angles, so the heads visibly preserve where they were pointing
+## when picked up. `aim_world` is the chassis aim (or the per-barrel
+## aim if `barrel_angles` is supplied per-head).
+func _draw_held_turret_heads_at(data: BlockData, center: Vector2, aim_world: float, barrel_angles: Array, scale: float) -> void:
+	if data == null or not data.is_turret() or data.turret_head_sprite == null:
+		return
+	var c: CanvasItem = _ccanvas()
+	var bcount: int = maxi(data.barrel_count, 1)
+	var head_tex: Texture2D = data.turret_head_sprite
+	var tex_size: Vector2 = head_tex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR * scale
+	var draw_angle_chassis: float = aim_world + PI / 2.0
+	var chassis_dir := Vector2.from_angle(aim_world)
+	var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
+	var spacing: float = data.barrel_spacing * scale
+	if bcount > 1:
+		c.draw_set_transform(center, draw_angle_chassis)
+		if data.turret_chassis_sprite:
+			var ctex: Texture2D = data.turret_chassis_sprite
+			var csize: Vector2 = ctex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR * scale
+			c.draw_texture_rect(ctex, Rect2(Vector2(-csize.x * 0.5, -csize.y * 0.5), csize), false, Color(1, 1, 1, 1.0))
+		else:
+			var plate_w: float = (float(bcount) - 1.0) * spacing + tex_size.x * 0.9
+			var plate_h: float = tex_size.y * 0.35
+			c.draw_rect(Rect2(Vector2(-plate_w * 0.5, -plate_h * 0.5), Vector2(plate_w, plate_h)), Color(0.32, 0.32, 0.34, 1.0))
+		c.draw_set_transform(Vector2.ZERO, 0.0)
+	for i in range(bcount):
+		var lateral: float = 0.0
+		if bcount > 1:
+			lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * spacing
+		var pivot: Vector2 = center + chassis_perp * lateral
+		var barrel_aim: float = aim_world
+		if i < barrel_angles.size():
+			barrel_aim = float(barrel_angles[i])
+		c.draw_set_transform(pivot, barrel_aim + PI / 2.0)
+		var rect := Rect2(
+			Vector2(-tex_size.x * 0.5, -tex_size.y + 14.0 * main.SPRITE_SCALE_FACTOR * scale),
+			tex_size,
+		)
+		c.draw_texture_rect(head_tex, rect, false, Color(1, 1, 1, 1.0))
+		c.draw_set_transform(Vector2.ZERO, 0.0)
+
+
 ## Draws the turret chassis (multi-barrel only) and head sprite(s) on top
 ## of an existing block preview, rotated to face `rot` (0=right, 1=down,
 ## 2=left, 3=up — same convention as placement_rotation). No-op when the
@@ -7421,6 +7491,7 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 func _draw_crane_payload(payload: Dictionary, pos: Vector2, angle: float, gs: float, scale: float) -> void:
 	if payload == null or payload.is_empty():
 		return
+	var c: CanvasItem = _ccanvas()
 	var ptype: String = payload.get("type", "")
 	if ptype == "building":
 		var block_data = Registry.get_block(StringName(payload.get("block_id", "")))
@@ -7428,16 +7499,50 @@ func _draw_crane_payload(payload: Dictionary, pos: Vector2, angle: float, gs: fl
 			return
 		var bw: float = block_data.grid_size.x * gs * scale
 		var bh: float = block_data.grid_size.y * gs * scale
-		if block_data.icon:
-			var visual_angle: float = angle + PI / 2.0
-			if block_data.tags.has("shaft"):
-				visual_angle += PI / 2.0
-			draw_set_transform(pos, visual_angle)
-			draw_texture_rect(block_data.icon, Rect2(-bw / 2.0, -bh / 2.0, bw, bh), false, Color(1, 1, 1, 1.0))
-			draw_set_transform(Vector2.ZERO, 0.0)
+		var visual_angle: float = angle + PI / 2.0
+		if block_data.tags.has("shaft"):
+			visual_angle += PI / 2.0
+		var is_turret: bool = block_data.is_turret() and block_data.turret_head_sprite != null
+		# Turrets need head positions to come from the saved aim angles,
+		# not the rot=0 bake — otherwise the heads "reset" to a neutral
+		# pose the moment the crane closes. Bake covers chassis-only
+		# blocks (cores, vents); turrets fall through to icon + manual
+		# head overlay below.
+		var composite_info: Dictionary = {}
+		if not is_turret:
+			composite_info = _request_preview_composite(block_data.id, 0)
+		if not composite_info.is_empty():
+			var rs: Vector2 = composite_info["rect_size"]
+			c.draw_set_transform(pos, visual_angle, Vector2(scale, scale))
+			c.draw_texture_rect(composite_info["tex"], Rect2(-rs.x / 2.0, -rs.y / 2.0, rs.x, rs.y), false, Color(1, 1, 1, 1.0))
+			c.draw_set_transform(Vector2.ZERO, 0.0)
+		elif block_data.icon:
+			c.draw_set_transform(pos, visual_angle)
+			c.draw_texture_rect(block_data.icon, Rect2(-bw / 2.0, -bh / 2.0, bw, bh), false, Color(1, 1, 1, 1.0))
+			c.draw_set_transform(Vector2.ZERO, 0.0)
 		else:
-			draw_rect(Rect2(pos.x - bw / 2.0, pos.y - bh / 2.0, bw, bh), Color(block_data.color.r, block_data.color.g, block_data.color.b, 1.0), true)
-		draw_rect(Rect2(pos.x - bw / 2.0, pos.y - bh / 2.0, bw, bh), Color(1, 1, 1, 0.25), false, 2.0)
+			c.draw_rect(Rect2(pos.x - bw / 2.0, pos.y - bh / 2.0, bw, bh), Color(block_data.color.r, block_data.color.g, block_data.color.b, 1.0), true)
+		# Manual turret head overlay at the saved aim angle so the heads
+		# stay glued to whatever direction they were pointing — and
+		# anchored to the rotated icon's local frame so the chassis +
+		# head visually move together.
+		if is_turret:
+			var saved_aim: float = float(payload.get("turret_aim_angle", 0.0))
+			var saved_barrels: Array = payload.get("turret_barrel_angles", [])
+			# Convert the saved world-space aim into a head offset from
+			# the chassis (i.e. "where was the head pointing relative
+			# to the body when picked up?"). The held chassis points
+			# along `angle` in world space, so the held head sits at
+			# `angle + offset` — and the relative pose is preserved
+			# even though the held block tumbles with the grabber.
+			var rot_at_pickup: int = int(payload.get("rotation", 0))
+			var chassis_at_pickup: float = float(rot_at_pickup) * (PI / 2.0)
+			var head_offset: float = wrapf(saved_aim - chassis_at_pickup, -PI, PI)
+			var aim_world: float = angle + head_offset
+			var barrel_world: Array = []
+			for b in saved_barrels:
+				barrel_world.append(angle + wrapf(float(b) - chassis_at_pickup, -PI, PI))
+			_draw_held_turret_heads_at(block_data, pos, aim_world, barrel_world, scale)
 		# If this building is itself a crane, draw a scaled-down version
 		# of its arm + grabber so the player can see where its head was
 		# when it got picked up. If it was holding something, that inner
@@ -7446,45 +7551,52 @@ func _draw_crane_payload(payload: Dictionary, pos: Vector2, angle: float, gs: fl
 		if block_data.tags.has("crane"):
 			var inner_state: Dictionary = payload.get("crane_state", {})
 			if not inner_state.is_empty():
-				var inner_arm_angle: float = float(inner_state.get("arm_angle", 0.0)) + angle
-				var inner_arm_ext: float = float(inner_state.get("arm_extension", CRANE_ARM_MIN_TOTAL))
-				var inner_dir: Vector2 = Vector2(cos(inner_arm_angle), sin(inner_arm_angle))
-				var inner_grabber: Vector2 = pos + inner_dir * inner_arm_ext
-				# Thin arm
-				var arm_thickness: float = 4.0 * main.SPRITE_SCALE_FACTOR
-				var arm_mid: Vector2 = (pos + inner_grabber) / 2.0
-				draw_set_transform(arm_mid, inner_arm_angle)
-				draw_rect(Rect2(-inner_arm_ext / 2.0, -arm_thickness / 2.0, inner_arm_ext, arm_thickness), Color(0.45, 0.45, 0.45, 0.95), true)
-				draw_set_transform(Vector2.ZERO, 0.0)
-				# Cross grabber
-				var inner_g_angle: float = float(inner_state.get("grabber_angle", 0.0)) + angle
-				var inner_held = inner_state.get("held_payload", null)
-				var inner_holding: bool = inner_held != null and inner_held is Dictionary and not (inner_held as Dictionary).is_empty()
-				var inner_cs: float = CRANE_GRABBER_SIZE * (0.7 if inner_holding else 1.0)
-				var inner_thickness: float = 6.0 * main.SPRITE_SCALE_FACTOR
-				# Draw inner held payload first (under grabber)
-				if inner_holding:
-					_draw_crane_payload(inner_held, inner_grabber, inner_g_angle, gs, scale)
-				draw_set_transform(inner_grabber, inner_g_angle)
-				draw_rect(Rect2(-inner_cs, -inner_thickness / 2.0, inner_cs * 2, inner_thickness), Color(0.6, 0.5, 0.2, 0.9), true)
-				draw_rect(Rect2(-inner_thickness / 2.0, -inner_cs, inner_thickness, inner_cs * 2), Color(0.6, 0.5, 0.2, 0.9), true)
-				draw_set_transform(Vector2.ZERO, 0.0)
-				# Base pivot dot
-				draw_circle(pos, 3.0, Color(0.6, 0.6, 0.6, 0.9))
+				# Reuse the same draw path placed cranes use, rooted at
+				# the held icon's center and rotated by the outer
+				# grabber so the inner pose follows the held block.
+				_draw_crane_pose(inner_state, block_data, pos, gs, angle)
 	elif ptype == "unit":
 		var unit_data = Registry.get_unit(StringName(payload.get("unit_id", "")))
+		# Held units render slightly smaller than their on-foot footprint so
+		# they visibly read as "cargo" inside the grabber instead of bumping
+		# up against the block icon they're nested with.
+		var held_unit_scale: float = 0.85
+		var unit_visual: float = gs * scale * held_unit_scale
+		# Saved poses from the moment of pickup. `facing_angle` is the
+		# chassis/body rotation, `aim_angle` is the head rotation —
+		# both world-space at pickup time. Held draw rotates them with
+		# the outer grabber so the unit reads as being carried in its
+		# original pose.
+		var saved_facing: float = float(payload.get("facing_angle", 0.0))
+		var saved_aim: float = float(payload.get("aim_angle", saved_facing))
+		var head_offset_u: float = wrapf(saved_aim - saved_facing, -PI, PI)
+		var body_world: float = angle
+		var head_world: float = body_world + head_offset_u
 		if unit_data:
-			if unit_data.icon:
-				var tex_size: Vector2 = _fit_texture_size(unit_data.icon, gs * scale)
-				draw_texture_rect(unit_data.icon, Rect2(pos.x - tex_size.x / 2.0, pos.y - tex_size.y / 2.0, tex_size.x, tex_size.y), false, Color(1, 1, 1, 1.0))
+			if unit_data.base_sprite or unit_data.head_sprite:
+				if unit_data.base_sprite:
+					var bt_size: Vector2 = _fit_texture_size(unit_data.base_sprite, unit_visual)
+					c.draw_set_transform(pos, body_world + PI / 2.0)
+					c.draw_texture_rect(unit_data.base_sprite, Rect2(-bt_size * 0.5, bt_size), false, Color(1, 1, 1, 1.0))
+					c.draw_set_transform(Vector2.ZERO, 0.0)
+				if unit_data.head_sprite:
+					var h_size: Vector2 = _fit_texture_size(unit_data.head_sprite, unit_visual)
+					c.draw_set_transform(pos, head_world + PI / 2.0)
+					c.draw_texture_rect(unit_data.head_sprite, Rect2(-h_size * 0.5, h_size), false, Color(1, 1, 1, 1.0))
+					c.draw_set_transform(Vector2.ZERO, 0.0)
+			elif unit_data.icon:
+				var tex_size: Vector2 = _fit_texture_size(unit_data.icon, unit_visual)
+				c.draw_set_transform(pos, body_world + PI / 2.0)
+				c.draw_texture_rect(unit_data.icon, Rect2(-tex_size * 0.5, tex_size), false, Color(1, 1, 1, 1.0))
+				c.draw_set_transform(Vector2.ZERO, 0.0)
 			else:
-				var us: float = (unit_data.visual_size if unit_data.visual_size > 0 else 8.0) * scale
+				var us: float = (unit_data.visual_size if unit_data.visual_size > 0 else 8.0) * scale * held_unit_scale
 				var uc: Color = unit_data.color if unit_data.color != Color() else Color(0.5, 0.8, 0.3)
 				uc.a = 1.0
-				draw_circle(pos, us, uc)
-				draw_arc(pos, us, 0, TAU, 24, uc.lightened(0.3), 1.5)
+				c.draw_circle(pos, us, uc)
+				c.draw_arc(pos, us, 0, TAU, 24, uc.lightened(0.3), 1.5)
 		else:
-			draw_circle(pos, 8.0 * scale, Color(0.3, 0.5, 0.9, 1.0))
+			c.draw_circle(pos, 8.0 * scale * held_unit_scale, Color(0.3, 0.5, 0.9, 1.0))
 
 
 ## Draws every active cable-node / cable-tower connection onto
@@ -7853,10 +7965,29 @@ func start_schematic_placement(data: Dictionary) -> void:
 	_schematic_place_rotation.clear()
 	var blocks_data: Dictionary = data.get("blocks", {})
 	var rot_data: Dictionary = data.get("rotation", {})
+
+	# Re-anchor on the actual topmost-leftmost block. Captures stored
+	# rels relative to the user's drag-rect corner, so empty rows/cols
+	# above or to the left of the schematic's content would shift the
+	# cursor off the block and silently break the top-left placement.
+	var raw: Array[Vector2i] = []
 	for key in blocks_data:
 		var parts: PackedStringArray = key.split(",")
 		if parts.size() >= 2:
-			var pos := Vector2i(int(parts[0]), int(parts[1]))
+			raw.append(Vector2i(int(parts[0]), int(parts[1])))
+	var min_x: int = 0
+	var min_y: int = 0
+	if not raw.is_empty():
+		min_x = raw[0].x
+		min_y = raw[0].y
+		for p in raw:
+			if p.x < min_x: min_x = p.x
+			if p.y < min_y: min_y = p.y
+
+	for key in blocks_data:
+		var parts2: PackedStringArray = key.split(",")
+		if parts2.size() >= 2:
+			var pos := Vector2i(int(parts2[0]) - min_x, int(parts2[1]) - min_y)
 			_schematic_place_blocks[pos] = StringName(blocks_data[key])
 			if rot_data.has(key):
 				_schematic_place_rotation[pos] = int(rot_data[key])
@@ -7958,6 +8089,121 @@ func crane_head_world(anchor: Vector2i) -> Vector2:
 	return base + arm_dir * (grabber_t * ext)
 
 
+## Walks a crane's nested held-cargo chain and returns the world
+## position of the deepest payload — i.e. where the held entity
+## actually sits, after every nested crane's saved arm length is
+## applied. Without this, crane→crane→block reports the block at the
+## outer crane's grabber, capping the effective reach to the outer
+## crane's range alone. Each nested crane's saved `arm_angle` is
+## taken in the outer pose's local frame and added on top of the
+## current cumulative grabber angle, mirroring `_draw_crane_pose`.
+## Enumerates every nested held entity in a crane's chain as a separate
+## targetable layer. depth=0 is whatever the placed crane is holding
+## directly (its centre = the placed crane's grabber); depth=N is the
+## thing held by the depth=(N-1) crane (centre = depth=(N-1) crane's
+## grabber). Lets enemies shoot at — and destroy — a SPECIFIC layer of
+## the chain instead of the whole cargo column collapsing whenever a
+## bullet hits the tip.
+func collect_held_chain(crane_anchor: Vector2i) -> Array:
+	var out: Array = []
+	if not crane_states.has(crane_anchor):
+		return out
+	var state: Dictionary = crane_states[crane_anchor]
+	var payload = state.get("held_payload", null)
+	if not (payload is Dictionary):
+		return out
+	var pos: Vector2 = crane_head_world(crane_anchor)
+	var outer_g_angle: float = float(state.get("grabber_angle", 0.0))
+	var depth: int = 0
+	for _i in range(16):
+		if not (payload is Dictionary):
+			break
+		var pdict: Dictionary = payload
+		var ptype: String = String(pdict.get("type", ""))
+		if ptype == "":
+			break
+		out.append({"depth": depth, "pos": pos, "payload": pdict})
+		if ptype != "building":
+			break
+		var bd = Registry.get_block(StringName(pdict.get("block_id", "")))
+		if bd == null or not bd.tags.has("crane"):
+			break
+		var inner_state = pdict.get("crane_state", null)
+		if not (inner_state is Dictionary) or (inner_state as Dictionary).is_empty():
+			break
+		var ist: Dictionary = inner_state
+		var inner_arm_angle: float = float(ist.get("arm_angle", 0.0)) + outer_g_angle
+		var inner_ext: float = float(ist.get("arm_extension", CRANE_ARM_MIN_TOTAL))
+		pos = pos + Vector2(cos(inner_arm_angle), sin(inner_arm_angle)) * inner_ext
+		outer_g_angle = wrapf(outer_g_angle + float(ist.get("grabber_angle", 0.0)), -PI, PI)
+		payload = ist.get("held_payload", null)
+		depth += 1
+	return out
+
+
+## World position of the held entity at `depth` in `crane_anchor`'s
+## chain (0 = directly held). Returns Vector2.ZERO if the depth is
+## past the chain length.
+func held_entity_world_at_depth(crane_anchor: Vector2i, depth: int) -> Vector2:
+	var chain: Array = collect_held_chain(crane_anchor)
+	if depth < 0 or depth >= chain.size():
+		return Vector2.ZERO
+	return chain[depth]["pos"]
+
+
+## Returns the payload Dictionary at `depth` in the chain (mutable
+## reference into the crane state, so callers can write back to e.g.
+## `health` or `internal_battery_charge`).
+func get_held_payload_at_depth(crane_anchor: Vector2i, depth: int) -> Dictionary:
+	if not crane_states.has(crane_anchor):
+		return {}
+	if depth < 0:
+		return {}
+	var payload = (crane_states[crane_anchor] as Dictionary).get("held_payload", null)
+	for _i in range(16):
+		if not (payload is Dictionary):
+			return {}
+		if depth == 0:
+			return payload
+		var pdict: Dictionary = payload
+		if String(pdict.get("type", "")) != "building":
+			return {}
+		var inner_state = pdict.get("crane_state", null)
+		if not (inner_state is Dictionary):
+			return {}
+		payload = (inner_state as Dictionary).get("held_payload", null)
+		depth -= 1
+	return {}
+
+
+func held_entity_world(crane_anchor: Vector2i) -> Vector2:
+	if not crane_states.has(crane_anchor):
+		return Vector2.ZERO
+	var pos: Vector2 = crane_head_world(crane_anchor)
+	var outer_g_angle: float = float((crane_states[crane_anchor] as Dictionary).get("grabber_angle", 0.0))
+	var payload = (crane_states[crane_anchor] as Dictionary).get("held_payload", null)
+	# Defensive depth cap — pathological save data shouldn't loop.
+	for _depth in range(16):
+		if not (payload is Dictionary):
+			break
+		var pdict: Dictionary = payload
+		if String(pdict.get("type", "")) != "building":
+			break
+		var bd = Registry.get_block(StringName(pdict.get("block_id", "")))
+		if bd == null or not bd.tags.has("crane"):
+			break
+		var inner_state = pdict.get("crane_state", null)
+		if not (inner_state is Dictionary) or (inner_state as Dictionary).is_empty():
+			break
+		var ist: Dictionary = inner_state
+		var inner_arm_angle: float = float(ist.get("arm_angle", 0.0)) + outer_g_angle
+		var inner_ext: float = float(ist.get("arm_extension", CRANE_ARM_MIN_TOTAL))
+		pos += Vector2(cos(inner_arm_angle), sin(inner_arm_angle)) * inner_ext
+		outer_g_angle = wrapf(outer_g_angle + float(ist.get("grabber_angle", 0.0)), -PI, PI)
+		payload = ist.get("held_payload", null)
+	return pos
+
+
 ## AI-time target position for `spec` from the perspective of `my_anchor`.
 ## Crane → crane links return the midpoint between the two cranes' centers
 ## (so both cranes converging on this same point cause their heads to meet).
@@ -7983,6 +8229,167 @@ func _crane_ai_target_pos(my_anchor: Vector2i, spec: Dictionary) -> Vector2:
 ##   - held_payload != null  → seek next acceptable output
 ## When the head is "over" a target tile and the precondition is met, the
 ## interaction (pickup/drop) fires. Targets are visited in declaration order.
+## Routes a projectile hit at the held entity carried by `crane_anchor`
+## through the payload's health field. When health reaches 0 the crane
+## drops the cargo (clears `held_payload`) and the held entity is gone
+## for good — same outcome as a placed turret/unit destruction.
+func damage_held_entity(crane_anchor: Vector2i, amount: float, depth: int = 0) -> void:
+	if not crane_states.has(crane_anchor):
+		return
+	var state: Dictionary = crane_states[crane_anchor]
+	# Walk to the parent crane state of the targeted layer so we can
+	# clear it on death. depth=0 → parent is `state` itself; depth=1 →
+	# parent is the inner crane's `crane_state`, etc.
+	var parent: Dictionary = state
+	for _i in range(depth):
+		var pl = parent.get("held_payload", null)
+		if not (pl is Dictionary):
+			return
+		var inner_state = (pl as Dictionary).get("crane_state", null)
+		if not (inner_state is Dictionary):
+			return
+		parent = inner_state
+	var payload = parent.get("held_payload", null)
+	if not (payload is Dictionary):
+		return
+	var p: Dictionary = payload
+	var hp: float = float(p.get("health", 0.0))
+	hp -= amount
+	if hp <= 0.0:
+		# Cargo destroyed. Whatever WAS held by this layer (deeper
+		# nesting, if any) goes with it — same outcome as a placed
+		# crane being destroyed mid-haul.
+		parent["held_payload"] = null
+		parent["grabber_open"] = true
+	else:
+		p["health"] = hp
+
+
+## Walks every crane state with a held building payload and ticks the
+## payload's internal battery + factory_state. Held blocks keep running
+## off their 10B reservoir while detached from any electrical network;
+## when the battery is drained, production stalls. Output items merge
+## back into the payload's `stored_items` so the dropped block lands
+## with whatever it produced en-route.
+func _tick_held_payload_simulation(delta: float) -> void:
+	if delta <= 0.0:
+		return
+	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	for anchor in crane_states:
+		var state: Dictionary = crane_states[anchor]
+		var payload: Variant = state.get("held_payload", null)
+		if payload == null or not (payload is Dictionary):
+			continue
+		var pdict: Dictionary = payload
+		if pdict.get("type", "") != "building":
+			continue
+		_tick_held_building(pdict, delta, power_sys)
+
+
+## Held-payload tick for a single building. Shared by the autonomous
+## crane sim above (so a held block keeps working in transit) and any
+## other path that wants to advance a detached factory snapshot.
+##
+## Drains the payload's `internal_battery_charge` at the block's
+## `electrical_power_use` rate. When the battery has charge, factory
+## state advances at full speed; when empty, production stalls.
+func _tick_held_building(pdict: Dictionary, delta: float, power_sys) -> void:
+	var data := Registry.get_block(StringName(pdict.get("block_id", "")))
+	if data == null:
+		return
+
+	# Battery drain. Power-only blocks (no consumption) skip the
+	# drain entirely; they just sit there happily.
+	var power_eff: float = 1.0
+	if data.electrical_power_use > 0.0:
+		var cap: float = 0.0
+		if power_sys and power_sys.has_method("resolve_block_battery_capacity"):
+			cap = power_sys.resolve_block_battery_capacity(data)
+		var charge: float = float(pdict.get("internal_battery_charge", 0.0))
+		var needed: float = data.electrical_power_use * delta
+		if charge >= needed:
+			pdict["internal_battery_charge"] = clampf(charge - needed, 0.0, cap)
+		elif charge > 0.0:
+			power_eff = charge / maxf(needed, 0.0001)
+			pdict["internal_battery_charge"] = 0.0
+		else:
+			# Battery empty — no production this tick. Inner held cargo
+			# (if this is a crane carrying something) still ticks; its
+			# own battery is independent.
+			power_eff = 0.0
+
+	# Factory advance.
+	if power_eff > 0.0 and data.production_time > 0.0 and (not data.input_items.is_empty() or not data.output_items.is_empty()):
+		_held_factory_advance(pdict, data, delta * power_eff)
+
+	# Recurse into nested held cargo: a held crane keeps its own
+	# `crane_state.held_payload` snapshot. Without this, only the
+	# outermost crane's cargo simulates — the second level down would
+	# freeze the moment its outer crane was picked up.
+	if data.tags.has("crane"):
+		var inner_state: Dictionary = pdict.get("crane_state", {})
+		if not inner_state.is_empty():
+			var inner_payload = inner_state.get("held_payload", null)
+			if inner_payload is Dictionary:
+				var ipd: Dictionary = inner_payload
+				match String(ipd.get("type", "")):
+					"building":
+						_tick_held_building(ipd, delta, power_sys)
+
+
+## Minimal off-grid factory advance. Operates on the merged
+## `stored_items` buffer the payload carries (factory inputs were folded
+## into stored_items at pickup, see main.gd:1709). Outputs land back in
+## stored_items so place_payload_building drops them into block_storage.
+func _held_factory_advance(pdict: Dictionary, data: BlockData, delta: float) -> void:
+	if delta <= 0.0:
+		return
+	var state: Dictionary = pdict.get("factory_state", {})
+	if state.is_empty():
+		state = {"phase": "collecting", "timer": 0.0}
+		pdict["factory_state"] = state
+	var stored: Dictionary = pdict.get("stored_items", {})
+	if stored.is_empty() and not data.input_items.is_empty():
+		# Nothing to consume.
+		return
+
+	var phase: String = String(state.get("phase", "collecting"))
+	if phase == "collecting":
+		# Held factories don't take new inputs (no conveyors). They run
+		# only off whatever was buffered at pickup. If inputs cover one
+		# full recipe, kick off processing.
+		if _held_factory_has_inputs(stored, data):
+			state["phase"] = "processing"
+			state["timer"] = data.production_time
+			state["timer_total"] = data.production_time
+		return
+
+	if phase == "processing":
+		var t: float = float(state.get("timer", data.production_time)) - delta
+		state["timer"] = t
+		if t <= 0.0:
+			# Consume one recipe's inputs.
+			for item_id in data.input_items:
+				var key := String(item_id)
+				var have: int = int(stored.get(key, 0))
+				stored[key] = maxi(0, have - int(data.input_items[item_id]))
+			# Produce outputs.
+			for out_id in data.output_items:
+				var okey := String(out_id)
+				stored[okey] = int(stored.get(okey, 0)) + int(data.output_items[out_id])
+			state["phase"] = "collecting"
+			state["timer"] = 0.0
+		pdict["stored_items"] = stored
+
+
+func _held_factory_has_inputs(stored: Dictionary, data: BlockData) -> bool:
+	for item_id in data.input_items:
+		var have: int = int(stored.get(String(item_id), 0))
+		if have < int(data.input_items[item_id]):
+			return false
+	return true
+
+
 func _tick_autonomous_cranes(delta: float) -> void:
 	if crane_states.is_empty():
 		return
@@ -8215,6 +8622,11 @@ func _crane_autonomous_pickup(anchor: Vector2i, state: Dictionary, head_pos: Vec
 				"unit_id": str(u.data.id) if u.data else "",
 				"health": u.health,
 				"team": u.team if "team" in u else 0,
+				# Snapshot the unit's pose so the held draw shows the head
+				# pointing where the unit was aiming, and respawning it
+				# from the payload restores the same facing.
+				"aim_angle": float(u.aim_angle) if "aim_angle" in u else 0.0,
+				"facing_angle": float(u.facing_angle) if "facing_angle" in u else 0.0,
 			}
 			unit_mgr.player_units.erase(u)
 			u.queue_free()
@@ -8272,6 +8684,14 @@ func _crane_autonomous_drop(anchor: Vector2i, state: Dictionary, head_pos: Vecto
 					var spawned = unit_mgr.player_units[-1]
 					if is_instance_valid(spawned):
 						spawned.health = float(payload.get("health", spawned.health))
+						# Restore the saved pose so the dropped unit
+						# resumes facing/aiming the same way it was
+						# when picked up, instead of snapping to a
+						# default forward.
+						if "facing_angle" in spawned and payload.has("facing_angle"):
+							spawned.facing_angle = float(payload["facing_angle"])
+						if "aim_angle" in spawned and payload.has("aim_angle"):
+							spawned.aim_angle = float(payload["aim_angle"])
 				state["held_payload"] = null
 				state["grabber_open"] = true
 		elif payload.get("type", "") == "building":
@@ -8347,6 +8767,7 @@ func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> 
 ## Draws all crane telescoping arms and cross grabbers.
 func _draw_cranes() -> void:
 	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	var c: CanvasItem = _ccanvas()
 	for anchor in crane_states:
 		if not main.placed_buildings.has(anchor):
 			continue
@@ -8357,92 +8778,101 @@ func _draw_cranes() -> void:
 		var gs: float = main.GRID_SIZE
 		var base: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
 
-		var angle: float = state["arm_angle"]
-		var ext: float = state["arm_extension"]
-		var arm_dir: Vector2 = Vector2(cos(angle), sin(angle))
-
-		# Distribute extension: arm3 extends first to max, then arm2, then arm1.
-		# Each has a minimum length it never goes below.
-		var remaining: float = maxf(ext - CRANE_ARM_MIN_TOTAL, 0.0)
-
-		# Arm3 (innermost, thinnest) extends first
-		var arm3_extra: float = minf(remaining, CRANE_ARM3_MAX - CRANE_ARM3_MIN)
-		remaining -= arm3_extra
-		# Arm2 (middle) extends second
-		var arm2_extra: float = minf(remaining, CRANE_ARM2_MAX - CRANE_ARM2_MIN)
-		remaining -= arm2_extra
-		# Arm1 (outermost, widest) extends last
-		var arm1_extra: float = minf(remaining, CRANE_ARM1_MAX - CRANE_ARM1_MIN)
-
-		var seg1_len: float = CRANE_ARM1_MIN + arm1_extra
-		var seg2_len: float = CRANE_ARM2_MIN + arm2_extra
-		var seg3_len: float = CRANE_ARM3_MIN + arm3_extra
-
-		var seg1_end: Vector2 = base + arm_dir * seg1_len
-		var seg2_end: Vector2 = seg1_end + arm_dir * seg2_len
-		var seg3_end: Vector2 = seg2_end + arm_dir * seg3_len
-		var _arm_end: Vector2 = seg3_end
-
-		# --- Grabber position: slides along the arm to reach the mouse ---
-		# The grabber can travel anywhere from the base to arm_end
-		# (Defensive: a held inner crane's serialized target_pos round-trips
-		# through JSON as a String, so reset to base when not a Vector2.)
-		var tp_raw = state.get("target_pos", base)
-		var target: Vector2 = tp_raw if tp_raw is Vector2 else base
-		if not (tp_raw is Vector2):
-			state["target_pos"] = target
-		var to_target_dist: float = (target - base).length()
-		var total_arm_len: float = seg1_len + seg2_len + seg3_len
-		var grabber_t: float = clampf(to_target_dist / total_arm_len, 0.0, 1.0)
-		var grabber_pos: Vector2 = base + arm_dir * (grabber_t * total_arm_len)
-
-		var holding: bool = state["held_payload"] != null
-		var cs: float = CRANE_GRABBER_SIZE * (0.7 if holding else 1.0)
-		var grabber_thickness: float = 6.0 * main.SPRITE_SCALE_FACTOR
-		var grabber_color := Color(0.6, 0.5, 0.2, 0.9)
-		var g_angle: float = state.get("grabber_angle", 0.0)
-
-		# --- Draw held payload UNDER everything (first) ---
-		if holding:
-			_draw_crane_payload(state["held_payload"], grabber_pos, g_angle, gs, 1.0)
-
-		# --- Draw cross grabber UNDER the arm (rotates with grabber_angle) ---
-		draw_set_transform(grabber_pos, g_angle)
-		# Horizontal bar
-		draw_rect(Rect2(-cs, -grabber_thickness / 2.0, cs * 2, grabber_thickness), grabber_color, true)
-		# Vertical bar
-		draw_rect(Rect2(-grabber_thickness / 2.0, -cs, grabber_thickness, cs * 2), grabber_color, true)
-		draw_set_transform(Vector2.ZERO, 0.0)
-
-		# --- Draw arm segments ON TOP of grabber and payload ---
-		# Segment 1 (outermost, widest — base)
-		var c1: Vector2 = (base + seg1_end) / 2.0
-		draw_set_transform(c1, angle)
-		draw_rect(Rect2(-seg1_len / 2.0, -CRANE_ARM1_WIDTH / 2.0, seg1_len, CRANE_ARM1_WIDTH), Color(0.5, 0.5, 0.5, 0.85), true)
-		draw_rect(Rect2(-seg1_len / 2.0, -CRANE_ARM1_WIDTH / 2.0, seg1_len, CRANE_ARM1_WIDTH), Color(0.6, 0.6, 0.6, 0.3), false, 1.0)
-		draw_set_transform(Vector2.ZERO, 0.0)
-
-		# Segment 2 (middle — slides out from seg1)
-		var c2: Vector2 = (seg1_end + seg2_end) / 2.0
-		draw_set_transform(c2, angle)
-		draw_rect(Rect2(-seg2_len / 2.0, -CRANE_ARM2_WIDTH / 2.0, seg2_len, CRANE_ARM2_WIDTH), Color(0.42, 0.42, 0.42, 0.9), true)
-		draw_rect(Rect2(-seg2_len / 2.0, -CRANE_ARM2_WIDTH / 2.0, seg2_len, CRANE_ARM2_WIDTH), Color(0.55, 0.55, 0.55, 0.3), false, 1.0)
-		draw_set_transform(Vector2.ZERO, 0.0)
-
-		# Segment 3 (innermost, thinnest — slides out from seg2)
-		var c3: Vector2 = (seg2_end + seg3_end) / 2.0
-		draw_set_transform(c3, angle)
-		draw_rect(Rect2(-seg3_len / 2.0, -CRANE_ARM3_WIDTH / 2.0, seg3_len, CRANE_ARM3_WIDTH), Color(0.35, 0.35, 0.35, 0.95), true)
-		draw_rect(Rect2(-seg3_len / 2.0, -CRANE_ARM3_WIDTH / 2.0, seg3_len, CRANE_ARM3_WIDTH), Color(0.5, 0.5, 0.5, 0.3), false, 1.0)
-		draw_set_transform(Vector2.ZERO, 0.0)
+		_draw_crane_pose(state, data, base, gs, 0.0)
 
 		# Draw range circle when controlled
 		if unit_mgr and unit_mgr.controlled_type == "crane" and unit_mgr.controlled_entity == anchor:
 			var range_px: float = data.crane_range * gs
-			draw_arc(base, range_px, 0, TAU, 64, Color(0.4, 0.8, 0.4, 0.15), 1.5)
+			c.draw_arc(base, range_px, 0, TAU, 64, Color(0.4, 0.8, 0.4, 0.15), 1.5)
 
-		# Draw base pivot circle
-		draw_circle(base, 5.0, Color(0.6, 0.6, 0.6, 0.7))
+
+## Returns the canvas crane drawing should target — `_crane_draw_canvas`
+## when `_crane_overlay` is invoking us, otherwise `self` for any
+## legacy code path that still calls the helpers from `_draw`.
+func _ccanvas() -> CanvasItem:
+	return _crane_draw_canvas if _crane_draw_canvas != null else self
+
+
+## Renders a crane's three telescoping segments + grabber + held payload
+## given a `state` dictionary, `base` world position, and an `angle_offset`
+## (rotates the whole pose, used so a crane held by another crane moves
+## with the outer grabber). Shared by `_draw_cranes` (placed cranes) and
+## `_draw_crane_payload` (cranes held as payloads), so the picked-up
+## visual is identical to the live one.
+func _draw_crane_pose(state: Dictionary, data: BlockData, base: Vector2, gs: float, angle_offset: float) -> void:
+	var angle: float = float(state.get("arm_angle", 0.0)) + angle_offset
+	var ext: float = float(state.get("arm_extension", CRANE_ARM_MIN_TOTAL))
+	var arm_dir: Vector2 = Vector2(cos(angle), sin(angle))
+
+	# Distribute extension: arm3 first, then arm2, then arm1.
+	var remaining: float = maxf(ext - CRANE_ARM_MIN_TOTAL, 0.0)
+	var arm3_extra: float = minf(remaining, CRANE_ARM3_MAX - CRANE_ARM3_MIN)
+	remaining -= arm3_extra
+	var arm2_extra: float = minf(remaining, CRANE_ARM2_MAX - CRANE_ARM2_MIN)
+	remaining -= arm2_extra
+	var arm1_extra: float = minf(remaining, CRANE_ARM1_MAX - CRANE_ARM1_MIN)
+
+	var seg1_len: float = CRANE_ARM1_MIN + arm1_extra
+	var seg2_len: float = CRANE_ARM2_MIN + arm2_extra
+	var seg3_len: float = CRANE_ARM3_MIN + arm3_extra
+
+	var seg1_end: Vector2 = base + arm_dir * seg1_len
+	var seg2_end: Vector2 = seg1_end + arm_dir * seg2_len
+	var seg3_end: Vector2 = seg2_end + arm_dir * seg3_len
+
+	# Grabber slides along the arm. `target_pos` is in world coords and
+	# only meaningful for placed cranes — for a held crane its saved
+	# target is stale, so fall back to the arm tip when re-rooting from
+	# `base`. Using distance-from-base keeps the grabber positioned
+	# along the rotated arm correctly.
+	var tp_raw = state.get("target_pos", base)
+	var to_target_dist: float
+	if tp_raw is Vector2 and angle_offset == 0.0:
+		to_target_dist = (tp_raw as Vector2 - base).length()
+	else:
+		to_target_dist = ext
+	var total_arm_len: float = seg1_len + seg2_len + seg3_len
+	var grabber_t: float = clampf(to_target_dist / total_arm_len, 0.0, 1.0)
+	var grabber_pos: Vector2 = base + arm_dir * (grabber_t * total_arm_len)
+
+	var holding: bool = state.get("held_payload", null) != null
+	var cs: float = CRANE_GRABBER_SIZE * (0.7 if holding else 1.0)
+	var grabber_thickness: float = 6.0 * main.SPRITE_SCALE_FACTOR
+	var grabber_color := Color(0.6, 0.5, 0.2, 0.9)
+	var g_angle: float = float(state.get("grabber_angle", 0.0)) + angle_offset
+
+	var c: CanvasItem = _ccanvas()
+	# Held payload UNDER everything.
+	if holding:
+		_draw_crane_payload(state["held_payload"], grabber_pos, g_angle, gs, 1.0)
+
+	# Cross grabber UNDER the arm.
+	c.draw_set_transform(grabber_pos, g_angle)
+	c.draw_rect(Rect2(-cs, -grabber_thickness / 2.0, cs * 2, grabber_thickness), grabber_color, true)
+	c.draw_rect(Rect2(-grabber_thickness / 2.0, -cs, grabber_thickness, cs * 2), grabber_color, true)
+	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+	# Arm segments ON TOP.
+	var c1: Vector2 = (base + seg1_end) / 2.0
+	c.draw_set_transform(c1, angle)
+	c.draw_rect(Rect2(-seg1_len / 2.0, -CRANE_ARM1_WIDTH / 2.0, seg1_len, CRANE_ARM1_WIDTH), Color(0.5, 0.5, 0.5, 0.85), true)
+	c.draw_rect(Rect2(-seg1_len / 2.0, -CRANE_ARM1_WIDTH / 2.0, seg1_len, CRANE_ARM1_WIDTH), Color(0.6, 0.6, 0.6, 0.3), false, 1.0)
+	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+	var c2: Vector2 = (seg1_end + seg2_end) / 2.0
+	c.draw_set_transform(c2, angle)
+	c.draw_rect(Rect2(-seg2_len / 2.0, -CRANE_ARM2_WIDTH / 2.0, seg2_len, CRANE_ARM2_WIDTH), Color(0.42, 0.42, 0.42, 0.9), true)
+	c.draw_rect(Rect2(-seg2_len / 2.0, -CRANE_ARM2_WIDTH / 2.0, seg2_len, CRANE_ARM2_WIDTH), Color(0.55, 0.55, 0.55, 0.3), false, 1.0)
+	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+	var c3: Vector2 = (seg2_end + seg3_end) / 2.0
+	c.draw_set_transform(c3, angle)
+	c.draw_rect(Rect2(-seg3_len / 2.0, -CRANE_ARM3_WIDTH / 2.0, seg3_len, CRANE_ARM3_WIDTH), Color(0.35, 0.35, 0.35, 0.95), true)
+	c.draw_rect(Rect2(-seg3_len / 2.0, -CRANE_ARM3_WIDTH / 2.0, seg3_len, CRANE_ARM3_WIDTH), Color(0.5, 0.5, 0.5, 0.3), false, 1.0)
+	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+	# Base pivot circle.
+	c.draw_circle(base, 5.0, Color(0.6, 0.6, 0.6, 0.7))
 
 
 # =========================
