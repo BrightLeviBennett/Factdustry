@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+[ext_resource type="Texture2D" path="res://textures/status effects/Wet.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"wet"
+display_name = "Wet"
+description = "Soaked through. Movement is hampered; lightning hits much harder."
+icon = ExtResource("2")
+duration = 5.0
+stackable = false
+refresh_on_reapply = true
+effect_type = 1
+tint_color = Color(0.4, 0.7, 1, 1)
+particle_color = Color(0.6, 0.85, 1, 1)
+speed_modifier = 0.7
+tags = PackedStringArray("water", "slow")
+affinities = Array[StringName]([&"shocked"])
+opposites = Array[StringName]([&"burning"])

@@ -19,5 +19,6 @@ build_cost = {
 "steel": 300
 }
 build_time = 42.0
-unit_capacity = 25
+required_tiles = null
+max_active_units = 25
 storage_capacity = 8000

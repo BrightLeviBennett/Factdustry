@@ -11,7 +11,7 @@ display_name = "Ground Scraper"
 description = "Industrial surface miner that strips topsoil for ores like coal. Produces 1 coal every 2 seconds at baseline; each extra ore tile under the footprint adds +25% throughput. Only mines floor-borne ore deposits — wall ores are out of reach."
 icon = ExtResource("2_gscom")
 category = 1
-tags = PackedStringArray("mining", "extraction", "floor_miner", "scraper_head")
+tags = PackedStringArray("mining", "extraction", "floor_miner", "scraper_head", "omnidirectional")
 color = Color(0.5, 0.6, 0.3, 1)
 grid_size = Vector2i(2, 2)
 top_sprite = ExtResource("3_gsbas")
@@ -22,6 +22,7 @@ build_cost = {
 }
 build_time = 4.0
 production_time = 2.0
+accepted_ores = Array[StringName]([&"coal_ore", &"sulfur_ore"])
 requires_power = true
 electrical_power_use = 10.0
 max_stored_items = 10

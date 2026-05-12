@@ -50,6 +50,13 @@ var selected_building: StringName = &""
 var require_resources := true
 var require_research := true
 var enemies_attack := true
+# Fog-of-war switches set by the map editor's Map Settings dialog and
+# serialized into the sector .json. FogSystem reads these on every
+# rebuild — disable to skip the system entirely, multiplier scales
+# both the unseen and explored alphas (1.0 = default, 0.5 = lighter,
+# 1.5 = noticeably darker).
+var fog_enabled := true
+var fog_darkness_mult := 1.0
 ## Developer toggle: when true, every entity that can be hit (enemies,
 ## the player drone, in-flight projectiles) overlays a magenta debug
 ## hitbox so combat geometry is visible. Wired up from the Developer
@@ -232,6 +239,11 @@ func is_ui_blocking() -> bool:
 		return true
 	if hud and hud.settings_ui and hud.settings_ui.is_open:
 		return true
+	# Suppress gameplay input during the landing/launch animation until
+	# the camera has caught up to the shardling.
+	var la = get_node_or_null("LaunchAnimation")
+	if la and la.has_method("is_input_locked") and la.is_input_locked():
+		return true
 	return false
 
 # --- SESSION STATS ---
@@ -355,6 +367,40 @@ func _ready() -> void:
 		wm.name = "WaveManager"
 		add_child(wm)
 
+	# Polish layer: sound, camera shake / hit flash, particle overlay.
+	# Each is a sibling of every other system; the building / unit /
+	# combat code only reads from them, so wiring is one-way.
+	var audio_script = load("res://main/audio_system.gd")
+	if audio_script:
+		var asys = Node.new()
+		asys.set_script(audio_script)
+		asys.name = "AudioSystem"
+		add_child(asys)
+	var feedback_script = load("res://main/feedback_system.gd")
+	if feedback_script:
+		var fsys = Node.new()
+		fsys.set_script(feedback_script)
+		fsys.name = "FeedbackSystem"
+		add_child(fsys)
+	var particle_script = load("res://main/particle_overlay.gd")
+	if particle_script:
+		var psys = Node2D.new()
+		psys.set_script(particle_script)
+		psys.name = "ParticleOverlay"
+		add_child(psys)
+	var fog_script = load("res://main/fog_system.gd")
+	if fog_script:
+		var fog = Node2D.new()
+		fog.set_script(fog_script)
+		fog.name = "FogSystem"
+		add_child(fog)
+	var launch_script = load("res://main/launch_animation.gd")
+	if launch_script:
+		var la = Node2D.new()
+		la.set_script(launch_script)
+		la.name = "LaunchAnimation"
+		add_child(la)
+
 	# Initialize resources from item .tres files
 	_init_resources()
 
@@ -457,6 +503,21 @@ func _ready() -> void:
 	var settings_script = load("res://main/settings_ui.gd")
 	if settings_script and settings_script.has_method("apply_pending_settings"):
 		settings_script.apply_pending_settings()
+
+	# Sector landing animation — plays anywhere the player just
+	# launched in (overlay confirmed) AND for starting_grounds first
+	# entry (which has no source sector to pay resources from, so it
+	# skips the overlay but still wants the touchdown beat). Continue
+	# / direct PLAY paths leave `pending_landing_animation` false, so
+	# resuming an existing sector skips both animations.
+	if SaveManager.pending_landing_animation and core_position != Vector2i(-1, -1):
+		var la = get_node_or_null("LaunchAnimation")
+		if la and la.has_method("play_landing"):
+			la.snapshot_prebuilt()
+			la.play_landing(core_position)
+	# Consume the flag either way so the next time we re-enter Main
+	# without a fresh launch doesn't accidentally inherit it.
+	SaveManager.pending_landing_animation = false
 
 
 ## Populates the _hud / _tech_ui / etc. cache. Call after the main scene tree
@@ -780,10 +841,66 @@ func get_nearest_lumina_core_anchor(world_pos: Vector2) -> Vector2i:
 	return best
 
 
+## Returns the production multiplier applied to a block at `grid_pos`
+## from nearby active "overdrive"-tagged buildings (overdriver,
+## overdrive dome, overdrive projector). Picks the strongest overdrive
+## whose radius covers the block. Applies only to drills, fluid pumps,
+## condensers, and factories — turrets / conveyors / vent turbines /
+## combustion gens are excluded explicitly.
+##
+## The boost multiplier is `data.overdrive_multiplier` directly (so an
+## entry of 2.25 = 225 % of base, i.e. "+125 % additional efficiency").
+func get_overdrive_multiplier(grid_pos: Vector2i) -> float:
+	var data = Registry.get_block(placed_buildings.get(grid_pos, &""))
+	if data == null:
+		return 1.0
+	# Eligibility gate. Drills + factories + pumps + condensers are in;
+	# everything else opts out.
+	var eligible: bool = false
+	if data.category == BlockData.BlockCategory.EXTRACTORS:
+		eligible = true
+	elif data.category == BlockData.BlockCategory.FACTORIES:
+		eligible = true
+	elif data.tags.has("pump") or data.tags.has("condenser"):
+		eligible = true
+	# Hard excludes for blocks that happen to fall in the categories
+	# above but the design says shouldn't be boosted.
+	if data.category == BlockData.BlockCategory.TURRETS:
+		eligible = false
+	if data.tags.has("vent_turbine") or data.tags.has("combustion_generator"):
+		eligible = false
+	if data.is_transport():
+		eligible = false
+	if not eligible:
+		return 1.0
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	var anchor_world: Vector2 = grid_to_world(anchor) \
+		+ Vector2(data.grid_size.x * GRID_SIZE * 0.5, data.grid_size.y * GRID_SIZE * 0.5)
+	var best: float = 1.0
+	for od_pos in placed_buildings:
+		if building_origins.get(od_pos, od_pos) != od_pos:
+			continue
+		var od_data = Registry.get_block(placed_buildings[od_pos])
+		if od_data == null or not od_data.tags.has("overdrive"):
+			continue
+		if od_data.overdrive_radius <= 0.0 or od_data.overdrive_multiplier <= 1.0:
+			continue
+		if get_building_faction(od_pos) != Faction.LUMINA:
+			continue
+		if is_building_inactive(od_pos):
+			continue
+		var od_world: Vector2 = grid_to_world(od_pos) \
+			+ Vector2(od_data.grid_size.x * GRID_SIZE * 0.5, od_data.grid_size.y * GRID_SIZE * 0.5)
+		var d: float = anchor_world.distance_to(od_world) / float(GRID_SIZE)
+		if d <= od_data.overdrive_radius and od_data.overdrive_multiplier > best:
+			best = od_data.overdrive_multiplier
+	return best
+
+
 ## Returns the per-type unit capacity based on all placed LUMINA cores.
-## Each core's unit_capacity adds to the total. Under-construction cores
-## (or cores actively being deconstructed) don't contribute — a core has
-## to be fully built before it lifts the cap.
+## Each core's `max_active_units` adds to the total. Under-construction
+## cores (or cores actively being deconstructed) don't contribute — a
+## core has to be fully built before it lifts the cap.
 func get_unit_cap_per_type() -> int:
 	var cap := 0
 	for grid_pos in placed_buildings:
@@ -796,8 +913,8 @@ func get_unit_cap_per_type() -> int:
 		if is_building_inactive(grid_pos):
 			continue
 		var data = Registry.get_block(block_id)
-		if data and data.unit_capacity > 0:
-			cap += data.unit_capacity
+		if data and data.max_active_units > 0:
+			cap += data.max_active_units
 	return cap
 
 
@@ -932,6 +1049,13 @@ func is_building_inactive(grid_pos: Vector2i) -> bool:
 	if building_deconstruct_progress.has(anchor_check):
 		return true
 	if is_building_constructing(grid_pos):
+		return true
+	# Blocks that the landing animation hasn't revealed yet (the yellow
+	# ring hasn't crossed them) are inert — they don't tick logistics,
+	# don't draw power, don't fire turrets. They flip to active the
+	# instant the ring sweeps past them.
+	var la = get_node_or_null("LaunchAnimation")
+	if la and la.has_method("is_block_hidden") and la.is_block_hidden(anchor_check):
 		return true
 	return false
 
@@ -1517,8 +1641,29 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 		var bdata = Registry.get_block(bid)
 		if bdata and bdata.tags.has("platform"):
 			return
+		# Armor: subtract from incoming damage, with a 1-damage floor so
+		# fully-armored blocks can't be invulnerable. Applied per hit.
+		if bdata and bdata.armor > 0.0:
+			amount = maxf(amount - bdata.armor, 1.0)
 	building_health[anchor] -= amount
+	# Polish: nudge the camera so the player can feel damage land.
+	# (The white hit-flash overlay was removed — it tinted enemy
+	# blocks gray when they were under sustained fire and read as a
+	# weird persistent rectangle. Shake alone gives enough feedback.)
+	var fb = get_node_or_null("FeedbackSystem")
+	if fb:
+		var bldg_data = Registry.get_block(placed_buildings.get(anchor, &""))
+		var max_hp: float = bldg_data.max_health if bldg_data else 100.0
+		fb.add_shake(clampf(amount / max_hp * 8.0, 0.0, 6.0))
 	if building_health[anchor] <= 0:
+		# Destruction shake + sound: the destroy signal handles the SFX
+		# (AudioSystem listens to building_destroyed); the shake is
+		# proportional to the building's nominal HP so a turret going
+		# down feels chunkier than a belt tile.
+		if fb:
+			var ddata = Registry.get_block(placed_buildings.get(anchor, &""))
+			var dscale: float = (ddata.max_health if ddata else 100.0) / 100.0
+			fb.add_shake(clampf(6.0 * dscale, 2.0, 18.0))
 		destroy_building(anchor, true)
 
 

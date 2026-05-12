@@ -10,7 +10,7 @@ display_name = "Advanced Plasma Bore"
 description = "Enhanced plasma drill for deep-core extraction."
 icon = ExtResource("2")
 category = 1
-tags = PackedStringArray("mining", "extraction")
+tags = PackedStringArray("mining", "extraction", "drill_lasers")
 color = Color(1, 0.2, 0.4, 1)
 grid_size = Vector2i(3, 3)
 max_health = 320.0
@@ -23,3 +23,4 @@ output_items = {
 "ore": 8
 }
 production_time = 2.0
+mine_range = 6

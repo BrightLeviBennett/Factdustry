@@ -178,6 +178,13 @@ func _hud_ref() -> Node:
 
 
 func _ready() -> void:
+	# Sit above the launch-animation overlays (main canvas z=4090,
+	# core overlay z=86, flap overlay z=85), the cable overlay (52),
+	# and fog (80). z_index max in Godot 4 is 4096, so 4095 is the
+	# highest we can go without clipping. The shardling stays visible
+	# above every animation layer.
+	z_index = 4095
+	z_as_relative = false
 	# Wait for Registry essentials (units + blocks) — drone doesn't need the
 	# non-essential planet/sector data, so don't block on those.
 	while not Registry.essentials_loaded:
@@ -209,10 +216,7 @@ func _ready() -> void:
 	range_color = Color(drone_color.r, drone_color.g, drone_color.b, 0.08)
 	range_border_color = Color(drone_color.r, drone_color.g, drone_color.b, 0.2)
 
-	# Load mining speed from mechanical drill data (drone mines 2x faster)
-	var drill_data = Registry.get_block(&"mechanical_drill")
-	if drill_data:
-		mining_speed = 0.5
+	mining_speed = 0.2
 	# Init mined_inventory slots
 	for item in Registry.items_list:
 		if not mined_inventory.has(item.id):
@@ -380,6 +384,11 @@ func _ai_shoot_target_pos() -> Variant:
 	return null
 
 func _input(event: InputEvent) -> void:
+	# Defensive: during a scene swap the drone can receive one more
+	# input event after its `main` reference (resolved via @onready)
+	# has been freed. Bail out instead of dereferencing null.
+	if main == null or not is_instance_valid(main):
+		return
 	if main.is_ui_blocking():
 		return
 	if event.is_action_pressed("respawn"):
@@ -1015,9 +1024,9 @@ func _draw() -> void:
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr and unit_mgr.controlled_entity != null:
 		return
-	var hud = _hud_ref()
-	if not hud or hud.visible:
-		_draw_range_circle()
+	# (Build-range visualizer removed — the blue square around the
+	# drone was too noisy for normal play. The range itself still
+	# drives placement gating; only the on-screen overlay is gone.)
 	# Chassis underneath, then turret + healer heads, then beams on top
 	# so the lasers visibly emerge from the rotating heads instead of
 	# vanishing behind the body. Mirrors how Mindustry's modular units
@@ -1630,10 +1639,10 @@ func _draw_transfer_items() -> void:
 		var icon: Texture2D = entry["icon"]
 
 		if icon:
-			var s := 12.0
+			var s := 24.0
 			draw_texture_rect(icon, Rect2(local_pos - Vector2(s / 2.0, s / 2.0), Vector2(s, s)), false)
 		else:
-			draw_circle(local_pos, 4.0, Color(0.3, 0.9, 1.0, 0.8))
+			draw_circle(local_pos, 8.0, Color(0.3, 0.9, 1.0, 0.8))
 
 
 func _draw_health_bar() -> void:

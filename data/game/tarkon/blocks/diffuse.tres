@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 [ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_ammo"]
-[ext_resource type="Texture2D" uid="uid://coik2soop8tpg" path="res://textures/blocks/turrets/Diffuse/DiffuseBase.png" id="2_c4qlf"]
+[ext_resource type="Texture2D" uid="uid://dw0tcbjfcdvho" path="res://textures/blocks/turrets/Diffuse/DiffuseBase.png" id="2_c4qlf"]
 [ext_resource type="Texture2D" uid="uid://bcydylmydxx5a" path="res://textures/blocks/turrets/Diffuse/DiffuseComplete.png" id="3_740hx"]
 [ext_resource type="Texture2D" uid="uid://dtv6ofg17hwfg" path="res://textures/blocks/turrets/Diffuse/DiffuseHead.png" id="4_740hx"]
 
@@ -12,6 +12,7 @@ item_id = &"mat_graphite"
 amount_per_shot = 2
 damage = 8.0
 building_damage_mult = 0.6
+bullet_spread = 32.0
 inaccuracy = 32.0
 projectiles_per_shot = 15
 projectile_speed = 520.0
@@ -43,10 +44,10 @@ build_cost = {
 }
 build_time = 3.0
 requires_power = true
-power_consumption = 3.0
 attack_speed = 0.8
 attack_range = 7.5
 ammo_types = Array[Resource]([SubResource("Resource_740hx")])
-link_range = null
-electrical_power_storage = null
+bullet_spread = 8.0
+ammo_capacity = 30
+required_tiles = null
 max_stored_items = 30

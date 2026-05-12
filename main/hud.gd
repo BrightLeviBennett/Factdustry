@@ -492,8 +492,12 @@ func _process(delta: float) -> void:
 			_cost_dirty = false
 			_update_build_cost_panel(main.selected_building)
 		build_cost_panel.visible = true
-	elif main.placed_buildings.has(hovered_grid):
-		# Hovering over a placed block — show tooltip
+	elif main.placed_buildings.has(hovered_grid) \
+			and main.get_building_faction(hovered_grid) == main.Faction.LUMINA:
+		# Hovering over one of the player's own placed blocks — show
+		# tooltip. Enemy / derelict blocks are excluded here so the
+		# empty PanelContainer (whose children _update_block_tooltip
+		# would have cleared) doesn't flash as a thin bar on hover.
 		build_cost_panel.visible = false
 		_last_cost_building = &""
 		# Rebuild if hovered cell changed, or periodically for live data
@@ -1300,6 +1304,12 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		block_tooltip.visible = false
 		return
 
+	# Tooltip is for the player's own blocks only — keeps enemy /
+	# derelict structures from leaking their internal state.
+	if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
+		block_tooltip.visible = false
+		return
+
 	var block_id: StringName = main.placed_buildings[grid_pos]
 	var data: BlockData = Registry.get_block(block_id)
 	if data == null:
@@ -1389,13 +1399,8 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		var count_color := Color(0.9, 0.3, 0.3) if at_cap else Color(0.7, 0.9, 0.7)
 		_add_tooltip_line("%s: %d / %d" % [unit_name, current_count, max_count], count_color)
 
-	# --- Conveyor Contents ---
-	if _logistics and data.is_transport() and not data.transports_fluid:
-		if _logistics.conveyor_items.has(grid_pos):
-			var item_entry = _logistics.conveyor_items[grid_pos]
-			var item = Registry.get_item_or_fluid(item_entry["item_id"])
-			if item:
-				_add_tooltip_line("Carrying: %s" % item.display_name, item.color)
+	# (Conveyor "Carrying:" line removed — what's on the belt is
+	# already visible in the world.)
 
 	# --- Pipe Contents ---
 	if _logistics and data.transports_fluid:
@@ -1432,23 +1437,49 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		# long as they have power. Reading front-edge ore for these
 		# would always hit 0% and report a broken extractor.
 		var is_geyser_miner: bool = data.tags.has("geyser_miner")
-		if terrain and not is_geyser_miner:
+		# Floor miners (ground scraper) read every ore tile UNDER their
+		# footprint — not the front edge. Each extra tile adds 25%, so
+		# the tooltip needs the same `_floor_miner_efficiency` math
+		# the production tick uses; otherwise the front-edge scan
+		# always reports 0% and the player can't tell whether the
+		# scraper is even working.
+		var is_floor_miner: bool = data.tags.has("floor_miner")
+		if terrain and not is_geyser_miner and not is_floor_miner:
+			# Walk up to mine_range tiles beyond each front-edge cell —
+			# matches the actual mining loop in _update_drills so a
+			# plasma bore that reaches ore 4 tiles away shows 100%
+			# instead of 0%.
+			var max_extend: int = maxi(data.mine_range, 1)
+			var accepted_walls_hud: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
+					else [&"blackstone_wall"]
 			for cell in front_cells:
+				var any_hit: bool = false
 				if is_wall_miner:
-					var c1_ok: bool = terrain.get_ore_at(cell) == null \
-						and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall"
-					var c2_ok: bool = terrain.get_ore_at(cell + dir) == null \
-						and StringName(terrain.wall_tiles.get(cell + dir, &"")) == &"blackstone_wall"
-					if c1_ok or c2_ok:
-						hit_count += 1
+					var wid_h: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+					if terrain.get_ore_at(cell) == null and accepted_walls_hud.has(wid_h):
+						any_hit = true
+					else:
+						for step in range(1, max_extend + 1):
+							var scan: Vector2i = cell + dir * step
+							var wid_hs: StringName = StringName(terrain.wall_tiles.get(scan, &""))
+							if terrain.get_ore_at(scan) == null and accepted_walls_hud.has(wid_hs):
+								any_hit = true
+								break
 				else:
 					if terrain.get_ore_at(cell) != null:
-						hit_count += 1
-					elif terrain.get_ore_at(cell + dir) != null:
-						hit_count += 1
+						any_hit = true
+					else:
+						for step in range(1, max_extend + 1):
+							if terrain.get_ore_at(cell + dir * step) != null:
+								any_hit = true
+								break
+				if any_hit:
+					hit_count += 1
 		var ore_eff: float
 		if is_geyser_miner:
 			ore_eff = 1.0
+		elif is_floor_miner:
+			ore_eff = _logistics._floor_miner_efficiency(origin, data.grid_size) if _logistics else 0.0
 		else:
 			ore_eff = float(hit_count) / float(front_count) if front_count > 0 else 1.0
 		# Power efficiency multiplies ore efficiency so the displayed %/rate
@@ -1461,7 +1492,12 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		var efficiency: float = ore_eff * pow_eff
 		var cycle = data.production_time if data.production_time > 0 else 2.0
 		var effective_cycle: float = cycle / efficiency if efficiency > 0 else 0.0
-		var rate: float = 1.0 / effective_cycle if effective_cycle > 0 else 0.0
+		var out_per_cycle: float = 0.0
+		for _out_id in data.output_items:
+			out_per_cycle += float(data.output_items[_out_id])
+		if out_per_cycle <= 0.0:
+			out_per_cycle = 1.0
+		var rate: float = out_per_cycle / effective_cycle if effective_cycle > 0 else 0.0
 		var eff_pct: int = int(round(efficiency * 100))
 		var eff_color: Color
 		if eff_pct >= 100:
@@ -1476,12 +1512,8 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		var rate: float = 1.0 / cycle
 		_add_tooltip_line("Efficiency: %.2f/s" % rate, Color(0.7, 0.9, 0.7))
 
-	# --- Power gen generator note ---
-	# Consumer status is already shown via the power bar above. Pure
-	# generators get a short rating line so you can see their contribution
-	# without hovering the network tooltip math.
-	if data.electrical_power_gen > 0:
-		_add_tooltip_line("Generates: %.0f power" % data.electrical_power_gen, Color(0.5, 0.8, 1.0))
+	# (Generator "Generates:" line removed — production reads are in the
+	# network info panel.)
 
 	# --- Needed Resources (for factories/constructors/drills with pending inputs) ---
 	if _logistics:
@@ -1597,62 +1629,8 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					hbox.add_child(lbl)
 					tooltip_vbox.add_child(hbox)
 
-	# --- Storage Contents ---
-	# For omnidirectional factories, also list the input buffer under the
-	# Storage section so the player can see sand/graphite/etc. piling up there.
-	var is_omni_storage: bool = data.tags.has("omnidirectional")
-	var factory_inputs: Dictionary = {}
-	if is_omni_storage and _logistics and _logistics.factory_buffers.has(origin):
-		factory_inputs = _logistics.factory_buffers[origin].get("inputs", {})
-	var has_factory_inputs: bool = false
-	for k in factory_inputs:
-		if int(factory_inputs[k]) > 0:
-			has_factory_inputs = true
-			break
-
-	if _logistics and (_logistics.block_storage.has(origin) or has_factory_inputs):
-		var storage_items: Dictionary = {}
-		var storage_fluids: Dictionary = {}
-		if _logistics.block_storage.has(origin):
-			var storage = _logistics.block_storage[origin]
-			storage_items = storage["items"]
-			storage_fluids = storage["fluids"]
-		var has_items: bool = not storage_items.is_empty()
-		var has_fluids: bool = not storage_fluids.is_empty()
-		if has_items or has_fluids or has_factory_inputs:
-			_add_tooltip_separator()
-			_add_tooltip_line("Storage:", Color(0.7, 0.75, 0.8))
-			# Input buffer contents (omnidirectional factories only)
-			for sn_id in factory_inputs:
-				var in_count: int = int(factory_inputs[sn_id])
-				if in_count <= 0:
-					continue
-				var in_item = Registry.get_item_or_fluid(sn_id)
-				var in_name: String = in_item.display_name if in_item else str(sn_id)
-				var in_max_str := ""
-				if data.max_stored_items > 0:
-					in_max_str = "/%d" % data.max_stored_items
-				_add_tooltip_line("  %s: %d%s" % [in_name, in_count, in_max_str], Color(0.7, 0.85, 0.7))
-			for item_id in storage_items:
-				var count: int = int(storage_items[item_id])
-				if count <= 0:
-					continue
-				var item = Registry.get_item_or_fluid(item_id)
-				var item_name: String = item.display_name if item else str(item_id)
-				var max_str := ""
-				if data.max_stored_items > 0:
-					max_str = "/%d" % data.max_stored_items
-				_add_tooltip_line("  %s: %d%s" % [item_name, count, max_str], Color(0.8, 0.85, 0.8))
-			for fluid_id in storage_fluids:
-				var amount: float = float(storage_fluids[fluid_id])
-				if amount <= 0:
-					continue
-				var fluid = Registry.get_fluid(fluid_id)
-				var fluid_name: String = fluid.display_name if fluid else str(fluid_id)
-				var max_str := ""
-				if data.max_stored_fluids > 0:
-					max_str = "/%.0f" % data.max_stored_fluids
-				_add_tooltip_line("  %s: %.0f%s" % [fluid_name, amount, max_str], Color(0.7, 0.8, 0.9))
+	# (Storage section removed — block menus surface their own
+	# storage panel when the player clicks in.)
 
 	# --- Loader / Unloader held payload (and its stored items) ---
 	# Loaders / unloaders carry a building payload around. Surface what
@@ -1673,91 +1651,30 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			lphase = String(us.get("phase", ""))
 			if us.get("payload") != null and us["payload"] is Dictionary:
 				lpayload = us["payload"]
-		if lphase != "" or not lpayload.is_empty():
+		if not lpayload.is_empty():
 			_add_tooltip_separator()
-			if lphase != "":
-				var pcolor := Color(0.6, 0.7, 0.8)
-				match lphase:
-					"idle": pcolor = Color(0.7, 0.7, 0.7)
-					"filling", "extracting", "collecting": pcolor = Color(0.8, 0.8, 0.4)
-					"holding", "ejecting", "outputting": pcolor = Color(0.4, 0.6, 0.9)
-				_add_tooltip_line("Phase: %s" % lphase.capitalize(), pcolor)
-			if not lpayload.is_empty():
-				var ptype: String = String(lpayload.get("type", ""))
-				if ptype == "building":
-					var bd: BlockData = Registry.get_block(StringName(lpayload.get("block_id", "")))
-					var bn: String = bd.display_name if bd else String(lpayload.get("block_id", "?"))
-					_add_tooltip_line("Holding: %s" % bn, Color(0.7, 0.85, 1.0))
-					var pstored: Dictionary = lpayload.get("stored_items", {})
-					var ptotal := 0
-					for sid in pstored:
-						ptotal += int(pstored[sid])
-					var pcap: int = bd.max_stored_items if bd else 0
-					if pcap > 0:
-						_add_tooltip_line("  Contents: %d / %d" % [ptotal, pcap], Color(0.7, 0.75, 0.8))
-					elif ptotal > 0:
-						_add_tooltip_line("  Contents: %d" % ptotal, Color(0.7, 0.75, 0.8))
-					for item_id in pstored:
-						var amount := int(pstored[item_id])
-						if amount <= 0:
-							continue
-						var item = Registry.get_item_or_fluid(item_id)
-						var iname: String = item.display_name if item else str(item_id)
-						_add_tooltip_line("    %s: %d" % [iname, amount], Color(0.8, 0.85, 0.8))
-				elif ptype == "unit":
-					var ud = Registry.get_unit(StringName(lpayload.get("unit_id", "")))
-					var un: String = ud.display_name if ud else String(lpayload.get("unit_id", "?"))
-					_add_tooltip_line("Holding: %s" % un, Color(0.7, 0.85, 1.0))
+			var ptype: String = String(lpayload.get("type", ""))
+			if ptype == "building":
+				var bd: BlockData = Registry.get_block(StringName(lpayload.get("block_id", "")))
+				var bn: String = bd.display_name if bd else String(lpayload.get("block_id", "?"))
+				_add_tooltip_line("Holding: %s" % bn, Color(0.7, 0.85, 1.0))
+			elif ptype == "unit":
+				var ud = Registry.get_unit(StringName(lpayload.get("unit_id", "")))
+				var un: String = ud.display_name if ud else String(lpayload.get("unit_id", "?"))
+				_add_tooltip_line("Holding: %s" % un, Color(0.7, 0.85, 1.0))
 
-	# --- Factory / Refabricator Phase ---
-	# Refabricators have their own state dict; the factory_buffers phase
-	# on these blocks is just the default "collecting" and doesn't reflect
-	# whether a unit payload has been picked up yet.
+	# Refabricator: keep the "Selected Unit: (none — click to pick)"
+	# nudge when nothing's queued (it's a call to action, not status).
+	# The "Producing:" / "Phase:" lines + the held / output unit echo
+	# are dropped — picking the t2 is in the world menu, and the input
+	# bars above already convey progress. Plain factories drop the
+	# phase line for the same reason.
 	var is_refab: bool = data.tags.has("refabricator")
 	if _logistics and is_refab and "refabricator_state" in _logistics and _logistics.refabricator_state.has(origin):
 		var rstate: Dictionary = _logistics.refabricator_state[origin]
-		# Selected tier-2 unit + count/cap for that unit type. When nothing
-		# is selected the block is dormant, so surface that prominently.
 		var sel_t2: StringName = StringName(rstate.get("selected_t2", &""))
 		if sel_t2 == &"":
 			_add_tooltip_line("Selected Unit: (none — click to pick)", Color(0.9, 0.7, 0.3))
-		else:
-			var sel_u = Registry.get_unit(sel_t2)
-			var sel_name: String = sel_u.display_name if sel_u else str(sel_t2)
-			_add_tooltip_line("Producing: %s" % sel_name, Color(0.85, 1.0, 0.8))
-			var sel_count: int = main.get_player_unit_count(sel_t2)
-			var sel_cap: int = main.get_unit_cap_per_type()
-			var sel_at_cap: bool = sel_count >= sel_cap
-			_add_tooltip_line(
-				"%s: %d / %d" % [sel_name, sel_count, sel_cap],
-				Color(0.9, 0.3, 0.3) if sel_at_cap else Color(0.7, 0.9, 0.7)
-			)
-		var rphase: String = rstate.get("phase", "idle")
-		var rcolor := Color(0.6, 0.7, 0.8)
-		match rphase:
-			"idle": rcolor = Color(0.7, 0.7, 0.7)
-			"collecting": rcolor = Color(0.8, 0.8, 0.4)
-			"processing": rcolor = Color(0.4, 0.8, 0.4)
-			"outputting": rcolor = Color(0.4, 0.6, 0.9)
-		_add_tooltip_line("Phase: %s" % rphase.capitalize(), rcolor)
-		# Also show what unit is being held / will be produced.
-		var in_uid: StringName = rstate.get("in_unit_id", &"")
-		if in_uid != &"":
-			var in_u = Registry.get_unit(in_uid)
-			_add_tooltip_line("Holding: %s" % (in_u.display_name if in_u else str(in_uid)), Color(0.7, 0.85, 1.0))
-		var out_uid: StringName = rstate.get("out_unit_id", &"")
-		if out_uid != &"":
-			var out_u = Registry.get_unit(out_uid)
-			_add_tooltip_line("Output: %s" % (out_u.display_name if out_u else str(out_uid)), Color(0.7, 1.0, 0.85))
-	elif _logistics and _logistics.factory_buffers.has(origin):
-		var state = _logistics.factory_buffers[origin]
-		var phase: String = state["phase"]
-		var phase_color := Color(0.6, 0.7, 0.8)
-		match phase:
-			"collecting": phase_color = Color(0.8, 0.8, 0.4)
-			"processing": phase_color = Color(0.4, 0.8, 0.4)
-			"outputting": phase_color = Color(0.4, 0.6, 0.9)
-		_add_tooltip_line("Phase: %s" % phase.capitalize(), phase_color)
 
 	# --- Archive: show contained archive ---
 	var building_sys = _building_sys_ref()
@@ -3759,6 +3676,17 @@ func _update_network_info_panel(hovered_grid: Vector2i) -> void:
 	if _network_info_locked_cell != Vector2i(-9999, -9999) \
 			and _network_index_for(_network_info_locked_cell) >= 0:
 		effective_cell = _network_info_locked_cell
+	# Network info is only legible for the player's own networks — an
+	# enemy / derelict cable cluster shouldn't surface its production /
+	# consumption / stored buffer to the player. Hide the panel when
+	# the hovered cell is on a non-LUMINA building (or empty terrain).
+	if main.placed_buildings.has(effective_cell) \
+			and main.get_building_faction(effective_cell) != main.Faction.LUMINA:
+		if _network_info_last_net != -1:
+			_network_info_last_net = -1
+			network_info_root.visible = false
+			network_info_placeholder.visible = true
+		return
 	var net_idx := _network_index_for(effective_cell)
 	if net_idx < 0:
 		if _network_info_last_net != -1:
@@ -4667,8 +4595,8 @@ func show_sector_loss() -> void:
 	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.08, 0.04, 0.04, 0.95)
-	style.border_color = Color(0.8, 0.2, 0.2, 0.7)
+	style.bg_color = Color(0.06, 0.06, 0.07, 0.95)
+	style.border_color = Color(0.85, 0.88, 0.92, 0.7)
 	style.set_border_width_all(2)
 	style.set_corner_radius_all(10)
 	style.content_margin_left = 20
@@ -4690,7 +4618,7 @@ func show_sector_loss() -> void:
 	title.text = "Sector %s Lost" % sector_name
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 22)
-	title.add_theme_color_override("font_color", Color(0.9, 0.25, 0.25))
+	title.add_theme_color_override("font_color", Color(0.92, 0.94, 0.96))
 	vbox.add_child(title)
 
 	vbox.add_child(HSeparator.new())

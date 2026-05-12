@@ -74,6 +74,18 @@ func swap_scene_to_main() -> void:
 		elif old is Node3D:
 			(old as Node3D).visible = false
 		old.process_mode = Node.PROCESS_MODE_DISABLED
+		# Rename + remove the outgoing Main out of /root BEFORE the
+		# new one is added — otherwise both nodes share the name
+		# "Main" for a frame and `/root/Main` resolves to the OLD
+		# (now-freeing) instance. Every child of the new Main that
+		# does `@onready var main = get_node("/root/Main")` would
+		# capture the dying old Main and crash the moment it tried
+		# to use it.
+		if old.name == "Main":
+			old.name = "MainOld"
+		var old_parent := old.get_parent()
+		if old_parent:
+			old_parent.remove_child(old)
 	var fresh: Node = _MAIN_PACKED_SCENE.instantiate()
 	# Add to /root before swapping current_scene so absolute paths
 	# (e.g. `/root/Main/...`) resolve immediately when Main._ready
@@ -125,6 +137,57 @@ func has_parked_main() -> bool:
 	return _parked_main != null and is_instance_valid(_parked_main)
 
 
+## Plays the launch animation in the parked Main (sector A) before
+## swapping to a fresh Main for the target sector. Falls back to a
+## direct swap when no parked Main exists (player came from the main
+## menu).
+##
+## Call from PlanetSelect's launch handler instead of
+## `swap_scene_to_main()`. PlanetSelect frees itself; the parked Main
+## becomes current_scene, plays its `LaunchAnimation.play_launch()`,
+## and on `launch_complete` performs the swap with `pending_map_path`
+## already set to the target sector.
+func queue_launch_with_animation() -> void:
+	# Same gate as the landing animation: only play the launch
+	# animation when the player committed to a launch via the resource
+	# cost overlay. Continue / direct PLAY / starting_grounds bypass
+	# the overlay AND skip both animations — they hand straight to
+	# the swap so resuming a sector doesn't replay launch every time.
+	if not pending_landing_animation:
+		swap_scene_to_main()
+		return
+	if not has_parked_main():
+		swap_scene_to_main()
+		return
+	# Remember the outgoing scene (PlanetSelect) — `unpark_main_to_tree`
+	# will steal current_scene away from it, but the node itself stays
+	# parented to /root until we explicitly free it.
+	var tree := get_tree()
+	var outgoing: Node = tree.current_scene
+	if not unpark_main_to_tree():
+		swap_scene_to_main()
+		return
+	# ONLY free the outgoing scene — NOT every other root child.
+	# Autoloads (Registry, TechTree, SaveManager itself, …) live as
+	# root children and freeing them detonates the next time any
+	# system tries to call Registry.get_block().
+	if outgoing != null and is_instance_valid(outgoing) and outgoing != tree.current_scene:
+		outgoing.queue_free()
+	# Kick the launch animation on Main's LaunchAnimation node, then
+	# swap to the new Main when it finishes.
+	var main_node = tree.current_scene
+	if main_node == null:
+		swap_scene_to_main()
+		return
+	var la = main_node.get_node_or_null("LaunchAnimation")
+	if la == null or not la.has_method("play_launch"):
+		swap_scene_to_main()
+		return
+	if not la.is_connected("launch_complete", swap_scene_to_main):
+		la.launch_complete.connect(swap_scene_to_main, CONNECT_ONE_SHOT)
+	la.play_launch()
+
+
 ## Re-attaches the parked Main back into /root as the current scene.
 ## Returns true on success. Caller is responsible for freeing whatever
 ## scene was previously current (e.g. PlanetSelect).
@@ -162,6 +225,13 @@ var pending_map_path := ""
 
 ## Sector ID that was launched (set by PlanetSelect, consumed by Main).
 var pending_sector_id: StringName = &""
+
+## Set true by PlanetSelect when the player commits to a launch via
+## the resource-cost overlay (first launch into a sector, or
+## post-abandon re-launch). Consumed by Main on the next sector load
+## to gate the landing animation — "continue" returns and direct
+## scene loads (CONTINUE / PLAY / starting_grounds) skip it.
+var pending_landing_animation: bool = false
 
 ## Per-resource starter amounts the player dialed in on the launch
 ## overlay. Keyed by mat_* item id, value = integer amount. The cost
@@ -1138,7 +1208,34 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"pipe_contents": pipe_contents_save,
 		"junction_items": junction_items_save,
 		"belt_unloader_state": belt_unloader_state_save,
+		# Session stats — persisted per-sector so the loss-screen totals
+		# survive scene reloads (e.g. planet menu → back). The map
+		# editor doesn't define these fields, so fall back to 0 via
+		# `get()` instead of crashing on a missing property.
+		"stats_blocks_placed": main.get("stats_blocks_placed") if main.get("stats_blocks_placed") != null else 0,
+		"stats_blocks_removed": main.get("stats_blocks_removed") if main.get("stats_blocks_removed") != null else 0,
+		"stats_enemy_blocks_destroyed": main.get("stats_enemy_blocks_destroyed") if main.get("stats_enemy_blocks_destroyed") != null else 0,
+		"stats_units_produced": main.get("stats_units_produced") if main.get("stats_units_produced") != null else 0,
+		"stats_units_destroyed": main.get("stats_units_destroyed") if main.get("stats_units_destroyed") != null else 0,
+		"stats_enemy_units_destroyed": main.get("stats_enemy_units_destroyed") if main.get("stats_enemy_units_destroyed") != null else 0,
+		"stats_play_time": main.get("stats_play_time") if main.get("stats_play_time") != null else 0.0,
 	}
+
+	# Fog-of-war: persist the explored cell set so revealed memory
+	# survives save/load. Visibility is recomputed from live LUMINA
+	# sources on load, so only `_explored` needs serializing.
+	var fog_node = get_node_or_null("/root/Main/FogSystem")
+	if fog_node and fog_node.has_method("save_state"):
+		data["fog"] = fog_node.save_state()
+	# Author-time fog settings (toggle + darkness multiplier) live on
+	# `main` regardless of which scene wrote them — the editor sets
+	# them via Map Settings, the playtest scene reads them through
+	# FogSystem. Default to enabled / 1.0 when absent so older saves
+	# behave like before.
+	if "fog_enabled" in main:
+		data["fog_enabled"] = bool(main.fog_enabled)
+	if "fog_darkness_mult" in main:
+		data["fog_darkness_mult"] = float(main.fog_darkness_mult)
 
 	# Save script runtime state if sector script exists
 	var sector_script = get_node_or_null("/root/Main/SectorScript")
@@ -1396,6 +1493,23 @@ func load_sector_from_path(path: String) -> bool:
 		# nodes (Unit Refabricator, etc.) stay locked on a dep the
 		# player visibly satisfies.
 		TechTree.sync_event_unlocks_from_resources(main.resources)
+
+	# --- Restore session stats so the loss screen survives scene reloads ---
+	if is_user_save_res:
+		if data.has("stats_blocks_placed"):
+			main.stats_blocks_placed = int(data["stats_blocks_placed"])
+		if data.has("stats_blocks_removed"):
+			main.stats_blocks_removed = int(data["stats_blocks_removed"])
+		if data.has("stats_enemy_blocks_destroyed"):
+			main.stats_enemy_blocks_destroyed = int(data["stats_enemy_blocks_destroyed"])
+		if data.has("stats_units_produced"):
+			main.stats_units_produced = int(data["stats_units_produced"])
+		if data.has("stats_units_destroyed"):
+			main.stats_units_destroyed = int(data["stats_units_destroyed"])
+		if data.has("stats_enemy_units_destroyed"):
+			main.stats_enemy_units_destroyed = int(data["stats_enemy_units_destroyed"])
+		if data.has("stats_play_time"):
+			main.stats_play_time = float(data["stats_play_time"])
 
 	# --- Restore drone position ---
 	if data.has("drone_position") and data["drone_position"] != "":
@@ -1711,6 +1825,16 @@ func load_sector_from_path(path: String) -> bool:
 					"timer": float(saved.get("timer", 0.0)),
 					"round_robin": int(saved.get("round_robin", 0)),
 				}
+
+	# --- Restore fog-of-war explored set ---
+	var fog_node = get_node_or_null("/root/Main/FogSystem")
+	if fog_node and fog_node.has_method("load_state") and data.has("fog") and data["fog"] is Dictionary:
+		fog_node.load_state(data["fog"])
+	# Author-time fog settings — FogSystem reads these from `main`.
+	if "fog_enabled" in main and data.has("fog_enabled"):
+		main.fog_enabled = bool(data["fog_enabled"])
+	if "fog_darkness_mult" in main and data.has("fog_darkness_mult"):
+		main.fog_darkness_mult = float(data["fog_darkness_mult"])
 
 	# --- Restore crane states ---
 	if building_sys and "crane_states" in building_sys and data.has("crane_states") and data["crane_states"] is Dictionary:

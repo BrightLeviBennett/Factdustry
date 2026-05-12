@@ -14,6 +14,9 @@ var main: Node2D
 var is_open := false
 var hovered_node_id: StringName = &""
 
+# Shared lock texture rendered over LOCKED nodes (replaces the emoji).
+var _lock_icon: Texture2D = preload("res://textures/UI/LockIcon.png")
+
 var root_panel: PanelContainer
 var tree_scroll: ScrollContainer
 var tree_canvas: Control
@@ -495,10 +498,17 @@ func _draw_node(nid: StringName, _node: Dictionary, z: float, nw: float, nh: flo
 			tree_canvas.draw_rect(Rect2(rect.position.x + 2, rect.position.y + rect.size.y - 5 * z, (rect.size.x - 4) * progress, 3 * z), accent_color.darkened(0.3), true)
 
 	if state == TechTree.NodeState.LOCKED:
-		var font = ThemeDB.fallback_font
-		var fs_lock = int(14 * z)
-		var ts = font.get_string_size("🔒", HORIZONTAL_ALIGNMENT_CENTER, -1, fs_lock)
-		tree_canvas.draw_string(font, Vector2(pos.x - ts.x / 2.0, pos.y + ts.y / 4.0), "🔒", HORIZONTAL_ALIGNMENT_CENTER, -1, fs_lock, lc)
+		# Draw the shared LockIcon.png centred on the node, scaled with
+		# the tree's current zoom (`z`). The texture's natural aspect
+		# (320 × 443) is preserved so it doesn't squish into a square,
+		# and we draw with white modulate so the icon renders at its
+		# true colours instead of inheriting the locked-node tint.
+		if _lock_icon != null:
+			var tex_sz: Vector2 = _lock_icon.get_size()
+			var lh: float = 24.0 * z
+			var lw: float = lh * (tex_sz.x / tex_sz.y)
+			var lr := Rect2(Vector2(pos.x - lw * 0.5, pos.y - lh * 0.5), Vector2(lw, lh))
+			tree_canvas.draw_texture_rect(_lock_icon, lr, false, Color.WHITE)
 	else:
 		var icon = _get_node_icon(nid)
 		var icon_size = 25.0 * z  # Change 32.0 to whatever pixel size you want

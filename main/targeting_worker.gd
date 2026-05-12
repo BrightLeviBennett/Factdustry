@@ -125,10 +125,13 @@ func _scan_turret_targets(snap: Dictionary) -> Array[Dictionary]:
 		var range_pixels: float = turret_info["range_pixels"]
 		var turret_world: Vector2 = Vector2(grid_pos.x * grid_size, grid_pos.y * grid_size) + half
 		var range_sq: float = range_pixels * range_pixels
+		var targets_air: bool = bool(turret_info.get("targets_air", true))
+		var targets_ground: bool = bool(turret_info.get("targets_ground", true))
 
 		var opposing_faction: int = 0 if turret_faction == 1 else 1
 
-		# Find nearest opposing unit
+		# Find nearest opposing unit. Skip layers the turret can't reach:
+		# UnitData.MovementLayer  0=GROUND 1=CRAWLER 2=HOVER 3=FLYING
 		var opposing_units: Array = player_units if turret_faction == 1 else enemies
 		var nearest_unit_id: int = -1
 		var nearest_unit_pos := Vector2.ZERO
@@ -136,6 +139,12 @@ func _scan_turret_targets(snap: Dictionary) -> Array[Dictionary]:
 
 		for u in opposing_units:
 			if u["is_dead"]:
+				continue
+			var u_layer: int = int(u.get("movement_layer", 0))
+			var u_is_air: bool = (u_layer == 2 or u_layer == 3)
+			if u_is_air and not targets_air:
+				continue
+			if not u_is_air and not targets_ground:
 				continue
 			var d: float = turret_world.distance_squared_to(u["pos"])
 			if d <= range_sq and d < nearest_unit_dist_sq:

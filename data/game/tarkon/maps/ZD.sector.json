@@ -3893,7 +3893,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1778201680.28389
+		"timestamp": 1778612915.54347
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -25687,6 +25687,8 @@
 		"99,98": "blackstone_floor",
 		"99,99": "blackstone_floor"
 	},
+	"fog_darkness_mult": 1.0,
+	"fog_enabled": false,
 	"grid_height": 150,
 	"grid_width": 150,
 	"hints": [],
@@ -25999,6 +26001,13 @@
 	"sorter_filters": {
 
 	},
+	"stats_blocks_placed": 0,
+	"stats_blocks_removed": 0,
+	"stats_enemy_blocks_destroyed": 0,
+	"stats_enemy_units_destroyed": 0,
+	"stats_play_time": 0.0,
+	"stats_units_destroyed": 0,
+	"stats_units_produced": 0,
 	"type": "sector",
 	"unloader_state": {
 

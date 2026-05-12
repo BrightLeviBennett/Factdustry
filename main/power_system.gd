@@ -295,6 +295,11 @@ func _is_block_active(anchor: Vector2i, data) -> bool:
 
 func _ready() -> void:
 	await get_tree().process_frame
+	# Defensive: the awaited frame can land mid-scene-swap, by which
+	# point `main` (resolved via @onready) might be a freed instance.
+	# Bail out instead of crashing on a null deref.
+	if main == null or not is_instance_valid(main):
+		return
 	main.building_placed.connect(_on_building_changed)
 	main.building_destroyed.connect(_on_building_destroyed)
 	_networks_dirty = true

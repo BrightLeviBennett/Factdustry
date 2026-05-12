@@ -8,7 +8,7 @@ id = &"earthquake_harvester"
 display_name = "Earthquake Harvester"
 description = "Uses seismic pulses to shake loose buried minerals."
 category = 1
-tags = PackedStringArray("mining", "extraction")
+tags = PackedStringArray("mining", "extraction", "floor_miner", "omnidirectional")
 color = Color(0.7, 0.4, 0.2, 1)
 grid_size = Vector2i(3, 3)
 max_health = 320.0
@@ -21,3 +21,4 @@ output_items = {
 "ore": 8
 }
 production_time = 2.0
+accepted_ores = Array[StringName]([&"zinc_ore"])

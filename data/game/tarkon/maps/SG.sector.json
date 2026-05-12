@@ -744,6 +744,9 @@
 
 	},
 	"core_position": "54,51",
+	"crane_links": {
+
+	},
 	"crane_states": {
 
 	},
@@ -754,7 +757,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777594015.43069
+		"timestamp": 1778440642.06553
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -3200,6 +3203,8 @@
 		"97,19": "grassy_floor",
 		"97,20": "grassy_floor"
 	},
+	"fog_darkness_mult": 1.0,
+	"fog_enabled": false,
 	"grid_height": 100,
 	"grid_width": 100,
 	"hints": [

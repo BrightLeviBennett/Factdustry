@@ -599,13 +599,13 @@ func _register_fluid_transport() -> void:
 
 func _register_mining() -> void:
 	_add(&"mechanical_drill",      "Mechanical Drill",      [&"core_shard"],            [&"mat_copper"], {&"mat_copper": 30}, Vector2(22, -1))
-	_add(&"impact_drill",        "Impact Drill",          [&"mechanical_drill"],      [&"-L-zinc_deposits"], {&"mat_copper": 90, &"mat_graphite": 30}, Vector2(25, -2))
+	_add(&"impact_drill",          "Impact Drill",          [&"mechanical_drill"],      [&"-L-zinc_deposits"], {&"mat_copper": 90, &"mat_graphite": 30}, Vector2(25, -2))
 	_add(&"bauxite_crusher",       "Bauxite Crusher",       [&"mechanical_drill"],      [&"-L-aluminum_mountains"], {&"mat_copper": 80, &"mat_silicon": 25}, Vector2(24, -2))
 	_add(&"wall_crusher",          "Wall Crusher",          [&"mechanical_drill"],      [&"mat_graphite"], {&"mat_copper": 80, &"mat_graphite": 25}, Vector2(23, -2))
-	_add(&"plasma_bore",           "Plasma Bore",           [&"mechanical_drill"],      [&"mat_steel"], {&"mat_copper": 100, &"mat_silicon": 40}, Vector2(22, -2))
+	_add(&"plasma_bore",           "Plasma Bore",           [&"mechanical_drill"],      [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25, &"mat_steel": 15}, Vector2(22, -2))
 	_add(&"mineral_extractor",     "Mineral Extractor",     [&"mechanical_drill"],      [&"-L-ferrum_ridge"], {&"mat_copper": 70, &"mat_graphite": 20}, Vector2(21, -2))
 	_add(&"ground_scraper",        "Ground Scraper",        [&"mechanical_drill"],      [&"-L-nightfall_depths"], {&"mat_copper": 180, &"mat_graphite": 60, &"mat_steel": 30}, Vector2(26, -2))
-	_add(&"earthquake_harvester",  "Earthquake Harvester",  [&"impact_drill"],        [], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_steel": 40}, Vector2(25, -3))
+	_add(&"earthquake_harvester",  "Earthquake Harvester",  [&"impact_drill"],          [], {&"mat_copper": 200, &"mat_silicon": 70, &"mat_steel": 40}, Vector2(25, -3))
 	_add(&"bauxite_grinder",       "Bauxite Grinder",       [&"bauxite_crusher"],       [], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_graphite": 30}, Vector2(24, -3))
 	_add(&"wall_grinder",          "Wall Grinder",          [&"wall_crusher"],          [&"mat_steel"], {&"mat_copper": 160, &"mat_steel": 50, &"mat_graphite": 30}, Vector2(23, -3))
 	_add(&"advanced_plasma_bore",  "Advanced Plasma Bore",  [&"plasma_bore"],           [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(22, -3))

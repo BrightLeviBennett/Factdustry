@@ -347,17 +347,33 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 	var front_count: int = front_cells.size()
 	if front_count == 0:
 		return 0.0
+	# Each front cell counts as a "hit" if ANY tile within mine_range
+	# beyond it has matching ore / blackstone — so a plasma bore can
+	# reach ore up to `mine_range` tiles ahead and still register at
+	# 100 %, not just at its adjacent tile.
+	var max_extend: int = maxi(data.mine_range, 1)
 	var hit_count: int = 0
 	for cell in front_cells:
+		var any_hit: bool = false
 		if is_wall_miner:
-			var c1_ok: bool = terrain.get_ore_at(cell) == null and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall"
-			var c2_ok: bool = terrain.get_ore_at(cell + dir) == null and StringName(terrain.wall_tiles.get(cell + dir, &"")) == &"blackstone_wall"
-			if c1_ok or c2_ok:
-				hit_count += 1
+			if terrain.get_ore_at(cell) == null and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall":
+				any_hit = true
+			else:
+				for step in range(1, max_extend + 1):
+					var scan: Vector2i = cell + dir * step
+					if terrain.get_ore_at(scan) == null and StringName(terrain.wall_tiles.get(scan, &"")) == &"blackstone_wall":
+						any_hit = true
+						break
 		else:
-			if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner) \
-					or _ore_is_minable_by(terrain.get_ore_at(cell + dir), is_floor_miner):
-				hit_count += 1
+			if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner, data):
+				any_hit = true
+			else:
+				for step in range(1, max_extend + 1):
+					if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
+						any_hit = true
+						break
+		if any_hit:
+			hit_count += 1
 	return float(hit_count) / float(front_count)
 
 
@@ -446,10 +462,10 @@ func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: in
 			for fy in range(data.grid_size.y):
 				scan_cells.append(origin + Vector2i(fx, fy))
 	else:
-		scan_cells = _get_extended_front_edge(origin, data.grid_size, rot)
+		scan_cells = _get_extended_front_edge(origin, data.grid_size, rot, data.mine_range)
 	for cell in scan_cells:
 		var ore: TerrainTileData = terrain.get_ore_at(cell)
-		if not _ore_is_minable_by(ore, is_floor_miner):
+		if not _ore_is_minable_by(ore, is_floor_miner, data):
 			continue
 		if ore.minable_resource == &"":
 			continue
@@ -462,13 +478,23 @@ func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: in
 ## "floor_ore"; regular drills only mine wall-embedded ores. Without
 ## this split, a coal patch in the dirt would be free pickings for any
 ## mechanical drill placed next to it.
-func _ore_is_minable_by(ore_data: TerrainTileData, is_floor_miner: bool) -> bool:
+func _ore_is_minable_by(ore_data: TerrainTileData, is_floor_miner: bool, data: BlockData = null) -> bool:
 	if ore_data == null:
 		return false
 	var is_floor_ore: bool = ore_data.tags.has("floor_ore")
 	if is_floor_miner:
-		return is_floor_ore
-	return not is_floor_ore
+		if not is_floor_ore:
+			return false
+	else:
+		if is_floor_ore:
+			return false
+	# Whitelist: if the block specifies accepted_ores, the tile id
+	# must be in it. Empty list = accept anything matching the
+	# floor/wall split above.
+	if data != null and data.accepted_ores.size() > 0:
+		if not data.accepted_ores.has(ore_data.id):
+			return false
+	return true
 
 
 func _update_drills(delta: float) -> void:
@@ -526,15 +552,20 @@ func _update_drills(delta: float) -> void:
 				for fy in range(data.grid_size.y):
 					mine_cells.append(origin + Vector2i(fx, fy))
 		else:
-			mine_cells = _get_extended_front_edge(origin, data.grid_size, rot)
+			mine_cells = _get_extended_front_edge(origin, data.grid_size, rot, data.mine_range)
 
 		var ore: TerrainTileData = null
 		var wall_found: bool = false
+		var accepted_walls: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
+				else [&"blackstone_wall"]
 		if is_wall_miner:
 			for cell in mine_cells:
 				if terrain.get_ore_at(cell) != null:
 					continue
-				if StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall":
+				var wid: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+				if wid == &"":
+					continue
+				if accepted_walls.has(wid):
 					wall_found = true
 					break
 			if not wall_found:
@@ -543,7 +574,7 @@ func _update_drills(delta: float) -> void:
 		else:
 			for cell in mine_cells:
 				var candidate: TerrainTileData = terrain.get_ore_at(cell)
-				if not _ore_is_minable_by(candidate, is_floor_miner):
+				if not _ore_is_minable_by(candidate, is_floor_miner, data):
 					continue
 				if candidate.minable_resource == &"":
 					continue
@@ -571,16 +602,36 @@ func _update_drills(delta: float) -> void:
 				2: dir = Vector2i(-1, 0)
 				3: dir = Vector2i(0, -1)
 				_: dir = Vector2i(1, 0)
+			# Each front cell counts as a hit if there's matching ore /
+			# blackstone anywhere within mine_range beyond it — the
+			# same range the actual mining loop uses, so a plasma bore
+			# (mine_range=4) registers 100 % when ore is 4 tiles ahead.
+			var max_extend: int = maxi(data.mine_range, 1)
+			var accepted_walls_eff: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
+					else [&"blackstone_wall"]
 			for cell in front_cells:
+				var any_hit: bool = false
 				if is_wall_miner:
-					var c1_ok: bool = terrain.get_ore_at(cell) == null and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall"
-					var c2_ok: bool = terrain.get_ore_at(cell + dir) == null and StringName(terrain.wall_tiles.get(cell + dir, &"")) == &"blackstone_wall"
-					if c1_ok or c2_ok:
-						hit_count += 1
+					var wid_e: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+					if terrain.get_ore_at(cell) == null and accepted_walls_eff.has(wid_e):
+						any_hit = true
+					else:
+						for step in range(1, max_extend + 1):
+							var scan: Vector2i = cell + dir * step
+							var wid_s: StringName = StringName(terrain.wall_tiles.get(scan, &""))
+							if terrain.get_ore_at(scan) == null and accepted_walls_eff.has(wid_s):
+								any_hit = true
+								break
 				else:
-					if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner) \
-							or _ore_is_minable_by(terrain.get_ore_at(cell + dir), is_floor_miner):
-						hit_count += 1
+					if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner, data):
+						any_hit = true
+					else:
+						for step in range(1, max_extend + 1):
+							if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
+								any_hit = true
+								break
+				if any_hit:
+					hit_count += 1
 			efficiency = float(hit_count) / float(front_count) if front_count > 0 else 1.0
 		extractor_efficiency[origin] = efficiency
 
@@ -595,7 +646,10 @@ func _update_drills(delta: float) -> void:
 			if power_eff <= 0.0:
 				continue  # No generation at all — idle this tick.
 
-		drill_timers[origin] -= delta * efficiency * power_eff
+		var od_mult: float = 1.0
+		if main.has_method("get_overdrive_multiplier"):
+			od_mult = main.get_overdrive_multiplier(origin)
+		drill_timers[origin] -= delta * efficiency * power_eff * od_mult
 		if drill_timers[origin] > 0:
 			continue
 
@@ -687,8 +741,11 @@ func _get_front_edge(origin: Vector2i, grid_size: Vector2i, rotation: int) -> Ar
 	return cells
 
 
-## Returns the front edge cells PLUS one tile further ahead (for extended drill range).
-func _get_extended_front_edge(origin: Vector2i, grid_size: Vector2i, rotation: int) -> Array[Vector2i]:
+## Returns the front edge cells PLUS `extend` tiles further ahead (for
+## extended drill range). `extend = 1` matches the original
+## mechanical-drill behaviour; plasma bores pass higher values to reach
+## deeper into ore walls.
+func _get_extended_front_edge(origin: Vector2i, grid_size: Vector2i, rotation: int, extend: int = 1) -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
 	var dir: Vector2i
 	match rotation:
@@ -701,9 +758,10 @@ func _get_extended_front_edge(origin: Vector2i, grid_size: Vector2i, rotation: i
 	for cell in front:
 		if not cells.has(cell):
 			cells.append(cell)
-		var extended := cell + dir
-		if not cells.has(extended):
-			cells.append(extended)
+		for step in range(1, max(extend, 0) + 1):
+			var extended := cell + dir * step
+			if not cells.has(extended):
+				cells.append(extended)
 	return cells
 
 
@@ -867,7 +925,10 @@ func _update_pumps(delta: float) -> void:
 		if _is_storage_full(anchor, data):
 			continue
 
-		var amount: float = rate_per_sec * net_eff * delta
+		var pump_od: float = 1.0
+		if main.has_method("get_overdrive_multiplier"):
+			pump_od = main.get_overdrive_multiplier(anchor)
+		var amount: float = rate_per_sec * net_eff * pump_od * delta
 		if amount <= 0.0:
 			continue
 		var pushed_any := false
@@ -1263,6 +1324,26 @@ func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 	# Initialize round-robin index if needed
 	if not router_output_index.has(grid_pos):
 		router_output_index[grid_pos] = 0
+
+	# Honour the cached exit_dir the picker pass committed to for the
+	# animation. Without this, the actual transfer can pop the item out
+	# of a side different from the one the player just watched it slide
+	# toward — the picker chose A based on the round-robin, then the
+	# RR advanced for the next item, and by the time progress hit 1.0
+	# we'd resume scanning from A+1 and possibly land on B.
+	var cached_exit: int = item.get("exit_dir", -1)
+	if cached_exit >= 0 and cached_exit != exclude_dir \
+			and not _is_cross_faction(grid_pos, grid_pos + DIR_VECTORS[cached_exit]):
+		var cached_pos: Vector2i = grid_pos + DIR_VECTORS[cached_exit]
+		var cached_entry: int = (cached_exit + 2) % 4
+		if _try_transfer_item(cached_pos, item["item_id"], cached_entry):
+			# Advance the round-robin past this exit so the NEXT item
+			# tries a different output first, matching the historical
+			# rotation behaviour.
+			var ci: int = outputs.find(cached_exit)
+			if ci >= 0:
+				router_output_index[grid_pos] = (ci + 1) % outputs.size()
+			return true
 
 	var rr_start: int = router_output_index[grid_pos] % outputs.size()
 
@@ -5146,7 +5227,10 @@ func _update_factories(delta: float) -> void:
 					_t_total = 0.0001
 				if not state.has("recipe_consumed"):
 					state["recipe_consumed"] = {}
-				var _tentative_timer: float = state["timer"] - delta * factory_power_eff
+				var _factory_od: float = 1.0
+				if main.has_method("get_overdrive_multiplier"):
+					_factory_od = main.get_overdrive_multiplier(origin)
+				var _tentative_timer: float = state["timer"] - delta * factory_power_eff * _factory_od
 				var _new_prog: float = clampf(1.0 - _tentative_timer / _t_total, 0.0, 1.0)
 				if _can_afford_progress(state["inputs"], _recipe, state["recipe_consumed"], _new_prog):
 					state["timer"] = _tentative_timer

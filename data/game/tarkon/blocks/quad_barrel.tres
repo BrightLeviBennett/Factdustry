@@ -18,3 +18,4 @@ attack_damage = 40.0
 attack_speed = 1.8
 attack_range = 6.0
 tags = PackedStringArray("turret", "defense")
+boosters = [{"item_id": &"mat_water", "per_sec": 0.1, "stat": "Fire Rate", "multiplier": 2.5}]

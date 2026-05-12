@@ -19,3 +19,4 @@ speed_modifier = 0.2
 attack_speed_modifier = 0.6
 defense_modifier = 1.4
 tags = PackedStringArray("cold", "slow")
+opposites = Array[StringName]([&"burning"])

@@ -126,6 +126,32 @@ var _shot_id_counter: int = 0
 var _shot_hits: Dictionary = {}
 var _shot_active: Dictionary = {}
 
+## Checks whether a turret currently has the required booster fluid /
+## item in its block storage and, if so, consumes one tick's worth and
+## returns the boost multiplier (e.g. 2.5 for +150 % fire rate). Falls
+## back to 1.0 when nothing is configured / available.
+func _get_active_booster_multiplier(anchor: Vector2i, data: BlockData, stat: String) -> float:
+	if data == null or data.boosters.is_empty():
+		return 1.0
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if logistics == null or not "block_storage" in logistics:
+		return 1.0
+	var storage: Dictionary = logistics.block_storage.get(anchor, {})
+	for entry in data.boosters:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		if String(entry.get("stat", "")) != stat:
+			continue
+		var iid: StringName = StringName(entry.get("item_id", &""))
+		var per_shot: float = float(entry.get("per_sec", 0.0)) * maxf(data.attack_speed, 0.01)
+		var avail: float = float(storage.get(iid, 0.0))
+		if avail >= per_shot and per_shot > 0.0:
+			storage[iid] = avail - per_shot
+			logistics.block_storage[anchor] = storage
+			return float(entry.get("multiplier", 1.0))
+	return 1.0
+
+
 func _next_shot_id() -> int:
 	_shot_id_counter += 1
 	return _shot_id_counter
@@ -287,7 +313,8 @@ func _push_targeting_snapshot() -> void:
 	if unit_mgr == null:
 		return
 
-	# Build enemy snapshot
+	# Build enemy snapshot. `movement_layer` lets the targeting worker
+	# filter by turret.targets_air / targets_ground.
 	var enemies_snap: Array = []
 	for e in unit_mgr.enemies:
 		if is_instance_valid(e):
@@ -296,6 +323,7 @@ func _push_targeting_snapshot() -> void:
 				"pos": e.position,
 				"is_dead": e.is_dead,
 				"unit_size": e.unit_size,
+				"movement_layer": int(e.data.movement_layer) if e.data else 0,
 			})
 
 	# Build player unit snapshot
@@ -307,6 +335,7 @@ func _push_targeting_snapshot() -> void:
 				"pos": u.position,
 				"is_dead": u.is_dead,
 				"unit_size": u.unit_size,
+				"movement_layer": int(u.data.movement_layer) if u.data else 0,
 			})
 
 	# Build turret list. Only anchor cells generate snapshot entries —
@@ -339,6 +368,8 @@ func _push_targeting_snapshot() -> void:
 			"faction": turret_faction,
 			"range_pixels": data.attack_range * main.GRID_SIZE,
 			"block_id": block_id,
+			"targets_air": data.targets_air,
+			"targets_ground": data.targets_ground,
 		})
 
 	# Build idle player units list (for auto-target scanning)
@@ -680,7 +711,8 @@ func _update_turrets(delta: float) -> void:
 						fire_pierce = ammo_data.pierce_count
 						fire_homing = ammo_data.homing
 						fire_knockback = ammo_data.knockback
-						fire_inaccuracy = ammo_data.inaccuracy
+						# Turret's bullet_spread + ammo bullet_spread = visual cone.
+						fire_inaccuracy = ammo_data.bullet_spread + data.bullet_spread
 						fire_pellets = ammo_data.projectiles_per_shot
 						fire_range_bonus = ammo_data.range_bonus
 						fire_trail_color = ammo_data.get_trail_color()
@@ -702,8 +734,11 @@ func _update_turrets(delta: float) -> void:
 		else:
 			continue
 
-		# Fire!
-		var full_cooldown: float = data.attack_speed * fire_reload_mult
+		# Fire! Apply any active booster (Fire Rate boost from consumed
+		# fluid/item) by dividing the cooldown — 250% fire rate cuts
+		# reload to 40% of the base value.
+		var booster_mult: float = _get_active_booster_multiplier(grid_pos, data, "Fire Rate")
+		var full_cooldown: float = (data.attack_speed * fire_reload_mult) / maxf(booster_mult, 0.0001)
 		if barrel_count > 1:
 			# Reset just this barrel; the other barrels keep their own
 			# cooldowns so the stagger holds across fires.
@@ -762,7 +797,14 @@ func _update_turrets(delta: float) -> void:
 		# A target hit registers when the projectile reaches its
 		# `target_pos` (handled by `_on_projectile_hit`) or via
 		# along-path collision (walls / direct-fire path).
+		# Apply turret `inaccuracy` (miss-target angle) as a one-time
+		# rotation on the aim direction for THIS shot — independent of
+		# the per-pellet bullet_spread cone below. 0 inaccuracy = always
+		# hits where it aimed; higher values randomly miss left/right.
 		var base_shot_dir: Vector2 = aim_dir
+		if data.inaccuracy > 0.0:
+			var miss_deg: float = randf_range(-data.inaccuracy, data.inaccuracy)
+			base_shot_dir = base_shot_dir.rotated(deg_to_rad(miss_deg))
 		var shot_distance: float = data.attack_range * main.GRID_SIZE
 		var pellet_total: int = maxi(fire_pellets, 1)
 		# Multi-pellet salvos share a shot_id so repeat hits on the same
@@ -1215,6 +1257,16 @@ func _spawn_projectile(
 	if sid != 0:
 		_shot_active[sid] = int(_shot_active.get(sid, 0)) + 1
 	projectiles.append(proj)
+	# Polish: shoot SFX. Multi-pellet salvos collapse onto a single
+	# shot_id so we only play once per salvo (instead of N pellets ×
+	# N barrels). Source-keyed so turret / unit / drone shots can use
+	# different sounds — `shoot_<source>` falls back to plain `shoot`.
+	var asys = main.get_node_or_null("AudioSystem")
+	if asys and asys.has_method("play"):
+		var play_now: bool = sid == 0 or int(_shot_active.get(sid, 0)) <= 1
+		if play_now:
+			asys.play("shoot_" + source, start_pos, -2.0)
+			asys.play("shoot", start_pos, -6.0, 1.0, 0.05)
 
 
 func _update_projectiles(delta: float) -> void:

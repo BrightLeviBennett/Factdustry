@@ -14,5 +14,5 @@ grid_size = Vector2i(6, 6)
 build_cost = { "copper": 28000, "graphite": 23000, "silicon": 12500, "steel": 9500, "aluminum": 3500 }
 build_time = 130.0
 tags = PackedStringArray("core")
-unit_capacity = 100
+max_active_units = 100
 storage_capacity = 50000

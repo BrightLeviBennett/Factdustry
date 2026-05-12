@@ -77,6 +77,11 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var max_health: float = 100.0
 ## HP regenerated per second (0 = no regen).
 @export var health_regen: float = 0.0
+## Damage absorbed per hit before HP is reduced. A round dealing 30
+## damage against 5 armor only chips 25 HP. Cores typically set this.
+## Minimum 1 damage always lands so an armored block can't be fully
+## invincible.
+@export var armor: float = 0.0
 
 
 @export_group("Cost")
@@ -92,9 +97,25 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## item_id -> amount produced per cycle.
 @export var output_items: Dictionary = {}
 @export var production_time: float = 1.0
+## Whitelist of ore-tile IDs this extractor is allowed to mine. When
+## empty, the standard floor_miner / wall_miner tag rules apply (any
+## matching ore). When set, the tile's `id` must appear here — used
+## to let multiple drill types share the floor-ore layer without
+## overlapping (ground scraper takes coal + sulfur, impact drill /
+## earthquake harvester / eruption harvester take the rest).
+@export var accepted_ores: Array[StringName] = []
+## Whitelist of wall-tile IDs a wall-miner block accepts. When empty,
+## defaults to blackstone_wall (the original wall_crusher behaviour).
+## Lets specialised crushers — bauxite, etc. — face their own wall
+## types without overlapping with the generic wall_crusher.
+@export var accepted_walls: Array[StringName] = [&"blackstone_wall"]
+## Extra tiles BEYOND the front edge that a drill / extractor reaches
+## when scanning for ore. 0 = front edge only (no extension), 1 = the
+## default mechanical-drill behaviour (front + 1), higher values let
+## plasma bores reach further into walls. Used by logistics_system's
+## drill update + the placement-preview range visual.
+@export var mine_range: int = 1
 @export var requires_power: bool = false
-## ATP consumed per second when active.
-@export var power_consumption: float = 0.0
 
 
 @export_group("Combat")
@@ -107,6 +128,36 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var aoe_radius: float = 0.0
 ## Ammo types accepted. Empty = fires without consuming resources.
 @export var ammo_types: Array[Resource] = []
+## How accurately the turret hits its target (degrees of random aim
+## error per shot). 0 = laser-perfect aim; higher values miss more.
+## Separate from `bullet_spread` (visual pellet cone).
+@export var inaccuracy: float = 0.0
+## Visual spread cone for a single shot — pellet count and ammo
+## bullet_spread also add to this. 0 = single tight bullet.
+@export var bullet_spread: float = 0.0
+## Does this turret shoot at flying units (FLYING / HOVER movement layer)?
+@export var targets_air: bool = true
+## Does this turret shoot at ground units (CRAWLER / WALKER / etc.)?
+@export var targets_ground: bool = true
+## Max ammo this turret can stockpile (0 = no internal magazine, pulls
+## from network on demand). Display-only for now.
+@export var ammo_capacity: int = 0
+## Maximum amount of fluid this turret / liquid-using block can buffer.
+## 0 = no liquid input. Display-only for now.
+@export var liquid_capacity: float = 0.0
+## Required tiles — blocks like pumps / wall crushers / condensers
+## need to be placed on or facing specific terrain. Each entry is
+## { "tile_id": StringName, "efficiency": float, "label": String? }.
+## Display-only; the actual placement validation lives elsewhere.
+@export var required_tiles: Array = []
+## Booster recipes — fluid / item inputs that grant a stat bonus when
+## fed into this block. Each entry is a Dictionary with keys:
+##   "item_id":   StringName — the consumed resource
+##   "per_sec":   float       — how much is consumed each second when active
+##   "stat":      String      — display label, e.g. "Fire Rate", "Mine Speed"
+##   "multiplier": float      — value of the boost (e.g. 2.5 = +150%)
+## Example: { item_id: "water", per_sec: 0.1, stat: "Fire Rate", multiplier: 2.5 }
+@export var boosters: Array = []
 
 
 @export_group("Transport")
@@ -140,6 +191,15 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## explicitly to override.
 @export var internal_battery_units: int = 0
 
+## Fog-of-war sight radius in tiles. Cells within this radius of a
+## LUMINA-faction building are revealed as "visible"; once visited
+## they stay marked "explored" even if the building is later destroyed.
+## When 0, FogSystem auto-defaults to max(attack_range, 5) for turrets
+## and a small constant for everything else, so authors only need to
+## set this for blocks that should see further than their gun reach
+## (radars, observation posts, cores, etc.).
+@export var sight_range: float = 0.0
+
 
 @export_group("Directional IO")
 ## Relative direction (0=right,1=down,2=left,3=up) -> accepted item_id.
@@ -166,10 +226,21 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## the duration of that recipe. Empty fallback = use `input_items` for
 ## every unit, matching legacy behaviour.
 @export var refab_recipes: Dictionary = {}
-## +N max of each unit type per copy of this core.
-@export var unit_capacity: int = 0
+## +N max simultaneous player units this core supports.
+@export var max_active_units: int = 0
 ## +N max of each resource type per copy of this core.
 @export var storage_capacity: int = 0
+## For unit-fabricator cores (e.g. Core: Bastion), the unit they
+## passively spawn / build. Display-only.
+@export var spawned_unit: StringName = &""
+## Overdrive: blocks of category POWER tagged "overdrive" project a
+## production multiplier on every applicable block within
+## `overdrive_radius` tiles (Euclidean). Drills, fluid pumps,
+## condensers and factories all consult `get_overdrive_multiplier()`
+## in main.gd; turrets / conveyors / vent turbines / combustion gens
+## are explicitly excluded by tag in main.gd's check.
+@export var overdrive_multiplier: float = 1.0
+@export var overdrive_radius: float = 0.0
 
 
 # =========================

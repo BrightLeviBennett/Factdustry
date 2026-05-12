@@ -5,6 +5,9 @@
 	"archive_holdings": {
 
 	},
+	"belt_unloader_state": {
+
+	},
 	"block_storage": {
 
 	},
@@ -1765,6 +1768,9 @@
 
 	},
 	"core_position": "26,72",
+	"crane_links": {
+
+	},
 	"crane_states": {
 
 	},
@@ -1775,7 +1781,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777130761.50083
+		"timestamp": 1778612879.94061
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -8708,8 +8714,14 @@
 		"99,98": "grassy_floor",
 		"99,99": "grassy_floor"
 	},
+	"fog_darkness_mult": 1.0,
+	"fog_enabled": false,
 	"grid_height": 100,
 	"grid_width": 100,
+	"hints": [],
+	"junction_items": {
+
+	},
 	"linked_pairs": [
 		[
 			"58,32",
@@ -8717,6 +8729,10 @@
 		]
 	],
 	"loader_state": {
+
+	},
+	"mass_driver_projectiles": [],
+	"mass_driver_state": {
 
 	},
 	"ore_tiles": {
@@ -8752,12 +8768,18 @@
 	"payload_items": {
 
 	},
+	"pipe_contents": {
+
+	},
 	"player_units": [],
 	"refabricator_state": {
 
 	},
 	"resources": {
-
+		"mat_copper": 993,
+		"mat_graphite": 574,
+		"mat_silicon": 2965,
+		"mat_steel": 1526
 	},
 	"script_steps": [
 		{
@@ -8855,6 +8877,13 @@
 	"sorter_filters": {
 
 	},
+	"stats_blocks_placed": 0,
+	"stats_blocks_removed": 0,
+	"stats_enemy_blocks_destroyed": 0,
+	"stats_enemy_units_destroyed": 0,
+	"stats_play_time": 0.0,
+	"stats_units_destroyed": 0,
+	"stats_units_produced": 0,
 	"type": "sector",
 	"unloader_state": {
 

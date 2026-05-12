@@ -91,6 +91,18 @@ enum EffectType {
 @export var on_expire_effect: Resource
 ## Tags for checking immunities
 @export var tags: PackedStringArray = []
+## Status effects that synergize with this one — shown as "Affinities"
+## in the database (e.g. Tarred amplifies Melting). Display-only.
+@export var affinities: Array[StringName] = []
+## Status effects that cancel this one on contact — shown as
+## "Opposites" in the database (e.g. Freezing / Wet cancel Melting).
+## When `apply_status_effect` runs, applying any opposite-tagged effect
+## removes this effect from the target.
+@export var opposites: Array[StringName] = []
+## Optional explicit "health multiplier". When 1.0, derived from
+## `defense_modifier` for backward compat — defense > 1.0 reduces HP
+## (1.25 defense → 0.8 health), defense < 1.0 increases it.
+@export var health_multiplier_override: float = 1.0
 
 
 # =========================
@@ -114,3 +126,14 @@ func get_total_damage() -> float:
 	if duration <= 0 or tick_interval <= 0:
 		return 0.0
 	return tick_damage * (duration / tick_interval)
+
+
+## Returns the effective health multiplier — explicit override if set
+## (≠ 1.0), otherwise derived from defense_modifier. health = 1 / def
+## so defense > 1 reduces health and vice versa.
+func get_health_multiplier() -> float:
+	if health_multiplier_override != 1.0:
+		return health_multiplier_override
+	if defense_modifier > 0.0:
+		return 1.0 / defense_modifier
+	return 1.0

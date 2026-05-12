@@ -19,3 +19,4 @@ particle_color = Color(1, 0.7, 0.2, 1)
 tick_damage = 4.0
 tick_interval = 0.5
 tags = PackedStringArray("fire", "dot")
+opposites = Array[StringName]([&"freezing"])

@@ -162,9 +162,66 @@ func _process(delta: float) -> void:
 		if has_target:
 			position = position.lerp(follow_target, delta * follow_smoothing)
 
-	# Smoothly animate zoom
-	var new_zoom = lerp(zoom.x, target_zoom, delta * zoom_smoothing)
-	zoom = Vector2(new_zoom, new_zoom)
+	# Polish: drive the Camera2D's `offset` from FeedbackSystem so any
+	# damage / explosion can shake the view without fighting `position`
+	# (which is the smoothed follow target). offset = 0 when the system
+	# isn't around or no shake is active.
+	var fb = get_node_or_null("/root/Main/FeedbackSystem")
+	if fb and fb.has_method("shake_offset"):
+		offset = fb.shake_offset()
+	else:
+		offset = Vector2.ZERO
 
-	# Redraw building system for parallax
-	get_node("/root/Main/BuildingSystem").queue_redraw()
+	# Zoom-punch (one-shot tween from LaunchAnimation.land): override
+	# `target_zoom` for `_zoom_punch_total` seconds, easing back to
+	# the player's preferred zoom. Camera shake handles the shake half
+	# of the "landed" feel; this handles the wider-FoV reveal of the
+	# new map.
+	if _zoom_punch_time > 0.0:
+		_zoom_punch_time -= delta
+		var t: float = clampf(1.0 - _zoom_punch_time / _zoom_punch_total, 0.0, 1.0)
+		var current_target: float = lerpf(_zoom_punch_value, _zoom_punch_return, ease(t, 2.0))
+		var new_zoom_p = lerp(zoom.x, current_target, delta * zoom_smoothing)
+		zoom = Vector2(new_zoom_p, new_zoom_p)
+	else:
+		# Skip our smoothing while the launch animation is actively
+		# driving the camera — it writes `zoom` directly each frame, and
+		# our lerp would otherwise drag it back toward `target_zoom`
+		# at smoothing-speed, muting the dramatic zoom curve.
+		# Only the LANDING (1) and LAUNCHING (4) phases drive zoom — the
+		# ring-sweep / paused states should let the player zoom normally.
+		var la = get_node_or_null("/root/Main/LaunchAnimation")
+		var la_owns_zoom: bool = false
+		if la != null and "state" in la:
+			var s := int(la.state)
+			la_owns_zoom = (s == 1 or s == 4)
+		if not la_owns_zoom:
+			var new_zoom = lerp(zoom.x, target_zoom, delta * zoom_smoothing)
+			zoom = Vector2(new_zoom, new_zoom)
+
+	# Redraw building system for parallax. During scene swaps the
+	# BuildingSystem may have already been freed by the time _process
+	# fires, so resolve defensively rather than crashing on a null
+	# deref.
+	var bs := get_node_or_null("/root/Main/BuildingSystem")
+	if bs:
+		bs.queue_redraw()
+
+
+# Zoom-punch state (set by `kick_zoom_punch`).
+var _zoom_punch_time: float = 0.0
+var _zoom_punch_total: float = 1.0
+var _zoom_punch_value: float = 1.0
+var _zoom_punch_return: float = 1.0
+
+
+## One-shot zoom override for a sector landing / dramatic moment.
+## `start` = zoom value at t=0, `end` = zoom value at t=duration.
+## After the punch ends, normal zoom smoothing resumes toward
+## `target_zoom`.
+func kick_zoom_punch(start: float, end: float, duration: float) -> void:
+	_zoom_punch_total = maxf(duration, 0.01)
+	_zoom_punch_time = _zoom_punch_total
+	_zoom_punch_value = start
+	_zoom_punch_return = end
+	zoom = Vector2(start, start)

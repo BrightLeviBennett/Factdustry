@@ -1498,9 +1498,16 @@ func _on_launch_pressed() -> void:
 	# LAUNCH state gates on resources from the source sector; everything
 	# else (CONTINUE / PLAY / starting_grounds) skips the overlay and loads
 	# straight into the sector.
-	if _launch_state(selected_sector) == "LAUNCH":
+	var state := _launch_state(selected_sector)
+	if state == "LAUNCH":
 		_open_launch_overlay(selected_sector)
 		return
+	# LAUNCH_FREE = first-time starting_grounds. No source sector to
+	# pay resources from / no launch animation to play (you're coming
+	# from the main menu), but we DO want the land animation. Continue
+	# / PLAY skip both — they're "you're already there".
+	if state == "LAUNCH_FREE":
+		SaveManager.pending_landing_animation = true
 	_do_launch(selected_sector)
 
 
@@ -1516,14 +1523,13 @@ func _do_launch(sector) -> void:
 		SaveManager.pending_map_path = sector.map_path
 	else:
 		SaveManager.pending_map_path = ""
-	# Launching a (possibly different) sector — the parked tree is for
-	# whatever the player came from; drop it so Main rebuilds against
-	# the freshly chosen pending_map_path.
-	SaveManager.discard_parked_main()
-	# Manual same-frame swap (no `change_scene_to_file` deferral) so
-	# the player goes from PlanetSelect straight to a fully built
-	# Main with the camera already framed on the core, no black flash.
-	SaveManager.swap_scene_to_main()
+	# Cross-sector launch flow: when the player came from a parked
+	# Main (sector A), re-attach that Main and play its launch
+	# animation BEFORE swapping to the target sector. On
+	# launch_complete the SaveManager helper swaps to a fresh Main
+	# with `pending_map_path` already set. When no parked Main exists
+	# (came from main menu), this falls back to a direct swap.
+	SaveManager.queue_launch_with_animation()
 
 
 # =========================
@@ -1902,6 +1908,12 @@ func _on_launch_confirm() -> void:
 			seed_pack[mat] = amt
 	SaveManager.pending_seed_pack = seed_pack
 	SaveManager.save_campaign()
+	# Player just confirmed a real launch via the resource-cost
+	# overlay — main._ready consumes this flag and plays the landing
+	# animation. CONTINUE / direct PLAY paths leave it false so
+	# returning to an already-active sector doesn't replay the
+	# touchdown.
+	SaveManager.pending_landing_animation = true
 	var sector = launch_overlay_sector
 	_close_launch_overlay()
 	_do_launch(sector)

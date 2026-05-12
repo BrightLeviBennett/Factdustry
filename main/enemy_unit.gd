@@ -28,6 +28,12 @@ var attack_timer := 0.0
 var target_building: Variant = null
 var is_dead := false
 var is_selected := false
+
+# --- STATUS EFFECTS ---
+# id -> { "effect": StatusEffectData, "time_left": float, "stacks": int,
+#         "boost": float (1.0 default; >1.0 if amplified by an affinity) }
+var active_statuses: Dictionary = {}
+var _status_tick_acc: float = 0.0
 var is_controlled := false  # True when the player is directly controlling this unit
 var target_unit: Variant = null  # Node2D — enemy unit targeted by player units
 
@@ -199,11 +205,80 @@ func _ready() -> void:
 	health = max_health
 
 
+## Applies a status effect to this unit, honouring opposites
+## (canceling both effects) and affinities (boosting both effects'
+## modifier magnitudes). If neither relation applies, the effect is
+## just added/refreshed.
+func apply_status_effect(effect: StatusEffectData) -> void:
+	if effect == null or effect.id == &"":
+		return
+	# OPPOSITES: applying an effect that this unit already has an
+	# opposite of cancels both (matches the user's default rule).
+	for existing_id in active_statuses.keys():
+		var existing_eff: StatusEffectData = active_statuses[existing_id]["effect"]
+		if existing_eff == null:
+			continue
+		var is_opp: bool = (effect.opposites.has(existing_id)
+			or existing_eff.opposites.has(effect.id))
+		if is_opp:
+			active_statuses.erase(existing_id)
+			return  # New effect cancels with existing; neither persists.
+	# AFFINITIES: applying an effect that this unit already has an
+	# affinity of doubles the modifier deviation for both.
+	var boost_new: float = 1.0
+	for existing_id2 in active_statuses.keys():
+		var existing_eff2: StatusEffectData = active_statuses[existing_id2]["effect"]
+		if existing_eff2 == null:
+			continue
+		var is_aff: bool = (effect.affinities.has(existing_id2)
+			or existing_eff2.affinities.has(effect.id))
+		if is_aff:
+			boost_new = 2.0
+			# Boost the existing affinity too.
+			active_statuses[existing_id2]["boost"] = 2.0
+	# Add or refresh the effect.
+	if active_statuses.has(effect.id) and effect.refresh_on_reapply:
+		active_statuses[effect.id]["time_left"] = effect.duration
+		if effect.stackable:
+			active_statuses[effect.id]["stacks"] = mini(int(active_statuses[effect.id]["stacks"]) + 1, effect.max_stacks)
+	else:
+		active_statuses[effect.id] = {
+			"effect": effect,
+			"time_left": effect.duration,
+			"stacks": 1,
+			"boost": boost_new,
+		}
+
+
+func _tick_status_effects(delta: float) -> void:
+	if active_statuses.is_empty():
+		return
+	_status_tick_acc += delta
+	var expire: Array = []
+	for sid in active_statuses:
+		var ent: Dictionary = active_statuses[sid]
+		ent["time_left"] = float(ent["time_left"]) - delta
+		if float(ent["time_left"]) <= 0.0:
+			expire.append(sid)
+			continue
+		var se: StatusEffectData = ent["effect"]
+		# DoT tick — tick_damage > 0 dealt every tick_interval.
+		if se != null and se.tick_damage > 0.0 and se.tick_interval > 0.0:
+			if _status_tick_acc >= se.tick_interval:
+				var dmg: float = se.tick_damage * float(ent.get("stacks", 1)) * float(ent.get("boost", 1.0))
+				health -= dmg
+	if _status_tick_acc >= 0.5:
+		_status_tick_acc = 0.0
+	for sid in expire:
+		active_statuses.erase(sid)
+
+
 func _process(delta: float) -> void:
 	if is_dead:
 		return
 	if main.world_paused:
 		return
+	_tick_status_effects(delta)
 
 	# PLAYER UNIT: allow shooting while moving. Opportunistic fire always ticks,
 	# and manual targets (right-click orders) are pursued persistently.
@@ -617,6 +692,18 @@ func _follow_path(delta: float) -> void:
 			var terrain_f = _terrain_ref()
 			if terrain_f and terrain_f.get_water_depth_at(main.world_to_grid(position)) > 0:
 				speed_mult = 0.5
+	# Stack any active speed modifier from status effects (Wet → 0.7×,
+	# Freezing → 0.2×, etc.). The `boost` field amplifies effects that
+	# have an affinity active alongside them; a 1.0 boost = vanilla.
+	for sid in active_statuses:
+		var ent: Dictionary = active_statuses[sid]
+		var se: StatusEffectData = ent["effect"]
+		if se != null and se.speed_modifier != 1.0:
+			var base_mod: float = se.speed_modifier
+			var boost: float = float(ent.get("boost", 1.0))
+			# Amplify the DEVIATION from 1.0 by the boost factor.
+			var effective: float = 1.0 + (base_mod - 1.0) * boost
+			speed_mult *= maxf(effective, 0.05)
 	var step = move_speed * speed_mult * delta
 
 	# --- Tank-style steering -----------------------------------------------
@@ -752,6 +839,17 @@ func _try_attack(delta: float) -> void:
 	if not _is_valid_attack_target(target_building):
 		target_building = null
 		unit_manager.request_new_path(self)
+		return
+
+	# Range gate. Without this, a stuck unit (inside a wall / void cell
+	# the path-follower can't make it out of) keeps firing on its
+	# attack_cooldown regardless of distance — looking like a unit with
+	# infinite attack range. Suppress the shot when we're more than the
+	# unit's effective range from the target.
+	var bldg_world: Vector2 = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+	var atk_range: float = data.attack_range if data else main.GRID_SIZE / 2.0
+	var effective_range: float = maxf(atk_range, main.GRID_SIZE * 1.5)
+	if position.distance_to(bldg_world) > effective_range:
 		return
 
 	attack_timer = attack_cooldown
@@ -1133,24 +1231,13 @@ func _check_wall_overlap(delta: float) -> void:
 			_request_repath()
 	if unit_manager.is_world_pos_walkable(position, data.movement_layer):
 		return
-	# Spiral outward looking for a free cell.
-	var here: Vector2i = main.world_to_grid(position)
-	for radius in range(1, 5):
-		for dy in range(-radius, radius + 1):
-			for dx in range(-radius, radius + 1):
-				if absi(dx) != radius and absi(dy) != radius:
-					continue
-				var probe: Vector2i = here + Vector2i(dx, dy)
-				var probe_world: Vector2 = main.grid_to_world(probe) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
-				if unit_manager.is_world_pos_walkable(probe_world, data.movement_layer):
-					position = probe_world
-					# Position changed — the existing path is now garbage,
-					# pull a fresh one to wherever we were heading.
-					# Skipped while manually controlled (player owns
-					# movement, not the path worker).
-					if not _skip_repath_on_unstick:
-						_request_repath()
-					return
+	# Unit ended up on a wall / void / building cell that its movement
+	# layer can't legally occupy. Kill it outright — the previous spiral-
+	# outward rescue could mask underlying bugs (units phasing through
+	# walls, spawning on void) and let stuck units cheat infinite attack
+	# range from inside terrain. A clean kill makes the "how did this
+	# happen" question loud and obvious.
+	take_damage(max_health + 1.0)
 
 
 func _disperse_from_nearby_units() -> void:
@@ -1220,8 +1307,19 @@ func take_damage(amount: float) -> void:
 	if data:
 		actual_damage = data.calc_damage_taken(amount)
 	health -= actual_damage
+	# Polish: hit-flash + audio. Read by enemy_unit's _draw to tint the
+	# sprite white briefly. Sound is played positionally so a unit being
+	# shot far off-screen sounds quieter than one right next to you.
+	var fb = main.get_node_or_null("FeedbackSystem")
+	if fb and fb.has_method("kick_unit_flash"):
+		fb.kick_unit_flash(self)
+	var asys = main.get_node_or_null("AudioSystem")
+	if asys and asys.has_method("play"):
+		asys.play("hit_unit", position, -4.0)
 	if health <= 0 and not is_dead:
 		is_dead = true
+		if asys:
+			asys.play("unit_die", position)
 		_on_death()
 
 
@@ -1257,9 +1355,22 @@ func move_to_position(world_pos: Vector2) -> void:
 
 
 # --- DRAWING ---
+var _flash_until: float = 0.0  # Set by FeedbackSystem.kick_unit_flash()
+
+
 func _draw() -> void:
 	if is_dead:
 		return
+
+	# Hit-flash: tint everything brighter for ~0.08 s after a damage
+	# event. Multiplying modulate works for both textured units and the
+	# primitive-shape fallbacks because all draws inherit it.
+	var now: float = Time.get_ticks_msec() / 1000.0
+	if _flash_until > now:
+		var t: float = clampf((_flash_until - now) / 0.08, 0.0, 1.0)
+		modulate = Color(1, 1, 1).lerp(Color(2.5, 2.5, 2.5), t)
+	elif modulate != Color(1, 1, 1):
+		modulate = Color(1, 1, 1)
 
 	# Textured rendering (turret-style: base + rotating head) takes precedence
 	# over the primitive-shape fallbacks whenever the .tres supplies sprites.

@@ -1402,13 +1402,23 @@ func spawn_enemy(spawn_position: Vector2, unit_id: StringName = &"basic_cell") -
 	if unit_data == null:
 		push_warning("UnitManager: Unit '%s' not found in Registry — using fallback stats." % unit_id)
 
+	# Validate spawn position. If the requested cell isn't walkable for
+	# this unit's movement layer (void / wall / building), look for the
+	# nearest walkable neighbour. Failing that, abort the spawn — better
+	# to drop one wave-spawn than to plant an enemy inside a wall where
+	# it can't be reached AND can shoot from infinite range.
+	var ml_e: int = unit_data.movement_layer if unit_data else 0
+	var corrected_e: Variant = _validate_spawn_position(spawn_position, ml_e)
+	if corrected_e == null:
+		push_warning("UnitManager: refused to spawn '%s' — no walkable cell near %s" % [unit_id, str(spawn_position)])
+		return
 	var enemy = Node2D.new()
 	enemy.set_script(enemy_script)
 	enemy.data = unit_data  # Pass the UnitData resource (may be null — enemy uses fallbacks)
 	enemy.team = UnitData.Team.ENEMY
 	enemy.main = main
 	enemy.unit_manager = self
-	enemy.position = spawn_position
+	enemy.position = corrected_e
 
 	add_child(enemy)
 	enemies.append(enemy)
@@ -1422,17 +1432,45 @@ func spawn_player_unit(spawn_position: Vector2, unit_id: StringName) -> void:
 		push_warning("UnitManager: Unit '%s' not found in Registry!" % unit_id)
 		return
 
+	var ml_p: int = unit_data.movement_layer
+	var corrected_p: Variant = _validate_spawn_position(spawn_position, ml_p)
+	if corrected_p == null:
+		push_warning("UnitManager: refused to spawn '%s' — no walkable cell near %s" % [unit_id, str(spawn_position)])
+		return
 	var unit = Node2D.new()
 	unit.set_script(enemy_script)
 	unit.data = unit_data
 	unit.team = UnitData.Team.PLAYER
 	unit.main = main
 	unit.unit_manager = self
-	unit.position = spawn_position
+	unit.position = corrected_p
 
 	add_child(unit)
 	player_units.append(unit)
 	# Player units don't pathfind to buildings — they idle at spawn
+
+
+## Returns the requested position if it's walkable for `ml`, otherwise
+## scans a small ring (up to 4 tiles) for the nearest walkable cell and
+## snaps to its centre. Returns `null` when nothing nearby is legal —
+## caller should bail rather than placing the unit on a wall / void.
+## Flying units always pass; their layer has no walkability constraint.
+func _validate_spawn_position(world_pos: Vector2, ml: int) -> Variant:
+	if ml == UnitData.MovementLayer.FLYING:
+		return world_pos
+	if is_world_pos_walkable(world_pos, ml):
+		return world_pos
+	var here: Vector2i = main.world_to_grid(world_pos)
+	for radius in range(1, 5):
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				if absi(dx) != radius and absi(dy) != radius:
+					continue
+				var probe: Vector2i = here + Vector2i(dx, dy)
+				var probe_world: Vector2 = main.grid_to_world(probe) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+				if is_world_pos_walkable(probe_world, ml):
+					return probe_world
+	return null
 
 
 func _spawn_test_nests() -> void:

@@ -148,6 +148,7 @@ var _drill_head_textures: Dictionary = {}
 # mechanically independent. State is stateless — angles are derived from
 # Time.get_ticks_msec() and the block's grid position.
 var _crusher_head_texture: Texture2D
+var _grinder_head_texture: Texture2D
 const CRUSHER_HEAD_SPIN_A := 3.7   # radians/sec target (head 0)
 const CRUSHER_HEAD_SPIN_B := -4.2  # target: different speed AND direction (head 1)
 # How fast each head's angular velocity eases toward its target (rad/s²).
@@ -773,6 +774,7 @@ const _PIPE_TEX_PATH := "res://textures/blocks/fluid transportation/FluidConduit
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
+const _GRINDER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallGrinder/GrinderHead.png"
 const _SCRAPER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/Ground Scraper/GroundScraperHead.png"
 const _VENT_TURBINE_BASE_TEX_PATH := "res://textures/blocks/power/VentTurbineBase.png"
 const _VENT_TURBINE_INNER_TEX_PATH := "res://textures/blocks/power/VentTurbineInner.png"
@@ -809,6 +811,7 @@ func _queue_texture_loads() -> void:
 	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
+	ResourceLoader.load_threaded_request(_GRINDER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_SCRAPER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_VENT_TURBINE_BASE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_VENT_TURBINE_INNER_TEX_PATH)
@@ -836,6 +839,7 @@ func _ensure_textures_loaded() -> void:
 	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
 	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
+	_grinder_head_texture = ResourceLoader.load_threaded_get(_GRINDER_HEAD_TEX_PATH)
 	_scraper_head_texture = ResourceLoader.load_threaded_get(_SCRAPER_HEAD_TEX_PATH)
 	_vent_turbine_base_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_BASE_TEX_PATH)
 	_vent_turbine_inner_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_INNER_TEX_PATH)
@@ -967,6 +971,64 @@ func _draw_drill_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Draws one red plasma beam per front-edge cell for blocks tagged
+## `drill_lasers` (plasma_bore, advanced_plasma_bore). Each beam runs
+## from the front face of the bore's front-edge cell to the far face
+## of the cell it's actively mining. Uses `Main.draw_beam` — the same
+## render path the player drone's mining + heal lasers use, so the
+## visual language (white core, colored sheath, endpoint discs,
+## breathing pulse) is consistent across all in-game beams.
+func _draw_drill_lasers(grid_pos: Vector2i, rotation: int, grid_size: Vector2i, mine_range: int) -> void:
+	if main == null:
+		return
+	var gs := float(main.GRID_SIZE)
+	var parallax: Vector2 = _get_top_offset(main.grid_to_world(grid_pos))
+	var fwd: Vector2
+	var fwd_i: Vector2i
+	match rotation:
+		0:
+			fwd = Vector2(1, 0); fwd_i = Vector2i(1, 0)
+		1:
+			fwd = Vector2(0, 1); fwd_i = Vector2i(0, 1)
+		2:
+			fwd = Vector2(-1, 0); fwd_i = Vector2i(-1, 0)
+		3:
+			fwd = Vector2(0, -1); fwd_i = Vector2i(0, -1)
+		_:
+			fwd = Vector2(1, 0); fwd_i = Vector2i(1, 0)
+	# Inner front-edge cells (the LAST row of the bore's footprint along
+	# the facing direction). `_get_front_edge` returns the cells just
+	# OUTSIDE the bore, so step them back by one to land on the bore's
+	# own front face.
+	var outer_front_cells := _get_front_edge(grid_pos, grid_size, rotation)
+	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() / 333.0)
+	var laser_color := Color(1.0, 0.15, 0.15)
+	# The drill actually scans `mine_range + 1` tiles beyond the bore
+	# (the front edge + mine_range more, matching `_get_extended_front_edge`),
+	# so the laser needs to do the same — otherwise ore at the very
+	# end of range looks like it falls outside the beam.
+	var max_reach: int = mine_range + 1
+	for outer in outer_front_cells:
+		var inner_front: Vector2i = outer - fwd_i
+		# Find the first ore tile within reach; else use max-range.
+		var hit_dist: int = max_reach
+		for step in range(1, max_reach + 1):
+			var scan: Vector2i = outer + fwd_i * (step - 1)
+			if terrain != null and terrain.has_method("get_ore_at"):
+				var ore = terrain.get_ore_at(scan)
+				if ore != null and ore.minable_resource != &"":
+					hit_dist = step
+					break
+		var hit_cell: Vector2i = outer + fwd_i * (hit_dist - 1)
+		# Start: front face of the bore's own front-edge cell (the emitter
+		# port — touches the boundary between the bore and the mined area).
+		var start: Vector2 = main.grid_to_world(inner_front) + Vector2(gs * 0.5, gs * 0.5) + fwd * (gs * 0.5) + parallax
+		# End: NEAR face of the hit cell (the side facing the bore).
+		var end: Vector2 = main.grid_to_world(hit_cell) + Vector2(gs * 0.5, gs * 0.5) - fwd * (gs * 0.5) + parallax
+		main.draw_beam(self, start, end, laser_color, pulse)
+
+
 ## Draws two gear-style crusher heads on a block tagged "crusher_heads".
 ## One head is placed on the inner edge of each front-edge cell (the edge
 ## touching the crusher body), with the texture centered on that edge — so
@@ -978,16 +1040,22 @@ func _draw_drill_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 func _draw_crusher_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 		block_id: StringName, tint: Color = Color.WHITE,
 		spinning: bool = true) -> void:
-	if _crusher_head_texture == null:
+	# Pick texture by block tag: wall_grinder (3 heads) uses GrinderHead,
+	# everything else (wall_crusher etc.) uses CrusherHead.
+	var bd_h = Registry.get_block(block_id)
+	var is_grinder: bool = bd_h != null and bd_h.tags.has("grinder_heads")
+	var head_tex: Texture2D = _grinder_head_texture if is_grinder else _crusher_head_texture
+	if head_tex == null:
 		return
 
 	var gs := float(main.GRID_SIZE)
 	var world_pos: Vector2 = main.grid_to_world(grid_pos)
 	var offset: Vector2 = _get_top_offset(world_pos) * _get_height_scale(block_id)
 
-	# Front-edge cells (one per head) — same mapping _get_front_edge produces.
+	# Front-edge cells (one per head) — same mapping _get_front_edge
+	# produces. Wall crusher = 2 cells, wall grinder = 3 cells, etc.
 	var front_cells := _get_front_edge(grid_pos, grid_size, rotation)
-	if front_cells.size() < 2:
+	if front_cells.size() < 1:
 		return
 
 	# Forward unit vector for the block. Used to shift each head back toward
@@ -1001,46 +1069,57 @@ func _draw_crusher_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 		3: fwd = Vector2(0, -1)
 		_: fwd = Vector2(1, 0)
 
-	# Square sprite centered at the pivot. Drawn below native-size so the
-	# gears sit comfortably inside a single tile — tweak CRUSHER_HEAD_SCALE
-	# at the top of this script (or inline here) if you want them bigger.
-	const CRUSHER_HEAD_SCALE := 0.5
-	var tex_size: Vector2 = _crusher_head_texture.get_size() * CRUSHER_HEAD_SCALE * main.SPRITE_SCALE_FACTOR
+	# Square sprite centered at the pivot. Sized as a fraction of a tile
+	# (not the texture's native px), so swapping the head art for a
+	# higher-resolution version doesn't blow up the in-world size.
+	const CRUSHER_HEAD_TILE_FRACTION := 0.75
+	var head_world_size: float = gs * CRUSHER_HEAD_TILE_FRACTION
+	var tex_size: Vector2 = Vector2(head_world_size, head_world_size)
 	var tex_rect := Rect2(-tex_size * 0.5, tex_size)
 
-	# Per-block phase offsets — derived from grid_pos so neighboring crushers
-	# stay visually desynced. Used both for the spin animation and the
-	# resting angle when the crusher isn't running.
-	var seed_a: int = grid_pos.x * 73 + grid_pos.y * 31
-	var seed_b: int = grid_pos.x * 17 + grid_pos.y * 53
-	var phase_a: float = fposmod(float(seed_a), TAU)
-	var phase_b: float = fposmod(float(seed_b), TAU)
-
-	var angle_a: float = phase_a
-	var angle_b: float = phase_b
+	var head_count: int = front_cells.size()
+	# Compute live angles for each head. The state dict stores
+	# `angle_<i>` / `vel_<i>` per head index so the existing 2-head
+	# crusher inertial state keeps working AND new 3-head grinders
+	# extend it without breaking.
+	var angles: Array = []
 	if spinning:
-		# Placed crushers read live inertial state maintained by _process.
-		# Initialize lazily at rest pose so the first draw works even if no
-		# tick has happened yet (the tick will start easing velocity up/down
-		# on subsequent frames).
 		if not _crusher_head_state.has(grid_pos):
-			_crusher_head_state[grid_pos] = {
-				"angle_a": phase_a, "angle_b": phase_b,
-				"vel_a": 0.0, "vel_b": 0.0,
-			}
+			_crusher_head_state[grid_pos] = {}
 		var s: Dictionary = _crusher_head_state[grid_pos]
-		angle_a = float(s["angle_a"])
-		angle_b = float(s["angle_b"])
-	var angles: Array = [angle_a, angle_b]
+		for i in range(head_count):
+			var key_a: String = "angle_%d" % i
+			if not s.has(key_a):
+				var seed_i: int = grid_pos.x * (73 + i * 11) + grid_pos.y * (31 + i * 7)
+				s[key_a] = fposmod(float(seed_i), TAU)
+				s["vel_%d" % i] = 0.0
+			angles.append(float(s[key_a]))
+	else:
+		for i in range(head_count):
+			var seed_i: int = grid_pos.x * (73 + i * 11) + grid_pos.y * (31 + i * 7)
+			angles.append(fposmod(float(seed_i), TAU))
 
-	for i in range(2):
+	# Axis along the front edge (perpendicular to `fwd`). Used to nudge
+	# the outer heads inward so they line up with the indicator arrows
+	# drawn into the body texture (the artwork insets its arrows from
+	# the body's outer corners; cell centers don't match that inset
+	# without an explicit pull-toward-center).
+	var side: Vector2 = Vector2(-fwd.y, fwd.x)
+	const CRUSHER_HEAD_EDGE_SQUEEZE := 0.1
+	# Front-edge midpoint along `side` (cell-center coordinates).
+	var edge_mid: float = (float(head_count) - 1.0) * 0.5
+	for i in range(head_count):
 		var cell: Vector2i = front_cells[i]
 		var cell_center: Vector2 = main.grid_to_world(cell) + Vector2(gs * 0.5, gs * 0.5) + offset
 		# Shift back toward the crusher by half a tile → head sits on the
 		# shared edge between the crusher body and the front cell.
 		var head_pos: Vector2 = cell_center - fwd * (gs * 0.5)
+		# Pull the head inward along the front edge by a small fraction
+		# of its distance from the edge midpoint.
+		var lateral_tiles: float = float(i) - edge_mid
+		head_pos += side * (lateral_tiles * gs * CRUSHER_HEAD_EDGE_SQUEEZE)
 		draw_set_transform(head_pos, angles[i])
-		draw_texture_rect(_crusher_head_texture, tex_rect, false, tint)
+		draw_texture_rect(head_tex, tex_rect, false, tint)
 		draw_set_transform(Vector2.ZERO, 0.0)
 
 
@@ -1092,18 +1171,26 @@ func _tick_crusher_head_states(delta: float) -> void:
 			to_erase.append(anchor)
 			continue
 		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
-		if data == null or not data.tags.has("crusher_heads"):
+		if data == null or (not data.tags.has("crusher_heads") and not data.tags.has("grinder_heads")):
 			to_erase.append(anchor)
 			continue
 		var active := _is_crusher_spinning(anchor, data)
-		var target_a: float = CRUSHER_HEAD_SPIN_A if active else 0.0
-		var target_b: float = CRUSHER_HEAD_SPIN_B if active else 0.0
 		var s: Dictionary = _crusher_head_state[anchor]
 		var step: float = CRUSHER_HEAD_ACCEL * delta
-		s["vel_a"] = move_toward(float(s["vel_a"]), target_a, step)
-		s["vel_b"] = move_toward(float(s["vel_b"]), target_b, step)
-		s["angle_a"] = fposmod(float(s["angle_a"]) + float(s["vel_a"]) * delta, TAU)
-		s["angle_b"] = fposmod(float(s["angle_b"]) + float(s["vel_b"]) * delta, TAU)
+		# Walk every head currently tracked for this anchor — supports
+		# 2-head wall_crusher and 3-head wall_grinder transparently.
+		# Targets alternate sign/speed by index so adjacent heads spin
+		# opposite directions like the original wall-crusher pair.
+		for key in s.keys():
+			if not (key as String).begins_with("angle_"):
+				continue
+			var idx: int = int(String(key).substr(6))
+			var vkey: String = "vel_%d" % idx
+			var base_target: float = CRUSHER_HEAD_SPIN_A if (idx % 2 == 0) else CRUSHER_HEAD_SPIN_B
+			# Slightly different magnitude per head for visual variety.
+			var target: float = (base_target * (1.0 + 0.05 * idx)) if active else 0.0
+			s[vkey] = move_toward(float(s.get(vkey, 0.0)), target, step)
+			s[key] = fposmod(float(s[key]) + float(s[vkey]) * delta, TAU)
 	for a in to_erase:
 		_crusher_head_state.erase(a)
 
@@ -1240,16 +1327,33 @@ func _draw_hovered_turret_range() -> void:
 	var grid_pos: Vector2i = main.world_to_grid(mouse_world)
 	if not main.placed_buildings.has(grid_pos):
 		return
+	# Player's own blocks only — enemy / derelict structures shouldn't
+	# advertise their reach to the player on hover.
+	if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
+		return
 	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
-	if data == null or not data.is_turret() or data.attack_range <= 0.0:
+	if data == null:
+		return
+	# Pick the appropriate range based on what kind of block this is:
+	#   - turret   → attack_range (firing radius)
+	#   - crane    → crane_range  (reach of the grabber)
+	#   - mass_driver → link_range (max partner distance)
+	var range_tiles: float = 0.0
+	if data.is_turret() and data.attack_range > 0.0:
+		range_tiles = data.attack_range
+	elif data.tags.has("crane") and data.crane_range > 0.0:
+		range_tiles = data.crane_range
+	elif data.tags.has("mass_driver") and data.link_range > 0.0:
+		range_tiles = data.link_range
+	if range_tiles <= 0.0:
 		return
 	var gs: float = float(main.GRID_SIZE)
 	var center: Vector2 = main.grid_to_world(anchor) + Vector2(
 		data.grid_size.x * gs * 0.5,
 		data.grid_size.y * gs * 0.5,
 	)
-	var range_px: float = data.attack_range * gs
+	var range_px: float = range_tiles * gs
 	_draw_dashed_circle(center, range_px, Color(1, 1, 1, 0.85), 3.0)
 
 
@@ -2670,26 +2774,41 @@ func _is_facing_ore(grid_pos: Vector2i, rotation: int, block_id: StringName = &"
 	if is_floor_miner:
 		for x in range(data.grid_size.x):
 			for y in range(data.grid_size.y):
-				if _ore_matches_miner(terrain, grid_pos + Vector2i(x, y), true):
+				if _ore_matches_miner(terrain, grid_pos + Vector2i(x, y), true, data):
 					return true
 		return false
+	# Drills accept ore anywhere within their data-driven mine_range
+	# beyond the front edge — so a plasma bore (mine_range=4) can be
+	# placed up to 4 tiles back from the ore wall.
+	var max_extend: int = maxi(data.mine_range, 1)
 	var front_cells = _get_front_edge(grid_pos, data.grid_size, rotation)
 	for cell in front_cells:
-		if _ore_matches_miner(terrain, cell, is_floor_miner):
+		if _ore_matches_miner(terrain, cell, is_floor_miner, data):
 			return true
-		if _ore_matches_miner(terrain, cell + dir, is_floor_miner):
-			return true
+		for step in range(1, max_extend + 1):
+			if _ore_matches_miner(terrain, cell + dir * step, is_floor_miner, data):
+				return true
 	return false
 
 
-func _ore_matches_miner(terrain, cell: Vector2i, is_floor_miner: bool) -> bool:
+func _ore_matches_miner(terrain, cell: Vector2i, is_floor_miner: bool, data: BlockData = null) -> bool:
 	var ore_data: TerrainTileData = terrain.get_ore_at(cell)
 	if ore_data == null:
 		return false
 	var is_floor_ore: bool = ore_data.tags.has("floor_ore")
 	if is_floor_miner:
-		return is_floor_ore
-	return not is_floor_ore
+		if not is_floor_ore:
+			return false
+	else:
+		if is_floor_ore:
+			return false
+	# Whitelist filter: when the block lists `accepted_ores`, the tile
+	# id must match. Lets the ground scraper claim coal + sulfur while
+	# impact / earthquake / eruption harvesters take the rest.
+	if data != null and data.accepted_ores.size() > 0:
+		if not data.accepted_ores.has(ore_data.id):
+			return false
+	return true
 
 
 ## Returns true if this building's front edge faces a blackstone wall tile
@@ -2717,19 +2836,25 @@ func _is_facing_wall(grid_pos: Vector2i, rotation: int, block_id: StringName = &
 	# further ahead, matching how drills check for ore.
 	var front_cells = _get_front_edge(grid_pos, data.grid_size, rotation)
 	for cell in front_cells:
-		if _is_mineable_wall(terrain, cell):
+		if _is_mineable_wall(terrain, cell, data):
 			return true
-		if _is_mineable_wall(terrain, cell + dir):
+		if _is_mineable_wall(terrain, cell + dir, data):
 			return true
 	return false
 
 
-## Wall-miner helper: true if the cell is a blackstone_wall with no ore on it.
-func _is_mineable_wall(terrain: Node, cell: Vector2i) -> bool:
+## Wall-miner helper: true if the cell is a wall this block can mine
+## (consults `data.accepted_walls`, defaulting to blackstone_wall) and
+## has no ore on it.
+func _is_mineable_wall(terrain: Node, cell: Vector2i, data: BlockData = null) -> bool:
 	if terrain.get_ore_at(cell) != null:
 		return false
-	var wall_id = terrain.wall_tiles.get(cell, &"")
-	return StringName(wall_id) == &"blackstone_wall"
+	var wall_id: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+	if wall_id == &"":
+		return false
+	if data != null and data.accepted_walls.size() > 0:
+		return data.accepted_walls.has(wall_id)
+	return wall_id == &"blackstone_wall"
 
 
 ## Returns true if any cardinal neighbor of this building is an archive block.
@@ -2965,6 +3090,14 @@ func _unhandled_input(event: InputEvent) -> void:
 					if _handle_work_click(click_pos):
 						get_viewport().set_input_as_handled()
 						return
+					if not main.placed_buildings.has(click_pos):
+						# Clicking empty ground while a link source is pending
+						# abandons the selection — same feel as clicking a
+						# non-linkable block.
+						if link_source != Vector2i(-1, -1):
+							link_source = Vector2i(-1, -1)
+							_link_just_linked = Vector2i(-1, -1)
+							queue_redraw()
 					if main.placed_buildings.has(click_pos):
 						var click_block_id = main.placed_buildings[click_pos]
 						var click_data = Registry.get_block(click_block_id)
@@ -5288,6 +5421,19 @@ func _apply_transport_crossings(raw: Array[Vector2i], transport_tag: String) -> 
 			var existing_id: StringName = main.placed_buildings[gp]
 			var existing_data = Registry.get_block(existing_id)
 			var same_transport: bool = existing_data != null and existing_data.tags.has(transport_tag)
+			# A different-tag transport in the same swap family (e.g.
+			# dragging a duct over a belt — both share the "belt_duct"
+			# group) should overlay-swap rather than be bridged over.
+			# Treat it as same_transport so the perpendicular/parallel
+			# branch runs and try_place_building's swap_group swap
+			# replaces the belt with the new block at commit time.
+			if not same_transport and existing_data != null:
+				var sel_data = Registry.get_block(main.selected_building)
+				if sel_data and main.has_method("_get_swap_group"):
+					var sel_group: StringName = main._get_swap_group(sel_data)
+					var ex_group: StringName = main._get_swap_group(existing_data)
+					if sel_group != &"" and sel_group == ex_group:
+						same_transport = true
 			# Platforms are terrain, not obstacles — drag straight onto them
 			# without trying to bridge over. The transport block's normal
 			# placement path stashes the platform underneath via
@@ -5636,12 +5782,19 @@ func _draw_placed_buildings() -> void:
 	var wall_set: Dictionary = _cached_wall_set
 	var any_non_lumina := false
 
+	# LaunchAnimation hides pre-built LUMINA blocks until the ring
+	# sweep crosses them — the sector visually "spawns into existence"
+	# as the ring travels. Skip those anchors entirely so they don't
+	# appear early in any of the building draw passes.
+	var la_filter = get_node_or_null("/root/Main/LaunchAnimation")
 	for grid_pos in main.placed_buildings:
 		if grid_pos.x < grid_min.x or grid_pos.x > grid_max.x:
 			continue
 		if grid_pos.y < grid_min.y or grid_pos.y > grid_max.y:
 			continue
 		if not main.is_building_anchor(grid_pos):
+			continue
+		if la_filter and la_filter.has_method("is_block_hidden") and la_filter.is_block_hidden(grid_pos):
 			continue
 		all_positions.append(grid_pos)
 		is_wall_of.append(false)
@@ -6162,10 +6315,22 @@ func _draw_placed_buildings() -> void:
 		if data.tags.has("drill_heads"):
 			var dh_variant: String = _get_drill_head_variant(grid_pos, rot, data.grid_size)
 			_draw_drill_heads(grid_pos, rot, data.grid_size, dh_variant, block_id)
-		if data.tags.has("crusher_heads"):
-			# Placed crushers always render from live state; the per-frame
-			# tick (_tick_crusher_head_states) is what decides whether the
-			# heads are spinning up, holding speed, or coasting to a stop.
+		if data.tags.has("drill_lasers"):
+			# Only fire lasers when the bore is fully built AND powered —
+			# a ghost / under-construction / unpowered bore shouldn't be
+			# emitting plasma.
+			var lasers_active: bool = true
+			if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+				lasers_active = false
+			if lasers_active:
+				if power_sys and power_sys.has_method("is_powered_or_battery"):
+					lasers_active = power_sys.is_powered_or_battery(grid_pos)
+			if lasers_active:
+				_draw_drill_lasers(grid_pos, rot, data.grid_size, data.mine_range)
+		if data.tags.has("crusher_heads") or data.tags.has("grinder_heads"):
+			# Placed crushers / grinders read live inertial state; the
+			# per-frame tick (_tick_crusher_head_states) decides whether
+			# the heads spin up, hold speed, or coast to a stop.
 			_draw_crusher_heads(grid_pos, rot, data.grid_size, block_id, Color.WHITE, true)
 
 	# --- PASS 2.25: Build animation overlay ---
@@ -6366,28 +6531,6 @@ func _draw_placed_buildings() -> void:
 			var ov_rect := Rect2(br_centre - ov_size * 0.5, ov_size)
 			draw_texture_rect(overlay_tex, ov_rect, false)
 
-	# --- PASS 3: Draw direction arrows on directional buildings ---
-	for idx in order:
-		if is_wall_of[idx]:
-			continue
-		var grid_pos: Vector2i = all_positions[idx]
-		if ss and ss.is_tile_hidden(grid_pos):
-			continue
-		var block_id: StringName = main.placed_buildings[grid_pos]
-		if not _is_directional(block_id):
-			continue
-
-		var rotation: int = main.building_rotation.get(grid_pos, 0)
-		var block_size: Vector2i = _size_for.call(block_id)
-		var world_pos: Vector2 = main.grid_to_world(grid_pos)
-		var offset: Vector2 = _offset_for.call(block_id)
-		var center: Vector2 = world_pos + Vector2(
-			gs * block_size.x / 2.0,
-			gs * block_size.y / 2.0
-		) + offset
-
-		_draw_direction_arrow(center, rotation, Color(1, 1, 1, 0.6))
-
 	# --- PASS 4: Draw health bars on damaged buildings ---
 	for idx in order:
 		if is_wall_of[idx]:
@@ -6396,6 +6539,22 @@ func _draw_placed_buildings() -> void:
 		if ss and ss.is_tile_hidden(grid_pos):
 			continue
 		var health_pct: float = main.get_building_health_pct(grid_pos)
+		# Launch-anim reveal tint: paints over the freshly-drawn sprite
+		# while the ring sweep is running. Color.WHITE = no-op so the
+		# overlay only kicks in for blocks the ring has actually touched
+		# (or for pre-built blocks waiting their turn).
+		var la_ref = get_node_or_null("/root/Main/LaunchAnimation")
+		if la_ref and la_ref.has_method("get_block_reveal_tint"):
+			var t_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+			var reveal_tint: Color = la_ref.get_block_reveal_tint(t_anchor)
+			if reveal_tint.a > 0.001:
+				var rev_id: StringName = main.placed_buildings[grid_pos]
+				var rev_size: Vector2i = _size_for.call(rev_id)
+				var rev_world: Vector2 = main.grid_to_world(grid_pos)
+				var rev_offset: Vector2 = _offset_for.call(rev_id)
+				draw_rect(
+					Rect2(rev_world + rev_offset, Vector2(gs * rev_size.x, gs * rev_size.y)),
+					reveal_tint, true)
 		if health_pct < 1.0:
 			var block_id: StringName = main.placed_buildings[grid_pos]
 			var block_size: Vector2i = _size_for.call(block_id)
@@ -6407,6 +6566,7 @@ func _draw_placed_buildings() -> void:
 				health_pct,
 				gs * block_size.x
 			)
+
 
 
 ## Stamps a held turret's chassis plate (multi-barrel) and head
@@ -6693,7 +6853,7 @@ func _draw_paused_queue() -> void:
 		if data.tags.has("drill_heads"):
 			var dh_variant: String = _get_drill_head_variant(grid_pos, rotation, data.grid_size)
 			_draw_drill_heads(grid_pos, rotation, data.grid_size, dh_variant, block_id, Color(1, 1, 1, 0.45))
-		if data.tags.has("crusher_heads"):
+		if data.tags.has("crusher_heads") or data.tags.has("grinder_heads"):
 			_draw_crusher_heads(grid_pos, rotation, data.grid_size, block_id, Color(1, 1, 1, 0.45), false)
 		# Turret heads / chassis overlay so paused-queue and out-of-
 		# build-range turret ghosts visibly show their barrels.
@@ -6910,7 +7070,7 @@ func _draw_preview() -> void:
 					dh_variant = _get_drill_head_variant(cell, dh_rot, data.grid_size)
 				var dh_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
 				_draw_drill_heads(cell, dh_rot, data.grid_size, dh_variant, main.selected_building, dh_tint)
-			if cell_block_id == main.selected_building and data and data.tags.has("crusher_heads"):
+			if cell_block_id == main.selected_building and data and (data.tags.has("crusher_heads") or data.tags.has("grinder_heads")):
 				var ch_rot: int = preview_rots.get(cell, main.placement_rotation)
 				var ch_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
 				_draw_crusher_heads(cell, ch_rot, data.grid_size, main.selected_building, ch_tint, false)
@@ -7063,7 +7223,7 @@ func _draw_preview() -> void:
 			dh_variant = _get_drill_head_variant(preview_grid_pos, main.placement_rotation, data.grid_size)
 		var dh_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
 		_draw_drill_heads(preview_grid_pos, main.placement_rotation, data.grid_size, dh_variant, main.selected_building, dh_tint)
-	if data and data.tags.has("crusher_heads"):
+	if data and (data.tags.has("crusher_heads") or data.tags.has("grinder_heads")):
 		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
 		_draw_crusher_heads(preview_grid_pos, main.placement_rotation, data.grid_size, main.selected_building, ch_tint, false)
 
@@ -7120,6 +7280,20 @@ func _draw_preview() -> void:
 	if data and data.tags.has("cable_node"):
 		var cable_range: int = 10 if String(data.id).begins_with("cable_tower") else 5
 		_draw_cable_range_preview(preview_grid_pos, data.grid_size, cable_range)
+
+	# Drill / extractor mining range preview: reuse the dashed line style
+	# the cable preview uses, but only along the front edge in the
+	# facing direction. Shows how far the drill will reach into ore.
+	# Omnidirectional / floor / geyser / wall miners don't have a
+	# meaningful "forward" so they skip the preview.
+	if data and data.category == BlockData.BlockCategory.EXTRACTORS \
+			and data.mine_range > 0 \
+			and not data.tags.has("floor_miner") \
+			and not data.tags.has("omnidirectional") \
+			and not data.tags.has("geyser_miner") \
+			and not data.tags.has("wall_miner"):
+		_draw_drill_range_preview(preview_grid_pos, data.grid_size,
+			main.placement_rotation, data.mine_range)
 
 
 ## Draws the yellow dashed range indicator and connectable-block outlines for
@@ -7188,6 +7362,42 @@ func _draw_cable_range_preview(origin: Vector2i, grid_size: Vector2i, cable_rang
 				var anchor_world: Vector2 = Vector2(hit_anchor) * gs + parallax_off
 				var anchor_size: Vector2 = Vector2(anchor_data.grid_size) * gs
 				draw_rect(Rect2(anchor_world, anchor_size), outline_color, false, 2.0)
+
+
+## Draws a yellow dashed range indicator along the drill's facing
+## direction, marking the front edge + `mine_range` tiles ahead. Same
+## visual language as `_draw_cable_range_preview` so the player reads
+## both as "this is what it reaches".
+func _draw_drill_range_preview(origin: Vector2i, grid_size: Vector2i, rotation: int, mine_range: int) -> void:
+	if mine_range <= 0:
+		return
+	var gs := float(main.GRID_SIZE)
+	var parallax_off := _get_top_offset(Vector2.ZERO)
+	var dash_color := Color(1.0, 0.9, 0.2, 0.85)
+
+	var dir_v: Vector2i
+	match rotation:
+		0: dir_v = Vector2i(1, 0)
+		1: dir_v = Vector2i(0, 1)
+		2: dir_v = Vector2i(-1, 0)
+		3: dir_v = Vector2i(0, -1)
+		_: dir_v = Vector2i(1, 0)
+	var dir_vf: Vector2 = Vector2(dir_v)
+
+	var front_cells := _get_front_edge(origin, grid_size, rotation)
+	# One dash per tile of mine_range, starting at the front edge cell
+	# and walking forward. mine_range = 4 → 4 dashes (plasma bore),
+	# mine_range = 6 → 6 dashes (advanced plasma bore).
+	var line_tiles: int = mine_range
+	var dash_frac := 0.55
+
+	for front in front_cells:
+		# Start at the centre of the front-edge tile.
+		var center: Vector2 = Vector2(front) * gs + Vector2(gs * 0.5, gs * 0.5) + parallax_off
+		for t in range(line_tiles):
+			var seg_start: Vector2 = center + dir_vf * (gs * (float(t) - 0.5))
+			var seg_end: Vector2 = seg_start + dir_vf * (gs * dash_frac)
+			draw_line(seg_start, seg_end, dash_color, 2.0)
 
 
 ## Draws the red demolish rectangle while the player is drag-selecting.
@@ -7612,6 +7822,10 @@ func _draw_cable_links(canvas: CanvasItem) -> void:
 	if not ("cable_connections" in power_sys):
 		return
 	var _ss_link = get_node_or_null("/root/Main/SectorScript")
+	# LaunchAnimation hides prebuilt blocks until the ring sweep crosses
+	# them — skip cable wires that would dangle from a revealed node to
+	# a still-hidden node, since the network can't be connected yet.
+	var _la_link = get_node_or_null("/root/Main/LaunchAnimation")
 	var gs: float = main.GRID_SIZE
 	var half_tile := Vector2(gs / 2.0, gs / 2.0)
 	var cable_tint := Color(1.0, 1.0, 1.0, 1.0)
@@ -7625,6 +7839,14 @@ func _draw_cable_links(canvas: CanvasItem) -> void:
 		if not main.placed_buildings.has(ca) or not main.placed_buildings.has(cb):
 			continue
 		if _ss_link and (_ss_link.is_tile_hidden(ca) or _ss_link.is_tile_hidden(cb)):
+			continue
+		# Only consult LaunchAnimation while it's actively in a non-IDLE
+		# phase. Once IDLE, _hidden_until_hit has been cleared, but
+		# gating on state here also protects against any future paths
+		# that might leave stale entries in the dict.
+		if _la_link and "state" in _la_link and int(_la_link.state) != 0 \
+				and _la_link.has_method("is_block_hidden") \
+				and (_la_link.is_block_hidden(ca) or _la_link.is_block_hidden(cb)):
 			continue
 		var wa: Vector2 = main.grid_to_world(ca) + half_tile + _get_top_offset(main.grid_to_world(ca))
 		var wb: Vector2 = main.grid_to_world(cb) + half_tile + _get_top_offset(main.grid_to_world(cb))
@@ -7747,7 +7969,10 @@ func _draw_links() -> void:
 
 	# Range circle: shows the block's `link_range` (in tiles) as a faint
 	# disc the player can use to gauge where a partner is reachable.
-	if src_data.link_range > 0.0:
+	# Mass drivers are excluded — their range is shown by the hover
+	# overlay (`_draw_hovered_turret_range`) instead so we don't draw
+	# two competing rings.
+	if src_data.link_range > 0.0 and not src_data.tags.has("mass_driver"):
 		draw_arc(src_world, src_data.link_range * gs, 0.0, TAU, 96,
 			Color(1.0, 0.9, 0.3, 0.5), 1.5)
 
@@ -8766,8 +8991,6 @@ func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> 
 
 ## Draws all crane telescoping arms and cross grabbers.
 func _draw_cranes() -> void:
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-	var c: CanvasItem = _ccanvas()
 	for anchor in crane_states:
 		if not main.placed_buildings.has(anchor):
 			continue
@@ -8779,11 +9002,9 @@ func _draw_cranes() -> void:
 		var base: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
 
 		_draw_crane_pose(state, data, base, gs, 0.0)
-
-		# Draw range circle when controlled
-		if unit_mgr and unit_mgr.controlled_type == "crane" and unit_mgr.controlled_entity == anchor:
-			var range_px: float = data.crane_range * gs
-			c.draw_arc(base, range_px, 0, TAU, 64, Color(0.4, 0.8, 0.4, 0.15), 1.5)
+		# Range overlay for cranes is now unified with turrets via the
+		# hover-driven `_draw_hovered_turret_range`. The old per-frame
+		# green arc was redundant and only appeared while controlling.
 
 
 ## Returns the canvas crane drawing should target — `_crane_draw_canvas`

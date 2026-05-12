@@ -2591,6 +2591,9 @@
 
 	},
 	"core_position": "175,79",
+	"crane_links": {
+
+	},
 	"crane_states": {
 
 	},
@@ -2601,7 +2604,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1777908811.50011
+		"timestamp": 1778612896.15765
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -22609,6 +22612,8 @@
 		"99,98": "water",
 		"99,99": "water"
 	},
+	"fog_darkness_mult": 1.0,
+	"fog_enabled": false,
 	"grid_height": 100,
 	"grid_width": 200,
 	"hints": [],
@@ -22713,6 +22718,7 @@
 	"resources": {
 		"mat_copper": 15,
 		"mat_graphite": 9,
+		"mat_silicon": 2965,
 		"mat_steel": 2
 	},
 	"script_steps": [
@@ -22910,6 +22916,13 @@
 	"sorter_filters": {
 
 	},
+	"stats_blocks_placed": 0,
+	"stats_blocks_removed": 0,
+	"stats_enemy_blocks_destroyed": 0,
+	"stats_enemy_units_destroyed": 0,
+	"stats_play_time": 0.0,
+	"stats_units_destroyed": 0,
+	"stats_units_produced": 0,
 	"type": "sector",
 	"unloader_state": {
 

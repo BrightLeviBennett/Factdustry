@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d0oql1q42d13v"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,12 +6,21 @@
 script = ExtResource("1")
 id = &"bauxite_crusher"
 display_name = "Bauxite Crusher"
-description = "Specialized crusher for bauxite ore extraction."
+description = "Crushes bauxite walls into bauxite ore. Must face a bauxite wall. Requires electrical power."
 category = 1
+tags = PackedStringArray("mining", "extractor", "wall_miner", "crusher_heads")
 color = Color(0.7, 0.5, 0.3, 1)
+grid_size = Vector2i(2, 2)
 max_health = 240.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 2.0
-output_items = { "ore": 6 }
+output_items = {
+"mat_bauxite": 2
+}
 production_time = 2.0
-tags = PackedStringArray("mining", "extraction")
+accepted_walls = Array[StringName]([&"bauxite_wall"])
+electrical_power_use = 12.0
+max_stored_items = 15

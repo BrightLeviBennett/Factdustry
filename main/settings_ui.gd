@@ -262,6 +262,11 @@ func _build_game_tab() -> void:
 			if c and "pan_rotate_threshold" in c:
 				c.pan_rotate_threshold = threshold
 	)
+	# Debug/replay buttons: fire the landing or launch animations on
+	# the currently-loaded sector. Useful while iterating on the
+	# launch_animation tunables — no need to relaunch the sector.
+	_add_button_row("Play Land", _on_play_land_pressed,
+		"Play Launch", _on_play_launch_pressed)
 
 func _get_show_fps() -> bool:
 	return Engine.is_printing_error_messages()
@@ -794,6 +799,68 @@ func _add_section(title: String) -> void:
 	lbl.add_theme_color_override("font_color", Color(0.3, 0.75, 1.0))
 	content_vbox.add_child(lbl)
 	content_vbox.add_child(HSeparator.new())
+
+
+## Adds a horizontal row with two buttons. Used by the General tab
+## "Play Land / Play Launch" debug controls.
+func _add_button_row(label_a: String, on_a: Callable, label_b: String, on_b: Callable) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	var btn_a = Button.new()
+	btn_a.text = label_a
+	btn_a.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_a.pressed.connect(on_a)
+	hbox.add_child(btn_a)
+	var btn_b = Button.new()
+	btn_b.text = label_b
+	btn_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_b.pressed.connect(on_b)
+	hbox.add_child(btn_b)
+	content_vbox.add_child(hbox)
+
+
+## Plays the landing animation on the currently-loaded sector. No-op
+## if Main / LaunchAnimation / core anchor aren't available.
+func _on_play_land_pressed() -> void:
+	var main_node = get_node_or_null("/root/Main")
+	if main_node == null:
+		push_warning("Play Land: no Main scene — open a sector first.")
+		return
+	var la = main_node.get_node_or_null("LaunchAnimation")
+	if la == null or not la.has_method("play_landing"):
+		push_warning("Play Land: LaunchAnimation not found.")
+		return
+	var core_pos: Vector2i = main_node.core_position if "core_position" in main_node else Vector2i(-1, -1)
+	if core_pos == Vector2i(-1, -1):
+		push_warning("Play Land: no core_position on Main.")
+		return
+	if la.has_method("snapshot_prebuilt"):
+		la.snapshot_prebuilt()
+	la.play_landing(core_pos)
+	_close_settings_and_pause_menu()
+
+
+## Plays the launching animation on the currently-loaded sector.
+func _on_play_launch_pressed() -> void:
+	var main_node = get_node_or_null("/root/Main")
+	if main_node == null:
+		push_warning("Play Launch: no Main scene — open a sector first.")
+		return
+	var la = main_node.get_node_or_null("LaunchAnimation")
+	if la == null or not la.has_method("play_launch"):
+		push_warning("Play Launch: LaunchAnimation not found.")
+		return
+	la.play_launch()
+	_close_settings_and_pause_menu()
+
+
+## Closes the settings overlay AND the underlying pause/escape menu so
+## the player sees the animation play unobstructed.
+func _close_settings_and_pause_menu() -> void:
+	hide_settings()
+	var hud = get_node_or_null("/root/Main/HUD")
+	if hud and hud.has_method("_close_escape_menu") and hud.escape_menu_open:
+		hud._close_escape_menu()
 
 
 func _add_label(text: String) -> void:

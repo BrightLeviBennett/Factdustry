@@ -1997,7 +1997,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1778200678.34489
+		"timestamp": 1778612863.13061
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -15088,31 +15088,11 @@
 		"99,171": "grassy_floor",
 		"99,172": "grassy_floor"
 	},
+	"fog_darkness_mult": 1.0,
+	"fog_enabled": false,
 	"grid_height": 300,
 	"grid_width": 300,
 	"hints": [],
-	"hints_runtime": {
-		"clock": 35.2839976666685,
-		"landing_fired": true,
-		"runtime": {
-			"Mass Driver": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			},
-			"bridge": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			}
-		}
-	},
 	"junction_items": {
 
 	},
@@ -15196,46 +15176,6 @@
 		"mat_graphite": 574,
 		"mat_silicon": 2965,
 		"mat_steel": 1526
-	},
-	"script_runtime": {
-		"core_counts": {
-
-		},
-		"core_unit_mined_counts": {
-
-		},
-		"current_step": -1,
-		"decoded_archive_counts": {
-
-		},
-		"deposited_baselines": {
-
-		},
-		"disabled_buildings": [],
-		"ferox_blocks_destroyed_counts": {
-
-		},
-		"hidden_tiles": [],
-		"mined_counts": {
-
-		},
-		"placed_baselines": {
-
-		},
-		"placed_counts": {
-
-		},
-		"produced_counts": {
-
-		},
-		"script_running": false,
-		"step_wait_timer": 0.0,
-		"units_destroyed_counts": {
-
-		},
-		"units_produced_counts": {
-
-		}
 	},
 	"script_steps": [
 		{
@@ -15524,6 +15464,13 @@
 	"sorter_filters": {
 
 	},
+	"stats_blocks_placed": 0,
+	"stats_blocks_removed": 0,
+	"stats_enemy_blocks_destroyed": 0,
+	"stats_enemy_units_destroyed": 0,
+	"stats_play_time": 0.0,
+	"stats_units_destroyed": 0,
+	"stats_units_produced": 0,
 	"type": "sector",
 	"unloader_state": {
 

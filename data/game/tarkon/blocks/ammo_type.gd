@@ -63,8 +63,18 @@ extends Resource
 ## Extra range added to the turret's base attack_range (in pixels)
 @export var range_bonus: float = 0.0
 
-## Inaccuracy in degrees — random spread applied to the shot direction
-@export_range(0.0, 45.0, 0.1) var inaccuracy: float = 0.0
+## Bullet spread in degrees — the visible cone width for this ammo's
+## projectiles. Combined with the turret's own `bullet_spread`. Renamed
+## from `inaccuracy` (which now means "miss the target" on BlockData).
+@export_range(0.0, 45.0, 0.1) var bullet_spread: float = 0.0
+## Legacy alias — kept so old .tres files using `inaccuracy = X` still
+## load correctly. The data setter copies the value into bullet_spread
+## on load.
+@export_range(0.0, 45.0, 0.1) var inaccuracy: float = 0.0:
+	set(v):
+		inaccuracy = v
+		if bullet_spread == 0.0:
+			bullet_spread = v
 
 ## Number of projectiles fired per shot (for shotgun-style ammo)
 @export_range(1, 1000) var projectiles_per_shot: int = 1

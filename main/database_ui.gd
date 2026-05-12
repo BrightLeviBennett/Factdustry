@@ -33,6 +33,10 @@ var _sections: Dictionary = {}
 # All tile nodes for search filtering
 var _all_tiles: Array = []
 
+# Shared lock icon used by tile overlays + the icon grids in
+# Used In / Produced By / Used to Build / etc.
+var _lock_icon: Texture2D = preload("res://textures/UI/LockIcon.png")
+
 # --- CATEGORY DEFINITIONS ---
 var categories := {}
 
@@ -96,15 +100,20 @@ func _refresh_tile_lock(tile: Dictionary) -> void:
 	for c in panel.get_children():
 		c.queue_free()
 	if locked:
-		var lock_label = Label.new()
-		lock_label.text = "🔒"
-		lock_label.add_theme_font_size_override("font_size", 16)
-		lock_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		lock_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		lock_label.anchor_right = 1.0
-		lock_label.anchor_bottom = 1.0
-		lock_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		panel.add_child(lock_label)
+		# PanelContainer stretches direct children to fill, so anchor /
+		# offset insets are ignored. Wrap the icon in a CenterContainer
+		# and give the TextureRect a fixed custom_minimum_size so it
+		# stays small inside the tile.
+		var center = CenterContainer.new()
+		center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(center)
+		var lock_rect = TextureRect.new()
+		lock_rect.texture = _lock_icon
+		lock_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		lock_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		lock_rect.custom_minimum_size = Vector2(14, 14)
+		lock_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		center.add_child(lock_rect)
 	else:
 		var icon_rect = TextureRect.new()
 		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
@@ -302,28 +311,104 @@ func _build_section(cat_key: String) -> void:
 	sep.add_theme_constant_override("separation", 4)
 	_grid_vbox.add_child(sep)
 
-	# Grid of icon tiles
-	var flow = HFlowContainer.new()
-	flow.add_theme_constant_override("h_separation", TILE_PADDING)
-	flow.add_theme_constant_override("v_separation", TILE_PADDING)
-	_grid_vbox.add_child(flow)
+	var section_data = {"header": header, "separator": sep, "tiles": [], "subsections": []}
 
-	var section_data = {"header": header, "separator": sep, "grid": flow, "tiles": []}
-
-	# Populate tiles
-	for entry in cat["list"]:
-		# Skip blocks that aren't really player-facing tech entries — the
-		# &"archive" and &"power_source" blocks are level-design fixtures
-		# (no tech-tree node, no place button), not catalog entries.
-		if cat_key == "blocks" and entry is BlockData:
-			if entry.id == &"archive" or entry.id == &"power_source":
-				continue
-		var tile = _build_tile(entry, cat_key)
-		flow.add_child(tile["node"])
-		section_data["tiles"].append(tile)
-		_all_tiles.append(tile)
+	# For the blocks tab, group entries by BlockCategory and emit a
+	# sub-header + sub-separator between groups (same visual language
+	# as the top-level category headers, just smaller / dimmer).
+	if cat_key == "blocks":
+		var grouped: Dictionary = {}
+		for entry in cat["list"]:
+			if entry is BlockData:
+				if entry.id == &"archive" or entry.id == &"power_source":
+					continue
+				var sub_key: int = entry.category
+				if not grouped.has(sub_key):
+					grouped[sub_key] = []
+				grouped[sub_key].append(entry)
+		# Preserve enum order so the layout reads CORE → EXTRACTORS → …
+		var ordered: Array = []
+		for sub_key in [
+			BlockData.BlockCategory.CORE, BlockData.BlockCategory.EXTRACTORS,
+			BlockData.BlockCategory.FACTORIES, BlockData.BlockCategory.POWER,
+			BlockData.BlockCategory.TURRETS, BlockData.BlockCategory.WALLS,
+			BlockData.BlockCategory.UNITS, BlockData.BlockCategory.ASSIST,
+			BlockData.BlockCategory.PAYLOAD, BlockData.BlockCategory.ITEMS,
+			BlockData.BlockCategory.FLUIDS]:
+			if grouped.has(sub_key):
+				ordered.append(sub_key)
+		# Wrap all sub-sections in a tight inner VBox so the gap between
+		# sub-sections is visibly smaller than the gap between top-level
+		# categories — they read as part of the same Blocks section
+		# instead of as siblings of EXTRACTORS / FACTORIES / etc.
+		var sub_wrap = VBoxContainer.new()
+		sub_wrap.add_theme_constant_override("separation", 2)
+		_grid_vbox.add_child(sub_wrap)
+		var first_sub: bool = true
+		for sub_key in ordered:
+			_add_sub_section_header(_block_category_name(sub_key), cat["color"], not first_sub, sub_wrap)
+			first_sub = false
+			var sub_flow = HFlowContainer.new()
+			sub_flow.add_theme_constant_override("h_separation", TILE_PADDING)
+			sub_flow.add_theme_constant_override("v_separation", TILE_PADDING)
+			sub_wrap.add_child(sub_flow)
+			for entry in grouped[sub_key]:
+				var tile = _build_tile(entry, cat_key)
+				sub_flow.add_child(tile["node"])
+				section_data["tiles"].append(tile)
+				_all_tiles.append(tile)
+			section_data["subsections"].append({"flow": sub_flow, "key": sub_key})
+		# Mirror the original `grid` key so search filtering's
+		# `section["grid"]` lookup keeps working — point it at the
+		# first sub_flow so hiding it on no-match still works
+		# visually. The filter walks per-tile anyway.
+		if not section_data["subsections"].is_empty():
+			section_data["grid"] = section_data["subsections"][0]["flow"]
+		else:
+			var empty_flow = HFlowContainer.new()
+			_grid_vbox.add_child(empty_flow)
+			section_data["grid"] = empty_flow
+	else:
+		# Non-blocks tabs: single flat grid as before.
+		var flow = HFlowContainer.new()
+		flow.add_theme_constant_override("h_separation", TILE_PADDING)
+		flow.add_theme_constant_override("v_separation", TILE_PADDING)
+		_grid_vbox.add_child(flow)
+		section_data["grid"] = flow
+		for entry in cat["list"]:
+			var tile = _build_tile(entry, cat_key)
+			flow.add_child(tile["node"])
+			section_data["tiles"].append(tile)
+			_all_tiles.append(tile)
 
 	_sections[cat_key] = section_data
+
+
+## Adds a sub-section header inside a top-level category (e.g. the
+## "Extractors" header under the "Blocks" section). The text sits
+## above a thin line — same visual language as the main section
+## header but in a dimmer / smaller style so the hierarchy reads.
+## `with_top_pad` inserts a tiny gap before the header for every
+## sub-section after the first.
+func _add_sub_section_header(text: String, color: Color, with_top_pad: bool, parent: Container = null) -> void:
+	var host: Container = parent if parent != null else _grid_vbox
+	if with_top_pad:
+		var pad = Control.new()
+		pad.custom_minimum_size = Vector2(0, 2)
+		host.add_child(pad)
+	var header = Label.new()
+	header.text = text
+	header.add_theme_font_size_override("font_size", 13)
+	header.add_theme_color_override("font_color", color.lightened(0.1))
+	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	host.add_child(header)
+	var sep = HSeparator.new()
+	var sep_style = StyleBoxLine.new()
+	sep_style.color = color.darkened(0.6)
+	sep_style.thickness = 1
+	sep.add_theme_stylebox_override("separator", sep_style)
+	sep.add_theme_constant_override("separation", 4)
+	host.add_child(sep)
 
 
 func _build_tile(entry: Resource, cat_key: String) -> Dictionary:
@@ -363,16 +448,18 @@ func _build_tile(entry: Resource, cat_key: String) -> Dictionary:
 		panel.add_child(icon_rect)
 
 	if is_locked:
-		# Lock overlay
-		var lock_label = Label.new()
-		lock_label.text = "🔒"
-		lock_label.add_theme_font_size_override("font_size", 16)
-		lock_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		lock_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		lock_label.anchor_right = 1.0
-		lock_label.anchor_bottom = 1.0
-		lock_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		panel.add_child(lock_label)
+		# Lock overlay — wrap in a CenterContainer because PanelContainer
+		# stretches direct children to fill (anchor/offset are ignored).
+		var center = CenterContainer.new()
+		center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(center)
+		var lock_rect = TextureRect.new()
+		lock_rect.texture = _lock_icon
+		lock_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		lock_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		lock_rect.custom_minimum_size = Vector2(14, 14)
+		lock_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		center.add_child(lock_rect)
 
 	# Signals
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -445,7 +532,7 @@ func _build_detail_overlay() -> void:
 func _on_tile_hover(entry: Resource, is_locked: bool) -> void:
 	_hovered_entry = entry
 	if is_locked:
-		_tooltip_label.text = "🔒 Locked"
+		_tooltip_label.text = "Locked"
 	else:
 		_tooltip_label.text = entry.display_name
 	_tooltip_panel.visible = true
@@ -482,9 +569,12 @@ func _show_detail(entry: Resource, cat_key: String) -> void:
 	_clear_container(_detail_container)
 
 	var cat_color = categories[cat_key]["color"]
-	_add_header(entry.display_name, cat_color)
+	_add_header_with_icon(entry, cat_color)
 
-	if "description" in entry and entry.description != "":
+	# Block detail handles its own Purpose section now; for other
+	# categories keep the inline description as before so the layout
+	# doesn't regress.
+	if cat_key != "blocks" and "description" in entry and entry.description != "":
 		_add_text(entry.description, dim_text_color, 13)
 
 	_add_separator()
@@ -578,81 +668,269 @@ func _get_tech_id_for_entry(entry: Resource) -> StringName:
 # =========================
 
 func _show_item_details(item: ItemData) -> void:
-	_add_section("Properties")
+	var produced_by: Array[BlockData] = []
+	var used_in: Array[BlockData] = []
+	var used_to_build: Array[BlockData] = []
+	# Build a quick check: is this item the `minable_resource` of any
+	# ore tile? Drills don't literally list "mat_copper" in their
+	# output_items — they output 1 × whatever ore tile they're on — so
+	# we have to consult the tile registry instead.
+	var minable_from_floor: bool = false
+	var minable_from_wall: bool = false
+	for t in Registry.tiles_list:
+		if t == null or t.minable_resource == &"":
+			continue
+		if not _key_matches_item(t.minable_resource, item.id):
+			continue
+		if t.tags.has("floor_ore"):
+			minable_from_floor = true
+		else:
+			minable_from_wall = true
+	for b in Registry.blocks_list:
+		if b == null:
+			continue
+		# Direct output_items match (factories / arc furnaces etc.)
+		var produces: bool = _dict_has_item(b.output_items, item.id)
+		# Drill match — any non-wall-miner / non-geyser-miner extractor
+		# whose miner-type lines up with where the ore is found. We
+		# also honour the drill's `accepted_ores` whitelist so ground
+		# scraper shows up under copper-mined-by-coal? No — under
+		# coal/sulfur only; impact / earthquake / eruption show under
+		# zinc_ore-derived items only.
+		if not produces and b.category == BlockData.BlockCategory.EXTRACTORS:
+			var has_whitelist: bool = b.accepted_ores.size() > 0
+			var whitelist_match: bool = false
+			if has_whitelist:
+				for t in Registry.tiles_list:
+					if t == null or t.minable_resource == &"":
+						continue
+					if not b.accepted_ores.has(t.id):
+						continue
+					if _key_matches_item(t.minable_resource, item.id):
+						whitelist_match = true
+						break
+			if b.tags.has("floor_miner"):
+				if has_whitelist:
+					produces = whitelist_match
+				elif minable_from_floor:
+					produces = true
+			elif not b.tags.has("wall_miner") and not b.tags.has("geyser_miner") \
+					and not b.tags.has("floor_miner") and minable_from_wall:
+				produces = true
+		if produces:
+			produced_by.append(b)
+		var uses_input: bool = _dict_has_item(b.input_items, item.id)
+		if not uses_input and b.boosters.size() > 0:
+			for be in b.boosters:
+				if typeof(be) == TYPE_DICTIONARY and _key_matches_item(be.get("item_id", &""), item.id):
+					uses_input = true
+					break
+		if uses_input:
+			used_in.append(b)
+		if _dict_has_item(b.build_cost, item.id):
+			used_to_build.append(b)
+	_add_block_icon_grid("Produced By", produced_by)
+	_add_block_icon_grid("Used In", used_in)
+	_add_block_icon_grid("Used to Build", used_to_build)
 
-	_add_separator()
-	_add_section("Used In")
 
-	_add_separator()
-	_add_section("Produced By")
+## Returns true if `dict` has a key that refers to the given item id,
+## allowing the "mat_*" prefix stored on items vs. the bare name used
+## in build_cost / input_items / output_items.
+func _dict_has_item(dict: Dictionary, item_id: StringName) -> bool:
+	for k in dict.keys():
+		if _key_matches_item(k, item_id):
+			return true
+	return false
+
+
+func _key_matches_item(key, item_id: StringName) -> bool:
+	var ks: String = str(key)
+	var is_str: String = str(item_id)
+	if ks == is_str:
+		return true
+	if "mat_" + ks == is_str:
+		return true
+	if ks == "mat_" + is_str:
+		return true
+	return false
 
 
 func _show_block_details(block: BlockData) -> void:
+	# --- Purpose ---
+	if block.description != "":
+		_add_section("Purpose")
+		_add_text(block.description, text_color, 13)
+		_add_separator()
+
+	# --- General ---
 	_add_section("General")
-	_add_stat("Size", "%dx%d" % [block.grid_size.x, block.grid_size.y], text_color)
-	
 	_add_stat("Health", str(block.max_health), Color(0.4, 1.0, 0.4))
+	if block.armor > 0.0:
+		_add_stat("Armor", str(block.armor), Color(0.8, 0.8, 1.0))
 	if block.health_regen > 0:
 		_add_stat("Regen", "%s HP/sec" % str(block.health_regen), Color(0.4, 1.0, 0.4))
-		
-	for item_id in block.build_cost:
-		var item = Registry.get_item_or_fluid(item_id)
-		var item_name = item.display_name if item else str(item_id)
-		var item_color = item.color if item else text_color
-		_add_stat(item_name, str(block.build_cost[item_id]), item_color)
+	_add_stat("Size", "%dx%d" % [block.grid_size.x, block.grid_size.y], text_color)
+	if block.build_time > 0.0:
+		_add_stat("Build Time", "%s seconds" % _fmt_num(block.build_time), text_color)
+	if block.build_cost.size() > 0:
+		_add_cost_row("Build Cost", block.build_cost)
+	if block.max_active_units > 0:
+		_add_stat("Max Active Units", "+%d" % block.max_active_units, Color(0.7, 0.95, 0.7))
+	if block.storage_capacity > 0:
+		_add_stat("Storage Capacity Bonus", "+%d" % block.storage_capacity, Color(0.7, 0.95, 0.7))
 
-	if block.is_producer():
+	# --- Liquids (turrets / blocks with liquid_capacity) ---
+	if block.liquid_capacity > 0.0:
 		_add_separator()
-		_add_section("Production (every %ss)" % str(block.production_time))
-		if block.input_items.size() > 0:
-			_add_text("Inputs:", dim_text_color, 12)
-			for item_id in block.input_items:
-				var item = Registry.get_item_or_fluid(item_id)
-				var item_name = item.display_name if item else str(item_id)
-				_add_stat("  " + item_name, str(block.input_items[item_id]), Color(1.0, 0.5, 0.5))
-		_add_text("Outputs:", dim_text_color, 12)
-		for item_id in block.output_items:
-			var item = Registry.get_item_or_fluid(item_id)
-			var item_name = item.display_name if item else str(item_id)
-			_add_stat("  " + item_name, str(block.output_items[item_id]), Color(0.5, 1.0, 0.5))
+		_add_section("Liquids")
+		_add_stat("Liquid Capacity", "%s liquid units" % _fmt_num(block.liquid_capacity), Color(0.4, 0.7, 1.0))
 
+	# --- Power ---
+	var has_power_info: bool = block.electrical_power_use > 0.0 \
+		or block.electrical_power_gen > 0.0 \
+		or block.electrical_power_storage > 0.0
+	if has_power_info:
+		_add_separator()
+		_add_section("Power")
+		if block.electrical_power_use > 0.0:
+			_add_stat("Power Use", "⚡ %s power units/second" % _fmt_num(block.electrical_power_use), Color(1.0, 0.9, 0.3))
+		if block.electrical_power_gen > 0.0:
+			_add_stat("Power Gen", "⚡ %s power units/second" % _fmt_num(block.electrical_power_gen), Color(0.5, 1.0, 0.5))
+		if block.electrical_power_storage > 0.0:
+			_add_stat("Power Storage", "%s power-seconds" % _fmt_num(block.electrical_power_storage), Color(0.8, 0.8, 1.0))
+
+	# --- Items section (storage capacity for factories etc.) ---
+	if block.max_stored_items > 0 and (block.is_producer() or block.tags.has("core")):
+		_add_separator()
+		_add_section("Items")
+		_add_stat("Item Capacity", "%d items" % block.max_stored_items, text_color)
+
+	# --- Required Tiles (for pumps / wall crushers / condensers / geyser miners) ---
+	var req_tiles: Array = _derive_required_tiles(block)
+	if req_tiles.size() > 0:
+		_add_separator()
+		_add_section("Required Tiles")
+		_add_required_tiles_row(req_tiles)
+
+	# --- Input / Output ---
+	if block.is_producer() or block.produced_unit != &"":
+		_add_separator()
+		_add_section("Input/Output")
+		var cycle: float = block.production_time if block.production_time > 0.0 else 1.0
+		# Fabricator with a produced unit: show output as the unit card.
+		if block.produced_unit != &"":
+			_add_text("Output:", dim_text_color, 13)
+			var unit_data = Registry.get_unit(block.produced_unit)
+			if unit_data:
+				_add_unit_card(unit_data, "%s seconds" % _fmt_num(cycle))
+			if block.input_items.size() > 0:
+				_add_text("Inputs:", dim_text_color, 13)
+				for item_id in block.input_items:
+					var amt: int = int(block.input_items[item_id])
+					var rate: float = amt / cycle
+					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
+		else:
+			if block.input_items.size() > 0:
+				_add_text("Input:", dim_text_color, 13)
+				for item_id in block.input_items:
+					var amt: int = int(block.input_items[item_id])
+					var rate: float = amt / cycle
+					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
+			if block.output_items.size() > 0:
+				_add_text("Output:", dim_text_color, 13)
+				for item_id in block.output_items:
+					var amt: int = int(block.output_items[item_id])
+					var rate: float = amt / cycle
+					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
+		_add_stat("Production Time", "%s seconds" % _fmt_num(cycle), text_color)
+
+	# --- Function: turret combat info ---
 	if block.is_turret():
 		_add_separator()
-		_add_section("Combat")
-		# Damage moved onto AmmoType. Show the highest-damage round so
-		# the bar reflects the turret's peak output; per-ammo rows below
-		# break it down further.
-		var max_dmg: float = 0.0
-		for ammo in block.ammo_types:
-			if ammo is AmmoType:
-				max_dmg = maxf(max_dmg, (ammo as AmmoType).damage)
-		_add_stat_bar("Base Attack Speed", block.attack_speed, 3.0, Color(1.0, 0.8, 0.3))
-		_add_stat_bar("Base Range", block.attack_range, 10.0, Color(0.4, 0.7, 1.0))
-		if block.is_aoe:
-			_add_stat("AoE Radius", "%s px" % str(block.aoe_radius), Color(1.0, 0.6, 0.3))
+		_add_section("Function")
+		_add_stat("Range", "%s blocks" % _fmt_num(block.attack_range), Color(0.4, 0.7, 1.0))
+		_add_stat("Inaccuracy", "%s degrees" % _fmt_num(block.inaccuracy), text_color)
+		if block.bullet_spread > 0.0:
+			_add_stat("Bullet Spread", "%s degrees" % _fmt_num(block.bullet_spread), text_color)
+		var rate: float = (1.0 / block.attack_speed) if block.attack_speed > 0.0 else 0.0
+		_add_stat("Firing Rate", "%s/sec" % _fmt_num(rate), Color(1.0, 0.8, 0.3))
+		_add_stat("Targets Air", "Yes" if block.targets_air else "No",
+			Color(0.5, 1.0, 0.5) if block.targets_air else Color(1.0, 0.5, 0.5))
+		_add_stat("Targets Ground", "Yes" if block.targets_ground else "No",
+			Color(0.5, 1.0, 0.5) if block.targets_ground else Color(1.0, 0.5, 0.5))
+		if block.is_aoe and block.aoe_radius > 0.0:
+			_add_stat("AoE Radius", "%s px" % _fmt_num(block.aoe_radius), Color(1.0, 0.6, 0.3))
 
-		# --- Ammo entries (Mindustry-style listing of every accepted ammo type) ---
+		# Ammo cards
 		if block.ammo_types.size() > 0:
-			_add_separator()
-			_add_section("Ammo")
+			_add_text("Ammo:", dim_text_color, 13)
 			for ammo_res in block.ammo_types:
 				if ammo_res == null or not (ammo_res is AmmoType):
 					continue
-				_add_ammo_entry(block, ammo_res as AmmoType)
+				_add_ammo_card(block, ammo_res as AmmoType)
 		else:
-			_add_separator()
 			_add_text("Requires ammo to fire — none configured.", Color(1.0, 0.5, 0.4), 12)
 
+		if block.ammo_capacity > 0:
+			_add_stat("Ammo Capacity", "%d shots" % block.ammo_capacity, text_color)
+		var max_ammo_use: int = 1
+		for ammo_res2 in block.ammo_types:
+			if ammo_res2 is AmmoType:
+				max_ammo_use = maxi(max_ammo_use, (ammo_res2 as AmmoType).amount_per_shot)
+		if max_ammo_use > 1:
+			_add_stat("Ammo Use", "%d/shot" % max_ammo_use, text_color)
+
+	# --- Transport ---
 	if block.is_transport():
 		_add_separator()
 		_add_section("Transport")
-		_add_stat("Speed", "%s items/sec" % str(block.transport_speed), text_color)
+		_add_stat("Speed", "%s items/sec" % _fmt_num(block.transport_speed), text_color)
 		_add_stat("Fluids", "Yes" if block.transports_fluid else "No", text_color)
 
-	if block.requires_power:
+	# --- Mining range (for drills) + drillables list ---
+	if block.category == BlockData.BlockCategory.EXTRACTORS:
+		if block.mine_range > 0:
+			_add_separator()
+			_add_section("Mining")
+			_add_stat("Mine Range", "%d tiles ahead" % block.mine_range, Color(0.7, 0.95, 0.7))
+		_add_drillables_section(block)
+
+	# --- Refabricator / upgrader unit-conversion map ---
+	if block.refab_recipes.size() > 0:
 		_add_separator()
-		_add_section("Power")
-		_add_stat("Consumption", "%s Power/sec" % str(block.power_consumption), Color(1.0, 1.0, 0.3))
+		_add_section("Unit Upgrades")
+		# refab_recipes maps `output_unit -> {item_id: amount}`. The
+		# input unit is inferred from the recipe key's "from" unit; in
+		# many existing refabricators the input == produced_unit's
+		# previous tier. We show "output ← input" cards by best guess
+		# (using `produced_unit` as the implied input when the recipe
+		# doesn't specify one).
+		for out_id in block.refab_recipes.keys():
+			var out_u = Registry.get_unit(StringName(out_id))
+			var in_u = Registry.get_unit(block.produced_unit) if block.produced_unit != &"" else null
+			if out_u == null:
+				continue
+			_add_unit_conversion_row(in_u, out_u)
+
+	# --- Core-specific spawned unit ---
+	if block.spawned_unit != &"":
+		_add_separator()
+		_add_section("Unit Type")
+		var spawn_data = Registry.get_unit(block.spawned_unit)
+		if spawn_data:
+			_add_unit_card(spawn_data, "")
+
+	# --- Optional Enhancements (Boosters) ---
+	if block.boosters.size() > 0:
+		_add_separator()
+		_add_section("Optional Enhancements")
+		_add_text("Booster:", dim_text_color, 13)
+		for entry in block.boosters:
+			if typeof(entry) == TYPE_DICTIONARY:
+				_add_booster_card(entry)
+			elif entry is BlockData:
+				_add_block_card(entry)
 
 
 func _show_unit_details(unit: UnitData) -> void:
@@ -699,56 +977,81 @@ func _show_unit_details(unit: UnitData) -> void:
 		_add_section("Immunities")
 		_add_text(", ".join(unit.immunities), text_color, 13)
 
+	# Mindustry-style "Produced By" / "Upgraded By" icon grids.
+	var produced_by: Array[BlockData] = []
+	var upgraded_by: Array[BlockData] = []
+	var upgrades_into: Array[UnitData] = []
+	for b in Registry.blocks_list:
+		if b == null:
+			continue
+		if b.produced_unit == unit.id:
+			produced_by.append(b)
+		if b.refab_recipes.size() > 0 and b.refab_recipes.has(unit.id):
+			# This block can upgrade INTO `unit`. The block's
+			# produced_unit / parent unit is the "from".
+			upgraded_by.append(b)
+	_add_block_icon_grid("Produced By", produced_by)
+	_add_block_icon_grid("Upgraded By", upgraded_by)
+
 
 func _show_fluid_details(fluid: FluidData) -> void:
-	_add_section("Properties")
-	_add_stat("Viscosity", str(fluid.viscosity), text_color)
-	_add_stat("Flow Speed", "%.1fx" % fluid.get_flow_speed(), accent_color)
-	_add_stat("Units/Segment", str(fluid.units_per_segment), text_color)
-	_add_stat("Temperature", "%s°" % str(fluid.temperature), text_color)
-
-	if fluid.is_hazardous:
-		_add_separator()
-		_add_section("⚠ Hazardous")
-		_add_stat("Damage", "%s/sec" % str(fluid.hazard_damage), Color(1.0, 0.3, 0.3))
-
-	if fluid.evaporates:
-		_add_separator()
-		_add_section("Evaporation")
-		_add_stat("Rate", "%s units/sec" % str(fluid.evaporation_rate), dim_text_color)
-
-	if fluid.item_equivalent != &"":
-		_add_separator()
-		_add_section("Conversion")
-		var item = Registry.get_item(fluid.item_equivalent)
-		var fname = item.display_name if item else str(fluid.item_equivalent)
-		_add_stat("Item Form", fname, text_color)
-		_add_stat("Ratio", "%s units = 1 item" % str(fluid.units_per_item), text_color)
+	var produced_by: Array[BlockData] = []
+	var used_in: Array[BlockData] = []
+	for b in Registry.blocks_list:
+		if b == null:
+			continue
+		if _dict_has_item(b.output_items, fluid.id):
+			produced_by.append(b)
+		var uses_input: bool = _dict_has_item(b.input_items, fluid.id)
+		if not uses_input and b.boosters.size() > 0:
+			for be in b.boosters:
+				if typeof(be) == TYPE_DICTIONARY and _key_matches_item(be.get("item_id", &""), fluid.id):
+					uses_input = true
+					break
+		if uses_input:
+			used_in.append(b)
+	_add_block_icon_grid("Produced By", produced_by)
+	_add_block_icon_grid("Used In", used_in)
 
 
 func _show_status_effect_details(effect: StatusEffectData) -> void:
+	# --- Multipliers / Damage (Mindustry-style headline stats) ---
+	var hm: float = effect.get_health_multiplier() if effect.has_method("get_health_multiplier") else 1.0
+	if hm != 1.0:
+		var hm_color: Color = Color(1.0, 0.45, 0.45) if hm < 1.0 else Color(0.45, 1.0, 0.55)
+		_add_stat("Health Multiplier", "%sx" % _fmt_num(hm), hm_color)
+	if effect.speed_modifier != 1.0:
+		var sm_color: Color = Color(1.0, 0.45, 0.45) if effect.speed_modifier < 1.0 else Color(0.45, 1.0, 0.55)
+		_add_stat("Speed Multiplier", "%sx" % _fmt_num(effect.speed_modifier), sm_color)
+	if effect.damage_modifier != 1.0:
+		var dm_color: Color = Color(0.45, 1.0, 0.55) if effect.damage_modifier < 1.0 else Color(1.0, 0.45, 0.45)
+		_add_stat("Damage Multiplier", "%sx" % _fmt_num(effect.damage_modifier), dm_color)
+	if effect.attack_speed_modifier != 1.0:
+		var asm_color: Color = Color(1.0, 0.45, 0.45) if effect.attack_speed_modifier < 1.0 else Color(0.45, 1.0, 0.55)
+		_add_stat("Attack Speed Mult.", "%sx" % _fmt_num(effect.attack_speed_modifier), asm_color)
+	if effect.production_modifier != 1.0:
+		var pm_color: Color = Color(1.0, 0.45, 0.45) if effect.production_modifier < 1.0 else Color(0.45, 1.0, 0.55)
+		_add_stat("Production Mult.", "%sx" % _fmt_num(effect.production_modifier), pm_color)
+	if effect.has_dot() and effect.tick_interval > 0.0:
+		var dps: float = effect.tick_damage / effect.tick_interval
+		_add_stat("Damage", "%s/sec" % _fmt_num(dps), Color(1.0, 0.45, 0.35))
+	elif effect.has_hot() and effect.tick_interval > 0.0:
+		var hps: float = absf(effect.tick_damage) / effect.tick_interval
+		_add_stat("Heal", "%s/sec" % _fmt_num(hps), Color(0.45, 1.0, 0.55))
+
+	# --- Affinities ---
+	if effect.affinities.size() > 0:
+		_add_status_id_row("Affinities", effect.affinities, Color(0.7, 0.95, 0.7))
+	# --- Opposites ---
+	if effect.opposites.size() > 0:
+		_add_status_id_row("Opposites", effect.opposites, Color(0.55, 0.8, 1.0))
+
+	_add_separator()
 	_add_section("Properties")
 	_add_stat("Type", _effect_type_name(effect.effect_type), text_color)
 	_add_stat("Duration", "%ss" % str(effect.duration) if effect.duration > 0 else "Permanent", text_color)
 	_add_stat("Stackable", "Yes (max %d)" % effect.max_stacks if effect.stackable else "No", text_color)
 	_add_stat("Refreshes", "Yes" if effect.refresh_on_reapply else "No", text_color)
-
-	if effect.speed_modifier != 1.0 or effect.damage_modifier != 1.0 or \
-	   effect.defense_modifier != 1.0 or effect.attack_speed_modifier != 1.0 or \
-	   effect.production_modifier != 1.0:
-		_add_separator()
-		_add_section("Stat Modifiers")
-
-	if effect.speed_modifier != 1.0:
-		_add_modifier_stat("Move Speed", effect.speed_modifier)
-	if effect.damage_modifier != 1.0:
-		_add_modifier_stat("Damage", effect.damage_modifier)
-	if effect.defense_modifier != 1.0:
-		_add_modifier_stat("Defense", effect.defense_modifier)
-	if effect.attack_speed_modifier != 1.0:
-		_add_modifier_stat("Attack Speed", effect.attack_speed_modifier)
-	if effect.production_modifier != 1.0:
-		_add_modifier_stat("Production", effect.production_modifier)
 
 	if effect.has_dot():
 		_add_separator()
@@ -831,6 +1134,35 @@ func _add_header(text: String, color: Color) -> void:
 	label.add_theme_font_size_override("font_size", 20)
 	label.add_theme_color_override("font_color", color)
 	_detail_container.add_child(label)
+
+
+## Mindustry-style header: icon + display name (colored) + id subtitle
+## on the second line. Used by every entry type that has an icon.
+func _add_header_with_icon(entry: Resource, color: Color) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	if "icon" in entry and entry.icon:
+		var ir = TextureRect.new()
+		ir.texture = entry.icon
+		ir.custom_minimum_size = Vector2(32, 32)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		hbox.add_child(ir)
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", -2)
+	var name_lbl = Label.new()
+	name_lbl.text = entry.display_name if "display_name" in entry else ""
+	name_lbl.add_theme_font_size_override("font_size", 20)
+	name_lbl.add_theme_color_override("font_color", color)
+	vbox.add_child(name_lbl)
+	if "id" in entry:
+		var id_lbl = Label.new()
+		id_lbl.text = str(entry.id).replace("_", "-")
+		id_lbl.add_theme_font_size_override("font_size", 12)
+		id_lbl.add_theme_color_override("font_color", dim_text_color)
+		vbox.add_child(id_lbl)
+	hbox.add_child(vbox)
+	_detail_container.add_child(hbox)
 
 
 func _add_section(text: String) -> void:
@@ -1051,6 +1383,659 @@ func _add_separator() -> void:
 	sep.add_theme_constant_override("separation", 8)
 	sep.add_theme_stylebox_override("separator", StyleBoxLine.new())
 	_detail_container.add_child(sep)
+
+
+## Formats a number cleanly: trims trailing zeros and decimal points,
+## so 1.250 renders as "1.25", 4.000 as "4", etc. Matches the
+## Mindustry-style display in the screenshots.
+func _fmt_num(v: float) -> String:
+	if absf(v - roundf(v)) < 0.0001:
+		return str(int(roundf(v)))
+	var s: String = "%.3f" % v
+	while s.ends_with("0"):
+		s = s.substr(0, s.length() - 1)
+	if s.ends_with("."):
+		s = s.substr(0, s.length() - 1)
+	return s
+
+
+## Inline build-cost row: "Label: [icon1][num1] [icon2][num2] ...".
+## Used by the General section so the cost shows as a single
+## horizontal strip of resource icons + amounts.
+func _add_cost_row(label_text: String, cost: Dictionary) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	var label = Label.new()
+	label.text = label_text + ":"
+	label.add_theme_font_size_override("font_size", 14)
+	label.add_theme_color_override("font_color", dim_text_color)
+	label.custom_minimum_size.x = 140
+	hbox.add_child(label)
+	for item_id in cost:
+		var entry = HBoxContainer.new()
+		entry.add_theme_constant_override("separation", 2)
+		var item = Registry.get_item_or_fluid(item_id)
+		if item and item.icon:
+			var ir = TextureRect.new()
+			ir.texture = item.icon
+			ir.custom_minimum_size = Vector2(20, 20)
+			ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			entry.add_child(ir)
+		var amt_lbl = Label.new()
+		amt_lbl.text = _fmt_amount(int(cost[item_id]))
+		amt_lbl.add_theme_font_size_override("font_size", 14)
+		amt_lbl.add_theme_color_override("font_color", item.color if item else text_color)
+		entry.add_child(amt_lbl)
+		hbox.add_child(entry)
+	_detail_container.add_child(hbox)
+
+
+## "Card" widget: a horizontal panel showing an item icon + name +
+## per-cycle amount + rate per second. Used in Input/Output sections.
+func _add_item_card(item_id, amount: int, rate_text: String) -> void:
+	var card = PanelContainer.new()
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.12, 0.13, 0.16, 0.85)
+	sb.set_corner_radius_all(6)
+	sb.content_margin_left = 8
+	sb.content_margin_right = 8
+	sb.content_margin_top = 4
+	sb.content_margin_bottom = 4
+	card.add_theme_stylebox_override("panel", sb)
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	card.add_child(hbox)
+	var item = Registry.get_item_or_fluid(item_id)
+	if item and item.icon:
+		var ir = TextureRect.new()
+		ir.texture = item.icon
+		ir.custom_minimum_size = Vector2(22, 22)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		hbox.add_child(ir)
+	var name_lbl = Label.new()
+	name_lbl.text = item.display_name if item else str(item_id)
+	name_lbl.add_theme_font_size_override("font_size", 14)
+	name_lbl.add_theme_color_override("font_color", item.color if item else text_color)
+	hbox.add_child(name_lbl)
+	var amt_lbl = Label.new()
+	amt_lbl.text = "  %d" % amount
+	amt_lbl.add_theme_font_size_override("font_size", 14)
+	amt_lbl.add_theme_color_override("font_color", Color(0.95, 0.85, 0.4))
+	hbox.add_child(amt_lbl)
+	if rate_text != "":
+		var rate_lbl = Label.new()
+		rate_lbl.text = "  %s" % rate_text
+		rate_lbl.add_theme_font_size_override("font_size", 13)
+		rate_lbl.add_theme_color_override("font_color", dim_text_color)
+		hbox.add_child(rate_lbl)
+	_detail_container.add_child(card)
+
+
+## Card showing a unit (icon + display name + subtitle).
+func _add_unit_card(unit: UnitData, subtitle_text: String) -> void:
+	var card = PanelContainer.new()
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.12, 0.13, 0.16, 0.85)
+	sb.set_corner_radius_all(6)
+	sb.content_margin_left = 8
+	sb.content_margin_right = 8
+	sb.content_margin_top = 4
+	sb.content_margin_bottom = 4
+	card.add_theme_stylebox_override("panel", sb)
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	card.add_child(hbox)
+	if "icon" in unit and unit.icon:
+		var ir = TextureRect.new()
+		ir.texture = unit.icon
+		ir.custom_minimum_size = Vector2(24, 24)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		hbox.add_child(ir)
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 0)
+	var name_lbl = Label.new()
+	name_lbl.text = unit.display_name
+	name_lbl.add_theme_font_size_override("font_size", 14)
+	name_lbl.add_theme_color_override("font_color", text_color)
+	vbox.add_child(name_lbl)
+	if subtitle_text != "":
+		var sub_lbl = Label.new()
+		sub_lbl.text = subtitle_text
+		sub_lbl.add_theme_font_size_override("font_size", 12)
+		sub_lbl.add_theme_color_override("font_color", dim_text_color)
+		vbox.add_child(sub_lbl)
+	hbox.add_child(vbox)
+	_detail_container.add_child(card)
+
+
+## Card showing another block (icon + display name + ID subtitle).
+func _add_block_card(block: BlockData) -> void:
+	var card = PanelContainer.new()
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.12, 0.13, 0.16, 0.85)
+	sb.set_corner_radius_all(6)
+	sb.content_margin_left = 8
+	sb.content_margin_right = 8
+	sb.content_margin_top = 4
+	sb.content_margin_bottom = 4
+	card.add_theme_stylebox_override("panel", sb)
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	card.add_child(hbox)
+	if block.icon:
+		var ir = TextureRect.new()
+		ir.texture = block.icon
+		ir.custom_minimum_size = Vector2(24, 24)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		hbox.add_child(ir)
+	var vbox = VBoxContainer.new()
+	var name_lbl = Label.new()
+	name_lbl.text = block.display_name
+	name_lbl.add_theme_font_size_override("font_size", 14)
+	name_lbl.add_theme_color_override("font_color", text_color)
+	vbox.add_child(name_lbl)
+	var id_lbl = Label.new()
+	id_lbl.text = str(block.id)
+	id_lbl.add_theme_font_size_override("font_size", 12)
+	id_lbl.add_theme_color_override("font_color", dim_text_color)
+	vbox.add_child(id_lbl)
+	hbox.add_child(vbox)
+	_detail_container.add_child(card)
+
+
+## Inline status-effect ID row: "Affinities: [icon Name][icon Name]"
+## — used for Affinities / Opposites on a status-effect detail page.
+func _add_status_id_row(label_text: String, status_ids: Array, color: Color) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	var label = Label.new()
+	label.text = label_text + ":"
+	label.add_theme_font_size_override("font_size", 14)
+	label.add_theme_color_override("font_color", dim_text_color)
+	label.custom_minimum_size.x = 140
+	hbox.add_child(label)
+	for sid in status_ids:
+		var entry = HBoxContainer.new()
+		entry.add_theme_constant_override("separation", 4)
+		var sd: StatusEffectData = null
+		if Registry.has_method("get_status_effect"):
+			sd = Registry.get_status_effect(StringName(sid))
+		if sd and sd.icon:
+			var ir = TextureRect.new()
+			ir.texture = sd.icon
+			ir.custom_minimum_size = Vector2(18, 18)
+			ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			entry.add_child(ir)
+		var name_lbl = Label.new()
+		name_lbl.text = sd.display_name if sd else str(sid)
+		name_lbl.add_theme_font_size_override("font_size", 14)
+		name_lbl.add_theme_color_override("font_color", color)
+		entry.add_child(name_lbl)
+		hbox.add_child(entry)
+	_detail_container.add_child(hbox)
+
+
+## Returns the implied required-tile list for a block, combining the
+## explicit `required_tiles` data field with auto-derivation from tags.
+## Each entry is {tile_id, efficiency, label?}.
+func _derive_required_tiles(block: BlockData) -> Array:
+	var out: Array = []
+	for entry in block.required_tiles:
+		if typeof(entry) == TYPE_DICTIONARY:
+			out.append(entry)
+	# Auto-derivation:
+	if block.tags.has("condenser"):
+		# Vent → 0.5x rate (4/s), Geyser → 1.0x (8/s).
+		out.append({"tile_id": &"vent", "efficiency": 0.5})
+		out.append({"tile_id": &"geyser", "efficiency": 1.0})
+	elif block.tags.has("pump"):
+		# Pumps scale rate with water_depth (the block places ON water
+		# floors with water_depth > 0). Show the three depth tiers.
+		out.append({"tile_id": &"water_shallow", "efficiency": 0.5, "label": "shallow"})
+		out.append({"tile_id": &"water_mid", "efficiency": 1.0, "label": "mid"})
+		out.append({"tile_id": &"water_deep", "efficiency": 1.5, "label": "deep"})
+	elif block.tags.has("geyser_miner"):
+		out.append({"tile_id": &"geyser", "efficiency": 1.0})
+	elif block.tags.has("vent_powered") or block.tags.has("vent_turbine"):
+		out.append({"tile_id": &"vent", "efficiency": 1.0})
+	elif block.tags.has("wall_miner"):
+		var walls: Array = block.accepted_walls if block.accepted_walls.size() > 0 else [&"blackstone_wall"]
+		for w in walls:
+			out.append({"tile_id": w, "efficiency": 1.0})
+	return out
+
+
+## Row of tile-icon cards with their efficiency multiplier underneath.
+## Per the user's rule: efficiency ≤ 100% renders yellow, > 100% red.
+func _add_required_tiles_row(entries: Array) -> void:
+	var flow = HFlowContainer.new()
+	flow.add_theme_constant_override("h_separation", 4)
+	flow.add_theme_constant_override("v_separation", 4)
+	for entry in entries:
+		var tile_id: StringName = StringName(entry.get("tile_id", &""))
+		var eff: float = float(entry.get("efficiency", 1.0))
+		var tile = null
+		if Registry.has_method("get_tile"):
+			tile = Registry.get_tile(tile_id)
+		var card = PanelContainer.new()
+		var sb = StyleBoxFlat.new()
+		sb.bg_color = Color(0.12, 0.13, 0.16, 0.85)
+		sb.set_corner_radius_all(6)
+		sb.content_margin_left = 6
+		sb.content_margin_right = 6
+		sb.content_margin_top = 4
+		sb.content_margin_bottom = 4
+		card.add_theme_stylebox_override("panel", sb)
+		var vbox = VBoxContainer.new()
+		vbox.add_theme_constant_override("separation", 2)
+		card.add_child(vbox)
+		var top_row = HBoxContainer.new()
+		top_row.add_theme_constant_override("separation", 6)
+		if tile and tile.icon:
+			var tr = TextureRect.new()
+			tr.texture = tile.icon
+			tr.custom_minimum_size = Vector2(24, 24)
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			top_row.add_child(tr)
+		var name_lbl = Label.new()
+		var fallback_name: String = String(entry.get("label", ""))
+		if fallback_name == "":
+			fallback_name = tile.get_display_name() if (tile and tile.has_method("get_display_name")) else str(tile_id).replace("_", " ").capitalize()
+		name_lbl.text = fallback_name
+		name_lbl.add_theme_font_size_override("font_size", 13)
+		name_lbl.add_theme_color_override("font_color", text_color)
+		top_row.add_child(name_lbl)
+		vbox.add_child(top_row)
+		var pct: int = int(round(eff * 100.0))
+		# Coloring: ≥100% reads as yellow (baseline / boosted), <100%
+		# reads as red (penalty), matching the pump-depth example.
+		var pct_color: Color = Color(0.95, 0.82, 0.25) if pct >= 100 else Color(1.0, 0.45, 0.35)
+		var pct_lbl = Label.new()
+		pct_lbl.text = "%d%%" % pct
+		pct_lbl.add_theme_font_size_override("font_size", 13)
+		pct_lbl.add_theme_color_override("font_color", pct_color)
+		vbox.add_child(pct_lbl)
+		flow.add_child(card)
+	_detail_container.add_child(flow)
+
+
+## Lists every ore tile the drill can mine, with its display name and
+## the output item icon underneath. Shown as a two-column grid of
+## cards. Skips floor miners' floor-ore-only filter / wall miners'
+## blackstone-wall filter properly via _ore_is_minable_by-style logic.
+func _add_drillables_section(block: BlockData) -> void:
+	if block.tags.has("wall_miner") or block.tags.has("geyser_miner"):
+		return  # Wall crushers / geyser miners have a different output spec.
+	var is_floor_miner: bool = block.tags.has("floor_miner")
+	var drillables: Array = []  # of {tile: TerrainTileData, item_id: StringName}
+	for tile in Registry.tiles_list:
+		if tile == null or tile.minable_resource == &"":
+			continue
+		var is_floor_ore: bool = tile.tags.has("floor_ore")
+		if is_floor_miner and not is_floor_ore:
+			continue
+		if not is_floor_miner and is_floor_ore:
+			continue
+		# Honour the block's accepted_ores whitelist so a ground scraper
+		# only lists coal + sulfur, not every floor ore.
+		if block.accepted_ores.size() > 0 and not block.accepted_ores.has(tile.id):
+			continue
+		drillables.append({"tile": tile, "item_id": tile.minable_resource})
+	if drillables.is_empty():
+		return
+	_add_separator()
+	_add_section("Drillables")
+	var rate: float = 1.0 / maxf(block.production_time, 0.0001)
+	# Render as a HFlowContainer of cards. Each card shows the tile
+	# icon + name + the output item icon underneath.
+	var flow = HFlowContainer.new()
+	flow.add_theme_constant_override("h_separation", 4)
+	flow.add_theme_constant_override("v_separation", 4)
+	for d in drillables:
+		var tile: TerrainTileData = d["tile"]
+		var iid: StringName = StringName(d["item_id"])
+		var item = Registry.get_item_or_fluid(iid)
+		var card = PanelContainer.new()
+		var sb = StyleBoxFlat.new()
+		sb.bg_color = Color(0.12, 0.13, 0.16, 0.85)
+		sb.set_corner_radius_all(6)
+		sb.content_margin_left = 6
+		sb.content_margin_right = 6
+		sb.content_margin_top = 4
+		sb.content_margin_bottom = 4
+		card.add_theme_stylebox_override("panel", sb)
+		card.custom_minimum_size = Vector2(180, 0)
+		var row = HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		card.add_child(row)
+		if tile.icon:
+			var tr = TextureRect.new()
+			tr.texture = tile.icon
+			tr.custom_minimum_size = Vector2(28, 28)
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			row.add_child(tr)
+		var vbox = VBoxContainer.new()
+		vbox.add_theme_constant_override("separation", -2)
+		var name_lbl = Label.new()
+		name_lbl.text = tile.get_display_name() if tile.has_method("get_display_name") else str(tile.id)
+		name_lbl.add_theme_font_size_override("font_size", 13)
+		name_lbl.add_theme_color_override("font_color", text_color)
+		vbox.add_child(name_lbl)
+		var out_row = HBoxContainer.new()
+		out_row.add_theme_constant_override("separation", 4)
+		if item and item.icon:
+			var oir = TextureRect.new()
+			oir.texture = item.icon
+			oir.custom_minimum_size = Vector2(16, 16)
+			oir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			oir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			out_row.add_child(oir)
+		var rate_lbl = Label.new()
+		rate_lbl.text = "%s/sec" % _fmt_num(rate)
+		rate_lbl.add_theme_font_size_override("font_size", 12)
+		rate_lbl.add_theme_color_override("font_color", dim_text_color)
+		out_row.add_child(rate_lbl)
+		vbox.add_child(out_row)
+		row.add_child(vbox)
+		flow.add_child(card)
+	_detail_container.add_child(flow)
+
+
+## Unit conversion row: shows `input_unit → output_unit` cards.
+func _add_unit_conversion_row(in_unit: UnitData, out_unit: UnitData) -> void:
+	if in_unit == null and out_unit == null:
+		return
+	var card = PanelContainer.new()
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.12, 0.13, 0.16, 0.85)
+	sb.set_corner_radius_all(6)
+	sb.content_margin_left = 8
+	sb.content_margin_right = 8
+	sb.content_margin_top = 4
+	sb.content_margin_bottom = 4
+	card.add_theme_stylebox_override("panel", sb)
+	var row = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	card.add_child(row)
+	if in_unit and in_unit.icon:
+		var ir = TextureRect.new()
+		ir.texture = in_unit.icon
+		ir.custom_minimum_size = Vector2(24, 24)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		row.add_child(ir)
+	if in_unit:
+		var nl = Label.new()
+		nl.text = in_unit.display_name
+		nl.add_theme_font_size_override("font_size", 13)
+		nl.add_theme_color_override("font_color", text_color)
+		row.add_child(nl)
+	var arrow = Label.new()
+	arrow.text = "→"
+	arrow.add_theme_font_size_override("font_size", 16)
+	arrow.add_theme_color_override("font_color", accent_color)
+	row.add_child(arrow)
+	if out_unit and out_unit.icon:
+		var ir2 = TextureRect.new()
+		ir2.texture = out_unit.icon
+		ir2.custom_minimum_size = Vector2(24, 24)
+		ir2.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir2.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		row.add_child(ir2)
+	if out_unit:
+		var nl2 = Label.new()
+		nl2.text = out_unit.display_name
+		nl2.add_theme_font_size_override("font_size", 13)
+		nl2.add_theme_color_override("font_color", text_color)
+		row.add_child(nl2)
+	_detail_container.add_child(card)
+
+
+## Mindustry-style icon grid for "Produced By / Used In / Used to
+## Build" sections — wraps a row of clickable block icons under a
+## section header. Locked entries show a LockIcon instead of the block
+## icon and are non-interactive; unlocked entries open that block's
+## detail when clicked.
+func _add_block_icon_grid(label_text: String, blocks: Array) -> void:
+	if blocks.is_empty():
+		return
+	_add_separator()
+	_add_section(label_text)
+	var flow = HFlowContainer.new()
+	flow.add_theme_constant_override("h_separation", 4)
+	flow.add_theme_constant_override("v_separation", 4)
+	for b in blocks:
+		if b == null:
+			continue
+		var locked: bool = "id" in b and TechTree.nodes.has(b.id) and not TechTree.is_researched(b.id)
+		var btn = Button.new()
+		btn.flat = true
+		btn.custom_minimum_size = Vector2(32, 32)
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.tooltip_text = ("Locked" if locked else (b.display_name if "display_name" in b else ""))
+		# Render the icon as a child TextureRect so non-square textures
+		# (LockIcon is 320×443) keep their aspect instead of being
+		# squashed by the button's `expand_icon` stretch.
+		var tex: Texture2D = _lock_icon if locked else (b.icon if ("icon" in b and b.icon) else null)
+		if tex != null:
+			var ir = TextureRect.new()
+			ir.texture = tex
+			ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			ir.anchor_right = 1.0
+			ir.anchor_bottom = 1.0
+			ir.offset_left = 3
+			ir.offset_right = -3
+			ir.offset_top = 3
+			ir.offset_bottom = -3
+			ir.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			btn.add_child(ir)
+		# Only unlocked entries open the detail panel on click; locked
+		# ones swallow the input so nothing happens.
+		if not locked:
+			btn.pressed.connect(_show_detail.bind(b, "blocks"))
+		flow.add_child(btn)
+	_detail_container.add_child(flow)
+
+
+## Booster card: large pill showing the consumed item/fluid + rate on
+## the left, and the boost it grants on the right (e.g. "Fire Rate +150%").
+## Matches the Mindustry image's "Water 15/sec  250% Fire Rate" layout.
+func _add_booster_card(entry: Dictionary) -> void:
+	var card = PanelContainer.new()
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.12, 0.13, 0.16, 0.92)
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 10
+	sb.content_margin_right = 10
+	sb.content_margin_top = 6
+	sb.content_margin_bottom = 6
+	card.add_theme_stylebox_override("panel", sb)
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 12)
+	card.add_child(hbox)
+	# Left: item icon + name + rate
+	var left = HBoxContainer.new()
+	left.add_theme_constant_override("separation", 6)
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var iid = StringName(entry.get("item_id", &""))
+	var item = Registry.get_item_or_fluid(iid)
+	if item and item.icon:
+		var ir = TextureRect.new()
+		ir.texture = item.icon
+		ir.custom_minimum_size = Vector2(22, 22)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		left.add_child(ir)
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", -2)
+	var name_lbl = Label.new()
+	name_lbl.text = item.display_name if item else str(iid)
+	name_lbl.add_theme_font_size_override("font_size", 14)
+	name_lbl.add_theme_color_override("font_color", item.color if item else text_color)
+	vbox.add_child(name_lbl)
+	var rate_lbl = Label.new()
+	rate_lbl.text = "%s/sec" % _fmt_num(float(entry.get("per_sec", 0.0)))
+	rate_lbl.add_theme_font_size_override("font_size", 12)
+	rate_lbl.add_theme_color_override("font_color", dim_text_color)
+	vbox.add_child(rate_lbl)
+	left.add_child(vbox)
+	hbox.add_child(left)
+	# Right: stat + boost percent
+	var stat: String = String(entry.get("stat", "Boost"))
+	var mult: float = float(entry.get("multiplier", 1.0))
+	var pct: int = int(round(mult * 100.0))
+	var right_lbl = Label.new()
+	right_lbl.text = "%d%% %s" % [pct, stat]
+	right_lbl.add_theme_font_size_override("font_size", 14)
+	right_lbl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.35))
+	hbox.add_child(right_lbl)
+	_detail_container.add_child(card)
+
+
+## Compact formatter: 1500 → "1.5k", 1000000 → "1.0M".
+func _fmt_amount(n: int) -> String:
+	if n >= 1000000:
+		return "%.1fM" % (n / 1000000.0)
+	if n >= 1000:
+		return "%.1fk" % (n / 1000.0)
+	return str(n)
+
+
+## Mindustry-style ammo card: ammo icon + name as header, then
+## damage / vs-buildings / knockback / homing / ammo-per-shot in a
+## tidy block. Replaces the older _add_ammo_entry for the new layout.
+func _add_ammo_card(turret: BlockData, ammo: AmmoType) -> void:
+	# Outer card panel
+	var card = PanelContainer.new()
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.12, 0.13, 0.16, 0.92)
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 10
+	sb.content_margin_right = 10
+	sb.content_margin_top = 6
+	sb.content_margin_bottom = 6
+	card.add_theme_stylebox_override("panel", sb)
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 2)
+	card.add_child(vbox)
+
+	# Header: ammo icon + display name
+	var item = Registry.get_item_or_fluid(ammo.item_id)
+	var header = HBoxContainer.new()
+	header.add_theme_constant_override("separation", 6)
+	if item and item.icon:
+		var ir = TextureRect.new()
+		ir.texture = item.icon
+		ir.custom_minimum_size = Vector2(20, 20)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		header.add_child(ir)
+	var hname = Label.new()
+	hname.text = item.display_name if item else str(ammo.item_id)
+	hname.add_theme_font_size_override("font_size", 15)
+	hname.add_theme_color_override("font_color", text_color)
+	header.add_child(hname)
+	vbox.add_child(header)
+
+	# Damage
+	var dmg_lbl = Label.new()
+	dmg_lbl.text = "%s damage" % _fmt_num(ammo.damage)
+	dmg_lbl.add_theme_font_size_override("font_size", 13)
+	dmg_lbl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.35))
+	vbox.add_child(dmg_lbl)
+	# vs Buildings — show as "-NN% building damage" if reduction
+	if ammo.building_damage_mult != 1.0:
+		var bldg_pct: int = int(round((ammo.building_damage_mult - 1.0) * 100.0))
+		var sign: String = "+" if bldg_pct > 0 else ""
+		var bldg_color: Color = Color(1.0, 0.45, 0.35) if bldg_pct < 0 else Color(0.45, 1.0, 0.55)
+		var bdmg = Label.new()
+		bdmg.text = "%s%d%% building damage" % [sign, bldg_pct]
+		bdmg.add_theme_font_size_override("font_size", 13)
+		bdmg.add_theme_color_override("font_color", bldg_color)
+		vbox.add_child(bdmg)
+	if ammo.unit_damage_mult != 1.0:
+		var unit_pct: int = int(round((ammo.unit_damage_mult - 1.0) * 100.0))
+		var usign: String = "+" if unit_pct > 0 else ""
+		var ucolor: Color = Color(1.0, 0.45, 0.35) if unit_pct < 0 else Color(0.45, 1.0, 0.55)
+		var ud = Label.new()
+		ud.text = "%s%d%% unit damage" % [usign, unit_pct]
+		ud.add_theme_font_size_override("font_size", 13)
+		ud.add_theme_color_override("font_color", ucolor)
+		vbox.add_child(ud)
+	# Knockback
+	if ammo.knockback > 0.0:
+		var kb = Label.new()
+		kb.text = "%s knockback" % _fmt_num(ammo.knockback / 48.0)
+		kb.add_theme_font_size_override("font_size", 13)
+		kb.add_theme_color_override("font_color", Color(0.9, 0.8, 0.5))
+		vbox.add_child(kb)
+	# Per-shot ammo cost
+	if ammo.amount_per_shot > 1:
+		var ap = Label.new()
+		ap.text = "%d ammo/item" % ammo.amount_per_shot
+		ap.add_theme_font_size_override("font_size", 13)
+		ap.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+		vbox.add_child(ap)
+	# Pierce
+	if ammo.pierce_count > 0:
+		var p = Label.new()
+		p.text = "pierces %d targets" % ammo.pierce_count
+		p.add_theme_font_size_override("font_size", 13)
+		p.add_theme_color_override("font_color", Color(0.9, 0.6, 0.9))
+		vbox.add_child(p)
+	# Homing flag (Mindustry shows literally "homing")
+	if ammo.homing > 0.0:
+		var hm = Label.new()
+		hm.text = "homing"
+		hm.add_theme_font_size_override("font_size", 13)
+		hm.add_theme_color_override("font_color", Color(1.0, 0.7, 0.9))
+		vbox.add_child(hm)
+	# Splash
+	if ammo.is_splash and ammo.splash_radius > 0.0:
+		var sp = Label.new()
+		sp.text = "splash %.0f px" % ammo.splash_radius
+		sp.add_theme_font_size_override("font_size", 13)
+		sp.add_theme_color_override("font_color", Color(1.0, 0.6, 0.3))
+		vbox.add_child(sp)
+	# Burn (DoT)
+	if ammo.burn_damage > 0.0:
+		var b = Label.new()
+		b.text = "%s burn dmg/s for %ss" % [_fmt_num(ammo.burn_damage), _fmt_num(ammo.burn_duration)]
+		b.add_theme_font_size_override("font_size", 13)
+		b.add_theme_color_override("font_color", Color(1.0, 0.5, 0.2))
+		vbox.add_child(b)
+	# Status
+	if ammo.status_effect != null:
+		var sname: String = "applied"
+		if "display_name" in ammo.status_effect and ammo.status_effect.display_name != "":
+			sname = ammo.status_effect.display_name
+		var st = Label.new()
+		st.text = "applies %s%s" % [sname, (" (%ss)" % _fmt_num(ammo.status_duration)) if ammo.status_duration > 0.0 else ""]
+		st.add_theme_font_size_override("font_size", 13)
+		st.add_theme_color_override("font_color", Color(0.9, 0.5, 1.0))
+		vbox.add_child(st)
+	# Targeting filter (only show if restricted)
+	if not (ammo.collides_air and ammo.collides_ground):
+		var tg = Label.new()
+		if ammo.collides_air and not ammo.collides_ground:
+			tg.text = "air only"
+		elif ammo.collides_ground and not ammo.collides_air:
+			tg.text = "ground only"
+		else:
+			tg.text = "cannot hit anything"
+		tg.add_theme_font_size_override("font_size", 13)
+		tg.add_theme_color_override("font_color", Color(0.7, 0.9, 1.0))
+		vbox.add_child(tg)
+
+	_detail_container.add_child(card)
 
 
 # =========================

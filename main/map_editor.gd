@@ -20,6 +20,11 @@ const GRID_SIZE := 128
 ## constants through `main.SPRITE_SCALE_FACTOR` regardless of which scene
 ## owns it (Main vs MapEditor).
 const SPRITE_SCALE_FACTOR := float(GRID_SIZE) / 64.0
+## Fog-of-war switches authored in the editor's Map Settings dialog.
+## Serialized into the sector .json so the playtest scene's FogSystem
+## picks them up on load.
+var fog_enabled := true
+var fog_darkness_mult := 1.0
 var GRID_WIDTH := 100
 var GRID_HEIGHT := 100
 

@@ -3801,7 +3801,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1778342348.68619
+		"timestamp": 1778420252.92809
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -18292,6 +18292,28 @@
 			"text": "The Cobustion Generator takes 1 coal and produces 20 power for 3 seconds. "
 		}
 	],
+	"hints_runtime": {
+		"clock": 3.12491734199134,
+		"landing_fired": true,
+		"runtime": {
+			"Mass Driver": {
+				"activated_at": 231894.702059201,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			},
+			"bridge": {
+				"activated_at": 231894.702059201,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			}
+		}
+	},
 	"junction_items": {
 
 	},
@@ -18611,6 +18633,46 @@
 		"mat_silicon": 2965,
 		"mat_steel": 1526
 	},
+	"script_runtime": {
+		"core_counts": {
+
+		},
+		"core_unit_mined_counts": {
+
+		},
+		"current_step": -1,
+		"decoded_archive_counts": {
+
+		},
+		"deposited_baselines": {
+
+		},
+		"disabled_buildings": [],
+		"ferox_blocks_destroyed_counts": {
+
+		},
+		"hidden_tiles": [],
+		"mined_counts": {
+
+		},
+		"placed_baselines": {
+
+		},
+		"placed_counts": {
+
+		},
+		"produced_counts": {
+
+		},
+		"script_running": false,
+		"step_wait_timer": 0.0,
+		"units_destroyed_counts": {
+
+		},
+		"units_produced_counts": {
+
+		}
+	},
 	"script_steps": [
 		{
 			"actions": [
@@ -18679,7 +18741,7 @@
 				{
 					"from": "93,317",
 					"id": "PPT",
-					"text": "(-white)Place a [image]Combustion Generator and give it coal to create power.",
+					"text": "(-white)Place a [res://textures/blocks/power/CombustionGenerator.png]Combustion Generator and give it coal to create power.",
 					"to": "98,317",
 					"type": "draw_text"
 				}

@@ -824,6 +824,9 @@ var _settings_open := false
 var _width_input: SpinBox
 var _height_input: SpinBox
 var _alignment_input: OptionButton
+var _fog_enabled_check: CheckBox
+var _fog_dark_slider: HSlider
+var _fog_dark_value_label: Label
 var _map_alignment := 0  # 0=TL,1=TM,2=TR,3=ML,4=MM,5=MR,6=BL,7=BM,8=BR
 
 func _create_settings_panel() -> void:
@@ -906,6 +909,45 @@ func _create_settings_panel() -> void:
 	a_hbox.add_child(_alignment_input)
 	vbox.add_child(a_hbox)
 
+	# Fog of War toggle. The actual fog system lives in the playtest
+	# scene; here we just stash the value on `main` so save_manager
+	# round-trips it.
+	var fog_enabled_hbox = HBoxContainer.new()
+	fog_enabled_hbox.add_theme_constant_override("separation", 8)
+	var fog_enabled_label = Label.new()
+	fog_enabled_label.text = "Fog of War:"
+	fog_enabled_label.custom_minimum_size.x = 90
+	fog_enabled_hbox.add_child(fog_enabled_label)
+	_fog_enabled_check = CheckBox.new()
+	_fog_enabled_check.button_pressed = bool(main.get("fog_enabled")) if "fog_enabled" in main else true
+	fog_enabled_hbox.add_child(_fog_enabled_check)
+	vbox.add_child(fog_enabled_hbox)
+
+	# Fog darkness multiplier. 0.5 = half as dark as the default fog;
+	# 1.5 = 50 % darker than default. The fog system multiplies both
+	# its unseen and explored alphas by this number (clamped at 0..2
+	# so the slider can't push the explored layer into pure-opaque
+	# territory).
+	var fog_dark_hbox = HBoxContainer.new()
+	fog_dark_hbox.add_theme_constant_override("separation", 8)
+	var fog_dark_label = Label.new()
+	fog_dark_label.text = "Fog Darkness:"
+	fog_dark_label.custom_minimum_size.x = 90
+	fog_dark_hbox.add_child(fog_dark_label)
+	_fog_dark_slider = HSlider.new()
+	_fog_dark_slider.min_value = 0.2
+	_fog_dark_slider.max_value = 2.0
+	_fog_dark_slider.step = 0.05
+	_fog_dark_slider.value = float(main.get("fog_darkness_mult")) if "fog_darkness_mult" in main else 1.0
+	_fog_dark_slider.custom_minimum_size.x = 110
+	_fog_dark_value_label = Label.new()
+	_fog_dark_value_label.text = "%.2f×" % _fog_dark_slider.value
+	_fog_dark_value_label.custom_minimum_size.x = 40
+	_fog_dark_slider.value_changed.connect(func(v): _fog_dark_value_label.text = "%.2f×" % v)
+	fog_dark_hbox.add_child(_fog_dark_slider)
+	fog_dark_hbox.add_child(_fog_dark_value_label)
+	vbox.add_child(fog_dark_hbox)
+
 	# Apply + Close buttons
 	var btn_hbox = HBoxContainer.new()
 	btn_hbox.add_theme_constant_override("separation", 8)
@@ -931,12 +973,25 @@ func _toggle_settings() -> void:
 		_width_input.value = main.GRID_WIDTH
 		_height_input.value = main.GRID_HEIGHT
 		_alignment_input.selected = _map_alignment
+		if _fog_enabled_check and "fog_enabled" in main:
+			_fog_enabled_check.button_pressed = bool(main.fog_enabled)
+		if _fog_dark_slider and "fog_darkness_mult" in main:
+			_fog_dark_slider.value = float(main.fog_darkness_mult)
+			if _fog_dark_value_label:
+				_fog_dark_value_label.text = "%.2f×" % _fog_dark_slider.value
 
 
 func _on_settings_apply() -> void:
 	var new_w := int(_width_input.value)
 	var new_h := int(_height_input.value)
 	_map_alignment = _alignment_input.selected
+	# Fog values are author-time settings; just stash them on `main`
+	# so save_manager carries them into the .sector.json. The runtime
+	# FogSystem doesn't exist in the editor scene.
+	if _fog_enabled_check and "fog_enabled" in main:
+		main.fog_enabled = _fog_enabled_check.button_pressed
+	if _fog_dark_slider and "fog_darkness_mult" in main:
+		main.fog_darkness_mult = float(_fog_dark_slider.value)
 	if new_w != main.GRID_WIDTH or new_h != main.GRID_HEIGHT:
 		var old_w := int(main.GRID_WIDTH)
 		var old_h := int(main.GRID_HEIGHT)

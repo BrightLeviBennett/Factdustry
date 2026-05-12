@@ -21,6 +21,10 @@ extends Resource
 ## Unique ID (e.g., "blackstone_floor", "grassy_wall")
 @export var id: StringName = &""
 
+## Human-readable name shown in the database (e.g. "Copper Ore").
+## Falls back to a titlecased version of `id` when empty.
+@export var display_name: String = ""
+
 ## Icon texture
 @export var icon: Texture2D
 
@@ -97,3 +101,11 @@ func is_ore() -> bool:
 ## Returns true if this is a pumpable liquid source tile.
 func is_liquid_source() -> bool:
 	return is_liquid and extracted_liquid != &""
+
+
+## Returns a display-friendly name: `display_name` if set, otherwise
+## a titlecased version of `id` ("ore_copper" → "Ore Copper").
+func get_display_name() -> String:
+	if display_name != "":
+		return display_name
+	return str(id).replace("_", " ").capitalize()

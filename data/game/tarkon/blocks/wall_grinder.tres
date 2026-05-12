@@ -1,17 +1,27 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cfy4h2yqt172o"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://84xnje87pov" path="res://textures/blocks/resource extractors/WallGrinder/WallGrinder.png" id="2_ddc7o"]
 
 [resource]
 script = ExtResource("1")
 id = &"wall_grinder"
 display_name = "Wall Grinder"
-description = "High-speed wall mining with improved throughput."
+description = "Three-headed grinder that pulverises blackstone walls into sand. Must face a blackstone wall. Requires electrical power."
 category = 1
+tags = PackedStringArray("mining", "extractor", "wall_miner", "grinder_heads")
 color = Color(0.6, 0.6, 0.4, 1)
+grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("2_ddc7o")
 max_health = 320.0
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
 build_time = 2.0
-output_items = { "ore": 8 }
-production_time = 2.0
-tags = PackedStringArray("mining", "extraction")
+output_items = {
+"mat_sand": 9
+}
+production_time = 10.0
+electrical_power_use = 18.0
+max_stored_items = 20

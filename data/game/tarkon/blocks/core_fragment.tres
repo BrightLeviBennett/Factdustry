@@ -18,5 +18,5 @@ build_cost = {
 "silicon": 700
 }
 build_time = 30.0
-unit_capacity = 20
+max_active_units = 20
 storage_capacity = 6000
