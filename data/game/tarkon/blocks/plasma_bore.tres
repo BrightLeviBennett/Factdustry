@@ -15,7 +15,6 @@ color = Color(0.9, 0.3, 0.5, 1)
 grid_size = Vector2i(2, 2)
 top_sprite = ExtResource("2")
 max_health = 240.0
-armor = null
 build_cost = {
 "copper": 80,
 "silicon": 30,
@@ -26,19 +25,5 @@ output_items = {
 "ore": 6
 }
 production_time = 1.25
-accepted_ores = null
-accepted_walls = null
 mine_range = 4
-inaccuracy = null
-bullet_spread = null
-targets_air = null
-targets_ground = null
-ammo_capacity = null
-liquid_capacity = null
-required_tiles = null
-boosters = null
 electrical_power_use = 15.0
-max_active_units = null
-spawned_unit = null
-overdrive_multiplier = null
-overdrive_radius = null

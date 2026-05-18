@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_graphite_rod"
+display_name = "Graphite Rod"
+description = "Compressed graphite shaft. Reactor moderator material."
+max_stack = 100
+category = 0
+color = Color(0.3, 0.3, 0.3, 1)
+base_value = 6.0
+conveyable = true

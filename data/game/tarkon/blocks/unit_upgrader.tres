@@ -13,6 +13,5 @@ max_health = 360.0
 grid_size = Vector2i(3, 3)
 build_cost = { "copper": 200, "silicon": 80 }
 build_time = 4.0
-requires_power = true
 power_consumption = 6.0
 tags = PackedStringArray("fabricator", "units")

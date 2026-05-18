@@ -111,7 +111,7 @@ func _refresh_tile_lock(tile: Dictionary) -> void:
 		lock_rect.texture = _lock_icon
 		lock_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		lock_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		lock_rect.custom_minimum_size = Vector2(14, 14)
+		lock_rect.custom_minimum_size = Vector2(22, 22)
 		lock_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		center.add_child(lock_rect)
 	else:
@@ -457,7 +457,7 @@ func _build_tile(entry: Resource, cat_key: String) -> Dictionary:
 		lock_rect.texture = _lock_icon
 		lock_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		lock_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		lock_rect.custom_minimum_size = Vector2(14, 14)
+		lock_rect.custom_minimum_size = Vector2(28, 28)
 		lock_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		center.add_child(lock_rect)
 
@@ -780,11 +780,13 @@ func _show_block_details(block: BlockData) -> void:
 	if block.storage_capacity > 0:
 		_add_stat("Storage Capacity Bonus", "+%d" % block.storage_capacity, Color(0.7, 0.95, 0.7))
 
-	# --- Liquids (turrets / blocks with liquid_capacity) ---
+	# --- Liquids ---
 	if block.liquid_capacity > 0.0:
 		_add_separator()
 		_add_section("Liquids")
-		_add_stat("Liquid Capacity", "%s liquid units" % _fmt_num(block.liquid_capacity), Color(0.4, 0.7, 1.0))
+		_add_stat_with_icon("Liquid Capacity", _DB_FLUID_ICON,
+			"%s Fluid Units" % _fmt_num(block.liquid_capacity),
+			Color(0.4, 0.7, 1.0))
 
 	# --- Power ---
 	var has_power_info: bool = block.electrical_power_use > 0.0 \
@@ -794,11 +796,17 @@ func _show_block_details(block: BlockData) -> void:
 		_add_separator()
 		_add_section("Power")
 		if block.electrical_power_use > 0.0:
-			_add_stat("Power Use", "⚡ %s power units/second" % _fmt_num(block.electrical_power_use), Color(1.0, 0.9, 0.3))
+			_add_stat_with_icon("Power Use", _DB_POWER_ICON,
+				"%s power units/second" % _fmt_num(block.electrical_power_use),
+				Color(1.0, 0.9, 0.3))
 		if block.electrical_power_gen > 0.0:
-			_add_stat("Power Gen", "⚡ %s power units/second" % _fmt_num(block.electrical_power_gen), Color(0.5, 1.0, 0.5))
+			_add_stat_with_icon("Power Gen", _DB_POWER_ICON,
+				"%s power units/second" % _fmt_num(block.electrical_power_gen),
+				Color(0.5, 1.0, 0.5))
 		if block.electrical_power_storage > 0.0:
-			_add_stat("Power Storage", "%s power-seconds" % _fmt_num(block.electrical_power_storage), Color(0.8, 0.8, 1.0))
+			_add_stat_with_icon("Power Storage", _DB_POWER_ICON,
+				"%s power-seconds" % _fmt_num(block.electrical_power_storage),
+				Color(0.8, 0.8, 1.0))
 
 	# --- Items section (storage capacity for factories etc.) ---
 	if block.max_stored_items > 0 and (block.is_producer() or block.tags.has("core")):
@@ -824,10 +832,21 @@ func _show_block_details(block: BlockData) -> void:
 			var unit_data = Registry.get_unit(block.produced_unit)
 			if unit_data:
 				_add_unit_card(unit_data, "%s seconds" % _fmt_num(cycle))
-			if block.input_items.size() > 0:
+			# Real inputs = the produced unit's build_cost (normalized to
+			# "mat_*" runtime ids); falls back to block.input_items only
+			# when the unit declares none. Without this, a fabricator's
+			# .tres input_items had to be kept in sync with the unit's
+			# recipe by hand — and they drift (e.g. tank fabricator listed
+			# only copper while Press actually needs copper + silicon).
+			var fab_recipe: Dictionary = {}
+			if unit_data and not unit_data.build_cost.is_empty():
+				fab_recipe = _normalize_mat_keys(unit_data.build_cost)
+			else:
+				fab_recipe = block.input_items
+			if fab_recipe.size() > 0:
 				_add_text("Inputs:", dim_text_color, 13)
-				for item_id in block.input_items:
-					var amt: int = int(block.input_items[item_id])
+				for item_id in fab_recipe:
+					var amt: int = int(fab_recipe[item_id])
 					var rate: float = amt / cycle
 					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
 		else:
@@ -837,10 +856,18 @@ func _show_block_details(block: BlockData) -> void:
 					var amt: int = int(block.input_items[item_id])
 					var rate: float = amt / cycle
 					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
-			if block.output_items.size() > 0:
+			# Skip output entries whose id isn't a real item/fluid — old
+			# drill .tres files used "ore" as a placeholder key that
+			# never resolves to a registered item and would render as a
+			# bogus "ore" row in the database.
+			var real_outputs: Dictionary = {}
+			for raw_id in block.output_items:
+				if Registry.get_item_or_fluid(StringName(raw_id)) != null:
+					real_outputs[raw_id] = block.output_items[raw_id]
+			if real_outputs.size() > 0:
 				_add_text("Output:", dim_text_color, 13)
-				for item_id in block.output_items:
-					var amt: int = int(block.output_items[item_id])
+				for item_id in real_outputs:
+					var amt: int = int(real_outputs[item_id])
 					var rate: float = amt / cycle
 					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
 		_add_stat("Production Time", "%s seconds" % _fmt_num(cycle), text_color)
@@ -897,21 +924,75 @@ func _show_block_details(block: BlockData) -> void:
 		_add_drillables_section(block)
 
 	# --- Refabricator / upgrader unit-conversion map ---
-	if block.refab_recipes.size() > 0:
-		_add_separator()
-		_add_section("Unit Upgrades")
-		# refab_recipes maps `output_unit -> {item_id: amount}`. The
-		# input unit is inferred from the recipe key's "from" unit; in
-		# many existing refabricators the input == produced_unit's
-		# previous tier. We show "output ← input" cards by best guess
-		# (using `produced_unit` as the implied input when the recipe
-		# doesn't specify one).
-		for out_id in block.refab_recipes.keys():
-			var out_u = Registry.get_unit(StringName(out_id))
-			var in_u = Registry.get_unit(block.produced_unit) if block.produced_unit != &"" else null
-			if out_u == null:
+	# For any block with the `refabricator` tag (or an explicit
+	# refab_recipes table), list every supported T1 → T2 conversion.
+	# Per-T2 overrides come from refab_recipes; missing entries fall
+	# back to block.input_items, matching the runtime
+	# `_refab_effective_recipe` helper. Without this fallback the unit
+	# refabricator showed nothing because its .tres only set a global
+	# input_items and left refab_recipes empty.
+	var is_refab: bool = block.tags.has("refabricator") or block.refab_recipes.size() > 0
+	if is_refab:
+		# T1 = unit with NO unit parent (root of a unit chain). T2 =
+		# unit whose first unit-parent is a T1. The Unit Refabricator
+		# only handles T1 → T2 conversions, so we explicitly filter to
+		# that tier rather than listing every unit-with-a-unit-parent
+		# (which would also catch T2 → T3 upgrades that belong to a
+		# higher-tier refabricator).
+		var is_unit_node := func(nid) -> bool:
+			return Registry.get_unit(nid) != null
+		var is_tier1_unit := func(nid) -> bool:
+			if not is_unit_node.call(nid):
+				return false
+			var pts: Array = TechTree.nodes.get(nid, {}).get("parents", [])
+			for pid in pts:
+				if is_unit_node.call(pid):
+					return false
+			return true
+		var t2_targets: Array = []
+		for node_id in TechTree.nodes:
+			var u = Registry.get_unit(node_id)
+			if u == null:
 				continue
-			_add_unit_conversion_row(in_u, out_u)
+			var parents_arr: Array = TechTree.nodes[node_id].get("parents", [])
+			for parent_id in parents_arr:
+				if is_tier1_unit.call(parent_id):
+					t2_targets.append({"t2": node_id, "t1": parent_id})
+					break
+		# Merge in any explicit refab_recipes keys that aren't already
+		# represented by the tech-tree walk.
+		for out_id in block.refab_recipes.keys():
+			var dup := false
+			for entry in t2_targets:
+				if StringName(entry["t2"]) == StringName(out_id):
+					dup = true
+					break
+			if not dup:
+				t2_targets.append({"t2": StringName(out_id), "t1": block.produced_unit})
+		if not t2_targets.is_empty():
+			_add_separator()
+			_add_section("Unit Upgrades")
+			var cycle_r: float = block.production_time if block.production_time > 0.0 else 1.0
+			for entry in t2_targets:
+				var t2_id: StringName = StringName(entry["t2"])
+				var t1_id: StringName = StringName(entry["t1"])
+				var t2_u = Registry.get_unit(t2_id)
+				var t1_u = Registry.get_unit(t1_id) if t1_id != &"" else null
+				if t2_u == null:
+					continue
+				_add_unit_conversion_row(t1_u, t2_u)
+				# Materials: per-T2 override, else block.input_items.
+				var recipe: Dictionary = {}
+				if block.refab_recipes.has(t2_id):
+					var r = block.refab_recipes[t2_id]
+					if r is Dictionary and not r.is_empty():
+						recipe = r
+				if recipe.is_empty():
+					recipe = block.input_items
+				for item_id in recipe:
+					var amt: int = int(recipe[item_id])
+					var rate: float = amt / cycle_r
+					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
 
 	# --- Core-specific spawned unit ---
 	if block.spawned_unit != &"":
@@ -1202,6 +1283,43 @@ func _add_stat(label_text: String, value_text: String, value_color: Color) -> vo
 	_detail_container.add_child(hbox)
 
 
+## Like _add_stat, but with a small icon between the label and the
+## value text. Used for things like "Power Use: [PowerIcon] 4/sec"
+## and "Liquid Capacity: [FluidIcon] 30 Fluid Units" so the player
+## can recognise the resource at a glance instead of reading an
+## emoji.
+func _add_stat_with_icon(label_text: String, icon: Texture2D, value_text: String, value_color: Color) -> void:
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+
+	var label = Label.new()
+	label.text = label_text + ":"
+	label.add_theme_font_size_override("font_size", 14)
+	label.add_theme_color_override("font_color", dim_text_color)
+	label.custom_minimum_size.x = 140
+	hbox.add_child(label)
+
+	if icon:
+		var ir = TextureRect.new()
+		ir.texture = icon
+		ir.custom_minimum_size = Vector2(18, 18)
+		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		hbox.add_child(ir)
+
+	var value = Label.new()
+	value.text = value_text
+	value.add_theme_font_size_override("font_size", 14)
+	value.add_theme_color_override("font_color", value_color)
+	hbox.add_child(value)
+
+	_detail_container.add_child(hbox)
+
+
+const _DB_POWER_ICON: Texture2D = preload("res://textures/UI/PowerIcon.png")
+const _DB_FLUID_ICON: Texture2D = preload("res://textures/UI/FluidIcon.png")
+
+
 func _add_stat_bar(label_text: String, value: float, max_value: float, bar_color: Color) -> void:
 	var hbox = HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
@@ -1414,7 +1532,15 @@ func _add_cost_row(label_text: String, cost: Dictionary) -> void:
 	for item_id in cost:
 		var entry = HBoxContainer.new()
 		entry.add_theme_constant_override("separation", 2)
+		# Block.build_cost stores short keys like "copper" / "graphite",
+		# but the Registry uses the runtime item ids ("mat_copper" /
+		# "mat_graphite"). Try the raw key first, then fall back to the
+		# `mat_`-prefixed name so the icon actually resolves.
 		var item = Registry.get_item_or_fluid(item_id)
+		if item == null:
+			var s := String(item_id)
+			if not s.begins_with("mat_"):
+				item = Registry.get_item_or_fluid(StringName("mat_" + s))
 		if item and item.icon:
 			var ir = TextureRect.new()
 			ir.texture = item.icon
@@ -1429,6 +1555,25 @@ func _add_cost_row(label_text: String, cost: Dictionary) -> void:
 		entry.add_child(amt_lbl)
 		hbox.add_child(entry)
 	_detail_container.add_child(hbox)
+
+
+## Normalises a build-cost-style key ("copper") to the runtime item id
+## ("mat_copper") so the produced unit's build_cost dict reads as the
+## same item ids the conveyor system uses. Mirrors
+## `LogisticsSystem._normalize_item_keys` but lives here so the
+## database UI doesn't have to reach into Logistics just for this.
+func _normalize_mat_keys(d: Dictionary) -> Dictionary:
+	var out := {}
+	for raw_id in d:
+		var s := String(raw_id)
+		var normalized: String = s if s.begins_with("mat_") else "mat_" + s
+		# If "mat_<name>" isn't a real item but the raw key is, keep
+		# the raw key (lets non-material inputs pass through).
+		if Registry.get_item_or_fluid(StringName(normalized)) == null \
+				and Registry.get_item_or_fluid(StringName(s)) != null:
+			normalized = s
+		out[StringName(normalized)] = d[raw_id]
+	return out
 
 
 ## "Card" widget: a horizontal panel showing an item icon + name +

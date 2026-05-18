@@ -124,6 +124,21 @@ var _duct_textures := {}
 # infinitely along the belt. Gated by `belt_scroll_enabled` — when off,
 # belts render statically and we skip the per-frame queue_redraw too.
 var _belt_scroll_phase: float = 0.0
+
+# Build-beam scrolling stripe phase. Cycles [0, 1) over `_BUILD_BEAM_PERIOD`
+# seconds — frozen while the world is paused so the visual matches the
+# stalled build tick.
+var _build_beam_phase: float = 0.0
+const _BUILD_BEAM_PERIOD: float = 1.0
+
+# Derelict-→-LUMINA conversion flash. anchor → Time.get_ticks_msec() at
+# conversion, in seconds. Reused by `get_conversion_flash_tint` in the
+# pass 4 overlay so freshly-captured blocks visibly "lock in" with the
+# same yellow flash the launch-animation paints on pre-placed LUMINA
+# blocks, minus the white kicker.
+var _conversion_flash: Dictionary = {}
+const _CONVERSION_FLASH_YELLOW: float = 0.18
+const _CONVERSION_FLASH_FADE: float = 0.32  # total duration
 var belt_scroll_enabled: bool = false
 const _BELT_SCROLL_PIXELS_PER_SEC: float = 96.0
 var _payload_conveyor_textures := {}
@@ -171,6 +186,35 @@ const SCRAPER_HEAD_ACCEL := 5.0    # eases to/from target (rad/s²)
 # Per-scraper state. Key = anchor. Value: {"angle": float, "vel": float}.
 var _scraper_head_state: Dictionary = {}
 
+# --- IMPACT HEAD TEXTURE ---
+# Same layered render as the scraper (head texture drawn UNDER the base
+# sprite), but the head does NOT spin. Instead it scales between
+# IMPACT_HEAD_MIN_SCALE and IMPACT_HEAD_MAX_SCALE: it snaps to MIN on
+# every slam (the drill cycle's output moment), then eases back to MAX
+# over the production cycle to read as "retracting" between hits.
+# Particles burst out from under the head at the slam moment.
+var _impact_head_texture: Texture2D
+
+# Incinerator power-state textures: one each for powered / unpowered.
+# The world render swaps between them every frame based on
+# `PowerSystem.get_electrical_efficiency`.
+var _incinerator_powered_texture: Texture2D
+var _incinerator_unpowered_texture: Texture2D
+
+# Payload crane art: arm-segment + head (cross-grabber) textures
+# drawn dynamically by `_draw_crane_pose`. Base texture lives on the
+# .tres as `top_sprite` so the standard block render path paints it.
+var _payload_crane_arm_texture: Texture2D
+var _payload_crane_head_texture: Texture2D
+const IMPACT_HEAD_MIN_SCALE := 0.7   # head scale at the moment of impact (slam down)
+const IMPACT_HEAD_MAX_SCALE := 1.0   # head scale fully retracted (waiting for next slam)
+# Per-impact-drill state. Key = anchor. Value:
+#   {"slam_progress": float, "prev_progress": float} — slam_progress
+#   eases 0 (just slammed) → 1 (fully retracted) over the drill's
+#   production cycle. A drop in progress signals a new slam moment
+#   (used to fire the particle burst).
+var _impact_head_state: Dictionary = {}
+
 # Vent turbine: layered render with two spinning inner blade discs under
 # a static base plate. Same inertia model as the scraper head — `vel` eases
 # toward `VENT_TURBINE_SPIN` while the building is active, drops back to
@@ -181,6 +225,34 @@ const VENT_TURBINE_SPIN := 7.5    # radians/sec target
 const VENT_TURBINE_ACCEL := 5.0   # rad/s²
 var _vent_turbine_state: Dictionary = {}
 
+# --- LAYERED SPINNER BLOCKS ---
+# Generic three-layer render: Base (static) → Head (rotates while the
+# factory is producing) → Top (static). One entry per supported block
+# in `_LAYERED_SPINNERS`. Each entry stores the three texture paths,
+# the head's spin / accel constants, and is keyed by block_id. Adding
+# a new block is a single entry in the dict — no new tick / draw
+# functions required.
+const _LAYERED_SPINNERS := {
+	&"brass_mixer": {
+		"base": "res://textures/blocks/factories/Brass Mixer/BrassMixerBase.png",
+		"head": "res://textures/blocks/factories/Brass Mixer/BrassMixerHead.png",
+		"top":  "res://textures/blocks/factories/Brass Mixer/BrassMixerTop.png",
+		"spin":  4.5,
+		"accel": 8.0,
+	},
+	&"silicon_mixer": {
+		"base": "res://textures/blocks/factories/Silicon Refinery/SiliconRefineryBase.png",
+		"head": "res://textures/blocks/factories/Silicon Refinery/SiliconRefineryHead.png",
+		"top":  "res://textures/blocks/factories/Silicon Refinery/SiliconRefineryTop.png",
+		"spin":  4.5,
+		"accel": 8.0,
+	},
+}
+# Loaded Texture2D per block_id → {"base": Texture2D, "head": ..., "top": ...}.
+var _layered_spinner_textures: Dictionary = {}
+# Per-anchor head state: angle, vel, prev_timer (for stall detection).
+var _layered_spinner_state: Dictionary = {}
+
 # Vent condenser: same layered base + spinning inner pattern as the
 # vent turbine, with its own textures. The condenser carries the `pump`
 # tag so without this override the regular draw flow would route it
@@ -190,6 +262,15 @@ var _vent_condenser_inner_texture: Texture2D
 const VENT_CONDENSER_SPIN := 7.5
 const VENT_CONDENSER_ACCEL := 5.0
 var _vent_condenser_state: Dictionary = {}
+
+# Smoothly-eased displayed fluid total per anchor for the blue
+# storage bar. Logical `block_storage[anchor]["fluids"]` totals
+# change in discrete jumps (pipe push / pump tick); this dict carries
+# the value the bar actually paints, eased toward the true total at
+# FLUID_BAR_EASE_PER_SEC units per second so the bar slides instead
+# of teleporting.
+var _fluid_bar_display: Dictionary = {}
+const FLUID_BAR_EASE_PER_SEC := 8.0
 
 # Pre-baked composite of inner@0 + inner@45 + base, captured in a
 # SubViewport at startup. Drawn as a single semi-transparent layer in
@@ -299,6 +380,27 @@ var _storage_panel_open := false
 var _storage_panel_pos := Vector2i.ZERO
 var _storage_panel_items: Array = []
 var _storage_panel_hovered := -1
+
+# Launchpad world popup — small CanvasLayer-hosted panel anchored to the
+# launchpad's screen position. Owns its own input handler so clicking
+# inside it doesn't fall through to placement.
+var _launchpad_popup_layer: CanvasLayer = null
+var _launchpad_popup_panel: PanelContainer = null
+var _launchpad_popup_label: Button = null
+var _launchpad_popup_launch_btn: Button = null
+var _launchpad_popup_anchor: Vector2i = Vector2i.ZERO
+var _launchpad_popup_open: bool = false
+
+# Landing-pad filter popup. Two slot buttons, each showing the current
+# filter item / fluid (or "Empty"). Clicking a slot opens the world
+# menu in "landing_pad_slot" mode (filtered to unlocked items+fluids);
+# the menu writes back via `set_landing_pad_filter_slot(anchor, slot)`.
+var _landing_pad_popup_layer: CanvasLayer = null
+var _landing_pad_popup_panel: PanelContainer = null
+var _landing_pad_popup_slot_btns: Array = []   # Array[Button], length 2
+var _landing_pad_popup_anchor: Vector2i = Vector2i.ZERO
+var _landing_pad_popup_open: bool = false
+var _landing_pad_pick_slot: int = -1            # which slot the next pick fills
 
 # --- WALL RENDER CACHE ---
 ## Cached set of wall positions (rebuilt when terrain changes)
@@ -412,6 +514,10 @@ func _ready() -> void:
 	# seamlessly when the source rect runs past the texture's bounds,
 	# this CanvasItem needs to sample with repeat enabled.
 	texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	# Picking a real block from the build menu exits paste mode so the
+	# schematic stamp doesn't fight the block placement preview.
+	if main.has_signal("building_selected"):
+		main.building_selected.connect(_on_main_building_selected)
 	# Scale world-menu cell size to current GRID_SIZE so storage / sorter /
 	# picker panels stay proportional to a tile.
 	_world_menu_cell_size *= main.SPRITE_SCALE_FACTOR
@@ -764,11 +870,23 @@ const _DUCT_TEX_PATHS := {
 	"ca":       "res://textures/blocks/item transportation/Duct/Duct-CA.png",
 	"cb":       "res://textures/blocks/item transportation/Duct/Duct-CB.png",
 }
+## Drill heads are now split into per-side textures keyed by the
+## number of tiles each head needs to reach forward into ore.
+##   L0 / R0 = head sits at the drill's front edge (no extension).
+##   L1 / R1 = head reaches 1 tile past the front edge.
+##   L2 / R2 = head reaches 2 tiles past (mechanical_drill's max).
+## Picking the variant per side avoids the combinatorial explosion of
+## per-(left,right) combo art the old N/L/R/A system required.
+## -L2 / -R2 are taller than L0/L1 to fit the extra extension tile;
+## the renderer sizes its rect against the natural per-level depth
+## so the artwork lands flush.
 const _DRILL_HEAD_TEX_PATHS := {
-	"N": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-N.png",
-	"R": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R.png",
-	"L": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-L.png",
-	"A": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-A.png",
+	"L0": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-L0.png",
+	"L1": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-L1.png",
+	"L2": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-L2.png",
+	"R0": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R0.png",
+	"R1": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R1.png",
+	"R2": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R2.png",
 }
 const _PIPE_TEX_PATH := "res://textures/blocks/fluid transportation/FluidConduit.png"
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
@@ -776,6 +894,11 @@ const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
 const _GRINDER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallGrinder/GrinderHead.png"
 const _SCRAPER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/Ground Scraper/GroundScraperHead.png"
+const _IMPACT_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/Impact Drill/ImpactDrillHead.png"
+const _INCINERATOR_POWERED_TEX_PATH := "res://textures/blocks/item transportation/Incinerator-P.png"
+const _INCINERATOR_UNPOWERED_TEX_PATH := "res://textures/blocks/item transportation/Incinerator-NP.png"
+const _PAYLOAD_CRANE_ARM_TEX_PATH := "res://textures/blocks/units/PayloadCrane/PayloadCraneArm.png"
+const _PAYLOAD_CRANE_HEAD_TEX_PATH := "res://textures/blocks/units/PayloadCrane/PayloadCraneHead.png"
 const _VENT_TURBINE_BASE_TEX_PATH := "res://textures/blocks/power/VentTurbineBase.png"
 const _VENT_TURBINE_INNER_TEX_PATH := "res://textures/blocks/power/VentTurbineInner.png"
 const _VENT_CONDENSER_BASE_TEX_PATH := "res://textures/blocks/resource extractors/Vent Condenser/VentCondenserBase.png"
@@ -813,8 +936,18 @@ func _queue_texture_loads() -> void:
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_GRINDER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_SCRAPER_HEAD_TEX_PATH)
+	ResourceLoader.load_threaded_request(_IMPACT_HEAD_TEX_PATH)
+	ResourceLoader.load_threaded_request(_INCINERATOR_POWERED_TEX_PATH)
+	ResourceLoader.load_threaded_request(_INCINERATOR_UNPOWERED_TEX_PATH)
+	ResourceLoader.load_threaded_request(_PAYLOAD_CRANE_ARM_TEX_PATH)
+	ResourceLoader.load_threaded_request(_PAYLOAD_CRANE_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_VENT_TURBINE_BASE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_VENT_TURBINE_INNER_TEX_PATH)
+	for bid in _LAYERED_SPINNERS:
+		var entry: Dictionary = _LAYERED_SPINNERS[bid]
+		ResourceLoader.load_threaded_request(entry["base"])
+		ResourceLoader.load_threaded_request(entry["head"])
+		ResourceLoader.load_threaded_request(entry["top"])
 	ResourceLoader.load_threaded_request(_VENT_CONDENSER_BASE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_VENT_CONDENSER_INNER_TEX_PATH)
 	ResourceLoader.load_threaded_request(_FACTION_OVERLAY_FEROX_PATH)
@@ -841,8 +974,20 @@ func _ensure_textures_loaded() -> void:
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
 	_grinder_head_texture = ResourceLoader.load_threaded_get(_GRINDER_HEAD_TEX_PATH)
 	_scraper_head_texture = ResourceLoader.load_threaded_get(_SCRAPER_HEAD_TEX_PATH)
+	_impact_head_texture = ResourceLoader.load_threaded_get(_IMPACT_HEAD_TEX_PATH)
+	_incinerator_powered_texture = ResourceLoader.load_threaded_get(_INCINERATOR_POWERED_TEX_PATH)
+	_incinerator_unpowered_texture = ResourceLoader.load_threaded_get(_INCINERATOR_UNPOWERED_TEX_PATH)
+	_payload_crane_arm_texture = ResourceLoader.load_threaded_get(_PAYLOAD_CRANE_ARM_TEX_PATH)
+	_payload_crane_head_texture = ResourceLoader.load_threaded_get(_PAYLOAD_CRANE_HEAD_TEX_PATH)
 	_vent_turbine_base_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_BASE_TEX_PATH)
 	_vent_turbine_inner_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_INNER_TEX_PATH)
+	for bid in _LAYERED_SPINNERS:
+		var entry: Dictionary = _LAYERED_SPINNERS[bid]
+		_layered_spinner_textures[bid] = {
+			"base": ResourceLoader.load_threaded_get(entry["base"]),
+			"head": ResourceLoader.load_threaded_get(entry["head"]),
+			"top":  ResourceLoader.load_threaded_get(entry["top"]),
+		}
 	_vent_condenser_base_texture = ResourceLoader.load_threaded_get(_VENT_CONDENSER_BASE_TEX_PATH)
 	_vent_condenser_inner_texture = ResourceLoader.load_threaded_get(_VENT_CONDENSER_INNER_TEX_PATH)
 	_faction_overlay_ferox = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_FEROX_PATH)
@@ -852,19 +997,23 @@ func _ensure_textures_loaded() -> void:
 	_textures_ready = true
 
 
-## Returns the DrillHeads texture variant ("N", "R", "L", "A") to use
-## for a drill at grid_pos with the given rotation and grid_size.
-## Texture default is "drill facing down"; L/R are defined relative to the
-## texture's own left/right slots (which rotate together with the drill).
-##
-## The drill mines front-edge cells and the cells one tile beyond them.
-## "Directly in front" = ore sits on the front-edge cell itself.
-## "Not directly in front" = front-edge cell is empty but cell one tile ahead has ore.
-## If either head has no ore at all (invalid placement), fall back to "N".
-func _get_drill_head_variant(grid_pos: Vector2i, rotation: int, grid_size: Vector2i) -> String:
+## Maximum supported extension level (capped at the number of L*/R*
+## textures shipped). mine_range > MAX_DRILL_HEAD_LEVEL just clamps —
+## the last texture is reused for any deeper reach.
+const MAX_DRILL_HEAD_LEVEL := 2
+
+
+## Returns `{left: int, right: int}` — each entry is the extension
+## level (0 / 1 / 2) for that side, or -1 if that side has no
+## reachable ore at all and shouldn't render a head. The level is the
+## number of tiles BEYOND the front edge the head needs to reach,
+## clamped to MAX_DRILL_HEAD_LEVEL. Each side is independent so the
+## left head can be retracted while the right is fully extended.
+func _get_drill_head_levels(grid_pos: Vector2i, rotation: int, grid_size: Vector2i) -> Dictionary:
+	var none := {"left": -1, "right": -1}
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	if terrain == null:
-		return "N"
+		return none
 
 	var dir: Vector2i
 	match rotation:
@@ -876,10 +1025,11 @@ func _get_drill_head_variant(grid_pos: Vector2i, rotation: int, grid_size: Vecto
 
 	var front_cells := _get_front_edge(grid_pos, grid_size, rotation)
 	if front_cells.size() < 2:
-		return "N"
+		return none
 
-	# Map _get_front_edge's cells to the texture's left/right slots.
-	# _get_front_edge ordering + texture rotation of (rotation-1)*90° produces:
+	# Same texture-left / texture-right mapping the old variant
+	# resolver used (front_cells order vs the (rotation-1)*90° canvas
+	# rotation that comes later in the draw).
 	var tex_left_cell: Vector2i
 	var tex_right_cell: Vector2i
 	match rotation:
@@ -899,34 +1049,32 @@ func _get_drill_head_variant(grid_pos: Vector2i, rotation: int, grid_size: Vecto
 			tex_left_cell = front_cells[0]
 			tex_right_cell = front_cells[1]
 
-	# A head is "extended" only when ore is one tile PAST the front edge
-	# (i.e. not directly in front) — the head physically has to reach forward.
-	# If the front cell has ore directly, or has nothing at all, the head
-	# rests in its short/default position.
-	var left_extended := terrain.get_ore_at(tex_left_cell) == null \
-		and terrain.get_ore_at(tex_left_cell + dir) != null
-	var right_extended := terrain.get_ore_at(tex_right_cell) == null \
-		and terrain.get_ore_at(tex_right_cell + dir) != null
-
-	if not left_extended and not right_extended:
-		return "N"
-	if left_extended and not right_extended:
-		return "L"
-	if right_extended and not left_extended:
-		return "R"
-	return "A"
+	# Level = number of tiles past the front cell the head reaches.
+	# Ore at the front cell itself (offset 0) → L0 (no extension).
+	# Ore one tile past (offset 1) → L1. Two past (offset 2) → L2.
+	# No ore in scan range → L0 (head sits idle at the body face).
+	var find_level := func(start_cell: Vector2i) -> int:
+		for n in range(MAX_DRILL_HEAD_LEVEL + 1):
+			var c: Vector2i = start_cell + dir * n
+			if terrain.get_ore_at(c) != null:
+				return clampi(n, 0, MAX_DRILL_HEAD_LEVEL)
+		return 0
+	return {
+		"left": find_level.call(tex_left_cell),
+		"right": find_level.call(tex_right_cell),
+	}
 
 
-## Draws the DrillHeads overlay texture in front of a drill.
-## The texture spans grid_size.x tiles wide (matching drill width) by 2 tiles
-## in the forward direction (covering the front edge + one tile ahead), rotated
-## so its default "facing down" orientation aligns with the drill's rotation.
+## Draws the DrillHeads overlay textures in front of a drill — one
+## texture per side, sized per its own extension level. Each side's
+## rect is positioned half-a-tile off the drill's local center along
+## the texture-local X axis (since the body is 2 tiles wide for the
+## mechanical drill) and rooted with its near edge at the drill's
+## front face along Y, with depth = (level + 1) tiles. That makes
+## L2's taller artwork land 1 tile deeper than L0/L1 without changing
+## where the head "starts" against the body.
 func _draw_drill_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
-		variant: String, block_id: StringName, tint: Color = Color.WHITE) -> void:
-	var texture: Texture2D = _drill_head_textures.get(variant)
-	if texture == null:
-		return
-
+		levels: Dictionary, block_id: StringName, tint: Color = Color.WHITE) -> void:
 	var gs := float(main.GRID_SIZE)
 	var world_pos: Vector2 = main.grid_to_world(grid_pos)
 	var offset: Vector2 = _get_top_offset(world_pos) * _get_height_scale(block_id)
@@ -937,7 +1085,8 @@ func _draw_drill_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 		grid_size.y * gs / 2.0
 	) + offset
 
-	# Forward unit vector (in world space) for this rotation.
+	# Forward unit vector (world-space) for this rotation. Picks the
+	# correct half-extent of the body along the forward axis.
 	var fwd: Vector2
 	match rotation:
 		0: fwd = Vector2(1, 0)
@@ -945,29 +1094,48 @@ func _draw_drill_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 		2: fwd = Vector2(-1, 0)
 		3: fwd = Vector2(0, -1)
 		_: fwd = Vector2(1, 0)
-
-	# Texture dimensions in texture-space: width = drill width (tiles),
-	# height = 2 tiles (front edge + one tile ahead).
-	var heads_depth := 2.0
-	var w: float = grid_size.x * gs
-	var h: float = heads_depth * gs
-
-	# Drill body half-extent along the forward direction.
 	var drill_half_fwd: float
 	if abs(fwd.x) > 0.5:
 		drill_half_fwd = grid_size.x * gs / 2.0
 	else:
 		drill_half_fwd = grid_size.y * gs / 2.0
 
-	# Position the heads-rect center: body center offset by
-	# (half drill depth + half heads depth) along forward.
-	var heads_center: Vector2 = body_center + fwd * (drill_half_fwd + h / 2.0)
+	# Front-face center: where the head rects START (near edge).
+	var front_center: Vector2 = body_center + fwd * drill_half_fwd
 
-	# Texture default faces DOWN (rot=1). Extra rotation = (rotation - 1) * 90°.
+	# After draw_set_transform(front_center, angle):
+	#   local +Y = forward (out of the drill)
+	#   local +X = texture's right side
+	#   local origin = exact middle of the drill's front face
+	# `angle` = (rotation - 1) * 90° so the texture's default "drill
+	# faces DOWN" orientation rotates into the live drill's facing.
 	var angle: float = (rotation - 1) * PI / 2.0
+	draw_set_transform(front_center, angle)
 
-	draw_set_transform(heads_center, angle)
-	draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
+	# Each L/R texture is authored at FULL drill width — its art only
+	# occupies the matching half of the image, and the other half is
+	# transparent. Drawing them both at the same full-width rect
+	# layers the left head from the L texture and the right head from
+	# the R texture without distorting the artwork. Depth scales with
+	# each texture's natural aspect so L2's taller artwork (1.5×) is
+	# drawn at 1.5× the depth of L0/L1 (1:1).
+	var full_w: float = grid_size.x * gs
+	var paint_side := func(prefix: String, lvl: int):
+		if lvl < 0:
+			return
+		var clamped: int = clampi(lvl, 0, MAX_DRILL_HEAD_LEVEL)
+		var tex: Texture2D = _drill_head_textures.get("%s%d" % [prefix, clamped])
+		if tex == null:
+			return
+		var ts: Vector2 = tex.get_size()
+		var depth: float = full_w  # square fallback
+		if ts.x > 0.0:
+			depth = full_w * (ts.y / ts.x)
+		var rect := Rect2(Vector2(-full_w * 0.5, 0.0), Vector2(full_w, depth))
+		draw_texture_rect(tex, rect, false, tint)
+
+	paint_side.call("L", int(levels.get("left", -1)))
+	paint_side.call("R", int(levels.get("right", -1)))
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
@@ -1260,6 +1428,102 @@ func _draw_scraper_head(grid_pos: Vector2i, top_pos: Vector2, width: float, heig
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Per-frame tick for impact-drill heads. Drives the slam / retract
+## animation from the matching drill_timer in LogisticsSystem:
+##   slam_progress = 1 - (timer / cycle)        — eased visually
+## A drop in slam_progress (timer just reset → next slam) fires a
+## one-shot particle burst under the head.
+func _tick_impact_head_states(delta: float) -> void:
+	var logistics = _logistics
+	if logistics == null:
+		return
+	var to_erase: Array[Vector2i] = []
+	# Track every active impact-drill anchor; create state lazily.
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if _impact_head_state.has(anchor):
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if data == null or not data.tags.has("impact_head"):
+			continue
+		# Start at 0 so the first tick — which reads drill_timers ==
+		# cycle (target=0) — doesn't false-positive a slam from the
+		# default 1.0 → 0.0 drop.
+		_impact_head_state[anchor] = {"slam_progress": 0.0, "prev_progress": 0.0}
+	for anchor in _impact_head_state:
+		if not main.placed_buildings.has(anchor):
+			to_erase.append(anchor)
+			continue
+		var data2: BlockData = Registry.get_block(main.placed_buildings[anchor])
+		if data2 == null or not data2.tags.has("impact_head"):
+			to_erase.append(anchor)
+			continue
+		var s: Dictionary = _impact_head_state[anchor]
+		var cycle: float = data2.production_time if data2.production_time > 0.0 else 2.0
+		var timer: float = -1.0
+		if "drill_timers" in logistics and logistics.drill_timers.has(anchor):
+			timer = float(logistics.drill_timers[anchor])
+		var prev: float = float(s.get("slam_progress", 0.0))
+		var target: float
+		if timer < 0.0:
+			target = 0.0  # not tracked yet — pre-warmup, sit small
+		else:
+			# slam_progress: 0 right after slam (timer == cycle), 1 at
+			# end of CD (timer == 0).
+			target = clampf(1.0 - timer / maxf(cycle, 0.0001), 0.0, 1.0)
+		# Arm the slam detector only once the drill has visibly
+		# retracted near full extension — guarantees the next drop is
+		# a real slam, not the first-frame init / power-cycle
+		# transient. Disarm immediately after firing the burst.
+		var armed: bool = bool(s.get("armed", false))
+		if not armed and target >= 0.9:
+			armed = true
+		if armed and prev - target >= 0.4:
+			_spawn_impact_slam_burst(anchor, data2)
+			armed = false
+		s["armed"] = armed
+		s["prev_progress"] = prev
+		s["slam_progress"] = target
+	for a in to_erase:
+		_impact_head_state.erase(a)
+
+
+## Fires a single particle puff under the impact drill's head when it
+## slams down. Routed through ParticleOverlay's burst API so the cloud
+## reads as ejecta from the impact zone.
+func _spawn_impact_slam_burst(anchor: Vector2i, data: BlockData) -> void:
+	var overlay = get_node_or_null("/root/Main/ParticleOverlay")
+	if overlay == null or not overlay.has_method("spawn_burst"):
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var center: Vector2 = main.grid_to_world(anchor) \
+		+ Vector2(data.grid_size.x * gs * 0.5, data.grid_size.y * gs * 0.5)
+	overlay.spawn_burst(center, "impact_slam")
+
+
+## Draws the impact drill's head texture centered on the footprint at
+## a scale that snaps to MIN on every slam and eases back to MAX
+## across the production cycle. Drawn BEFORE the base sprite so the
+## base covers the head's center (same composition as the scraper).
+func _draw_impact_head(grid_pos: Vector2i, top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	if _impact_head_texture == null:
+		return
+	if not _impact_head_state.has(grid_pos):
+		_impact_head_state[grid_pos] = {"slam_progress": 1.0, "prev_progress": 1.0}
+	var s: Dictionary = _impact_head_state[grid_pos]
+	# Ease so the bounce-back from a slam feels cushioned rather than
+	# linear (similar feel to ease(t, 1.6) used elsewhere).
+	var p: float = clampf(float(s.get("slam_progress", 1.0)), 0.0, 1.0)
+	var eased: float = ease(p, 1.6)
+	var scale_factor: float = lerpf(IMPACT_HEAD_MIN_SCALE, IMPACT_HEAD_MAX_SCALE, eased)
+	var center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+	var draw_w: float = width * scale_factor
+	var draw_h: float = height * scale_factor
+	draw_set_transform(center, 0.0)
+	draw_texture_rect(_impact_head_texture, Rect2(Vector2(-draw_w * 0.5, -draw_h * 0.5), Vector2(draw_w, draw_h)), false, tint)
+	draw_set_transform(Vector2.ZERO, 0.0)
+
+
 ## Per-frame tick for vent turbines. Mirrors `_tick_scraper_head_states` —
 ## each anchor's angular velocity eases toward `VENT_TURBINE_SPIN` while
 ## the building is active and back to zero when inactive, with the angle
@@ -1293,6 +1557,77 @@ func _tick_vent_turbine_states(delta: float) -> void:
 ## caps and segment joins are flat — `draw_arc` was leaving slight
 ## connector slivers between adjacent calls that read as a faint gray
 ## ring under the white dashes.
+## Paints a "pod under construction" sprite on top of every Launchpad
+## whose mandatory cost is still being collected. Once collected, the
+## pod renders solid — the cargo is loaded and the pad is ready to
+## launch. Mirrors the block-build animation: dark/blueprint wash on
+## the unbuilt portion, with a yellow build-front line sweeping right.
+func _draw_launchpad_pod_previews() -> void:
+	if main == null:
+		return
+	var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
+	if lp_sys == null or not lp_sys.has_method("get_pod_build_progress"):
+		return
+	var pod_tex: Texture2D = null
+	# Borrow the launch_animation's pod texture so we render exactly the
+	# same art the launch animation will animate.
+	var anim = get_node_or_null("/root/Main/LaunchAnimation")
+	if anim and "_pod_tex" in anim:
+		pod_tex = anim._pod_tex
+	if pod_tex == null:
+		# Fallback path: don't draw anything rather than a placeholder
+		# rect that'd be confusing on top of the pad sprite.
+		return
+	var gs: float = float(main.GRID_SIZE)
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if anchor != cell:
+			continue
+		if main.placed_buildings.get(anchor, &"") != &"launchpad":
+			continue
+		# Only LUMINA launchpads — captured enemy launchpads would render
+		# nonsensical previews.
+		if main.get_building_faction(anchor) != main.Faction.LUMINA:
+			continue
+		var data = Registry.get_block(&"launchpad")
+		if data == null:
+			continue
+		var world_pos: Vector2 = main.grid_to_world(anchor)
+		var offset: Vector2 = _get_top_offset(world_pos) * _get_height_scale(&"launchpad")
+		var w: float = gs * float(data.grid_size.x)
+		var h: float = gs * float(data.grid_size.y)
+		var top_pos: Vector2 = world_pos + offset
+		# Pod is rendered in the centre of the launchpad at ~70% of the
+		# launchpad footprint so the player can still see the pad art
+		# around the pod.
+		var pod_size: float = minf(w, h) * 0.7
+		var pod_rect := Rect2(
+			top_pos + Vector2((w - pod_size) * 0.5, (h - pod_size) * 0.5),
+			Vector2(pod_size, pod_size))
+		var pct: float = clampf(lp_sys.get_pod_build_progress(anchor), 0.0, 1.0)
+		# Solid pod once construction is complete — drawn opaque so the
+		# player sees it's ready. While building, the pod is fully drawn
+		# but the unbuilt portion gets a translucent dark "blueprint"
+		# overlay and a yellow build-front line, matching block builds.
+		draw_texture_rect(pod_tex, pod_rect, false, Color(1, 1, 1, 1.0))
+		if pct < 1.0:
+			var reveal_x: float = pod_rect.size.x * pct
+			var unbuilt_rect := Rect2(
+				pod_rect.position.x + reveal_x,
+				pod_rect.position.y,
+				pod_rect.size.x - reveal_x,
+				pod_rect.size.y)
+			# Dark wash so the unbuilt portion reads as "not yet here"
+			# rather than a faint white blast.
+			draw_rect(unbuilt_rect, Color(0.05, 0.05, 0.07, 0.55), true)
+			# Yellow build-front line.
+			var line_x: float = pod_rect.position.x + reveal_x
+			draw_line(
+				Vector2(line_x, pod_rect.position.y),
+				Vector2(line_x, pod_rect.position.y + pod_rect.size.y),
+				Color(1.0, 0.9, 0.2, 0.9), 2.0)
+
+
 func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: float, dashes: int = 48) -> void:
 	if radius <= 0.0 or dashes <= 0:
 		return
@@ -1438,6 +1773,29 @@ func _draw_crane_preview(top_pos: Vector2, width: float, height: float, tint: Co
 ## base) so the preview is one semi-transparent layer — no alpha
 ## stacking between layers. Falls back to drawing the layers separately
 ## while the bake is still pending.
+## Static placement-preview render for any layered-spinner block
+## (brass mixer, silicon refinery, …). Paints Base → Head → Top from
+## the loaded texture set at the same tint the rest of the preview
+## uses, so the ghost matches what the placed render will draw.
+func _draw_layered_spinner_preview(block_id: StringName, top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	var tex_set: Dictionary = _layered_spinner_textures.get(block_id, {})
+	if tex_set.is_empty():
+		return
+	var size := Vector2(width, height)
+	var rect := Rect2(top_pos, size)
+	var base_tex: Texture2D = tex_set.get("base", null)
+	if base_tex:
+		draw_texture_rect(base_tex, rect, false, tint)
+	var head_tex: Texture2D = tex_set.get("head", null)
+	if head_tex:
+		# Head is drawn at angle 0 in the preview — no spin state to
+		# read for an unplaced block.
+		draw_texture_rect(head_tex, rect, false, tint)
+	var top_tex: Texture2D = tex_set.get("top", null)
+	if top_tex:
+		draw_texture_rect(top_tex, rect, false, tint)
+
+
 func _draw_vent_turbine_preview(top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
 	var size := Vector2(width, height)
 	if _vent_turbine_preview_texture:
@@ -1646,6 +2004,28 @@ func _populate_preview_layers(sv: SubViewport, data: BlockData, rot: int, pad: V
 				pivot_node.add_child(hs)
 		return
 
+	# --- Ground scraper / impact drill: base sprite + their rotating /
+	# pulsing head on top. The live draw routes through
+	# _draw_scraper_head / _draw_impact_head and adds the head over the
+	# block body; the bake mirrors that so the placement preview
+	# doesn't look like a headless base plate.
+	if data.tags.has("scraper_head") or data.tags.has("impact_head"):
+		if data.base_sprite:
+			add_fill.call(data.base_sprite, pad, block_size)
+		elif data.top_sprite:
+			add_fill.call(data.top_sprite, pad, block_size)
+		var head_tex: Texture2D = null
+		if data.tags.has("scraper_head"):
+			head_tex = _scraper_head_texture
+		else:
+			head_tex = _impact_head_texture
+		if head_tex:
+			# Scraper sits at its idle angle (0); impact head at its
+			# max-scale rest pose — matches what the player sees on a
+			# block that's powered but not yet cycling.
+			add_fill.call(head_tex, pad, block_size)
+		return
+
 	# Fallback: just paint whatever single sprite the block has — gives
 	# a safe baseline for any block type we ask to bake but haven't
 	# specialised yet.
@@ -1793,13 +2173,213 @@ func _draw_vent_turbine(grid_pos: Vector2i, top_pos: Vector2, width: float, heig
 	draw_texture_rect(_vent_turbine_base_texture, Rect2(top_pos, size), false, tint)
 
 
+## Per-frame tick for every layered-spinner block. The head spins when
+## the factory is mid-batch (phase == "processing" AND the timer
+## actually decreased since last frame — phase alone keeps reading
+## "processing" when the loop stalls on a missing input, so the timer
+## delta is what proves work is happening) and decays via inertia
+## otherwise. One tick covers brass_mixer, silicon_mixer, …
+## everything registered in `_LAYERED_SPINNERS`.
+func _tick_layered_spinner_states(delta: float) -> void:
+	var to_erase: Array[Vector2i] = []
+	# Lazy-create state for every placed layered-spinner block.
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if _layered_spinner_state.has(anchor):
+			continue
+		var bid: StringName = main.placed_buildings.get(anchor, &"")
+		if not _LAYERED_SPINNERS.has(bid):
+			continue
+		_layered_spinner_state[anchor] = {"angle": 0.0, "vel": 0.0, "prev_timer": -1.0}
+	for anchor in _layered_spinner_state:
+		if not main.placed_buildings.has(anchor):
+			to_erase.append(anchor)
+			continue
+		var bid2: StringName = main.placed_buildings[anchor]
+		if not _LAYERED_SPINNERS.has(bid2):
+			to_erase.append(anchor)
+			continue
+		var cfg: Dictionary = _LAYERED_SPINNERS[bid2]
+		var s: Dictionary = _layered_spinner_state[anchor]
+		var phase_active: bool = _is_layered_spinner_producing(anchor)
+		var cur_timer: float = -1.0
+		if _logistics and "factory_buffers" in _logistics and _logistics.factory_buffers.has(anchor):
+			cur_timer = float(_logistics.factory_buffers[anchor].get("timer", -1.0))
+		var prev_timer: float = float(s.get("prev_timer", -1.0))
+		var timer_advanced: bool = prev_timer > 0.0 and cur_timer >= 0.0 and cur_timer < prev_timer
+		var active: bool = phase_active and timer_advanced
+		var target: float = float(cfg["spin"]) if active else 0.0
+		var step: float = float(cfg["accel"]) * delta
+		s["vel"] = move_toward(float(s["vel"]), target, step)
+		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
+		s["prev_timer"] = cur_timer
+	for a in to_erase:
+		_layered_spinner_state.erase(a)
+
+
+## True when a layered-spinner block is in the middle of consuming
+## inputs (factory phase == "processing"). Power / input / output gates
+## have already been checked by the factory loop's collecting →
+## processing transition; the `_tick_layered_spinner_states` caller
+## additionally requires the timer to advance.
+func _is_layered_spinner_producing(anchor: Vector2i) -> bool:
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	var ss = _sector_script_ref()
+	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
+		return false
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null:
+		return false
+	if data.electrical_power_use > 0:
+		var ps = _power_sys_ref()
+		if ps == null or ps.get_electrical_efficiency(anchor) <= 0.0:
+			return false
+	if _logistics and "factory_buffers" in _logistics and _logistics.factory_buffers.has(anchor):
+		var phase: String = String(_logistics.factory_buffers[anchor].get("phase", ""))
+		return phase == "processing"
+	return false
+
+
+## Generic layered-spinner draw: static Base → rotating Head → static
+## Top, all sized to the block's footprint. Reads the texture set
+## from `_layered_spinner_textures[block_id]` and the head angle from
+## the per-anchor state dict.
+func _draw_layered_spinner(grid_pos: Vector2i, block_id: StringName, top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	var tex_set: Dictionary = _layered_spinner_textures.get(block_id, {})
+	var base_tex: Texture2D = tex_set.get("base", null)
+	if base_tex == null:
+		return
+	if not _layered_spinner_state.has(grid_pos):
+		_layered_spinner_state[grid_pos] = {"angle": 0.0, "vel": 0.0, "prev_timer": -1.0}
+	var s: Dictionary = _layered_spinner_state[grid_pos]
+	var angle: float = float(s.get("angle", 0.0))
+	var size := Vector2(width, height)
+	var center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+	# Base (bottom layer, static).
+	draw_texture_rect(base_tex, Rect2(top_pos, size), false, tint)
+	# Head (middle layer, rotating).
+	var head_tex: Texture2D = tex_set.get("head", null)
+	if head_tex:
+		draw_set_transform(center, angle)
+		draw_texture_rect(head_tex, Rect2(-size * 0.5, size), false, tint)
+		draw_set_transform(Vector2.ZERO, 0.0)
+	# Top (top layer, static).
+	var top_tex: Texture2D = tex_set.get("top", null)
+	if top_tex:
+		draw_texture_rect(top_tex, Rect2(top_pos, size), false, tint)
+
+
+# =========================
+# HEAD-SPIN STATE PORTABILITY
+# =========================
+## A picked-up block (held in a crane grabber) is removed from
+## `main.placed_buildings`, which causes every head-spin tick to
+## garbage-collect its state. Without the helpers below the head
+## would teleport to a halt the instant the grabber closed.
+##
+## `_capture_spin_state` snapshots whatever spin dicts are tracking
+## the anchor; the held-payload simulation calls `_tick_spin_state`
+## to keep easing each vel toward 0 (inertia), and on drop
+## `_restore_spin_state` re-seats the snapshot under the new anchor
+## so the placed block resumes from the decayed angle / velocity
+## the head was at when it was lifted.
+
+const _SPIN_DECEL := {
+	"crusher": CRUSHER_HEAD_ACCEL,
+	"scraper": SCRAPER_HEAD_ACCEL,
+	"vent_turbine": VENT_TURBINE_ACCEL,
+	"vent_condenser": VENT_CONDENSER_ACCEL,
+	# Layered-spinner heads (brass mixer, silicon refinery, …) all
+	# share a single decel rate driven by the table below — the per-
+	# block accel constant only matters for spool-UP. Coast-down looks
+	# the same on every drum-style head.
+	"layered_spinner": 2.0,
+}
+
+
+func _capture_spin_state(anchor: Vector2i) -> Dictionary:
+	var snap: Dictionary = {}
+	if _crusher_head_state.has(anchor):
+		snap["crusher"] = (_crusher_head_state[anchor] as Dictionary).duplicate(true)
+		_crusher_head_state.erase(anchor)
+	if _scraper_head_state.has(anchor):
+		snap["scraper"] = (_scraper_head_state[anchor] as Dictionary).duplicate(true)
+		_scraper_head_state.erase(anchor)
+	if _vent_turbine_state.has(anchor):
+		snap["vent_turbine"] = (_vent_turbine_state[anchor] as Dictionary).duplicate(true)
+		_vent_turbine_state.erase(anchor)
+	if _vent_condenser_state.has(anchor):
+		snap["vent_condenser"] = (_vent_condenser_state[anchor] as Dictionary).duplicate(true)
+		_vent_condenser_state.erase(anchor)
+	if _layered_spinner_state.has(anchor):
+		snap["layered_spinner"] = (_layered_spinner_state[anchor] as Dictionary).duplicate(true)
+		_layered_spinner_state.erase(anchor)
+	return snap
+
+
+func _restore_spin_state(anchor: Vector2i, snap: Dictionary) -> void:
+	if snap.is_empty():
+		return
+	if snap.has("crusher"):
+		_crusher_head_state[anchor] = (snap["crusher"] as Dictionary).duplicate(true)
+	if snap.has("scraper"):
+		_scraper_head_state[anchor] = (snap["scraper"] as Dictionary).duplicate(true)
+	if snap.has("vent_turbine"):
+		_vent_turbine_state[anchor] = (snap["vent_turbine"] as Dictionary).duplicate(true)
+	if snap.has("vent_condenser"):
+		_vent_condenser_state[anchor] = (snap["vent_condenser"] as Dictionary).duplicate(true)
+	if snap.has("layered_spinner"):
+		_layered_spinner_state[anchor] = (snap["layered_spinner"] as Dictionary).duplicate(true)
+
+
+## Called from `_tick_held_building` once per frame. Eases every
+## tracked head's velocity toward 0 (target is always 0 — the held
+## block is detached and not producing) and integrates angle. Each
+## head kind uses its own ACCEL rate so the inertial feel matches
+## what the placed-state tick uses.
+func _tick_spin_state(snap: Dictionary, delta: float) -> void:
+	if snap.is_empty() or delta <= 0.0:
+		return
+	for kind in snap.keys():
+		var sub: Dictionary = snap[kind]
+		if not (sub is Dictionary) or sub.is_empty():
+			continue
+		var decel: float = float(_SPIN_DECEL.get(kind, 5.0))
+		var step: float = decel * delta
+		# Crusher heads use indexed angle_N / vel_N keys; everything
+		# else uses plain "angle" / "vel". Detect via key suffix.
+		var keys: Array = sub.keys()
+		var has_indexed: bool = false
+		for k in keys:
+			if (k as String).begins_with("angle_"):
+				has_indexed = true
+				break
+		if has_indexed:
+			for key in keys:
+				if not (key as String).begins_with("angle_"):
+					continue
+				var idx_str: String = String(key).substr(6)
+				var vkey: String = "vel_%s" % idx_str
+				sub[vkey] = move_toward(float(sub.get(vkey, 0.0)), 0.0, step)
+				sub[key] = fposmod(float(sub[key]) + float(sub[vkey]) * delta, TAU)
+		else:
+			sub["vel"] = move_toward(float(sub.get("vel", 0.0)), 0.0, step)
+			sub["angle"] = fposmod(float(sub.get("angle", 0.0)) + float(sub["vel"]) * delta, TAU)
+
+
 ## Handles Q or R key to rotate, L key to toggle linking mode.
 func _input(event: InputEvent) -> void:
 	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
 		return
-	# --- SCHEMATIC CAPTURE ---
-	if event.is_action("schematic_capture") and not _placing_schematic:
+	# --- SCHEMATIC CAPTURE (C) → straight into copy/paste placement ---
+	# Pressing C again while in paste mode begins a fresh selection
+	# (the previous paste buffer is replaced on release).
+	if event.is_action("schematic_capture"):
 		if event.is_action_pressed("schematic_capture") and not _schematic_mode:
+			# A fresh C-drag overrides any active paste session.
+			if _placing_schematic:
+				_placing_schematic = false
 			# Start dragging immediately from current mouse position
 			var mw = get_global_mouse_position()
 			_schematic_mode = true
@@ -1809,11 +2389,15 @@ func _input(event: InputEvent) -> void:
 			_schematic_dragging = true
 			queue_redraw()
 		elif event.is_action_released("schematic_capture") and _schematic_dragging:
-			# Released — finalize the rect
+			# Released — capture the rect and jump straight into paste mode.
+			# Player can left-click to drop copies, G/H to flip, V to save,
+			# Esc to exit.
 			var mw = get_global_mouse_position()
 			_schematic_end = main.world_to_grid(mw)
 			_schematic_dragging = false
-			_schematic_confirmed = true
+			_schematic_mode = false
+			_schematic_confirmed = false
+			_enter_paste_mode_from_rect(_schematic_start, _schematic_end)
 			queue_redraw()
 	if event.is_action_pressed("ui_cancel"):
 		# Filter menu first, then crane link mode, then power-link source.
@@ -1835,7 +2419,15 @@ func _input(event: InputEvent) -> void:
 			_close_world_menu()
 			get_viewport().set_input_as_handled()
 			return
-		if _schematic_mode or _schematic_confirmed:
+		if _launchpad_popup_open:
+			_hide_launchpad_popup()
+			get_viewport().set_input_as_handled()
+			return
+		if _landing_pad_popup_open:
+			_hide_landing_pad_popup()
+			get_viewport().set_input_as_handled()
+			return
+		if _schematic_mode or _schematic_dragging:
 			_schematic_mode = false
 			_schematic_confirmed = false
 			_schematic_dragging = false
@@ -1843,14 +2435,25 @@ func _input(event: InputEvent) -> void:
 		elif _placing_schematic:
 			_placing_schematic = false
 			queue_redraw()
-	if event.is_action_pressed("ui_accept") and _schematic_confirmed:
-		_show_schematic_save_dialog()
 	if _schematic_dragging and event is InputEventMouseMotion:
 		var mw = get_global_mouse_position()
 		_schematic_end = main.world_to_grid(mw)
 		queue_redraw()
 
-	# --- SCHEMATIC PLACEMENT: click to place ---
+	# --- SCHEMATIC PLACEMENT: click to place repeatedly, G/H flip, V save ---
+	if _placing_schematic and event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_G:
+			_flip_schematic_placement_x()
+			get_viewport().set_input_as_handled()
+			return
+		elif event.keycode == KEY_H:
+			_flip_schematic_placement_y()
+			get_viewport().set_input_as_handled()
+			return
+		elif event.keycode == KEY_V:
+			_show_schematic_save_dialog_from_placement()
+			get_viewport().set_input_as_handled()
+			return
 	if _placing_schematic and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		# Schematics drop a whole batch of build orders — also locked
 		# while piloting a non-builder.
@@ -1913,14 +2516,24 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
+	# Legacy CanvasLayer popups for launchpad / landing pad — superseded
+	# by the world_menu integration. Force-hide on first tick after the
+	# migration in case a save left them open.
+	if _launchpad_popup_open:
+		_hide_launchpad_popup()
+	if _landing_pad_popup_open:
+		_hide_landing_pad_popup()
 	# Pause-aware crusher-head inertial tick. While the world is paused the
 	# per-block velocity/angle both freeze in place; when unpaused they ease
 	# back in or out, giving each head a real spool-up/coast-down feel.
 	if not ("world_paused" in main and main.world_paused):
 		_tick_crusher_head_states(_delta)
 		_tick_scraper_head_states(_delta)
+		_tick_impact_head_states(_delta)
 		_tick_vent_turbine_states(_delta)
+		_tick_layered_spinner_states(_delta)
 		_tick_vent_condenser_states(_delta)
+		_tick_fluid_bar_display(_delta)
 		_tick_autonomous_cranes(_delta)
 		_tick_held_payload_simulation(_delta)
 		if belt_scroll_enabled:
@@ -1934,6 +2547,10 @@ func _process(_delta: float) -> void:
 			# using this effect.
 			_belt_scroll_phase = fposmod(_belt_scroll_phase + _delta * _BELT_SCROLL_PIXELS_PER_SEC, 1024.0)
 			queue_redraw()
+		# Build-beam stripe phase ticks independent of the belt-scroll
+		# toggle so the build laser still animates when the player has
+		# belt scrolling disabled.
+		_build_beam_phase = fposmod(_build_beam_phase + _delta / _BUILD_BEAM_PERIOD, 1.0)
 
 	# --- Unified work queue: build + deconstruct, one at a time ---
 	# Walk the queue and tick the first entry that's currently within build
@@ -2198,7 +2815,10 @@ func _tick_pending_swap(anchor: Vector2i, delta: float) -> void:
 	if build_time <= 0.0:
 		build_time = 1.0
 
-	entry["progress"] = float(entry.get("progress", 0.0)) + delta
+	# Same multi-builder boost as `_tick_progressive_build` — N builders
+	# in range = N× advance per tick.
+	var swap_speed: int = _count_builders_in_range_of(anchor)
+	entry["progress"] = float(entry.get("progress", 0.0)) + delta * float(swap_speed)
 	var pct: float = clampf(float(entry["progress"]) / build_time, 0.0, 1.0)
 	var consumed: Dictionary = entry.get("consumed", {})
 
@@ -2286,8 +2906,11 @@ func _tick_progressive_build(anchor: Vector2i, delta: float) -> void:
 	var consumed: Dictionary = main.building_resources_consumed.get(anchor, {})
 	var build_time: float = data.build_time if data.build_time > 0 else 1.0
 
-	# Advance progress
-	main.building_build_progress[anchor] += delta
+	# Advance progress — scaled by the number of builders (primary drone,
+	# AI shardlings, and assist-mode player units) whose ranges cover
+	# this anchor, so N builders on one block finish it N× as fast.
+	var build_speed: int = _count_builders_in_range_of(anchor)
+	main.building_build_progress[anchor] += delta * float(build_speed)
 	var pct: float = clampf(main.building_build_progress[anchor] / build_time, 0.0, 1.0)
 
 	# Try to consume resources proportional to progress
@@ -2361,7 +2984,10 @@ func _tick_progressive_build(anchor: Vector2i, delta: float) -> void:
 ## refunds resources over the duration. When complete, destroys the building.
 func _tick_progressive_deconstruct(anchor: Vector2i, delta: float) -> void:
 	var entry: Dictionary = main.building_deconstruct_progress[anchor]
-	entry["progress"] += delta
+	# Multi-builder boost: tearing a block down also speeds up with
+	# extra drones / assisting units in range, mirroring builds.
+	var decon_speed: int = _count_builders_in_range_of(anchor)
+	entry["progress"] += delta * float(decon_speed)
 
 	# Proportionally refund resources
 	var build_time: float = float(entry.get("build_time", 1.0))
@@ -2506,12 +3132,284 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 	return true
 
 
-## Returns true if the position is within drone build range.
+## Returns true if the position is within build range — either ANY
+## player_drone-script node's range (primary drone OR AI shardling
+## from a secondary core) OR the range of any player unit currently
+## in `assist_player_build` mode. Build / deconstruct ticks gate on
+## this, so an assisting unit camping next to a half-built wall lets
+## the build progress without the drone needing to be nearby.
 func _is_in_build_range(grid_pos: Vector2i) -> bool:
-	var drone = get_node_or_null("/root/Main/PlayerDrone")
-	if drone and not drone.is_in_build_range(grid_pos):
-		return false
-	return true
+	var drones: Array = _all_player_drones()
+	for d in drones:
+		if d.is_in_build_range(grid_pos):
+			return true
+	# Fall back to assisting player units. An 8-tile Chebyshev radius
+	# matches the soft "in range" threshold used in _tick_assist_build.
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	if unit_mgr and "player_units" in unit_mgr:
+		for u in unit_mgr.player_units:
+			if u == null or not is_instance_valid(u):
+				continue
+			if not ("assist_player_build" in u) or not u.assist_player_build:
+				continue
+			var ug: Vector2i = main.world_to_grid(u.position)
+			var dx: int = absi(ug.x - grid_pos.x)
+			var dy: int = absi(ug.y - grid_pos.y)
+			if maxi(dx, dy) <= 8:
+				return true
+	# When there's no drone at all (legacy / map editor), preserve the
+	# old "no gate" behavior so builds still work.
+	if drones.is_empty():
+		return true
+	return false
+
+
+## Returns every live drone-script node directly under Main: the
+## primary "PlayerDrone" plus any AI shardlings spawned for secondary
+## LUMINA cores ("AIShardling_<x>_<y>"). They share player_drone.gd
+## so the build-range / fire / heal helpers all work on them.
+func _all_player_drones() -> Array:
+	var out: Array = []
+	if main == null:
+		return out
+	for child in main.get_children():
+		if child == null or not is_instance_valid(child):
+			continue
+		if child.has_method("is_in_build_range"):
+			out.append(child)
+	return out
+
+
+## Counts every builder whose range covers `anchor` — used to scale
+## the build/deconstruct tick rate so N drones building a single
+## block advance N× faster than one. Clamped to >= 1 so a build
+## that's somehow ticking without a builder doesn't stall on a 0×
+## multiplier.
+func _count_builders_in_range_of(anchor: Vector2i) -> int:
+	var count: int = 0
+	for d in _all_player_drones():
+		if d.is_in_build_range(anchor):
+			count += 1
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	if unit_mgr and "player_units" in unit_mgr:
+		for u in unit_mgr.player_units:
+			if u == null or not is_instance_valid(u):
+				continue
+			if not ("assist_player_build" in u) or not u.assist_player_build:
+				continue
+			var ug: Vector2i = main.world_to_grid(u.position)
+			var dx: int = absi(ug.x - anchor.x)
+			var dy: int = absi(ug.y - anchor.y)
+			if maxi(dx, dy) <= 8:
+				count += 1
+	return maxi(count, 1)
+
+
+## Every world-space position currently contributing build effort to
+## `anchor` — primary drone, AI shardlings, assisting player units —
+## along with their facing angle so the beam can root at the front
+## of each unit's sprite. Returned as
+##   [{"pos": Vector2, "facing": float}, ...]
+func _builders_with_facing_for(anchor: Vector2i) -> Array:
+	var out: Array = []
+	for d in _all_player_drones():
+		if not d.is_in_build_range(anchor):
+			continue
+		var fa: float = 0.0
+		if "facing_angle" in d:
+			fa = float(d.facing_angle)
+		out.append({"pos": d.position, "facing": fa})
+	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	if unit_mgr and "player_units" in unit_mgr:
+		for u in unit_mgr.player_units:
+			if u == null or not is_instance_valid(u):
+				continue
+			if not ("assist_player_build" in u) or not u.assist_player_build:
+				continue
+			var ug: Vector2i = main.world_to_grid(u.position)
+			var dx: int = absi(ug.x - anchor.x)
+			var dy: int = absi(ug.y - anchor.y)
+			if maxi(dx, dy) > 8:
+				continue
+			var fa: float = 0.0
+			if "facing_angle" in u:
+				fa = float(u.facing_angle)
+			out.append({"pos": u.position, "facing": fa})
+	return out
+
+
+## Mindustry-style work-laser: filled translucent triangle from each
+## builder to the two endpoints of the reveal line, with a darker
+## stripe band that scrolls along the unit→block axis plus a pulsing
+## diamond at the unit's tip. Yellow + forward-scroll for builds,
+## red + reverse-scroll for deconstruction.
+##   `line_top` / `line_bot` — endpoints of the reveal line.
+##   `anchor`                — block being worked on (for builder lookup).
+##   `hue`                   — base saturated colour (yellow or red).
+##   `reverse_stripe`        — false: stripes slide unit→block (build).
+##                              true: stripes slide block→unit (decon).
+func _draw_active_build_beams(anchor: Vector2i, line_top: Vector2, line_bot: Vector2,
+		hue: Color = Color(1.0, 0.9, 0.2), reverse_stripe: bool = false) -> void:
+	var builders: Array = _builders_with_facing_for(anchor)
+	if builders.is_empty():
+		return
+	# Derive the four palette tints from the supplied hue so the build
+	# and decon flavours stay in lockstep visually.
+	var fill_color := Color(hue.r, hue.g, hue.b, 0.38)
+	var edge_color := Color(hue.r, hue.g, hue.b, 0.55)
+	var stripe_color := Color(hue.r * 0.85, hue.g * 0.78, hue.b * 0.55, 0.45)
+	# Two stripes scrolling on offset phases give the "moving belt of
+	# light" feel without needing an actual shader. Decon walks the
+	# phase backward so its band reads as travel block→unit instead of
+	# unit→block — top-right → down-left in screen space.
+	const _STRIPE_HALF_WIDTH := 0.05
+	var base_phase: float = (1.0 - _build_beam_phase) if reverse_stripe else _build_beam_phase
+	var phases: Array[float] = [
+		base_phase,
+		fposmod(base_phase + 0.5, 1.0),
+	]
+	for b in builders:
+		var unit_pos: Vector2 = b["pos"]
+		# Push the beam origin out to the front of the unit's sprite —
+		# the same convention movement uses (sprite is authored facing
+		# up, so forward = facing_angle + PI/2). Without this the
+		# triangle's apex would sit at the center of the chassis and
+		# the beam visibly emerges from the body's midpoint.
+		var facing: float = float(b["facing"])
+		var fwd: Vector2 = Vector2.from_angle(facing + PI / 2.0)
+		var origin: Vector2 = unit_pos + fwd * (main.GRID_SIZE * 0.25)
+		# Filled triangle: origin → line_top → line_bot.
+		var tri := PackedVector2Array([origin, line_top, line_bot])
+		draw_colored_polygon(tri, fill_color)
+		# Two outer lines from the origin to each end of the reveal
+		# line so the triangle reads as a beam rather than a vague
+		# wedge of fog.
+		draw_line(origin, line_top, edge_color, 1.5)
+		draw_line(origin, line_bot, edge_color, 1.5)
+		# Scrolling stripe(s) — for each phase, a quadrilateral that
+		# spans the same fraction-of-the-way along both outer edges.
+		# Because both edges share the same origin and end at the
+		# reveal line, the quad is naturally trapezoid-shaped (wide
+		# at the block, narrow at the unit) and stays clipped inside
+		# the outer triangle for free.
+		# Shear gives each stripe a diagonal lean. For builds, the top
+		# edge sits slightly ahead of the bottom edge (leading corner
+		# down-left → top-right). For decon, flip the sign so the
+		# lean reverses to top-right → down-left.
+		const _STRIPE_SHEAR := 0.06
+		var shear: float = -_STRIPE_SHEAR if reverse_stripe else _STRIPE_SHEAR
+		for ph in phases:
+			var t0: float = ph - _STRIPE_HALF_WIDTH
+			var t1: float = ph + _STRIPE_HALF_WIDTH
+			if t1 <= 0.0 or t0 >= 1.0:
+				continue
+			var top_t0: float = clampf(t0 + shear, 0.0, 1.0)
+			var top_t1: float = clampf(t1 + shear, 0.0, 1.0)
+			var bot_t0: float = clampf(t0 - shear, 0.0, 1.0)
+			var bot_t1: float = clampf(t1 - shear, 0.0, 1.0)
+			var top_a: Vector2 = origin.lerp(line_top, top_t0)
+			var top_b: Vector2 = origin.lerp(line_top, top_t1)
+			var bot_a: Vector2 = origin.lerp(line_bot, bot_t0)
+			var bot_b: Vector2 = origin.lerp(line_bot, bot_t1)
+			var stripe := PackedVector2Array([top_a, top_b, bot_b, bot_a])
+			draw_colored_polygon(stripe, stripe_color)
+	# Diamond is rendered separately (via crane_overlay at z 4096) so
+	# it sits ON TOP of the drone / unit sprite (z 4095) rather than
+	# being clipped by the chassis. See `_draw_active_work_diamonds`.
+
+
+## Draws the pulsing emitter diamond at one builder's tip, oriented
+## along `axis` (unit→block) with `hue` colouring. Routed onto
+## whichever CanvasItem is currently driving the draw — the
+## crane_overlay's `_draw` parks itself in `_crane_draw_canvas`
+## before invoking us so the diamond lands above the drone sprite.
+func _draw_build_beam_diamond_on(canvas: CanvasItem, origin: Vector2, axis: Vector2, hue: Color) -> void:
+	if canvas == null:
+		return
+	if axis.length_squared() < 0.0001:
+		return
+	var perp: Vector2 = Vector2(-axis.y, axis.x)
+	var pulse: float = sin(_build_beam_phase * TAU * 2.0)
+	var base_size: float = main.GRID_SIZE * 0.09
+	var size_d: float = base_size * (1.0 + pulse * 0.20)
+	var fwd_size: float = size_d * 1.4
+	var alpha: float = clampf(0.7 + pulse * 0.25, 0.0, 1.0)
+	var diamond := PackedVector2Array([
+		origin + axis * fwd_size,        # tip → block
+		origin + perp * size_d,          # right
+		origin - axis * fwd_size * 0.7,  # tail
+		origin - perp * size_d,          # left
+	])
+	canvas.draw_colored_polygon(diamond, Color(hue.r, hue.g, hue.b, alpha))
+	var outline_hue := Color(
+		clampf(hue.r + 0.0, 0.0, 1.0),
+		clampf(hue.g + 0.05, 0.0, 1.0),
+		clampf(hue.b + 0.2, 0.0, 1.0),
+	)
+	canvas.draw_polyline(PackedVector2Array([
+		diamond[0], diamond[1], diamond[2], diamond[3], diamond[0],
+	]), Color(outline_hue.r, outline_hue.g, outline_hue.b, clampf(alpha + 0.2, 0.0, 1.0)), 1.0)
+
+
+## Iterates every actively-progressing build / deconstruct anchor and
+## paints a pulsing diamond at each contributing builder's tip,
+## colour-coded yellow for builds and red for decons. Called from
+## the crane_overlay so the result renders at z 4096 — above units
+## (z ~70) and drones (z 4095). Without this routing the diamond
+## would sit at the BuildingSystem's default z and disappear behind
+## the very sprite it's supposed to emerge from.
+func _draw_active_work_diamonds() -> void:
+	var canvas: CanvasItem = _crane_draw_canvas if _crane_draw_canvas != null else self
+	# Active build anchor — at most one ticks per frame (the work
+	# queue advances a single entry at a time).
+	var active_anchor: Vector2i = _get_active_work_anchor()
+	if active_anchor == _NO_ACTIVE_WORK:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var build_data = Registry.get_block(main.placed_buildings.get(active_anchor, &""))
+	if build_data == null:
+		return
+	var block_size: Vector2i = build_data.grid_size
+	var block_world: Vector2 = main.grid_to_world(active_anchor)
+	var top_pos: Vector2 = block_world + _get_top_offset(block_world)
+	var block_w: float = gs * block_size.x
+	var block_h: float = gs * block_size.y
+	# Are we building or deconstructing? Build state takes priority.
+	var is_build: bool = "building_build_progress" in main and main.building_build_progress.has(active_anchor)
+	var is_decon: bool = (not is_build) and "building_deconstruct_progress" in main \
+			and main.building_deconstruct_progress.has(active_anchor)
+	if not (is_build or is_decon):
+		return
+	var hue: Color
+	var line_x: float
+	if is_build:
+		var bp: float = main.get_build_progress_pct(active_anchor)
+		if bp <= 0.0 or bp >= 1.0:
+			return
+		line_x = top_pos.x + block_w * bp
+		hue = Color(1.0, 0.9, 0.2)
+	else:
+		var entry: Dictionary = main.building_deconstruct_progress[active_anchor]
+		var bt: float = float(entry.get("build_time", 1.0))
+		var dp: float = clampf(float(entry.get("progress", 0.0)) / maxf(bt, 0.0001), 0.0, 1.0)
+		var max_pct: float = float(entry.get("max_build_pct", 1.0))
+		line_x = top_pos.x + block_w * (max_pct * (1.0 - dp))
+		hue = Color(0.95, 0.25, 0.25)
+	var line_mid := Vector2(line_x, top_pos.y + block_h * 0.5)
+	for b in _builders_with_facing_for(active_anchor):
+		var unit_pos: Vector2 = b["pos"]
+		var facing: float = float(b["facing"])
+		var fwd: Vector2 = Vector2.from_angle(facing + PI / 2.0)
+		# Sit the diamond at the front edge of the unit sprite. The
+		# diamond renders on the crane_overlay at z 4096 so it stays
+		# visible over the drone art (z 4095) even when it sits
+		# directly on top of the chassis nose.
+		var origin: Vector2 = unit_pos + fwd * (gs * 0.50)
+		var axis: Vector2 = (line_mid - origin)
+		if axis.length_squared() < 0.0001:
+			continue
+		axis = axis.normalized()
+		_draw_build_beam_diamond_on(canvas, origin, axis, hue)
 
 
 ## Returns the anchor of the work-order entry the drone should currently be
@@ -3057,6 +3955,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
+				# Launchpad / landing-pad popups: any unhandled left-click
+				# (i.e. not on the popup itself — that would have been
+				# consumed by the Button) dismisses them. Closing the
+				# popup is non-blocking so the player can keep building.
+				if _launchpad_popup_open:
+					_hide_launchpad_popup()
+				if _landing_pad_popup_open and not _world_menu_open:
+					# Don't dismiss when the slot-pick world menu is open;
+					# it'd close the parent popup mid-selection.
+					_hide_landing_pad_popup()
 				if _handle_crane_link_click(event):
 					get_viewport().set_input_as_handled()
 					return
@@ -3081,7 +3989,14 @@ func _unhandled_input(event: InputEvent) -> void:
 								_close_world_menu()
 						else:
 							_close_world_menu()
-						get_viewport().set_input_as_handled()
+						# Guard against a pending scene change (e.g. the
+						# launchpad's `__pick` action) — if BuildingSystem
+						# was already removed from the tree by `_apply_…`,
+						# `get_viewport()` returns null and the trailing
+						# `set_input_as_handled` would crash.
+						var vp_after_apply = get_viewport()
+						if vp_after_apply:
+							vp_after_apply.set_input_as_handled()
 						return
 					# No building selected — first check for work-queue interactions
 					# (pause/resume/promote), then fall through to block menus.
@@ -3110,6 +4025,20 @@ func _unhandled_input(event: InputEvent) -> void:
 						# guard only affects in-game clicks.
 						var click_faction: int = main.get_building_faction(click_anchor) if main.has_method("get_building_faction") else FACTION_LUMINA
 						if click_faction == FACTION_LUMINA and click_data:
+							# Shift+click on a duct bridge that has any
+							# incoming links opens the per-input filter menu
+							# instead of running the link / popup flow.
+							# Without incoming links there's nothing to
+							# filter so we fall through to the normal click.
+							if event.shift_pressed and click_data.id == &"duct_bridge":
+								var power_sys_shift = get_node_or_null("/root/Main/PowerSystem")
+								var has_incoming: bool = false
+								if power_sys_shift and power_sys_shift.has_method("get_links_as_destination_all"):
+									has_incoming = not (power_sys_shift.get_links_as_destination_all(click_anchor) as Array).is_empty()
+								if has_incoming:
+									_open_world_menu("duct_filter", click_anchor)
+									get_viewport().set_input_as_handled()
+									return
 							# Mindustry-style ad-hoc linking. The same click
 							# also opens any in-world UI the block has — a
 							# linkable storage block (e.g. an MD with a
@@ -3127,6 +4056,16 @@ func _unhandled_input(event: InputEvent) -> void:
 									link_source = Vector2i(-1, -1)
 									_link_just_linked = Vector2i(-1, -1)
 									queue_redraw()
+							# A click that did anything link-related (set
+							# source, established a link, cleared source)
+							# should NOT also pop the block's storage /
+							# sorter / constructor menu — otherwise selecting
+							# a bridge as a link source instantly opens its
+							# in-transit-items popup and you have to click
+							# through that before the second click can land.
+							if link_changed:
+								get_viewport().set_input_as_handled()
+								return
 							if click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader"):
 								_open_world_menu("sorter", click_anchor)
 								get_viewport().set_input_as_handled()
@@ -3137,6 +4076,27 @@ func _unhandled_input(event: InputEvent) -> void:
 								return
 							elif click_data.tags.has("refabricator"):
 								_open_world_menu("refabricator", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.tags.has("recipe_select") and click_data.factory_recipes != null and click_data.factory_recipes.size() > 0:
+								# Rod Shapper-style factory — clicking opens a recipe
+								# picker. Selection persists per-anchor in
+								# logistics.factory_recipe_state.
+								_open_world_menu("recipe_select", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.id == &"launchpad":
+								# Launchpad opens the standard world menu in
+								# "launchpad" mode — two clickable rows: the
+								# current destination + a Launch action.
+								_open_world_menu("launchpad", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.id == &"landing_pad":
+								# Landing pad opens the standard world menu
+								# in "landing_pad" mode — two slot rows that
+								# open a sub-picker on click.
+								_open_world_menu("landing_pad", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							# Fallback: any block with non-empty storage shows a
@@ -3382,6 +4342,18 @@ func _unhandled_input(event: InputEvent) -> void:
 					queue_redraw()
 
 
+## Maximum simultaneous links a bridge can hold on each role (source
+## OR destination). Belt bridges keep the simple 1+1 behavior; duct
+## bridges support up to 3+3 so a single output bridge can merge from
+## three inputs and a single input can fan out to three outputs.
+func _bridge_link_cap(data: BlockData) -> int:
+	if data == null:
+		return 1
+	if data.id == &"duct_bridge":
+		return 3
+	return 1
+
+
 ## Handles a left-click while in linking mode.
 ## Mindustry-style ad-hoc link click: called inline from the regular
 ## block-click flow (NOT a separate mode). Toggles / chains the link
@@ -3455,13 +4427,39 @@ func _handle_link_click_on_anchor(anchor: Vector2i, data: BlockData) -> bool:
 
 	var power_sys = get_node_or_null("/root/Main/PowerSystem")
 	if power_sys:
-		# 1:1 — drop any existing partner on either endpoint first.
-		var existing = power_sys.get_linked_partner(link_source)
-		if existing != null:
-			power_sys.unlink_blocks(link_source, existing)
-		existing = power_sys.get_linked_partner(anchor)
-		if existing != null:
-			power_sys.unlink_blocks(anchor, existing)
+		# Bridge-to-bridge links allow up to TWO partners per bridge —
+		# one outgoing (this bridge is the source / pair[0]) and one
+		# incoming (this bridge is the destination / pair[1]). So only
+		# drop the role-specific existing link, not both partners.
+		# Mass drivers and other non-bridge linkables keep the original
+		# 1:1 behavior.
+		if source_is_bridge and target_is_bridge:
+			# Per-bridge link caps: belt = 1 outgoing / 1 incoming,
+			# duct = 3 outgoing / 3 incoming. If the new link would
+			# push a side past its cap, drop the OLDEST link on that
+			# side first (FIFO replacement) so the player can rebind
+			# at will. Direction-aware unlinks keep the opposite role
+			# unaffected.
+			var src_cap: int = _bridge_link_cap(source_data)
+			var dst_cap: int = _bridge_link_cap(data)
+			var existing_src: Array = power_sys.get_links_as_source_all(link_source)
+			while existing_src.size() >= src_cap:
+				var oldest_dst: Vector2i = existing_src[0]
+				power_sys.unlink_directed(link_source, oldest_dst)
+				existing_src.remove_at(0)
+			var existing_dst: Array = power_sys.get_links_as_destination_all(anchor)
+			while existing_dst.size() >= dst_cap:
+				var oldest_src: Vector2i = existing_dst[0]
+				power_sys.unlink_directed(oldest_src, anchor)
+				existing_dst.remove_at(0)
+		else:
+			# 1:1 — drop any existing partner on either endpoint first.
+			var existing = power_sys.get_linked_partner(link_source)
+			if existing != null:
+				power_sys.unlink_blocks(link_source, existing)
+			existing = power_sys.get_linked_partner(anchor)
+			if existing != null:
+				power_sys.unlink_blocks(anchor, existing)
 		power_sys.link_blocks(link_source, anchor)
 
 	# Link complete — clear the selection. The just-clicked block does
@@ -3782,7 +4780,7 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 				"name": disp_name,
 				"count": count,
 			})
-	elif type == "sorter":
+	elif type == "sorter" or type == "duct_filter":
 		# First entry is the "clear filter" option
 		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
 		for item in Registry.items_list:
@@ -3864,6 +4862,67 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 				"name": unit_res.display_name,
 			})
 
+	elif type == "launchpad":
+		# Two clickable rows. ID `__pick` routes to the planet-select
+		# pick flow, `__launch` fires manual_launch. Label text is
+		# refreshed per-frame via `_refresh_launchpad_menu_labels` so
+		# the cooldown / diagnostic readout stays live.
+		_world_menu_items.append({"id": &"__pick", "icon": null, "name": "Set Sector"})
+		_world_menu_items.append({"id": &"__launch", "icon": null, "name": "Launch"})
+
+	elif type == "landing_pad":
+		# Two slot rows. IDs `__slot_0` and `__slot_1` open the
+		# sub-picker (`landing_pad_slot` menu) for the corresponding
+		# slot. Labels refreshed each frame to show the current filter.
+		_world_menu_items.append({"id": &"__slot_0", "icon": null, "name": "Slot 1"})
+		_world_menu_items.append({"id": &"__slot_1", "icon": null, "name": "Slot 2"})
+
+	elif type == "landing_pad_slot":
+		# Filter-slot picker for a Landing Pad. First row clears the slot;
+		# remaining rows are every researched item / fluid the player
+		# could plausibly route through the pad. Listing only researched
+		# entries keeps the menu from spoiling later-tier materials.
+		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
+		var gate_on_research: bool = "require_research" in main and main.require_research
+		for item in Registry.items_list:
+			if not item.conveyable:
+				continue
+			if gate_on_research and TechTree.nodes.has(item.id) \
+					and not TechTree.is_researched(item.id):
+				continue
+			_world_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name})
+		for fluid in Registry.fluids_list:
+			if gate_on_research and TechTree.nodes.has(fluid.id) \
+					and not TechTree.is_researched(fluid.id):
+				continue
+			_world_menu_items.append({"id": fluid.id, "icon": fluid.icon, "name": fluid.display_name})
+
+	elif type == "recipe_select":
+		# Generic per-factory recipe picker. Each `BlockData.factory_recipes`
+		# entry becomes a menu row; clicking one writes
+		# `LogisticsSystem.factory_recipe_state[anchor] = recipe.id` so the
+		# factory tick uses that recipe's input / output dicts.
+		var bid: StringName = main.placed_buildings.get(grid_pos, &"")
+		var bdata = Registry.get_block(bid)
+		# First entry clears the selection — factory goes idle again.
+		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
+		if bdata and bdata.factory_recipes != null:
+			for entry in bdata.factory_recipes:
+				if typeof(entry) != TYPE_DICTIONARY:
+					continue
+				var rid: StringName = StringName(entry.get("id", &""))
+				var rname: String = String(entry.get("display_name", String(rid)))
+				# Icon: prefer the output item's icon so the player reads
+				# the menu as "this recipe produces THIS".
+				var icon_tex: Texture2D = null
+				var out_dict: Dictionary = entry.get("output", {})
+				for out_id in out_dict:
+					var it = Registry.get_item_or_fluid(StringName(out_id))
+					if it and it.icon:
+						icon_tex = it.icon
+						break
+				_world_menu_items.append({"id": rid, "icon": icon_tex, "name": rname})
+
 	_world_menu_open = true
 	# Whenever a UI-style menu (sorter / constructor / refabricator /
 	# archive) opens for a block that also has stored items, open the
@@ -3883,6 +4942,217 @@ func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
 
 
 ## Opens the secondary resource panel for a block. Snapshots its current
+## Builds (lazy) and shows the launchpad sector-picker popup anchored to
+## the launchpad at `anchor`. The popup is a small dark panel with one
+## clickable label whose text reflects the current selection. Clicking
+## the label opens the planet-select scene in pick mode.
+func _show_launchpad_popup(anchor: Vector2i) -> void:
+	if _launchpad_popup_layer == null:
+		_launchpad_popup_layer = CanvasLayer.new()
+		_launchpad_popup_layer.layer = 90
+		add_child(_launchpad_popup_layer)
+		_launchpad_popup_panel = PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.06, 0.08, 0.12, 0.92)
+		sb.border_color = Color(1.0, 0.85, 0.2, 0.6)
+		sb.set_border_width_all(1)
+		sb.set_corner_radius_all(6)
+		sb.content_margin_left = 10
+		sb.content_margin_right = 10
+		sb.content_margin_top = 6
+		sb.content_margin_bottom = 6
+		_launchpad_popup_panel.add_theme_stylebox_override("panel", sb)
+		_launchpad_popup_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+		_launchpad_popup_layer.add_child(_launchpad_popup_panel)
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 4)
+		_launchpad_popup_panel.add_child(col)
+		_launchpad_popup_label = Button.new()
+		_launchpad_popup_label.flat = true
+		_launchpad_popup_label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
+		_launchpad_popup_label.add_theme_color_override("font_hover_color", Color(1.0, 0.92, 0.4))
+		_launchpad_popup_label.add_theme_font_size_override("font_size", 14)
+		_launchpad_popup_label.pressed.connect(_on_launchpad_popup_clicked)
+		col.add_child(_launchpad_popup_label)
+		_launchpad_popup_launch_btn = Button.new()
+		_launchpad_popup_launch_btn.text = "Launch"
+		_launchpad_popup_launch_btn.add_theme_font_size_override("font_size", 13)
+		_launchpad_popup_launch_btn.pressed.connect(_on_launchpad_popup_launch_pressed)
+		col.add_child(_launchpad_popup_launch_btn)
+	_launchpad_popup_anchor = anchor
+	_launchpad_popup_open = true
+	# Re-show the layer in case a previous `_hide_launchpad_popup` call
+	# turned it off — without this the second open silently does nothing.
+	if _launchpad_popup_layer:
+		_launchpad_popup_layer.visible = true
+	_refresh_launchpad_popup()
+
+
+func _refresh_launchpad_popup() -> void:
+	if not _launchpad_popup_open or _launchpad_popup_panel == null:
+		return
+	var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
+	var sel: StringName = &""
+	if lp_sys:
+		sel = lp_sys.get_selected_sector(_launchpad_popup_anchor)
+	var text: String
+	if sel == &"":
+		text = "<no sector selected>"
+	else:
+		var sec = Registry.get_sector(sel)
+		var name: String = sec.display_name if sec else String(sel).capitalize()
+		text = "Launching To: %s" % name
+	_launchpad_popup_label.text = text
+	# Launch button — enabled only when can_launch passes with the
+	# manual thresholds (≥20 items + ≥10.0 fluids of extras). Otherwise
+	# the button is greyed out so the player sees why nothing happens.
+	if _launchpad_popup_launch_btn:
+		var can_manual: bool = lp_sys != null \
+			and lp_sys.has_method("can_launch") \
+			and lp_sys.can_launch(_launchpad_popup_anchor, 20, 10.0)
+		_launchpad_popup_launch_btn.disabled = not can_manual
+		# Show cooldown remaining in the button text so the player
+		# doesn't have to guess why it's disabled.
+		var cd: float = 0.0
+		if lp_sys and lp_sys.has_method("cooldown_remaining"):
+			cd = lp_sys.cooldown_remaining(_launchpad_popup_anchor)
+		if cd > 0.0:
+			_launchpad_popup_launch_btn.text = "Cooldown %.1fs" % cd
+		else:
+			_launchpad_popup_launch_btn.text = "Launch"
+	# Position the panel just below the launchpad's center in screen
+	# coordinates. Re-projects every frame so the popup tracks zoom /
+	# camera pan.
+	var cam: Camera2D = get_viewport().get_camera_2d()
+	if cam == null:
+		return
+	var data = Registry.get_block(main.placed_buildings.get(_launchpad_popup_anchor, &""))
+	var gs: float = float(main.GRID_SIZE)
+	var size_tiles: int = data.grid_size.x if data else 1
+	var world_pos: Vector2 = main.grid_to_world(_launchpad_popup_anchor) + Vector2(
+		float(size_tiles) * gs * 0.5,
+		float(size_tiles) * gs + 4.0)
+	var screen: Vector2 = (world_pos - cam.get_screen_center_position()) * cam.zoom + (get_viewport_rect().size * 0.5)
+	# Center horizontally on the block; sit just below it.
+	_launchpad_popup_panel.position = screen - Vector2(_launchpad_popup_panel.size.x * 0.5, 0)
+
+
+func _hide_launchpad_popup() -> void:
+	_launchpad_popup_open = false
+	if _launchpad_popup_layer:
+		_launchpad_popup_layer.visible = false
+
+
+func _on_launchpad_popup_launch_pressed() -> void:
+	# Manual launch path — same gate as auto-launch but with the lower
+	# 20-items / 10.0-fluids passenger threshold.
+	var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
+	if lp_sys and lp_sys.has_method("manual_launch"):
+		lp_sys.manual_launch(_launchpad_popup_anchor)
+
+
+## Builds (lazy) and shows the landing-pad filter popup. Two slot buttons
+## each open the world menu in "landing_pad_slot" mode so the player can
+## pick which item / fluid that pad accepts.
+func _show_landing_pad_popup(anchor: Vector2i) -> void:
+	if _landing_pad_popup_layer == null:
+		_landing_pad_popup_layer = CanvasLayer.new()
+		_landing_pad_popup_layer.layer = 90
+		add_child(_landing_pad_popup_layer)
+		_landing_pad_popup_panel = PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.06, 0.08, 0.12, 0.92)
+		sb.border_color = Color(0.4, 0.85, 1.0, 0.6)
+		sb.set_border_width_all(1)
+		sb.set_corner_radius_all(6)
+		sb.content_margin_left = 10
+		sb.content_margin_right = 10
+		sb.content_margin_top = 6
+		sb.content_margin_bottom = 6
+		_landing_pad_popup_panel.add_theme_stylebox_override("panel", sb)
+		_landing_pad_popup_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+		_landing_pad_popup_layer.add_child(_landing_pad_popup_panel)
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 4)
+		_landing_pad_popup_panel.add_child(col)
+		var title := Label.new()
+		title.text = "Accepts:"
+		title.add_theme_font_size_override("font_size", 13)
+		title.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
+		col.add_child(title)
+		_landing_pad_popup_slot_btns.clear()
+		for i in range(2):
+			var btn := Button.new()
+			btn.text = "Empty"
+			btn.add_theme_font_size_override("font_size", 13)
+			btn.pressed.connect(_on_landing_pad_slot_clicked.bind(i))
+			col.add_child(btn)
+			_landing_pad_popup_slot_btns.append(btn)
+	_landing_pad_popup_anchor = anchor
+	_landing_pad_popup_open = true
+	_landing_pad_popup_layer.visible = true
+	_refresh_landing_pad_popup()
+
+
+func _refresh_landing_pad_popup() -> void:
+	if not _landing_pad_popup_open or _landing_pad_popup_panel == null:
+		return
+	var filter: Array = []
+	if _logistics and _logistics.has_method("get_landing_pad_filter"):
+		filter = _logistics.get_landing_pad_filter(_landing_pad_popup_anchor)
+	for i in range(_landing_pad_popup_slot_btns.size()):
+		var btn: Button = _landing_pad_popup_slot_btns[i]
+		var sn: StringName = filter[i] if i < filter.size() else &""
+		if sn == &"":
+			btn.text = "Empty"
+		else:
+			var res = Registry.get_item_or_fluid(sn)
+			btn.text = res.display_name if res else String(sn)
+	# Reposition just below the landing pad's footprint (same math as
+	# the launchpad popup).
+	var cam: Camera2D = get_viewport().get_camera_2d()
+	if cam == null:
+		return
+	var data = Registry.get_block(main.placed_buildings.get(_landing_pad_popup_anchor, &""))
+	var gs: float = float(main.GRID_SIZE)
+	var size_tiles: int = data.grid_size.x if data else 1
+	var world_pos: Vector2 = main.grid_to_world(_landing_pad_popup_anchor) + Vector2(
+		float(size_tiles) * gs * 0.5,
+		float(size_tiles) * gs + 4.0)
+	var screen: Vector2 = (world_pos - cam.get_screen_center_position()) * cam.zoom + (get_viewport_rect().size * 0.5)
+	_landing_pad_popup_panel.position = screen - Vector2(_landing_pad_popup_panel.size.x * 0.5, 0)
+
+
+func _hide_landing_pad_popup() -> void:
+	_landing_pad_popup_open = false
+	_landing_pad_pick_slot = -1
+	if _landing_pad_popup_layer:
+		_landing_pad_popup_layer.visible = false
+
+
+func _on_landing_pad_slot_clicked(slot: int) -> void:
+	# Open the standard world menu in "landing_pad_slot" mode. The slot
+	# index is stashed in `_landing_pad_pick_slot` for the apply step.
+	_landing_pad_pick_slot = slot
+	_open_world_menu("landing_pad_slot", _landing_pad_popup_anchor)
+
+
+func _on_launchpad_popup_clicked() -> void:
+	# Set the cross-scene pick request and switch to planet_select. After
+	# the player picks a sector there, planet_select reloads the source
+	# sector and main._ready drains `pending_launchpad_pick_result`.
+	SaveManager.launchpad_pick_request = {
+		"source_sector": SaveManager.active_sector_id,
+		"anchor": _launchpad_popup_anchor,
+	}
+	# Save the source sector so progress isn't lost during the pick
+	# detour. The pick flow re-loads this save when planet_select hands
+	# control back via `pending_launchpad_pick_result`.
+	if SaveManager.active_sector_id != &"":
+		SaveManager.save_sector(SaveManager.active_sector_id)
+	get_tree().change_scene_to_file("res://main/PlanetSelect.tscn")
+
+
 ## stored items; _draw_storage_panel re-pulls fresh counts each frame so
 ## the display animates as the block fills/empties.
 func _open_storage_panel(grid_pos: Vector2i) -> void:
@@ -3949,6 +5219,14 @@ func _apply_world_menu_selection(index: int) -> void:
 			_logistics.sorter_filters[_world_menu_pos] = selected_id
 		else:
 			editor_sorter_filters[_world_menu_pos] = selected_id
+	elif _world_menu_type == "duct_filter":
+		# Duct bridge output filter — empty string clears, anything
+		# else restricts the output bridge to accepting only that item.
+		if _logistics:
+			if selected_id == &"":
+				_logistics.duct_bridge_filters.erase(_world_menu_pos)
+			else:
+				_logistics.duct_bridge_filters[_world_menu_pos] = selected_id
 	elif _world_menu_type == "constructor":
 		if _logistics:
 			if _logistics.constructor_state.has(_world_menu_pos):
@@ -3981,6 +5259,67 @@ func _apply_world_menu_selection(index: int) -> void:
 			rs["phase"] = "idle"
 		else:
 			editor_refabricator_state[_world_menu_pos] = {"selected_t2": selected_id}
+	elif _world_menu_type == "recipe_select":
+		# Recipe-pick menu for `recipe_select`-tagged factories
+		# (Rod Shapper etc.). Logistics owns the per-anchor selection and
+		# the buffer-reset book-keeping.
+		if _logistics:
+			_logistics.set_factory_recipe(_world_menu_pos, selected_id)
+	elif _world_menu_type == "launchpad":
+		# Two row types: pick destination, or fire manual launch. The
+		# selection is keyed by the StringName id we stamped on the
+		# menu item (`__pick` / `__launch`).
+		var anchor: Vector2i = _world_menu_pos
+		_close_world_menu()
+		if selected_id == &"__pick":
+			# Route into the existing planet-select pick flow. The scene
+			# change is deferred so this frame's input processing
+			# completes before the tree is torn down — otherwise
+			# downstream `get_viewport().set_input_as_handled()` callers
+			# crash on a null viewport when BuildingSystem has already
+			# been ripped out of the tree mid-frame.
+			SaveManager.launchpad_pick_request = {
+				"source_sector": SaveManager.active_sector_id,
+				"anchor": anchor,
+			}
+			if SaveManager.active_sector_id != &"":
+				SaveManager.save_sector(SaveManager.active_sector_id)
+			get_tree().call_deferred("change_scene_to_file", "res://main/PlanetSelect.tscn")
+		elif selected_id == &"__launch":
+			var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
+			if lp_sys and lp_sys.has_method("manual_launch"):
+				lp_sys.manual_launch(anchor)
+		return
+
+	elif _world_menu_type == "landing_pad":
+		# Two slot rows. Clicking a slot opens the per-slot picker; the
+		# slot index is stashed in `_landing_pad_pick_slot` so the
+		# sub-menu's apply knows which slot to write back.
+		var anchor_lp: Vector2i = _world_menu_pos
+		_close_world_menu()
+		var slot: int = -1
+		if selected_id == &"__slot_0":
+			slot = 0
+		elif selected_id == &"__slot_1":
+			slot = 1
+		if slot >= 0:
+			_landing_pad_pick_slot = slot
+			_open_world_menu("landing_pad_slot", anchor_lp)
+		return
+
+	elif _world_menu_type == "landing_pad_slot":
+		# Filter-slot pick for a Landing Pad. `_landing_pad_pick_slot`
+		# was stashed when the parent landing_pad menu opened this
+		# sub-picker; write the choice back through LogisticsSystem.
+		if _logistics and _landing_pad_pick_slot >= 0:
+			_logistics.set_landing_pad_filter_slot(_world_menu_pos, _landing_pad_pick_slot, selected_id)
+		var slot_anchor: Vector2i = _world_menu_pos
+		_landing_pad_pick_slot = -1
+		_close_world_menu()
+		# Re-open the parent landing_pad menu so the player can pick the
+		# OTHER slot or close cleanly.
+		_open_world_menu("landing_pad", slot_anchor)
+		return
 
 	_close_world_menu()
 
@@ -3992,6 +5331,18 @@ func _apply_world_menu_selection(index: int) -> void:
 func _world_menu_cell_dim() -> Vector2:
 	if _world_menu_type == "archive":
 		return Vector2(160.0, 26.0) * main.SPRITE_SCALE_FACTOR
+	if _world_menu_type == "recipe_select":
+		# Wide single-column rows so the recipe's display name reads at
+		# a glance — graphite_rod / uranium_rod etc.
+		return Vector2(140.0, 36.0) * main.SPRITE_SCALE_FACTOR
+	if _world_menu_type == "landing_pad_slot":
+		return Vector2(140.0, 32.0) * main.SPRITE_SCALE_FACTOR
+	if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
+		# Wider cells than `landing_pad_slot` — these rows carry the
+		# current selection AND its label ("Sector: Waterfront Ruins",
+		# "Slot 1: Refined Uranium"), and the launchpad's Launch row can
+		# embed the diagnostic ("Launch: Need 4 more Steel").
+		return Vector2(220.0, 32.0) * main.SPRITE_SCALE_FACTOR
 	return Vector2(_world_menu_cell_size, _world_menu_cell_size)
 
 
@@ -3999,6 +5350,12 @@ func _world_menu_cell_dim() -> Vector2:
 ## list so each row gets the full cell width for its name.
 func _world_menu_col_count() -> int:
 	if _world_menu_type == "archive":
+		return 1
+	if _world_menu_type == "recipe_select":
+		return 1
+	if _world_menu_type == "landing_pad_slot":
+		return 1
+	if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
 		return 1
 	return _world_menu_columns
 
@@ -4181,6 +5538,51 @@ func _draw_storage_panel(ci: CanvasItem) -> void:
 func _draw_world_menu(ci: CanvasItem) -> void:
 	if not _world_menu_open:
 		return
+	# For block-tied menus, keep the secondary storage panel live —
+	# if items arrived after the menu opened (or were withdrawn empty),
+	# the panel auto-opens / auto-closes to match. Skipped for "storage"
+	# which IS the inventory display itself.
+	if _world_menu_type != "storage" and not _storage_panel_open:
+		var has_stored: bool = _block_has_any_stored(_world_menu_pos)
+		if has_stored:
+			_open_storage_panel(_world_menu_pos)
+	# Launchpad: refresh both row labels every frame so the player sees
+	# the live destination + the launch-readiness diagnostic / cooldown.
+	if _world_menu_type == "launchpad":
+		var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
+		if lp_sys and _world_menu_items.size() >= 2:
+			var sel: StringName = &""
+			if lp_sys.has_method("get_selected_sector"):
+				sel = lp_sys.get_selected_sector(_world_menu_pos)
+			if sel == &"":
+				_world_menu_items[0]["name"] = "<no sector selected>"
+			else:
+				var sec = Registry.get_sector(sel)
+				var sector_text: String = sec.display_name if sec else String(sel)
+				_world_menu_items[0]["name"] = "Launching To: %s" % sector_text
+			# Manual-launch threshold is 20 items + 10.0 fluids per the
+			# auto/manual rules in LaunchpadSystem.
+			var diag: String = ""
+			if lp_sys.has_method("diagnose_launch"):
+				diag = lp_sys.diagnose_launch(_world_menu_pos, 20, 10.0)
+			if diag == "":
+				_world_menu_items[1]["name"] = "Launch — ready"
+			else:
+				_world_menu_items[1]["name"] = "Launch — %s" % diag
+	# Landing pad: refresh slot labels each frame so the player sees the
+	# current filter without reopening the menu.
+	elif _world_menu_type == "landing_pad":
+		var logistics = _logistics if _logistics else get_node_or_null("/root/Main/LogisticsSystem")
+		var filter: Array = []
+		if logistics and logistics.has_method("get_landing_pad_filter"):
+			filter = logistics.get_landing_pad_filter(_world_menu_pos)
+		for i in range(_world_menu_items.size()):
+			var sn: StringName = filter[i] if i < filter.size() else &""
+			var label: String = "Empty"
+			if sn != &"":
+				var res = Registry.get_item_or_fluid(sn)
+				label = res.display_name if res else String(sn)
+			_world_menu_items[i]["name"] = "Slot %d: %s" % [i + 1, label]
 	# Storage popup is read-only and lives — rebuild the item list from
 	# the current buffers each frame so counts animate in real time
 	# instead of snapshotting at open-time. If the block emptied out
@@ -4219,10 +5621,22 @@ func _draw_world_menu(ci: CanvasItem) -> void:
 	var selected_sorter: StringName = &""
 	if _world_menu_type == "sorter" and _logistics:
 		selected_sorter = StringName(_logistics.sorter_filters.get(_world_menu_pos, &""))
+	var selected_duct_filter: StringName = &""
+	if _world_menu_type == "duct_filter" and _logistics:
+		selected_duct_filter = StringName(_logistics.duct_bridge_filters.get(_world_menu_pos, &""))
 
-	# Background
-	ci.draw_rect(menu_rect, Color(0.08, 0.08, 0.1, 0.92), true)
-	ci.draw_rect(menu_rect, Color(0.4, 0.4, 0.5, 0.8), false, 1.5)
+	# Background — launchpad / landing-pad menus use the same dark-navy
+	# panel + yellow border the legacy custom popup used so the look
+	# matches what those blocks had before the migration to world_menu.
+	var bg_fill: Color = Color(0.08, 0.08, 0.1, 0.92)
+	var bg_border: Color = Color(0.4, 0.4, 0.5, 0.8)
+	var border_width: float = 1.5
+	if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
+		bg_fill = Color(0.06, 0.08, 0.12, 0.92)
+		bg_border = Color(1.0, 0.85, 0.2, 0.6)
+		border_width = 1.0
+	ci.draw_rect(menu_rect, bg_fill, true)
+	ci.draw_rect(menu_rect, bg_border, false, border_width)
 
 	# Draw cells
 	var origin := menu_rect.position + Vector2(padding, padding)
@@ -4232,9 +5646,13 @@ func _draw_world_menu(ci: CanvasItem) -> void:
 		var cell_pos := origin + Vector2(col * dim.x, row * dim.y)
 		var cell_rect := Rect2(cell_pos, dim)
 
-		# Hover highlight
+		# Hover highlight — yellow tint for launchpad / landing-pad rows
+		# to match the panel's gold border, blue for everything else.
 		if i == _world_menu_hovered:
-			ci.draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
+			var hover_color: Color = Color(0.3, 0.5, 0.8, 0.5)
+			if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
+				hover_color = Color(1.0, 0.85, 0.2, 0.2)
+			ci.draw_rect(cell_rect, hover_color, true)
 
 		# Cell border — thicker/brighter blue when this row is the
 		# currently-selected archive / sorter filter so the player can
@@ -4246,15 +5664,22 @@ func _draw_world_menu(ci: CanvasItem) -> void:
 			is_selected = entry_id == selected_archive and entry_id != &""
 		elif _world_menu_type == "sorter":
 			is_selected = entry_id == selected_sorter and entry_id != &""
+		elif _world_menu_type == "duct_filter":
+			is_selected = entry_id == selected_duct_filter and entry_id != &""
 		if is_selected:
 			ci.draw_rect(cell_rect, Color(0.35, 0.65, 1.0, 1.0), false, 2.0)
+		elif _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
+			# Flat rows for the launchpad / landing-pad menus — the
+			# yellow panel border on the outside is the only frame,
+			# matching the old custom popup look.
+			pass
 		else:
 			ci.draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
 
 		var entry: Dictionary = _world_menu_items[i]
 
 		# Clear button (first cell in sorter or archive mode)
-		if (_world_menu_type == "sorter" or _world_menu_type == "archive") and i == 0:
+		if (_world_menu_type == "sorter" or _world_menu_type == "archive" or _world_menu_type == "duct_filter") and i == 0:
 			# Draw X for clear
 			var cx := cell_pos.x + dim.x * 0.5
 			var cy := cell_pos.y + dim.y * 0.5
@@ -4284,6 +5709,15 @@ func _draw_world_menu(ci: CanvasItem) -> void:
 			if _world_menu_type == "archive":
 				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + font_size * 0.35)
 				ci.draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, font_size, Color.WHITE)
+			elif _world_menu_type == "launchpad" or _world_menu_type == "landing_pad" \
+					or _world_menu_type == "recipe_select" or _world_menu_type == "landing_pad_slot":
+				# Render the full label centered horizontally so wide
+				# single-column menus read as buttons rather than icon
+				# cells. Slightly larger font so labels like "Sector:
+				# Waterfront Ruins" are comfortable to read.
+				var lp_font_size := 13
+				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + lp_font_size * 0.35)
+				ci.draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_CENTER, avail_w, lp_font_size, Color.WHITE)
 			else:
 				var short_name: String = full_name.left(4)
 				var text_pos := cell_pos + Vector2(4.0, dim.y * 0.65)
@@ -4310,6 +5744,7 @@ func _draw() -> void:
 	if not _textures_ready:
 		_ensure_textures_loaded()
 	_draw_placed_buildings()
+	_draw_launchpad_pod_previews()
 	_draw_block_hitboxes()
 	# `_draw_cranes` now runs on `_crane_overlay` (z_index 4097) so
 	# arms / grabbers / held cargo paint above units, turret heads,
@@ -4837,8 +6272,10 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 			return 1
 		return 0
 
-	# Generic storage block.
-	if data.tags.has("storage"):
+	# Generic storage block — also the path that runs for launchpads
+	# since they store cargo in block_storage["items"]. The launchpad's
+	# accept rules mirror this (any item, capped by max_stored_items).
+	if data.tags.has("storage") or data.tags.has("launchpad"):
 		if not _logistics.block_storage.has(anchor):
 			_logistics.block_storage[anchor] = {"items": {}, "fluids": {}}
 		var s: Dictionary = _logistics.block_storage[anchor]
@@ -4871,6 +6308,12 @@ func _block_accepts_item(anchor: Vector2i, item_id: StringName) -> bool:
 	if data.tags.has("core") \
 			and main.has_method("get_building_faction") \
 			and main.get_building_faction(anchor) == FACTION_LUMINA:
+		return true
+	# Launchpad: accepts any item the player wants to throw into the pod
+	# buffer — the launch logic deducts the mandatory cost off the top
+	# and ships the rest as cargo. Cap is enforced by max_stored_items
+	# inside `_deposit_items_into_block`.
+	if data.tags.has("launchpad"):
 		return true
 	# Consult the effective recipe so unit fabricators (whose `input_items`
 	# is empty — the recipe lives on the produced unit's build_cost) and
@@ -6049,6 +7492,9 @@ func _draw_placed_buildings() -> void:
 			var anchor_q: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 			var pct_q: float = main.get_build_progress_pct(anchor_q)
 			if pct_q == 0.0 and not (has_active_work and active_work_anchor == anchor_q):
+				# Queued ghost — translucent block sprite only. No white
+				# wash; the unbuilt portion reads as a semi-transparent
+				# silhouette of the block.
 				_draw_block_ghost_preview(grid_pos, block_id, data, top_pos, width, height,
 					main.building_rotation.get(grid_pos, 0))
 				continue
@@ -6116,6 +7562,12 @@ func _draw_placed_buildings() -> void:
 		# carries the `pump` tag and would otherwise grab `_pump_texture`.
 		elif block_id == &"vent_condenser":
 			_draw_vent_condenser(grid_pos, top_pos, width, height)
+		# Vent turbine: dedicated power-block art. It also carries the
+		# `pump` tag now (so the water-byproduct path runs) — without
+		# this guard the elif below would paint it with the generic
+		# fluid-pump texture, masking the turbine's own sprite.
+		elif block_id == &"vent_turbine":
+			_draw_vent_turbine(grid_pos, top_pos, width, height)
 		# Fluid pumps: draw with pump texture (before pipes; pumps also transport_fluid)
 		elif data and data.tags.has("pump") and _pump_texture:
 			var rot: int = main.building_rotation.get(grid_pos, 0)
@@ -6153,6 +7605,10 @@ func _draw_placed_buildings() -> void:
 			# the wall crusher's gears.
 			if data and data.tags.has("scraper_head"):
 				_draw_scraper_head(grid_pos, top_pos, width, height)
+			# Impact head: still-but-scaling drum that slams down on
+			# every drill cycle, eases back across the CD.
+			elif data and data.tags.has("impact_head"):
+				_draw_impact_head(grid_pos, top_pos, width, height)
 			# Unit fabricator layered rendering: base + unit-in-construction + top
 			if data and data.produced_unit != &"" and data.base_sprite and data.top_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
@@ -6228,6 +7684,20 @@ func _draw_placed_buildings() -> void:
 			# `VentTurbineInner` pair loaded on this system.
 			elif block_id == &"vent_turbine":
 				_draw_vent_turbine(grid_pos, top_pos, width, height)
+			# Layered spinner factories (brass_mixer, silicon_mixer, …):
+			# Base → rotating Head → Top, driven by `_LAYERED_SPINNERS`.
+			elif _LAYERED_SPINNERS.has(block_id):
+				_draw_layered_spinner(grid_pos, block_id, top_pos, width, height)
+			# Incinerator: swap between -P (powered) and -NP (unpowered)
+			# textures so the player can see at a glance whether the
+			# network is supplying its 5 W draw.
+			elif data and data.tags.has("incinerator"):
+				var anchor_inc: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+				var ps_inc = _power_sys_ref()
+				var inc_powered: bool = ps_inc != null and ps_inc.get_electrical_efficiency(anchor_inc) > 0.0
+				var inc_tex: Texture2D = _incinerator_powered_texture if inc_powered else _incinerator_unpowered_texture
+				if inc_tex:
+					draw_texture_rect(inc_tex, Rect2(top_pos, Vector2(width, height)), false, Color.WHITE)
 			# Top sprite only (single-layer world texture)
 			elif data and data.top_sprite:
 				var draw_rot: int = (rot + 1) % 4 if data.tags.has("shaft") else rot
@@ -6313,8 +7783,8 @@ func _draw_placed_buildings() -> void:
 		var is_dir: bool = _is_directional(block_id)
 		var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
 		if data.tags.has("drill_heads"):
-			var dh_variant: String = _get_drill_head_variant(grid_pos, rot, data.grid_size)
-			_draw_drill_heads(grid_pos, rot, data.grid_size, dh_variant, block_id)
+			var dh_levels: Dictionary = _get_drill_head_levels(grid_pos, rot, data.grid_size)
+			_draw_drill_heads(grid_pos, rot, data.grid_size, dh_levels, block_id)
 		if data.tags.has("drill_lasers"):
 			# Only fire lasers when the bore is fully built AND powered —
 			# a ghost / under-construction / unpowered bore shouldn't be
@@ -6360,29 +7830,33 @@ func _draw_placed_buildings() -> void:
 
 			var is_active_build: bool = has_active_work and active_work_anchor == grid_pos
 			if build_pct > 0.0:
-				# Partially built: draw the dark overlay only on the unbuilt
-				# portion so the reveal stays visible whether this anchor is
-				# actively being worked on or just paused mid-build. The
-				# moving yellow line only renders when actively building.
+				# Active build — pass 2 rendered the block at full opacity
+				# already. Dim the unbuilt portion (right of the reveal
+				# line) with a translucent black wash so it reads as a
+				# ghosted / transparent silhouette of the in-progress block.
 				var reveal_x: float = b_width * build_pct
-				var unbuilt_rect := Rect2(
-					b_top_pos.x + reveal_x, b_top_pos.y,
-					b_width - reveal_x, b_height
-				)
-				draw_rect(unbuilt_rect, Color(0, 0, 0, 0.65), true)
+				var unbuilt_w: float = b_width - reveal_x
+				if unbuilt_w > 0.0:
+					draw_rect(Rect2(b_top_pos.x + reveal_x, b_top_pos.y, unbuilt_w, b_height),
+						Color(0, 0, 0, 0.45), true)
 				if is_active_build:
 					var line_x: float = b_top_pos.x + reveal_x
-					draw_line(
-						Vector2(line_x, b_top_pos.y),
-						Vector2(line_x, b_top_pos.y + b_height),
-						Color(1.0, 0.9, 0.2, 0.9), 2.0
-					)
+					var line_top := Vector2(line_x, b_top_pos.y)
+					var line_bot := Vector2(line_x, b_top_pos.y + b_height)
+					# Build laser: every builder in range projects a
+					# translucent yellow triangle from its sprite front
+					# to the two endpoints of the reveal line, with a
+					# scrolling darker stripe so the beam reads as live.
+					# Drawn UNDER the reveal line so the line itself
+					# stays the brightest element.
+					_draw_active_build_beams(grid_pos, line_top, line_bot)
+					draw_line(line_top, line_bot, Color(1.0, 0.9, 0.2, 0.9), 2.0)
 				# CombatSystem only draws heads for fully-built turrets
-				# (inactive blocks are filtered out of its targeting/state
-				# init), so a turret under construction would otherwise
-				# show only its base. Overlay the head/chassis here at a
-				# slightly muted tint so the in-progress turret reads as
-				# what it'll become.
+				# (inactive blocks are filtered out of its targeting /
+				# state init), so a turret under construction would
+				# otherwise show only its base. Overlay the head /
+				# chassis here so the in-progress turret reads as what
+				# it'll become.
 				var b_data = Registry.get_block(b_block_id)
 				if b_data and b_data.is_turret():
 					var b_rot: int = int(main.building_rotation.get(grid_pos, 0))
@@ -6468,19 +7942,25 @@ func _draw_placed_buildings() -> void:
 			if line_pct < max_pct:
 				var dark_left: float = line_x
 				var dark_right: float = d_top_pos.x + d_width * max_pct
-				draw_rect(Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height), Color(0, 0, 0, 0.65), true)
+				draw_rect(Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height), Color(0, 0, 0, 0.45), true)
 			if max_pct < 1.0:
 				var never_left: float = d_top_pos.x + d_width * max_pct
-				draw_rect(Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height), Color(0, 0, 0, 0.65), true)
+				draw_rect(Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height), Color(0, 0, 0, 0.45), true)
 			# Moving red line only while actively deconstructing. Paused
 			# entries freeze the reveal at its current position so the
 			# player can see exactly how far decon has gotten.
 			if is_active_decon:
-				draw_line(
-					Vector2(line_x, d_top_pos.y),
-					Vector2(line_x, d_top_pos.y + d_height),
-					Color(0.9, 0.2, 0.2, 0.9), 2.0
+				var d_line_top := Vector2(line_x, d_top_pos.y)
+				var d_line_bot := Vector2(line_x, d_top_pos.y + d_height)
+				# Red work-laser variant: same triangle + scrolling
+				# stripe + pulsing diamond as the build beam, but the
+				# stripe rides block→unit instead of unit→block so the
+				# diagonal cadence reads top-right → down-left.
+				_draw_active_build_beams(
+					grid_pos, d_line_top, d_line_bot,
+					Color(0.95, 0.25, 0.25), true,
 				)
+				draw_line(d_line_top, d_line_bot, Color(0.9, 0.2, 0.2, 0.9), 2.0)
 			else:
 				# Tint the still-intact (already-built) area a faint red so
 				# paused decons are distinguishable from normal buildings.
@@ -6555,6 +8035,21 @@ func _draw_placed_buildings() -> void:
 				draw_rect(
 					Rect2(rev_world + rev_offset, Vector2(gs * rev_size.x, gs * rev_size.y)),
 					reveal_tint, true)
+		# Derelict → LUMINA conversion flash: yellow band over freshly-
+		# captured blocks. Only the anchor cell is tracked; we expand
+		# to the block's full footprint so multi-tile cores flash as a
+		# whole, not just their top-left tile.
+		var conv_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if grid_pos == conv_anchor:
+			var conv_tint: Color = get_conversion_flash_tint(conv_anchor)
+			if conv_tint.a > 0.001:
+				var conv_id: StringName = main.placed_buildings[grid_pos]
+				var conv_size: Vector2i = _size_for.call(conv_id)
+				var conv_world: Vector2 = main.grid_to_world(grid_pos)
+				var conv_offset: Vector2 = _offset_for.call(conv_id)
+				draw_rect(
+					Rect2(conv_world + conv_offset, Vector2(gs * conv_size.x, gs * conv_size.y)),
+					conv_tint, true)
 		if health_pct < 1.0:
 			var block_id: StringName = main.placed_buildings[grid_pos]
 			var block_size: Vector2i = _size_for.call(block_id)
@@ -6566,6 +8061,10 @@ func _draw_placed_buildings() -> void:
 				health_pct,
 				gs * block_size.x
 			)
+		# (Fluid storage bar moved to the hover tooltip — see
+		# `HUD._add_tooltip_fluid_bar`. We still tick
+		# `_fluid_bar_display` per frame so the tooltip's eased value
+		# stays smooth even when the panel rebuilds.)
 
 
 
@@ -6725,6 +8224,89 @@ func _draw_front_direction_arrow(grid_pos: Vector2i, grid_size: Vector2i, rotati
 	draw_line(end_pt, end_pt - back - perp, _FRONT_DIR_ARROW_COLOR, 4.0)
 
 
+## Eases every fluid-storing block's displayed total toward its true
+## value at FLUID_BAR_EASE_PER_SEC units/sec. Anchors with empty
+## storage (or where the building is gone) get dropped from the dict
+## so the bar fades back to zero before disappearing.
+func _tick_fluid_bar_display(delta: float) -> void:
+	if _logistics == null or not "block_storage" in _logistics:
+		return
+	var to_erase: Array[Vector2i] = []
+	# Seed entries for any newly-fluid-bearing anchors.
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if _fluid_bar_display.has(anchor):
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if data == null or data.liquid_capacity <= 0.0:
+			continue
+		_fluid_bar_display[anchor] = 0.0
+	# Ease each tracked anchor's displayed value toward the live total.
+	for anchor in _fluid_bar_display:
+		if not main.placed_buildings.has(anchor):
+			to_erase.append(anchor)
+			continue
+		var data2: BlockData = Registry.get_block(main.placed_buildings[anchor])
+		if data2 == null or data2.liquid_capacity <= 0.0:
+			to_erase.append(anchor)
+			continue
+		var storage: Dictionary = _logistics.block_storage.get(anchor, {})
+		var fluids: Dictionary = storage.get("fluids", {})
+		var total: float = 0.0
+		for fid in fluids:
+			total += float(fluids[fid])
+		var cur: float = float(_fluid_bar_display.get(anchor, 0.0))
+		_fluid_bar_display[anchor] = move_toward(cur, total, FLUID_BAR_EASE_PER_SEC * delta)
+	for a in to_erase:
+		_fluid_bar_display.erase(a)
+
+
+## Draws a small blue fluid-storage bar with "[stored]/[max]" text
+## above the block, just above where the health bar sits when it's
+## visible. Reads the eased value from `_fluid_bar_display` so the
+## bar slides smoothly rather than snapping per push.
+func _draw_fluid_storage_bar(world_pos: Vector2, anchor: Vector2i, max_amount: float, building_pixel_width: float = 128.0) -> void:
+	if max_amount <= 0.0:
+		return
+	var disp: float = float(_fluid_bar_display.get(anchor, 0.0))
+	if disp <= 0.001:
+		return
+	var bar_width: float = clampf(building_pixel_width * 0.8, 30.0, 150.0)
+	var bar_height: float = 5.0
+	# Sit just above the health bar (-10), 7 px higher to leave room
+	# for the label.
+	var bar_pos: Vector2 = world_pos + Vector2(
+		(building_pixel_width - bar_width) / 2.0 - building_pixel_width / 2.0 + main.GRID_SIZE / 2.0,
+		-17.0
+	)
+	# Background bed.
+	draw_rect(Rect2(bar_pos, Vector2(bar_width, bar_height)),
+		Color(0.0, 0.05, 0.15, 0.8), true)
+	# Eased blue fill.
+	var pct: float = clampf(disp / max_amount, 0.0, 1.0)
+	draw_rect(Rect2(bar_pos, Vector2(bar_width * pct, bar_height)),
+		Color(0.3, 0.6, 1.0, 0.95), true)
+	# Outline.
+	draw_rect(Rect2(bar_pos, Vector2(bar_width, bar_height)),
+		Color(0.6, 0.8, 1.0, 0.6), false, 1.0)
+	# "[stored]/[max]" label centered above the bar. Display the
+	# eased value rounded to an int so the number ticks smoothly.
+	# `get_theme_default_font` is Control-only; BuildingSystem is a
+	# Node2D, so pull the fallback font from ThemeDB instead.
+	var font: Font = ThemeDB.fallback_font
+	if font:
+		var font_size := 9
+		var text: String = "%d/%d" % [int(round(disp)), int(round(max_amount))]
+		var ts: Vector2 = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
+		var tx: float = bar_pos.x + (bar_width - ts.x) / 2.0
+		var ty: float = bar_pos.y - 2.0
+		# 1-px black drop shadow so the label reads on bright tiles.
+		draw_string(font, Vector2(tx + 1, ty + 1), text,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(0, 0, 0, 0.85))
+		draw_string(font, Vector2(tx, ty), text,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(0.9, 0.95, 1.0, 1.0))
+
+
 ## Draws a health bar centered above a building.
 ## bar_width_base is the pixel width of the building (scales with size).
 func _draw_building_health_bar(world_pos: Vector2, health_pct: float, building_pixel_width: float = 128.0) -> void:
@@ -6823,9 +8405,25 @@ func _draw_paused_queue() -> void:
 			# Prefer world-facing top/base sprites. data.icon is UI-only.
 			var q_tex: Texture2D = null
 			var q_drew_layered := false
+			# Layered-spinner / vent-turbine / vent-condenser factories
+			# carry their artwork in dynamic texture sets, not on the
+			# .tres (`base_sprite` / `top_sprite` are null), so the
+			# generic branches below all fall through to the flat-color
+			# fallback. Route them to the same preview helpers used by
+			# `_draw_block_ghost_preview` / drag-line previews so the
+			# paused-queue ghost actually shows the block's art.
+			if _LAYERED_SPINNERS.has(block_id):
+				_draw_layered_spinner_preview(block_id, top_pos, w, h, tint)
+				q_drew_layered = true
+			elif block_id == &"vent_turbine":
+				_draw_vent_turbine_preview(top_pos, w, h, tint)
+				q_drew_layered = true
+			elif block_id == &"vent_condenser":
+				_draw_vent_condenser_preview(top_pos, w, h, tint)
+				q_drew_layered = true
 			# Fabricators/refabricators layer base + top so the block reads
 			# as a whole building, not just its overlay.
-			if data.base_sprite and data.top_sprite:
+			elif data.base_sprite and data.top_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
 				_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint)
 				q_drew_layered = true
@@ -6851,8 +8449,8 @@ func _draw_paused_queue() -> void:
 
 		# Drill heads overlay for queued drill ghosts.
 		if data.tags.has("drill_heads"):
-			var dh_variant: String = _get_drill_head_variant(grid_pos, rotation, data.grid_size)
-			_draw_drill_heads(grid_pos, rotation, data.grid_size, dh_variant, block_id, Color(1, 1, 1, 0.45))
+			var dh_levels: Dictionary = _get_drill_head_levels(grid_pos, rotation, data.grid_size)
+			_draw_drill_heads(grid_pos, rotation, data.grid_size, dh_levels, block_id, Color(1, 1, 1, 0.45))
 		if data.tags.has("crusher_heads") or data.tags.has("grinder_heads"):
 			_draw_crusher_heads(grid_pos, rotation, data.grid_size, block_id, Color(1, 1, 1, 0.45), false)
 		# Turret heads / chassis overlay so paused-queue and out-of-
@@ -6870,7 +8468,7 @@ func _draw_paused_queue() -> void:
 ## the drone is actually working on right now versus the rest of the
 ## queue. Anchored at `top_pos` with the block's full footprint.
 func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: BlockData, top_pos: Vector2,
-		w: float, h: float, rot: int) -> void:
+		w: float, h: float, rot: int, draw_heads: bool = true) -> void:
 	if data == null:
 		return
 	var tint := Color(1, 1, 1, 0.45)
@@ -6891,7 +8489,20 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 	var q_rot: int = rot if _is_directional(block_id) else 0
 	var q_tex: Texture2D = null
 	var q_drew_layered := false
-	if data.base_sprite and data.top_sprite:
+	# Layered spinner blocks (brass mixer, silicon refinery) have no
+	# base/top sprite on the .tres — their artwork lives in the
+	# dynamic texture set. Paint Base + Head + Top so the queued
+	# ghost matches what will land.
+	if _LAYERED_SPINNERS.has(block_id):
+		_draw_layered_spinner_preview(block_id, top_pos, w, h, tint)
+		q_drew_layered = true
+	elif block_id == &"vent_turbine":
+		_draw_vent_turbine_preview(top_pos, w, h, tint)
+		q_drew_layered = true
+	elif block_id == &"vent_condenser":
+		_draw_vent_condenser_preview(top_pos, w, h, tint)
+		q_drew_layered = true
+	elif data.base_sprite and data.top_sprite:
 		_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
 		_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint)
 		q_drew_layered = true
@@ -6914,10 +8525,18 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 			var center := top_pos + Vector2(w / 2.0, h / 2.0)
 			_draw_direction_arrow(center, q_rot, Color(1, 1, 1, 0.5))
 	# Turret heads / chassis ghost overlay so a queued turret reads as
-	# what it'll become, not just a flat base.
-	_draw_turret_preview_heads(data, top_pos, w, h, q_rot, tint)
-	# Yellow outline marks "queued, waiting for the drone".
-	draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
+	# what it'll become, not just a flat base. `draw_heads` is false
+	# when the active-build path reuses this helper to paint the
+	# fade — that path has its own brighter head overlay so we don't
+	# want to double-stamp the heads.
+	if draw_heads:
+		_draw_turret_preview_heads(data, top_pos, w, h, q_rot, tint)
+	# Yellow outline marks "queued, waiting for the drone". Suppressed
+	# when this helper is being used as an active-build fade overlay
+	# (no `draw_heads`); the active build already has its own visuals
+	# (reveal line + beam) and shouldn't get the queued-ghost border.
+	if draw_heads:
+		draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
 
 
 func _draw_preview() -> void:
@@ -6999,6 +8618,9 @@ func _draw_preview() -> void:
 				elif cell_block_id == &"vent_condenser":
 					_draw_vent_condenser_preview(cell_pos, w, h, tint)
 					cell_layered = true
+				elif _LAYERED_SPINNERS.has(cell_block_id):
+					_draw_layered_spinner_preview(cell_block_id, cell_pos, w, h, tint)
+					cell_layered = true
 				# Cores + turrets: paint the pre-baked composite when ready
 				# so layered overlays don't alpha-stack at preview tint.
 				if not cell_layered and cell_data and (cell_data.tags.has("core") or cell_data.is_turret()):
@@ -7065,11 +8687,12 @@ func _draw_preview() -> void:
 			# these, not junction/bridge substitutions.
 			if cell_block_id == main.selected_building and data and data.tags.has("drill_heads"):
 				var dh_rot: int = preview_rots.get(cell, main.placement_rotation)
-				var dh_variant: String = "N"
-				if cell_ok:
-					dh_variant = _get_drill_head_variant(cell, dh_rot, data.grid_size)
+				# Always render heads in the preview — L0/R0 sit at the
+				# body face by default so the ghost reads as a complete
+				# drill even when placement is invalid (no ore in front).
+				var dh_levels: Dictionary = _get_drill_head_levels(cell, dh_rot, data.grid_size)
 				var dh_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
-				_draw_drill_heads(cell, dh_rot, data.grid_size, dh_variant, main.selected_building, dh_tint)
+				_draw_drill_heads(cell, dh_rot, data.grid_size, dh_levels, main.selected_building, dh_tint)
 			if cell_block_id == main.selected_building and data and (data.tags.has("crusher_heads") or data.tags.has("grinder_heads")):
 				var ch_rot: int = preview_rots.get(cell, main.placement_rotation)
 				var ch_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
@@ -7129,6 +8752,9 @@ func _draw_preview() -> void:
 			hover_layered = true
 		elif main.selected_building == &"vent_condenser":
 			_draw_vent_condenser_preview(top_pos, width, height, tint)
+			hover_layered = true
+		elif _LAYERED_SPINNERS.has(main.selected_building):
+			_draw_layered_spinner_preview(main.selected_building, top_pos, width, height, tint)
 			hover_layered = true
 		# Cores + turrets paint a pre-baked composite (base + faction
 		# overlay for cores; body + chassis + heads for turrets). Falls
@@ -7203,6 +8829,31 @@ func _draw_preview() -> void:
 		var t_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
 		_draw_turret_preview_heads(data, top_pos, width, height, main.placement_rotation, t_tint)
 
+	# Scraper / impact-drill heads in the preview. Both draw on top of
+	# the base sprite the same way the live render does — without this,
+	# the placement ghost was a headless body plate.
+	if data and data.tags.has("scraper_head"):
+		var sh_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		if _scraper_head_texture:
+			var sh_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+			draw_set_transform(sh_center, 0.0)
+			draw_texture_rect(_scraper_head_texture,
+				Rect2(Vector2(-width * 0.5, -height * 0.5), Vector2(width, height)),
+				false, sh_tint)
+			draw_set_transform(Vector2.ZERO, 0.0)
+	if data and data.tags.has("impact_head"):
+		var ih_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		if _impact_head_texture:
+			# At-rest pose = full IMPACT_HEAD_MAX_SCALE (slam_progress = 1).
+			var ih_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
+			var ih_w: float = width * IMPACT_HEAD_MAX_SCALE
+			var ih_h: float = height * IMPACT_HEAD_MAX_SCALE
+			draw_set_transform(ih_center, 0.0)
+			draw_texture_rect(_impact_head_texture,
+				Rect2(Vector2(-ih_w * 0.5, -ih_h * 0.5), Vector2(ih_w, ih_h)),
+				false, ih_tint)
+			draw_set_transform(Vector2.ZERO, 0.0)
+
 	# Crane preview: arm + grabber + base pivot at the default pose so
 	# the player sees the silhouette before placing.
 	if data and data.tags.has("crane"):
@@ -7216,13 +8867,13 @@ func _draw_preview() -> void:
 		var range_px: float = data.attack_range * float(main.GRID_SIZE)
 		_draw_dashed_circle(range_center, range_px, Color(1, 1, 1, 0.85), 3.0)
 
-	# Drill heads preview: falls back to "N" when placement is invalid.
+	# Drill heads preview: always shows the heads (L0/R0 by default
+	# when no ore is in scan range) so the ghost reads as a complete
+	# drill regardless of placement validity.
 	if data and data.tags.has("drill_heads"):
-		var dh_variant: String = "N"
-		if can_place:
-			dh_variant = _get_drill_head_variant(preview_grid_pos, main.placement_rotation, data.grid_size)
+		var dh_levels: Dictionary = _get_drill_head_levels(preview_grid_pos, main.placement_rotation, data.grid_size)
 		var dh_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
-		_draw_drill_heads(preview_grid_pos, main.placement_rotation, data.grid_size, dh_variant, main.selected_building, dh_tint)
+		_draw_drill_heads(preview_grid_pos, main.placement_rotation, data.grid_size, dh_levels, main.selected_building, dh_tint)
 	if data and (data.tags.has("crusher_heads") or data.tags.has("grinder_heads")):
 		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
 		_draw_crusher_heads(preview_grid_pos, main.placement_rotation, data.grid_size, main.selected_building, ch_tint, false)
@@ -7698,6 +9349,91 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 ##   `scale` — multiplier on the visible footprint, lets the recursive
 ##             call shrink the inner payload so it visibly sits "inside"
 ##             the outer crane's icon.
+## Held-block render for the three block kinds whose live appearance
+## relies on per-frame dynamic layers — vent turbine, vent condenser,
+## and wall crusher / grinder. The standard composite bake at rot=0
+## either misses these layers entirely (no top_sprite for the
+## condenser → blank icon, no head sprite for the crusher) or
+## bakes them at a single frozen angle (turbine). This helper
+## replays the live draw using the saved `head_spin_state` so the
+## blades keep turning while the block is in transit.
+func _draw_held_dynamic_block(payload: Dictionary, block_data: BlockData, pos: Vector2, visual_angle: float, bw: float, bh: float, scale: float) -> void:
+	var c: CanvasItem = _ccanvas()
+	var spin_root: Dictionary = payload.get("head_spin_state", {})
+
+	# --- VENT TURBINE / CONDENSER --------------------------------
+	# Two spinning inner copies (offset 45° from each other) under a
+	# static base plate. Matches `_draw_vent_turbine` / `_draw_vent_condenser`.
+	if block_data.id == &"vent_turbine" or block_data.id == &"vent_condenser":
+		var is_turbine: bool = block_data.id == &"vent_turbine"
+		var inner_tex: Texture2D = _vent_turbine_inner_texture if is_turbine else _vent_condenser_inner_texture
+		var base_tex: Texture2D = _vent_turbine_base_texture if is_turbine else _vent_condenser_base_texture
+		var sub: Dictionary = spin_root.get("vent_turbine" if is_turbine else "vent_condenser", {})
+		var spin_angle: float = float(sub.get("angle", 0.0))
+		var size := Vector2(bw, bh)
+		# Apply the held transform once; everything below is in local space.
+		c.draw_set_transform(pos, visual_angle, Vector2(scale, scale))
+		if inner_tex:
+			# Two interleaved discs, same `angle` so they stay locked.
+			c.draw_set_transform(pos, visual_angle + spin_angle, Vector2(scale, scale))
+			c.draw_texture_rect(inner_tex, Rect2(-size * 0.5, size), false)
+			c.draw_set_transform(pos, visual_angle + spin_angle + PI / 4.0, Vector2(scale, scale))
+			c.draw_texture_rect(inner_tex, Rect2(-size * 0.5, size), false)
+		if base_tex:
+			c.draw_set_transform(pos, visual_angle, Vector2(scale, scale))
+			c.draw_texture_rect(base_tex, Rect2(-size * 0.5, size), false)
+		c.draw_set_transform(Vector2.ZERO, 0.0)
+		return
+
+	# --- WALL CRUSHER / GRINDER ----------------------------------
+	# Body sprite first, then `head_count` heads pinned along the
+	# block's local front edge. The bake's visual_angle rotates the
+	# block as a whole; head positions are stamped in the held block's
+	# local frame (which assumes rotation 0 = front along +X).
+	if block_data.tags.has("crusher_heads") or block_data.tags.has("grinder_heads"):
+		# Body sprite first (top_sprite, or icon as fallback). Centered
+		# at pos and rotated by visual_angle so the held block tumbles
+		# with the grabber.
+		var body_tex: Texture2D = block_data.top_sprite if block_data.top_sprite else block_data.icon
+		if body_tex:
+			c.draw_set_transform(pos, visual_angle, Vector2(scale, scale))
+			c.draw_texture_rect(body_tex, Rect2(-bw * 0.5, -bh * 0.5, bw, bh), false)
+			c.draw_set_transform(Vector2.ZERO, 0.0)
+		var is_grinder: bool = block_data.tags.has("grinder_heads")
+		var head_tex: Texture2D = _grinder_head_texture if is_grinder else _crusher_head_texture
+		if head_tex == null:
+			return
+		var crusher_sub: Dictionary = spin_root.get("crusher", {})
+		var gs: float = float(main.GRID_SIZE)
+		# Number of front-edge cells when rotation = 0 is the block's
+		# Y dim (front faces +X, edge runs along +Y). Each head sits at
+		# the body's right edge, vertically along the front.
+		var head_count: int = block_data.grid_size.y
+		var head_world_size: float = gs * 0.75
+		var head_size := Vector2(head_world_size, head_world_size)
+		var edge_mid: float = (float(head_count) - 1.0) * 0.5
+		for i in range(head_count):
+			var angle_i: float = float(crusher_sub.get("angle_%d" % i, 0.0))
+			# Local position of head i, relative to block CENTER, in the
+			# block's rot=0 frame. Front edge x = (grid_size.x/2 - 0.5)*gs.
+			# Heads centered on each front cell along Y, with the same
+			# 0.1×lateral-tiles edge squeeze the placed render uses.
+			var local_x: float = (float(block_data.grid_size.x) / 2.0 - 0.5) * gs
+			var local_y: float = (float(i) + 0.5 - float(block_data.grid_size.y) / 2.0) * gs
+			var lateral_tiles: float = float(i) - edge_mid
+			local_y -= lateral_tiles * gs * 0.1
+			c.draw_set_transform(pos, visual_angle, Vector2(scale, scale))
+			# Compose local pos × head rotation by translating the
+			# transform: re-set transform centered on the head's local
+			# position, with the held block's visual rotation PLUS the
+			# head's own spin angle.
+			var head_world: Vector2 = pos + Vector2(local_x, local_y).rotated(visual_angle) * scale
+			c.draw_set_transform(head_world, visual_angle + angle_i, Vector2(scale, scale))
+			c.draw_texture_rect(head_tex, Rect2(-head_size * 0.5, head_size), false)
+		c.draw_set_transform(Vector2.ZERO, 0.0)
+		return
+
+
 func _draw_crane_payload(payload: Dictionary, pos: Vector2, angle: float, gs: float, scale: float) -> void:
 	if payload == null or payload.is_empty():
 		return
@@ -7713,15 +9449,27 @@ func _draw_crane_payload(payload: Dictionary, pos: Vector2, angle: float, gs: fl
 		if block_data.tags.has("shaft"):
 			visual_angle += PI / 2.0
 		var is_turret: bool = block_data.is_turret() and block_data.turret_head_sprite != null
+		# Block types with dynamic per-frame layers (vent turbine /
+		# condenser spin, crusher / grinder heads) skip the static
+		# composite bake — that bake would freeze the inner blade at
+		# a single angle and drop the heads entirely, making picked-
+		# up versions look broken. We layer them manually below using
+		# the captured spin state in `payload.head_spin_state`.
+		var has_dyn_layers: bool = (block_data.id == &"vent_turbine") \
+			or (block_data.id == &"vent_condenser") \
+			or block_data.tags.has("crusher_heads") \
+			or block_data.tags.has("grinder_heads")
 		# Turrets need head positions to come from the saved aim angles,
 		# not the rot=0 bake — otherwise the heads "reset" to a neutral
 		# pose the moment the crane closes. Bake covers chassis-only
 		# blocks (cores, vents); turrets fall through to icon + manual
 		# head overlay below.
 		var composite_info: Dictionary = {}
-		if not is_turret:
+		if not is_turret and not has_dyn_layers:
 			composite_info = _request_preview_composite(block_data.id, 0)
-		if not composite_info.is_empty():
+		if has_dyn_layers:
+			_draw_held_dynamic_block(payload, block_data, pos, visual_angle, bw, bh, scale)
+		elif not composite_info.is_empty():
 			var rs: Vector2 = composite_info["rect_size"]
 			c.draw_set_transform(pos, visual_angle, Vector2(scale, scale))
 			c.draw_texture_rect(composite_info["tex"], Rect2(-rs.x / 2.0, -rs.y / 2.0, rs.x, rs.y), false, Color(1, 1, 1, 1.0))
@@ -7829,10 +9577,26 @@ func _draw_cable_links(canvas: CanvasItem) -> void:
 	var gs: float = main.GRID_SIZE
 	var half_tile := Vector2(gs / 2.0, gs / 2.0)
 	var cable_tint := Color(1.0, 1.0, 1.0, 1.0)
-	var wire_scale := 1.0
-	var tex_w: float = 15.0 * main.SPRITE_SCALE_FACTOR
-	var tex_h: float = _wire_texture.get_height()
-	var draw_w: float = tex_w * wire_scale
+	# Cable is drawn at the texture's NATIVE pixel resolution — source
+	# rect and destination rect always match 1:1, so no axis gets
+	# stretched. Tiling does the heavy lifting:
+	#   * Cross-cable width: `draw_w` is chosen as 2 × native_w so we
+	#     show TWO complete copies of the texture across the cable's
+	#     thickness. Source rect is `draw_w` wide (in texture pixels)
+	#     and `texture_repeat = ENABLED` wraps the second copy in
+	#     automatically.
+	#   * Along the length: each tile is exactly native_h tall in both
+	#     source and destination. A 600-px cable shows 6 tiles laid
+	#     end-to-end at full native scale, so the texture's pattern
+	#     visibly repeats instead of appearing as one giant stretched
+	#     image.
+	var tex_native_w: float = _wire_texture.get_width()
+	var tex_native_h: float = _wire_texture.get_height()
+	# 2× native_w gives roughly the same visible width as the previous
+	# 15 × SPRITE_SCALE_FACTOR constant while keeping the tiling clean.
+	var draw_w: float = tex_native_w * 2.0
+	var hw: float = draw_w / 2.0
+	var tile_world_h: float = tex_native_h
 	for pair in power_sys.cable_connections:
 		var ca: Vector2i = pair[0]
 		var cb: Vector2i = pair[1]
@@ -7863,15 +9627,25 @@ func _draw_cable_links(canvas: CanvasItem) -> void:
 			continue
 		var forward: Vector2 = dir / length
 		var angle: float = forward.angle() - PI / 2.0
-		var hw: float = draw_w / 2.0
-		var segments: int = ceili(length / tex_h)
+		var segments: int = ceili(length / tile_world_h)
 		for i in range(segments):
-			var t0: float = i * tex_h
-			var this_len: float = minf(tex_h, length - t0)
-			var center: Vector2 = wa + forward * (t0 + this_len / 2.0)
+			var t0: float = i * tile_world_h
+			var this_world_h: float = minf(tile_world_h, length - t0)
+			# Source rect matches the destination 1:1 on both axes so
+			# nothing gets stretched. Width samples `draw_w` from a
+			# native-width texture — texture_repeat wraps it so two
+			# complete copies appear side-by-side. Height samples
+			# `this_world_h` from a native-height texture; for full
+			# tiles that's exactly the native height, for the final
+			# partial tile it's the remaining stub.
+			var center: Vector2 = wa + forward * (t0 + this_world_h / 2.0)
 			canvas.draw_set_transform(center, angle)
-			var src := Rect2(0, 0, tex_w, this_len)
-			canvas.draw_texture_rect_region(_wire_texture, Rect2(-hw, -this_len / 2.0, draw_w, this_len), src, cable_tint)
+			var src := Rect2(0, 0, draw_w, this_world_h)
+			canvas.draw_texture_rect_region(
+				_wire_texture,
+				Rect2(-hw, -this_world_h / 2.0, draw_w, this_world_h),
+				src, cable_tint,
+			)
 			canvas.draw_set_transform(Vector2.ZERO, 0.0)
 
 
@@ -7912,12 +9686,15 @@ func _draw_links() -> void:
 	# overlay calls it with itself as the target canvas.
 
 	# --- Mindustry-style linking highlights ---
-	# Colors describe ROLE in the link, not which side was clicked:
-	#   yellow = INPUT  (pair[0], the block that initiated the link)
-	#   blue   = OUTPUT (pair[1], the partner)
-	# So clicking either end of an existing pair shows the same coloring.
-	# When a block is selected with no existing link yet, paint it yellow
-	# (it's about to become the input of a new link).
+	# Color encodes the role(s) the block plays across its CURRENT
+	# pair memberships, so the player can see at a glance which side
+	# of every link a bridge sits on. Independent of which side the
+	# player clicked — the same coloring shows on both ends.
+	#   BLUE   = source / input only (block sends, doesn't receive)
+	#   YELLOW = destination / output only (block receives, doesn't send)
+	#   GREEN  = both roles (at least one outgoing AND one incoming)
+	# Bridges support multi-link (duct: 3+3), so this set walks EVERY
+	# pair touching `link_source` rather than just the first.
 	if link_source == Vector2i(-1, -1):
 		return
 
@@ -7925,18 +9702,12 @@ func _draw_links() -> void:
 	if src_data == null:
 		return
 
-	# Find the pair this block belongs to so we know which side is input
-	# vs output. Falls back to "no pair yet" if it's a brand-new selection.
-	var input_anchor: Vector2i = link_source
-	var output_anchor: Vector2i = Vector2i(-1, -1)
-	if power_sys and "linked_pairs" in power_sys:
-		for pair in power_sys.linked_pairs:
-			var pa: Vector2i = main.building_origins.get(pair[0], pair[0])
-			var pb: Vector2i = main.building_origins.get(pair[1], pair[1])
-			if pa == link_source or pb == link_source:
-				input_anchor = pa
-				output_anchor = pb
-				break
+	var blue_fill := Color(0.3, 0.7, 1.0, 0.35)
+	var blue_outline := Color(0.5, 0.85, 1.0, 0.9)
+	var yellow_fill := Color(1.0, 0.85, 0.2, 0.35)
+	var yellow_outline := Color(1.0, 0.95, 0.4, 0.9)
+	var green_fill := Color(0.35, 0.95, 0.45, 0.35)
+	var green_outline := Color(0.55, 1.0, 0.6, 0.9)
 
 	var draw_block_highlight := func(a: Vector2i, fill: Color, outline: Color):
 		var bd: BlockData = Registry.get_block(main.placed_buildings.get(a, &""))
@@ -7950,14 +9721,43 @@ func _draw_links() -> void:
 		draw_rect(Rect2(rp, Vector2(bw, bh)), fill, true)
 		draw_rect(Rect2(rp, Vector2(bw, bh)), outline, false, 2.0)
 
-	var yellow_fill := Color(1.0, 0.85, 0.2, 0.35)
-	var yellow_outline := Color(1.0, 0.95, 0.4, 0.9)
-	var blue_fill := Color(0.3, 0.7, 1.0, 0.35)
-	var blue_outline := Color(0.5, 0.85, 1.0, 0.9)
+	# Resolve role colors for one anchor. Walks linked_pairs ONCE per
+	# anchor — cheap given bridges cap at 6 links each.
+	var role_color_for := func(anchor: Vector2i) -> Array:
+		var has_out := false
+		var has_in := false
+		if power_sys and "linked_pairs" in power_sys:
+			for pair in power_sys.linked_pairs:
+				if pair[0] == anchor:
+					has_out = true
+				elif pair[1] == anchor:
+					has_in = true
+				if has_out and has_in:
+					break
+		if has_out and has_in:
+			return [green_fill, green_outline]
+		if has_out:
+			return [blue_fill, blue_outline]
+		if has_in:
+			return [yellow_fill, yellow_outline]
+		# Brand-new selection with no links yet — paint as a
+		# pending-source so the player sees what they just clicked.
+		return [blue_fill, blue_outline]
 
-	draw_block_highlight.call(input_anchor, yellow_fill, yellow_outline)
-	if output_anchor != Vector2i(-1, -1):
-		draw_block_highlight.call(output_anchor, blue_fill, blue_outline)
+	# Collect every anchor connected to link_source (plus link_source
+	# itself) and paint each with its own role-derived color.
+	var to_highlight: Dictionary = {link_source: true}
+	if power_sys and "linked_pairs" in power_sys:
+		for pair in power_sys.linked_pairs:
+			var pa: Vector2i = main.building_origins.get(pair[0], pair[0])
+			var pb: Vector2i = main.building_origins.get(pair[1], pair[1])
+			if pa == link_source:
+				to_highlight[pb] = true
+			elif pb == link_source:
+				to_highlight[pa] = true
+	for a in to_highlight:
+		var colors: Array = role_color_for.call(a)
+		draw_block_highlight.call(a, colors[0], colors[1])
 
 	# Dashed yellow line from source to the mouse so the player can see
 	# where their next click will go.
@@ -8001,7 +9801,7 @@ func _draw_dashed_line(from: Vector2, to: Vector2, color: Color, width: float, d
 # =========================
 
 func _draw_schematic_rect() -> void:
-	if not _schematic_dragging and not _schematic_confirmed:
+	if not _schematic_dragging:
 		return
 	var min_x: int = mini(_schematic_start.x, _schematic_end.x)
 	var min_y: int = mini(_schematic_start.y, _schematic_end.y)
@@ -8014,11 +9814,6 @@ func _draw_schematic_rect() -> void:
 	var rect_pos: Vector2 = top_left + offset
 	draw_rect(Rect2(rect_pos, Vector2(w, h)), Color(1, 0.9, 0, 0.2), true)
 	draw_rect(Rect2(rect_pos, Vector2(w, h)), Color(1, 0.9, 0, 0.6), false, 2.0)
-	if _schematic_confirmed:
-		# Draw "Press Enter to save" text
-		var font: Font = ThemeDB.fallback_font
-		var text_pos: Vector2 = rect_pos + Vector2(4, -6)
-		draw_string(font, text_pos, "Press Enter to save schematic", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 0.9, 0.3))
 
 
 func _capture_schematic_rect(from: Vector2i, to: Vector2i) -> Dictionary:
@@ -8051,11 +9846,202 @@ func _capture_schematic_rect(from: Vector2i, to: Vector2i) -> Dictionary:
 	return {"blocks": blocks, "rotation": rotation, "width": w, "height": h}
 
 
-func _show_schematic_save_dialog() -> void:
+## Records that the block at `anchor` was just flipped from DERELICT
+## to LUMINA so the draw pass can paint a brief yellow flash over it.
+## Same visual cadence as the launch-animation block reveal but
+## without the white kicker — just yellow → fade to normal.
+func register_conversion_flash(anchor: Vector2i) -> void:
+	_conversion_flash[anchor] = Time.get_ticks_msec() / 1000.0
+	queue_redraw()
+
+
+## Returns the tint to composite over `anchor` for the conversion
+## flash, or `Color(0,0,0,0)` when the flash is done / not active.
+## RGB picks the colour, alpha picks the strength — drawn over the
+## block's painted sprite in pass 4.
+func get_conversion_flash_tint(anchor: Vector2i) -> Color:
+	if not _conversion_flash.has(anchor):
+		return Color(0, 0, 0, 0)
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var dt: float = now - float(_conversion_flash[anchor])
+	if dt >= _CONVERSION_FLASH_FADE:
+		_conversion_flash.erase(anchor)
+		return Color(0, 0, 0, 0)
+	if dt < _CONVERSION_FLASH_YELLOW:
+		# Full-strength yellow band.
+		return Color(1.0, 0.85, 0.2, 0.85)
+	# Fade band: yellow alpha drops linearly to 0.
+	var fade_t: float = (dt - _CONVERSION_FLASH_YELLOW) \
+			/ maxf(_CONVERSION_FLASH_FADE - _CONVERSION_FLASH_YELLOW, 0.001)
+	return Color(1.0, 0.85, 0.2, lerpf(0.85, 0.0, fade_t))
+
+
+## Pushes a unit-payload dict directly onto the block anchored at `anchor`.
+## Handles three accept paths:
+##   • payload / freight conveyors → logistics.payload_items[anchor]
+##   • mass drivers                → logistics.mass_driver_state[anchor].payload
+##   • deconstructors              → logistics.deconstructor_state[anchor]
+## Returns true when the payload was accepted.
+func inject_unit_as_payload(anchor: Vector2i, payload: Dictionary) -> bool:
+	if _logistics == null:
+		return false
+	if not main.placed_buildings.has(anchor):
+		return false
+	var bid: StringName = main.placed_buildings[anchor]
+	var bdata = Registry.get_block(bid)
+	if bdata == null:
+		return false
+
+	# Deconstructor: occupies its `deconstructor_state` slot with a fresh
+	# payload. Skip when something's already being processed.
+	if bdata.tags.has("deconstructor"):
+		if not _logistics.deconstructor_state.has(anchor):
+			_logistics.deconstructor_state[anchor] = {
+				"payload": null, "phase": "idle", "timer": 0.0, "pending_items": {},
+			}
+		var dst: Dictionary = _logistics.deconstructor_state[anchor]
+		if dst.get("payload") != null:
+			return false
+		var decon_time := 2.0
+		dst["payload"] = payload
+		dst["phase"] = "deconstructing"
+		dst["timer"] = decon_time
+		return true
+
+	# Mass driver: park the payload in `mass_driver_state[anchor].payload`
+	# and let the rotate→fire pipeline pick it up next tick.
+	if bdata.tags.has("mass_driver"):
+		if not _logistics.mass_driver_state.has(anchor):
+			_logistics.mass_driver_state[anchor] = {}
+		var mst: Dictionary = _logistics.mass_driver_state[anchor]
+		if mst.get("payload") != null:
+			return false
+		mst["payload"] = payload
+		mst["phase"] = mst.get("phase", "idle")
+		return true
+
+	# Payload / freight conveyor: drop straight into payload_items keyed
+	# by anchor. Skip when the slot is already occupied.
+	if (bdata.tags.has("payload") or bdata.tags.has("freight")) and bdata.transport_speed > 0:
+		if _logistics.payload_items.has(anchor):
+			return false
+		_logistics.payload_items[anchor] = {
+			"payload_data": payload,
+			"progress": 0.0,
+			"entry_dir": -1,
+		}
+		return true
+
+	return false
+
+
+func _on_main_building_selected(block_id: StringName) -> void:
+	if block_id != &"" and _placing_schematic:
+		_placing_schematic = false
+		queue_redraw()
+
+
+func _enter_paste_mode_from_rect(from: Vector2i, to: Vector2i) -> void:
+	var captured: Dictionary = _capture_schematic_rect(from, to)
+	if captured["blocks"].is_empty():
+		return
+	start_schematic_placement(captured)
+
+
+func _flip_rot_x(rot: int) -> int:
+	match rot:
+		1: return 3
+		3: return 1
+		_: return rot
+
+
+func _flip_rot_y(rot: int) -> int:
+	match rot:
+		0: return 2
+		2: return 0
+		_: return rot
+
+
+func _block_effective_size(block_id: StringName, rot: int) -> Vector2i:
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return Vector2i(1, 1)
+	var gw: int = int(data.grid_size.x)
+	var gh: int = int(data.grid_size.y)
+	if rot == 1 or rot == 3:
+		return Vector2i(gh, gw)
+	return Vector2i(gw, gh)
+
+
+func _flip_schematic_placement_x() -> void:
+	if not _placing_schematic or _schematic_place_blocks.is_empty():
+		return
+	var new_blocks: Dictionary = {}
+	var new_rot: Dictionary = {}
+	var W: int = _schematic_place_width
+	for rel_pos in _schematic_place_blocks:
+		var bid: StringName = _schematic_place_blocks[rel_pos]
+		var rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
+		var eff: Vector2i = _block_effective_size(bid, rot)
+		var new_pos := Vector2i(W - rel_pos.x - eff.x, rel_pos.y)
+		var new_r := _flip_rot_x(rot)
+		new_blocks[new_pos] = bid
+		if new_r != 0:
+			new_rot[new_pos] = new_r
+	_schematic_place_blocks = new_blocks
+	_schematic_place_rotation = new_rot
+	queue_redraw()
+
+
+func _flip_schematic_placement_y() -> void:
+	if not _placing_schematic or _schematic_place_blocks.is_empty():
+		return
+	var new_blocks: Dictionary = {}
+	var new_rot: Dictionary = {}
+	var H: int = _schematic_place_height
+	for rel_pos in _schematic_place_blocks:
+		var bid: StringName = _schematic_place_blocks[rel_pos]
+		var rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
+		var eff: Vector2i = _block_effective_size(bid, rot)
+		var new_pos := Vector2i(rel_pos.x, H - rel_pos.y - eff.y)
+		var new_r := _flip_rot_y(rot)
+		new_blocks[new_pos] = bid
+		if new_r != 0:
+			new_rot[new_pos] = new_r
+	_schematic_place_blocks = new_blocks
+	_schematic_place_rotation = new_rot
+	queue_redraw()
+
+
+func _capture_from_placement_buffer() -> Dictionary:
+	var blocks: Dictionary = {}
+	var rotation: Dictionary = {}
+	for rel_pos in _schematic_place_blocks:
+		var bid: StringName = _schematic_place_blocks[rel_pos]
+		var key: String = "%d,%d" % [rel_pos.x, rel_pos.y]
+		blocks[key] = String(bid)
+		var rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
+		if rot != 0:
+			rotation[key] = rot
+	return {"blocks": blocks, "rotation": rotation, "width": _schematic_place_width, "height": _schematic_place_height}
+
+
+func _show_schematic_save_dialog_from_placement() -> void:
+	if not _placing_schematic or _schematic_place_blocks.is_empty():
+		return
+	var captured: Dictionary = _capture_from_placement_buffer()
+	_show_schematic_save_dialog(captured)
+
+
+func _show_schematic_save_dialog(captured_override = null) -> void:
 	if _schematic_popup and is_instance_valid(_schematic_popup):
 		_schematic_popup.queue_free()
 
-	var captured: Dictionary = _capture_schematic_rect(_schematic_start, _schematic_end)
+	var captured: Dictionary
+	if captured_override != null:
+		captured = captured_override
+	else:
+		captured = _capture_schematic_rect(_schematic_start, _schematic_end)
 	if captured["blocks"].is_empty():
 		_schematic_mode = false
 		_schematic_confirmed = false
@@ -8283,7 +10269,8 @@ func _execute_schematic_placement() -> void:
 		if main.place_building_for_schematic(grid_pos, block_id, rot):
 			placed += 1
 	print("BuildingSystem: Placed %d/%d schematic blocks." % [placed, _schematic_place_blocks.size()])
-	_placing_schematic = false
+	# Keep _placing_schematic true so the player can drop more copies
+	# (cmd-c / cmd-v style). Esc exits the paste mode.
 	queue_redraw()
 
 
@@ -8523,6 +10510,13 @@ func _tick_held_building(pdict: Dictionary, delta: float, power_sys) -> void:
 	if data == null:
 		return
 
+	# Head-spin inertia. Eases every captured head's velocity toward 0
+	# (the held block isn't producing) so the spin-down continues in
+	# transit rather than freezing instantly at pickup.
+	var spin_snap: Dictionary = pdict.get("head_spin_state", {})
+	if not spin_snap.is_empty():
+		_tick_spin_state(spin_snap, delta)
+
 	# Battery drain. Power-only blocks (no consumption) skip the
 	# drain entirely; they just sit there happily.
 	var power_eff: float = 1.0
@@ -8626,6 +10620,13 @@ func _tick_autonomous_cranes(delta: float) -> void:
 		# Skip if not a real placed crane any more.
 		if not main.placed_buildings.has(anchor):
 			continue
+		# Drain water booster first so the power calc below sees the
+		# right "is boost active" answer for the bump-up.
+		_drain_crane_water_boost(anchor, delta)
+		# Update dynamic power BEFORE the player-controlled gate so even
+		# manually-piloted cranes draw the right power per frame (their
+		# arm/grabber motion still costs real watts).
+		_update_crane_dynamic_power(anchor)
 		# Player-controlled cranes are driven by UnitManager exclusively.
 		if unit_mgr and unit_mgr.controlled_type == "crane" and unit_mgr.controlled_entity == anchor:
 			continue
@@ -8827,6 +10828,11 @@ func _crane_payload_matches_filter(payload: Dictionary, spec: Dictionary) -> boo
 
 
 func _crane_autonomous_pickup(anchor: Vector2i, state: Dictionary, head_pos: Vector2, spec: Dictionary) -> void:
+	# Unpowered cranes can't actuate the grabber — same gate as the
+	# arm motion. Without this, a head already parked on the target
+	# would still pick up the moment the player builds a powered link.
+	if _crane_speed_multiplier(anchor) <= 0.0:
+		return
 	var kind: String = spec.get("kind", "")
 	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
@@ -8892,6 +10898,9 @@ func _crane_autonomous_pickup(anchor: Vector2i, state: Dictionary, head_pos: Vec
 		state["grabber_open"] = false
 
 func _crane_autonomous_drop(anchor: Vector2i, state: Dictionary, head_pos: Vector2, spec: Dictionary) -> void:
+	# Same power gate as the pickup helper.
+	if _crane_speed_multiplier(anchor) <= 0.0:
+		return
 	var kind: String = spec.get("kind", "")
 	var payload: Dictionary = state["held_payload"]
 	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
@@ -8957,12 +10966,135 @@ func _crane_autonomous_drop(anchor: Vector2i, state: Dictionary, head_pos: Vecto
 
 
 ## Updates crane arm angle and extension toward target at constant speed.
+# Per-payload-crane dynamic power model. The base 10 W chassis idle is
+# always pinned, with extra draws layered on for whatever the crane is
+# actively doing this frame:
+#   +15 W rotating the arm  (arm_angle changed)
+#   +10 W extending/retracting (arm_extension changed)
+#   + 5 W rotating the grabber (grabber_angle changed)
+# Pickup and drop are EVENTS, not frame states — so on the frame a
+# pickup completes we stash a short burst whose magnitude equals
+# `_mass_driver_power_for_payload` (same weight formula MDs use). The
+# drop burst is a flat +10 W for the same window. The bursts taper to 0
+# over CRANE_POWER_BURST_FRAMES so they're visible in the power graph.
+const CRANE_POWER_BURST_FRAMES := 30   # ~0.5 s at 60 fps
+func _update_crane_dynamic_power(anchor: Vector2i) -> void:
+	var ps = _power_sys_ref()
+	if ps == null:
+		return
+	if not crane_states.has(anchor):
+		return
+	var state: Dictionary = crane_states[anchor]
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null:
+		return
+	# Inactive cranes (under construction / decon / hidden) draw nothing
+	# and we clear any leftover dynamic override so the chassis baseline
+	# doesn't keep haunting the network.
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		if ps.has_method("clear_dynamic_power_use"):
+			ps.clear_dynamic_power_use(anchor)
+		return
+
+	var draw: float = 10.0  # Idle baseline.
+
+	# Arm rotation: 15 W while the arm angle is changing this frame.
+	var cur_arm_angle: float = float(state.get("arm_angle", 0.0))
+	var prev_arm_angle: float = float(state.get("_pwr_prev_arm_angle", cur_arm_angle))
+	if not is_equal_approx(cur_arm_angle, prev_arm_angle):
+		draw += 15.0
+	state["_pwr_prev_arm_angle"] = cur_arm_angle
+
+	# Arm extension/retraction: 10 W while the extension is moving.
+	var cur_ext: float = float(state.get("arm_extension", 0.0))
+	var prev_ext: float = float(state.get("_pwr_prev_arm_extension", cur_ext))
+	if not is_equal_approx(cur_ext, prev_ext):
+		draw += 10.0
+	state["_pwr_prev_arm_extension"] = cur_ext
+
+	# Grabber rotation: 5 W while grabber_angle is moving.
+	var cur_g_angle: float = float(state.get("grabber_angle", 0.0))
+	var prev_g_angle: float = float(state.get("_pwr_prev_grabber_angle", cur_g_angle))
+	if not is_equal_approx(cur_g_angle, prev_g_angle):
+		draw += 5.0
+	state["_pwr_prev_grabber_angle"] = cur_g_angle
+
+	# Pickup / drop event detection. held_payload transitioning null →
+	# non-null is a pickup; non-null → null is a drop. We don't peek
+	# into the pickup/drop helper sites — the transition tells us
+	# everything we need, AND it covers manual / autonomous / unit-mgr
+	# paths uniformly.
+	var had_payload: bool = bool(state.get("_pwr_prev_held", false))
+	var has_payload_now: bool = state.get("held_payload", null) != null
+	if has_payload_now and not had_payload:
+		# Pickup just happened. Snapshot weight-based burst from the
+		# payload the crane is now holding.
+		var p_burst: int = _payload_pickup_power(state.get("held_payload"))
+		state["_pwr_pickup_burst"] = p_burst
+		state["_pwr_pickup_burst_remain"] = CRANE_POWER_BURST_FRAMES
+	elif had_payload and not has_payload_now:
+		state["_pwr_drop_burst_remain"] = CRANE_POWER_BURST_FRAMES
+	state["_pwr_prev_held"] = has_payload_now
+
+	# Drain active bursts each frame.
+	var pickup_remain: int = int(state.get("_pwr_pickup_burst_remain", 0))
+	if pickup_remain > 0:
+		draw += float(state.get("_pwr_pickup_burst", 0))
+		state["_pwr_pickup_burst_remain"] = pickup_remain - 1
+	var drop_remain: int = int(state.get("_pwr_drop_burst_remain", 0))
+	if drop_remain > 0:
+		draw += 10.0
+		state["_pwr_drop_burst_remain"] = drop_remain - 1
+
+	# Water booster: same +50 % multiplier the speed gets, applied to
+	# the total draw so a boosted crane costs 1.5× watts for 1.5× speed.
+	if _crane_water_boost_active(anchor):
+		draw *= WATER_BOOST_MULT
+	if ps.has_method("set_dynamic_power_use"):
+		ps.set_dynamic_power_use(anchor, draw)
+
+
+## Mirrors `LogisticsSystem._mass_driver_power_for_payload` — weight-
+## based pickup cost. Kept local to BuildingSystem so the cranes don't
+## couple to LogisticsSystem just for this one read.
+##   tile weight  = 8 per tile (or 8 for a unit)
+##   item weight  = 0.5 per stored item
+##   fluid weight = 1.0 per stored fluid unit
+##   power = floor(weight / 2)
+func _payload_pickup_power(payload: Variant) -> int:
+	if payload == null or not (payload is Dictionary):
+		return 0
+	var p: Dictionary = payload
+	var weight: float = 0.0
+	var ptype: String = String(p.get("type", ""))
+	if ptype == "building":
+		var sx: int = int(p.get("grid_size_x", 1))
+		var sy: int = int(p.get("grid_size_y", 1))
+		weight += 8.0 * float(sx) * float(sy)
+	elif ptype == "unit":
+		weight += 8.0
+	var stored_items: Dictionary = p.get("stored_items", {})
+	for it_id in stored_items:
+		weight += 0.5 * float(int(stored_items[it_id]))
+	var stored_fluids: Dictionary = p.get("stored_fluids", {})
+	for fl_id in stored_fluids:
+		weight += float(stored_fluids[fl_id])
+	return int(floor(weight / 2.0))
+
+
 func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> void:
 	if not crane_states.has(anchor):
 		return
 	var state: Dictionary = crane_states[anchor]
 	var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
 	if data == null:
+		return
+	# Cranes can't operate without power. A starved network freezes
+	# arm motion entirely; a brownout (efficiency in (0, 1)) slows the
+	# motion proportionally — same gating model the drill / factory
+	# loops use.
+	var speed_mult: float = _crane_speed_multiplier(anchor)
+	if speed_mult <= 0.0:
 		return
 	var gs: float = main.GRID_SIZE
 	var base: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
@@ -8972,9 +11104,11 @@ func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> 
 	var target_dist: float = clampf(to_target.length(), CRANE_ARM_MIN_TOTAL, max_reach)
 	var target_angle: float = to_target.angle() if to_target.length() > 1.0 else state["arm_angle"]
 
+	var eff_delta: float = delta * speed_mult
+
 	# Rotate at constant speed
 	var angle_diff: float = wrapf(target_angle - state["arm_angle"], -PI, PI)
-	var max_rotate: float = CRANE_ROTATE_SPEED * delta
+	var max_rotate: float = CRANE_ROTATE_SPEED * eff_delta
 	if absf(angle_diff) <= max_rotate:
 		state["arm_angle"] = target_angle
 	else:
@@ -8982,11 +11116,77 @@ func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> 
 
 	# Extend/retract at constant speed
 	var ext_diff: float = target_dist - state["arm_extension"]
-	var max_extend: float = CRANE_EXTEND_SPEED * delta
+	var max_extend: float = CRANE_EXTEND_SPEED * eff_delta
 	if absf(ext_diff) <= max_extend:
 		state["arm_extension"] = target_dist
 	else:
 		state["arm_extension"] += signf(ext_diff) * max_extend
+
+
+## Combined motion multiplier for a crane this frame:
+##   power_eff  — 0 when starved, 1 at full network supply, fractional
+##                during a brownout. Scales every motion (and the
+##                AI's pickup/drop arrive check via the slower arm).
+##   water boost — when the crane has water in its block_storage, a
+##                 +50 % speed multiplier kicks in AND the water is
+##                 drained at WATER_BOOST_DRAIN_PER_SEC. Power draw
+##                 is bumped by the same +50 % factor in
+##                 `_update_crane_dynamic_power`, so a fully-fed
+##                 booster costs 1.5× watts for 1.5× speed.
+const WATER_BOOST_MULT := 1.5
+const WATER_BOOST_DRAIN_PER_SEC := 0.5
+func _crane_speed_multiplier(anchor: Vector2i) -> float:
+	var ps = _power_sys_ref()
+	var eff: float = 1.0
+	if ps and ps.has_method("get_electrical_efficiency"):
+		eff = clampf(float(ps.get_electrical_efficiency(anchor)), 0.0, 1.0)
+	if eff <= 0.0:
+		return 0.0
+	var mult: float = eff
+	if _crane_water_boost_active(anchor):
+		mult *= WATER_BOOST_MULT
+	return mult
+
+
+## True iff this crane currently has water in its storage. Reading
+## stays cheap (single dict lookup); actual drainage happens in
+## `_drain_crane_water_boost` once per frame.
+func _crane_water_boost_active(anchor: Vector2i) -> bool:
+	if _logistics == null or not "block_storage" in _logistics:
+		return false
+	var storage: Dictionary = _logistics.block_storage.get(anchor, {})
+	var fluids: Dictionary = storage.get("fluids", {})
+	return float(fluids.get(&"mat_water", 0.0)) > 0.0
+
+
+## Drains the crane's water buffer at WATER_BOOST_DRAIN_PER_SEC while
+## the boost is active. Called from `_tick_autonomous_cranes` once per
+## crane per frame so the consumption rate is delta-accurate.
+func _drain_crane_water_boost(anchor: Vector2i, delta: float) -> void:
+	if _logistics == null or not "block_storage" in _logistics:
+		return
+	if not _logistics.block_storage.has(anchor):
+		return
+	var storage: Dictionary = _logistics.block_storage[anchor]
+	var fluids: Dictionary = storage.get("fluids", {})
+	var avail: float = float(fluids.get(&"mat_water", 0.0))
+	if avail <= 0.0:
+		return
+	# Only drain when motion actually consumed boost this frame — i.e.
+	# the network has any power at all. A fully-starved crane keeps
+	# its water (nothing to boost while frozen).
+	var ps = _power_sys_ref()
+	if ps and ps.has_method("get_electrical_efficiency") \
+			and float(ps.get_electrical_efficiency(anchor)) <= 0.0:
+		return
+	var consumed: float = WATER_BOOST_DRAIN_PER_SEC * delta
+	var remaining: float = maxf(avail - consumed, 0.0)
+	if remaining <= 0.0:
+		fluids.erase(&"mat_water")
+	else:
+		fluids[&"mat_water"] = remaining
+	storage["fluids"] = fluids
+	_logistics.block_storage[anchor] = storage
 
 
 ## Draws all crane telescoping arms and cross grabbers.
@@ -9058,8 +11258,6 @@ func _draw_crane_pose(state: Dictionary, data: BlockData, base: Vector2, gs: flo
 
 	var holding: bool = state.get("held_payload", null) != null
 	var cs: float = CRANE_GRABBER_SIZE * (0.7 if holding else 1.0)
-	var grabber_thickness: float = 6.0 * main.SPRITE_SCALE_FACTOR
-	var grabber_color := Color(0.6, 0.5, 0.2, 0.9)
 	var g_angle: float = float(state.get("grabber_angle", 0.0)) + angle_offset
 
 	var c: CanvasItem = _ccanvas()
@@ -9067,33 +11265,53 @@ func _draw_crane_pose(state: Dictionary, data: BlockData, base: Vector2, gs: flo
 	if holding:
 		_draw_crane_payload(state["held_payload"], grabber_pos, g_angle, gs, 1.0)
 
-	# Cross grabber UNDER the arm.
-	c.draw_set_transform(grabber_pos, g_angle)
-	c.draw_rect(Rect2(-cs, -grabber_thickness / 2.0, cs * 2, grabber_thickness), grabber_color, true)
-	c.draw_rect(Rect2(-grabber_thickness / 2.0, -cs, grabber_thickness, cs * 2), grabber_color, true)
-	c.draw_set_transform(Vector2.ZERO, 0.0)
+	# Cross grabber UNDER the arm. The head texture is a single bar
+	# (orange w/ a diamond), so we draw it twice — once at g_angle
+	# and once at g_angle + 90° — to form the cross. Each pass is a
+	# square sized to `cs * 2`; the bar art inside is naturally
+	# centered so the two passes form a symmetric +.
+	if _payload_crane_head_texture:
+		var head_size: float = cs * 2.0
+		var head_rect := Rect2(-head_size * 0.5, -head_size * 0.5, head_size, head_size)
+		c.draw_set_transform(grabber_pos, g_angle)
+		c.draw_texture_rect(_payload_crane_head_texture, head_rect, false)
+		c.draw_set_transform(grabber_pos, g_angle + PI / 2.0)
+		c.draw_texture_rect(_payload_crane_head_texture, head_rect, false)
+		c.draw_set_transform(Vector2.ZERO, 0.0)
 
-	# Arm segments ON TOP.
+	# Arm segments ON TOP. Texture is 128 wide × 512 tall — i.e. its
+	# LONG dimension is the Y axis. The arm itself extends along the
+	# local +X (after `draw_set_transform(center, angle)`), so we
+	# rotate the local frame by an extra −90° (`angle − PI/2`) and
+	# size the rect as (arm_width × seg_len) so the texture's long
+	# axis aligns with the arm direction without being squashed.
+	var arm_tex: Texture2D = _payload_crane_arm_texture
 	var c1: Vector2 = (base + seg1_end) / 2.0
-	c.draw_set_transform(c1, angle)
-	c.draw_rect(Rect2(-seg1_len / 2.0, -CRANE_ARM1_WIDTH / 2.0, seg1_len, CRANE_ARM1_WIDTH), Color(0.5, 0.5, 0.5, 0.85), true)
-	c.draw_rect(Rect2(-seg1_len / 2.0, -CRANE_ARM1_WIDTH / 2.0, seg1_len, CRANE_ARM1_WIDTH), Color(0.6, 0.6, 0.6, 0.3), false, 1.0)
+	if arm_tex:
+		c.draw_set_transform(c1, angle - PI / 2.0)
+		c.draw_texture_rect(arm_tex, Rect2(-CRANE_ARM1_WIDTH / 2.0, -seg1_len / 2.0, CRANE_ARM1_WIDTH, seg1_len), false)
+	else:
+		c.draw_set_transform(c1, angle)
+		c.draw_rect(Rect2(-seg1_len / 2.0, -CRANE_ARM1_WIDTH / 2.0, seg1_len, CRANE_ARM1_WIDTH), Color(0.5, 0.5, 0.5, 0.85), true)
 	c.draw_set_transform(Vector2.ZERO, 0.0)
 
 	var c2: Vector2 = (seg1_end + seg2_end) / 2.0
-	c.draw_set_transform(c2, angle)
-	c.draw_rect(Rect2(-seg2_len / 2.0, -CRANE_ARM2_WIDTH / 2.0, seg2_len, CRANE_ARM2_WIDTH), Color(0.42, 0.42, 0.42, 0.9), true)
-	c.draw_rect(Rect2(-seg2_len / 2.0, -CRANE_ARM2_WIDTH / 2.0, seg2_len, CRANE_ARM2_WIDTH), Color(0.55, 0.55, 0.55, 0.3), false, 1.0)
+	if arm_tex:
+		c.draw_set_transform(c2, angle - PI / 2.0)
+		c.draw_texture_rect(arm_tex, Rect2(-CRANE_ARM2_WIDTH / 2.0, -seg2_len / 2.0, CRANE_ARM2_WIDTH, seg2_len), false)
+	else:
+		c.draw_set_transform(c2, angle)
+		c.draw_rect(Rect2(-seg2_len / 2.0, -CRANE_ARM2_WIDTH / 2.0, seg2_len, CRANE_ARM2_WIDTH), Color(0.42, 0.42, 0.42, 0.9), true)
 	c.draw_set_transform(Vector2.ZERO, 0.0)
 
 	var c3: Vector2 = (seg2_end + seg3_end) / 2.0
-	c.draw_set_transform(c3, angle)
-	c.draw_rect(Rect2(-seg3_len / 2.0, -CRANE_ARM3_WIDTH / 2.0, seg3_len, CRANE_ARM3_WIDTH), Color(0.35, 0.35, 0.35, 0.95), true)
-	c.draw_rect(Rect2(-seg3_len / 2.0, -CRANE_ARM3_WIDTH / 2.0, seg3_len, CRANE_ARM3_WIDTH), Color(0.5, 0.5, 0.5, 0.3), false, 1.0)
+	if arm_tex:
+		c.draw_set_transform(c3, angle - PI / 2.0)
+		c.draw_texture_rect(arm_tex, Rect2(-CRANE_ARM3_WIDTH / 2.0, -seg3_len / 2.0, CRANE_ARM3_WIDTH, seg3_len), false)
+	else:
+		c.draw_set_transform(c3, angle)
+		c.draw_rect(Rect2(-seg3_len / 2.0, -CRANE_ARM3_WIDTH / 2.0, seg3_len, CRANE_ARM3_WIDTH), Color(0.35, 0.35, 0.35, 0.95), true)
 	c.draw_set_transform(Vector2.ZERO, 0.0)
-
-	# Base pivot circle.
-	c.draw_circle(base, 5.0, Color(0.6, 0.6, 0.6, 0.7))
 
 
 # =========================

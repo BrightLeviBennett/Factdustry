@@ -357,6 +357,49 @@ func _sum_internal_battery_units(net: Dictionary) -> float:
 	return total_ps / BATTERY_UNIT_PS
 
 
+## Burst spend across the entire network this cell belongs to. `amount_power`
+## is the burst size in raw power (not B). Drains from every internal
+## battery on the network proportionally to its remaining charge until the
+## demand is satisfied or all batteries are empty. Returns the actual
+## amount drained (may be less than `amount_power` if the network can't
+## cover the full draw). Use this for one-shot burst draws like a launchpad
+## launch — it gives the player a meaningful "needs a charged battery"
+## constraint without forcing every consumer to model burst behaviour.
+func try_burst_spend(grid_pos: Vector2i, amount_power: float) -> float:
+	if amount_power <= 0.0:
+		return 0.0
+	if not elec_cell_to_net.has(grid_pos):
+		return 0.0
+	var net_idx: int = elec_cell_to_net[grid_pos]
+	if net_idx < 0 or net_idx >= elec_networks.size():
+		return 0.0
+	var net: Dictionary = elec_networks[net_idx]
+	# Collect every unique anchor in the network that has a battery.
+	var anchors: Array = []
+	var charges: Dictionary = {}
+	var total: float = 0.0
+	for cell in net.get("cells", []):
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if charges.has(anchor):
+			continue
+		var c: float = float(_block_internal_battery.get(anchor, 0.0))
+		if c <= 0.0:
+			continue
+		anchors.append(anchor)
+		charges[anchor] = c
+		total += c
+	# Demand in power-seconds (we drain 1 second's worth of `amount_power`).
+	var demand: float = amount_power
+	if demand <= 0.0 or total <= 0.0:
+		return 0.0
+	var drained: float = minf(demand, total)
+	var ratio: float = drained / total
+	for anchor in anchors:
+		var c: float = float(charges[anchor])
+		_block_internal_battery[anchor] = c - c * ratio
+	return drained
+
+
 ## Public accessor — total stored B in the network the cell belongs to,
 ## along with the matching capacity. Used by the HUD's network panel.
 func get_network_total_internal_battery_units(grid_pos: Vector2i) -> Dictionary:
@@ -473,21 +516,33 @@ func get_electrical_network_info(grid_pos: Vector2i) -> Dictionary:
 ## Links two blocks together (e.g., overhead belts).
 ## Linked blocks share power networks as if adjacent.
 func link_blocks(pos_a: Vector2i, pos_b: Vector2i) -> void:
-	# Don't add duplicate links
+	# Reject EXACT same-direction duplicates only. The reverse pair
+	# (pos_b → pos_a) is a separate directional link — used by
+	# bridges that support both an outgoing and an incoming partner.
 	for pair in linked_pairs:
-		if (pair[0] == pos_a and pair[1] == pos_b) or \
-		   (pair[0] == pos_b and pair[1] == pos_a):
+		if pair[0] == pos_a and pair[1] == pos_b:
 			return
 	linked_pairs.append([pos_a, pos_b])
 	_networks_dirty = true
 
 
-## Removes a link between two blocks.
+## Removes a link between two blocks (in either direction).
 func unlink_blocks(pos_a: Vector2i, pos_b: Vector2i) -> void:
 	for i in range(linked_pairs.size() - 1, -1, -1):
 		var pair = linked_pairs[i]
 		if (pair[0] == pos_a and pair[1] == pos_b) or \
 		   (pair[0] == pos_b and pair[1] == pos_a):
+			linked_pairs.remove_at(i)
+	_networks_dirty = true
+
+
+## Removes only the directional pair (pos_a → pos_b). Used by bridges,
+## which can have separate links in each direction — unlinking the
+## outgoing leg must not also kill the incoming one.
+func unlink_directed(pos_a: Vector2i, pos_b: Vector2i) -> void:
+	for i in range(linked_pairs.size() - 1, -1, -1):
+		var pair = linked_pairs[i]
+		if pair[0] == pos_a and pair[1] == pos_b:
 			linked_pairs.remove_at(i)
 	_networks_dirty = true
 
@@ -500,6 +555,50 @@ func get_linked_partner(grid_pos: Vector2i) -> Variant:
 		if pair[1] == grid_pos:
 			return pair[0]
 	return null
+
+
+## Returns the position this bridge SENDS to (it's the source/input end
+## of a link, pair[0]). null if not linked outward. Bridges support up
+## to two roles per cell — one outgoing + one incoming — so callers
+## that care about direction should use these instead of the generic
+## `get_linked_partner`.
+func get_link_as_source(grid_pos: Vector2i) -> Variant:
+	for pair in linked_pairs:
+		if pair[0] == grid_pos:
+			return pair[1]
+	return null
+
+
+## Returns the position this bridge RECEIVES from (it's the
+## destination/output end of a link, pair[1]). null if not linked
+## inward.
+func get_link_as_destination(grid_pos: Vector2i) -> Variant:
+	for pair in linked_pairs:
+		if pair[1] == grid_pos:
+			return pair[0]
+	return null
+
+
+## All destinations this position sends to (every pair where it's
+## pair[0]). Empty array if none. Used by multi-output bridges
+## (duct bridge supports up to 3 outgoing partners).
+func get_links_as_source_all(grid_pos: Vector2i) -> Array:
+	var out: Array = []
+	for pair in linked_pairs:
+		if pair[0] == grid_pos:
+			out.append(pair[1])
+	return out
+
+
+## All sources this position receives from (every pair where it's
+## pair[1]). Empty array if none. Used by multi-input bridges
+## (duct bridge supports up to 3 incoming partners).
+func get_links_as_destination_all(grid_pos: Vector2i) -> Array:
+	var out: Array = []
+	for pair in linked_pairs:
+		if pair[1] == grid_pos:
+			out.append(pair[0])
+	return out
 
 
 # =========================
@@ -876,6 +975,16 @@ func _get_effective_elec_gen(grid_pos: Vector2i, data: BlockData) -> float:
 		# (the brief intra-cycle settlement step) — without the second,
 		# the generator visibly blinks to 0 power between fuel ticks.
 		if phase != "processing" and phase != "outputting":
+			return 0.0
+	# Nuclear reactors only generate while the dedicated reactor system
+	# has them in an active fuel cycle — without fuel rods OR after a
+	# coolant-loss shutdown, the 500-power output drops to 0.
+	if data.tags.has("nuclear_reactor"):
+		var nuc = get_node_or_null("/root/Main/NuclearReactorSystem")
+		if nuc == null:
+			return 0.0
+		var nuc_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if not nuc.is_reactor_active(nuc_anchor):
 			return 0.0
 	# Sun-deprived sectors (Nightfall Depths, Dark Valley) starve solar
 	# AND vent-driven generators of their full output — vent turbines

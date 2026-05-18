@@ -16,7 +16,6 @@ color = Color(0.6, 0.6, 0.5, 1)
 grid_size = Vector2i(2, 2)
 top_sprite = ExtResource("1_uuuo3")
 max_health = 240.0
-armor = null
 build_cost = {
 "copper": 45,
 "graphite": 15
@@ -26,24 +25,9 @@ output_items = {
 "mat_sand": 2
 }
 production_time = 2.0
-accepted_ores = null
-accepted_walls = null
-mine_range = null
-inaccuracy = null
-bullet_spread = null
-targets_air = null
-targets_ground = null
-ammo_capacity = null
-liquid_capacity = null
-required_tiles = null
-boosters = null
-link_range = null
+accepted_walls = Array[StringName]([&"blackstone_wall", &"purple_wall"])
+wall_efficiency = {
+&"purple_wall": 0.75
+}
 electrical_power_use = 10.0
-electrical_power_storage = null
-internal_battery_units = null
-sight_range = null
 max_stored_items = 15
-max_active_units = null
-spawned_unit = null
-overdrive_multiplier = null
-overdrive_radius = null

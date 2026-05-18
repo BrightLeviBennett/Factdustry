@@ -39,7 +39,6 @@ build_cost = {
 "silicon": 30
 }
 build_time = 3.0
-requires_power = true
 power_consumption = 3.0
 attack_speed = 0.25
 attack_range = 5.5

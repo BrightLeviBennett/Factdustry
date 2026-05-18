@@ -3801,9 +3801,12 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1778420252.92809
+		"timestamp": 1778865232.40268
 	},
 	"drone_position": "",
+	"duct_bridge_filters": {
+
+	},
 	"factory_buffers": {
 
 	},
@@ -18276,6 +18279,8 @@
 		"99,347": "purple_floor",
 		"99,348": "purple_floor"
 	},
+	"fog_darkness_mult": 1.0,
+	"fog_enabled": false,
 	"grid_height": 400,
 	"grid_width": 400,
 	"hints": [
@@ -18293,7 +18298,7 @@
 		}
 	],
 	"hints_runtime": {
-		"clock": 3.12491734199134,
+		"clock": 4.49999999999995,
 		"landing_fired": true,
 		"runtime": {
 			"Mass Driver": {
@@ -18767,6 +18772,13 @@
 	"sorter_filters": {
 
 	},
+	"stats_blocks_placed": 0,
+	"stats_blocks_removed": 0,
+	"stats_enemy_blocks_destroyed": 0,
+	"stats_enemy_units_destroyed": 0,
+	"stats_play_time": 0.0,
+	"stats_units_destroyed": 0,
+	"stats_units_produced": 0,
 	"type": "sector",
 	"unloader_state": {
 

@@ -12,6 +12,5 @@ color = Color(0.7, 0.7, 0.9, 1)
 max_health = 630.0
 build_cost = { "copper": 700, "silicon": 400 }
 build_time = 6.0
-requires_power = true
 power_consumption = 8.0
 tags = PackedStringArray("support")

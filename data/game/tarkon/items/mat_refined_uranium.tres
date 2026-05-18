@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_refined_uranium"
+display_name = "Refined Uranium"
+description = "Enriched uranium pellets. Reactor-grade fuel."
+max_stack = 100
+category = 0
+color = Color(0.6, 1.0, 0.3, 1)
+base_value = 18.0
+conveyable = true

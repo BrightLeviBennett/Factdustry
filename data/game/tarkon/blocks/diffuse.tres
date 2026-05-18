@@ -43,11 +43,9 @@ build_cost = {
 "silicon": 30
 }
 build_time = 3.0
-requires_power = true
 attack_speed = 0.8
 attack_range = 7.5
 ammo_types = Array[Resource]([SubResource("Resource_740hx")])
 bullet_spread = 8.0
 ammo_capacity = 30
-required_tiles = null
 max_stored_items = 30

@@ -7,10 +7,10 @@
 script = ExtResource("1")
 id = &"vent_turbine"
 display_name = "Vent Turbine"
-description = "Harnesses thermal vents for passive power generation."
+description = "Harnesses thermal vents for passive power generation, condensing a trickle of water as a byproduct."
 icon = ExtResource("2")
 category = 3
-tags = PackedStringArray("power", "vent_powered")
+tags = PackedStringArray("power", "vent_powered", "fluid", "transport", "pump", "condenser", "omnidirectional")
 color = Color(0.8, 0.6, 0.3, 1)
 grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("2")
@@ -19,4 +19,6 @@ build_cost = {
 "copper": 15
 }
 build_time = 1.5
+liquid_capacity = 25.0
+transports_fluid = true
 electrical_power_gen = 120.0

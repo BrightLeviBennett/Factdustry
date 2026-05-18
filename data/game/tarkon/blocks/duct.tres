@@ -18,4 +18,3 @@ build_cost = {
 }
 build_time = 0.5
 transport_speed = 10.0
-link_range = null

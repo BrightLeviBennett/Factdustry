@@ -21,9 +21,19 @@ class_name SectorProductionSim
 ## Reads efficiency (front-edge ore coverage) and power efficiency from
 ## the live scene so rates reflect the actual drill layout.
 ## Item ids that are intentionally excluded from offline accrual so their
-## in-sector stockpiles don't balloon while the player is away. Kept as a
-## class constant so the list is easy to find and extend.
-const EXCLUDED_ITEMS: Array[StringName] = [&"mat_iron", &"mat_sand"]
+## in-sector stockpiles don't drift away from reality while the player is
+## away. The pattern is: mid-chain intermediates that are produced AND
+## consumed by another block on the same factory floor. When the
+## production rate balances the consumption rate the net is ~0 and the
+## stockpile would stay flat — but the moment the balance tips
+## negative (e.g. the player has more silicon refineries than graphite
+## supply at the time of save) the offline calc drains the stockpile
+## faster than live play actually would, since live play only consumes
+## what's flowing on belts, not what's parked in core storage.
+##   - mat_iron     → consumed by steel furnace
+##   - mat_sand     → consumed by silicon mixer / glass etc.
+##   - mat_graphite → consumed by silicon mixer
+const EXCLUDED_ITEMS: Array[StringName] = [&"mat_iron", &"mat_sand", &"mat_graphite"]
 
 
 static func calculate_rates(main: Node2D) -> Dictionary:

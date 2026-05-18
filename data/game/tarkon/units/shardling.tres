@@ -1,14 +1,14 @@
 [gd_resource type="Resource" script_class="UnitData" format=3 uid="uid://cwr1b3vof7wma"]
 
 [ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://busd0y510wy6t" path="res://textures/units/shardling/Shardling.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://cmjtw5liqrkna" path="res://textures/units/shardling/ShardlingComplete.png" id="1_eerp8"]
 
 [resource]
 script = ExtResource("1")
 id = &"player_drone"
 display_name = "Shardling"
 description = "A small shard construct bonded to the core. Mines resources, explores the sector, and directs your forces. If destroyed, it respawns at the core."
-icon = ExtResource("2")
+icon = ExtResource("1_eerp8")
 team = 0
 category = 6
 color = Color(0.3, 0.9, 1, 1)

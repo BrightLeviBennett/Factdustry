@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_uranium_rod"
+display_name = "Uranium Rod"
+description = "Sealed fuel rod assembly. Ready for the reactor core."
+max_stack = 50
+category = 0
+color = Color(0.75, 1.0, 0.4, 1)
+base_value = 40.0
+conveyable = true

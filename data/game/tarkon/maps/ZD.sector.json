@@ -3893,9 +3893,12 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1778612915.54347
+		"timestamp": 1778865053.3534
 	},
 	"drone_position": "",
+	"duct_bridge_filters": {
+
+	},
 	"factory_buffers": {
 
 	},
@@ -25692,6 +25695,28 @@
 	"grid_height": 150,
 	"grid_width": 150,
 	"hints": [],
+	"hints_runtime": {
+		"clock": 4.23334878787881,
+		"landing_fired": true,
+		"runtime": {
+			"Mass Driver": {
+				"activated_at": 231894.702059201,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			},
+			"bridge": {
+				"activated_at": 62390.3979561385,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			}
+		}
+	},
 	"junction_items": {
 
 	},
@@ -25878,6 +25903,46 @@
 		"mat_silicon": 2965,
 		"mat_steel": 1526
 	},
+	"script_runtime": {
+		"core_counts": {
+
+		},
+		"core_unit_mined_counts": {
+
+		},
+		"current_step": -1,
+		"decoded_archive_counts": {
+
+		},
+		"deposited_baselines": {
+
+		},
+		"disabled_buildings": [],
+		"ferox_blocks_destroyed_counts": {
+
+		},
+		"hidden_tiles": [],
+		"mined_counts": {
+
+		},
+		"placed_baselines": {
+
+		},
+		"placed_counts": {
+
+		},
+		"produced_counts": {
+
+		},
+		"script_running": false,
+		"step_wait_timer": 0.0,
+		"units_destroyed_counts": {
+
+		},
+		"units_produced_counts": {
+
+		}
+	},
 	"script_steps": [
 		{
 			"actions": [
@@ -25898,7 +25963,7 @@
 				{
 					"from": "83,125",
 					"id": "DT",
-					"text": "(-white)Research and place 2 [res://textures/TexNotFound.png]Impact Drills to extract[res://textures/TexNotFound.png] Zinc.",
+					"text": "(-white)Research and place 2 [res://textures/blocks/resource extractors/Impact Drill/ImpactDrillComplete.png]Impact Drills to extract[res://textures/resources/zinc.png]Zinc.",
 					"to": "88,125",
 					"type": "draw_text"
 				}
@@ -25932,7 +25997,7 @@
 				{
 					"from": "85,119",
 					"id": "MT",
-					"text": "(-white)Now place a[res://textures/TexNotFound.png]Brass Mixer and supply it zinc and copper to produce  [res://textures/TexNotFound.png](-gold)Brass",
+					"text": "(-white)Now place a[res://textures/blocks/factories/Brass Mixer/BrassMixerComplete.png]Brass Mixer and supply it zinc and copper to produce  [res://textures/TexNotFound.png](-gold)Brass",
 					"to": "89,119",
 					"type": "draw_text"
 				}
@@ -25963,7 +26028,7 @@
 				{
 					"from": "98,116",
 					"id": "AT",
-					"text": "(-white)There are Archives on this sector, Decode them.\n(-white)Eniemies incomming, prepare to defend.",
+					"text": "(-white)There are [res://textures/blocks/cores/Archive.png]Archives on this sector, Decode them.\n(-white)Eniemies incomming, prepare to defend.",
 					"to": "102,116",
 					"type": "draw_text"
 				}

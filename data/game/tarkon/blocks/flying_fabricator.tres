@@ -23,5 +23,4 @@ build_cost = {
 "silicon": 30
 }
 build_time = 4.0
-requires_power = true
 power_consumption = 5.0

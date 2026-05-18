@@ -19,6 +19,7 @@ build_cost = {
 "graphite": 20
 }
 build_time = 1.5
+accepted_walls = Array[StringName]([])
+liquid_capacity = 50.0
 transport_speed = 5.0
 transports_fluid = true
-max_stored_fluids = 50.0

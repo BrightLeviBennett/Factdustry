@@ -244,6 +244,37 @@ var pending_seed_pack: Dictionary = {}
 ## The sector currently being played (set by Main, cleared on exit).
 var active_sector_id: StringName = &""
 
+## Cross-sector cargo dispatched by the Launchpad. Keyed by destination
+## sector id (StringName), value is an Array of pod descriptors:
+##   { items: Dict<StringName,int>, fluids: Dict<StringName,float>,
+##     from_sector: StringName }
+## Drained at sector-load time by the destination's logistics: each pod
+## is funneled into the Landing Pad's block_storage so the player picks
+## up the cargo when they return.
+var pending_pod_deliveries: Dictionary = {}
+
+## Snapshot of every saved sector's Landing Pad filters so a Launchpad
+## on sector A can validate that sector B has a matching pad BEFORE
+## queuing the delivery. Keyed by sector id:
+##   landing_pad_filters_by_sector[sector_id] = {
+##       <anchor "x,y"> : [item_id, ...]   // 0-2 entries
+##   }
+## Refreshed every time a sector is saved (see `save_sector`).
+var landing_pad_filters_by_sector: Dictionary = {}
+
+## Set by Launchpad when the player clicks its "Select sector" button.
+## planet_select.gd reads this on _ready, locks the view to Tarkon,
+## switches to "pick a sector for the launchpad" UI, and on pick reloads
+## the source sector with `pending_launchpad_pick_result` populated so
+## main.gd can write the selection back to the launchpad anchor.
+##   { source_sector: StringName, anchor: Vector2i }
+var launchpad_pick_request: Dictionary = {}
+## Result handed back to the source sector after the player picks a
+## destination via the planet-select scene. Drained in main._ready after
+## loading the source sector. Format:
+##   { anchor: Vector2i, sector_id: StringName }
+var pending_launchpad_pick_result: Dictionary = {}
+
 ## Per-sector resource storage for the global tech tree pool.
 ## Maps sector_id (StringName) → resources Dictionary (item_id → amount).
 var sector_resources: Dictionary = {}
@@ -1164,6 +1195,11 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 				"held_payload": held_save,
 			}
 
+	var landing_pad_filters_serialized := _serialize_landing_pad_filters()
+	# Push the freshly-serialised filter map into the cross-sector
+	# snapshot so other sectors' launchpads can read it without loading
+	# this map. Keyed by the sector being saved.
+	_refresh_landing_pad_snapshot(StringName(sector_name), landing_pad_filters_serialized)
 	var data := {
 		"version": 3,
 		"type": "sector",
@@ -1180,6 +1216,9 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"building_health": _serialize_health(main.building_health),
 		"linked_pairs": _serialize_links(links),
 		"sorter_filters": _serialize_sorter_filters(),
+		"landing_pad_filters": landing_pad_filters_serialized,
+		"launchpad_state": _serialize_launchpad_state(),
+		"duct_bridge_filters": _serialize_duct_bridge_filters(),
 		"script_steps": _serialize_script_steps(),
 		"hints": _serialize_hints(),
 		"resources": res_save,
@@ -1365,6 +1404,20 @@ func load_sector_from_path(path: String) -> bool:
 		building_sys_early.editor_sorter_filters.clear()
 		for key in sf_data:
 			building_sys_early.editor_sorter_filters[_str_to_vec2i(key)] = StringName(sf_data[key])
+
+	# --- Load Landing Pad filters ---
+	_deserialize_landing_pad_filters(data.get("landing_pad_filters", {}))
+	# --- Load Launchpad selection / cooldown state ---
+	_deserialize_launchpad_state(data.get("launchpad_state", {}))
+
+	# --- Load duct bridge output filters ---
+	var dbf_data = data.get("duct_bridge_filters", {})
+	if logistics and "duct_bridge_filters" in logistics:
+		logistics.duct_bridge_filters.clear()
+		for key in dbf_data:
+			var filt: StringName = StringName(dbf_data[key])
+			if filt != &"":
+				logistics.duct_bridge_filters[_str_to_vec2i(key)] = filt
 	# Editor-mode constructor/refab state. In-game these are restored
 	# later in this function from the same data dict into the live
 	# LogisticsSystem; for the editor we mirror them into BuildingSystem
@@ -1495,20 +1548,23 @@ func load_sector_from_path(path: String) -> bool:
 		TechTree.sync_event_unlocks_from_resources(main.resources)
 
 	# --- Restore session stats so the loss screen survives scene reloads ---
+	# Map editor's `main` is map_editor.gd, which doesn't define any of
+	# the `stats_*` fields — guard with `main.get(field) != null` so a
+	# load through the editor doesn't crash on the assignment.
 	if is_user_save_res:
-		if data.has("stats_blocks_placed"):
+		if data.has("stats_blocks_placed") and main.get("stats_blocks_placed") != null:
 			main.stats_blocks_placed = int(data["stats_blocks_placed"])
-		if data.has("stats_blocks_removed"):
+		if data.has("stats_blocks_removed") and main.get("stats_blocks_removed") != null:
 			main.stats_blocks_removed = int(data["stats_blocks_removed"])
-		if data.has("stats_enemy_blocks_destroyed"):
+		if data.has("stats_enemy_blocks_destroyed") and main.get("stats_enemy_blocks_destroyed") != null:
 			main.stats_enemy_blocks_destroyed = int(data["stats_enemy_blocks_destroyed"])
-		if data.has("stats_units_produced"):
+		if data.has("stats_units_produced") and main.get("stats_units_produced") != null:
 			main.stats_units_produced = int(data["stats_units_produced"])
-		if data.has("stats_units_destroyed"):
+		if data.has("stats_units_destroyed") and main.get("stats_units_destroyed") != null:
 			main.stats_units_destroyed = int(data["stats_units_destroyed"])
-		if data.has("stats_enemy_units_destroyed"):
+		if data.has("stats_enemy_units_destroyed") and main.get("stats_enemy_units_destroyed") != null:
 			main.stats_enemy_units_destroyed = int(data["stats_enemy_units_destroyed"])
-		if data.has("stats_play_time"):
+		if data.has("stats_play_time") and main.get("stats_play_time") != null:
 			main.stats_play_time = float(data["stats_play_time"])
 
 	# --- Restore drone position ---
@@ -2179,6 +2235,96 @@ func _serialize_archive_decoder_state() -> Dictionary:
 	return result
 
 
+## Per-output duct bridge filter (output anchor → allowed item id).
+## Empty filters are dropped so the on-disk shape stays compact.
+func _serialize_duct_bridge_filters() -> Dictionary:
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	var result := {}
+	if logistics == null or not ("duct_bridge_filters" in logistics):
+		return result
+	for grid_pos in logistics.duct_bridge_filters:
+		var filter_id = logistics.duct_bridge_filters[grid_pos]
+		if filter_id != &"":
+			result[_vec2i_to_str(grid_pos)] = String(filter_id)
+	return result
+
+
+## Updates the cross-sector landing-pad filter snapshot for `sector_id`
+## with the serialized dict from the most recent save. Lets a Launchpad
+## on another sector validate cargo routing before queuing a delivery.
+## Per-sector serialization of every Launchpad's state — currently the
+## selected destination sector + last-launch timestamp so the cooldown
+## carries across saves. Cargo lives in the standard block_storage
+## serialization, not here.
+func _serialize_launchpad_state() -> Dictionary:
+	var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
+	var out := {}
+	if lp_sys == null or not ("launchpad_state" in lp_sys):
+		return out
+	for anchor in lp_sys.launchpad_state:
+		var st: Dictionary = lp_sys.launchpad_state[anchor]
+		out[_vec2i_to_str(anchor)] = {
+			"selected_sector": String(st.get("selected_sector", &"")),
+			"cooldown_remaining": float(st.get("cooldown_remaining", 0.0)),
+			"build_timer": float(st.get("build_timer", 0.0)),
+		}
+	return out
+
+
+func _deserialize_launchpad_state(raw: Dictionary) -> void:
+	var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
+	if lp_sys == null or not ("launchpad_state" in lp_sys):
+		return
+	lp_sys.launchpad_state.clear()
+	for k in raw:
+		var entry: Dictionary = raw[k]
+		lp_sys.launchpad_state[_str_to_vec2i(k)] = {
+			"selected_sector": StringName(entry.get("selected_sector", "")),
+			"cooldown_remaining": float(entry.get("cooldown_remaining", 0.0)),
+			"build_timer": float(entry.get("build_timer", 0.0)),
+			"pod_buffer": {},
+			"pod_fluids": {},
+		}
+
+
+func _refresh_landing_pad_snapshot(sector_id: StringName, serialized: Dictionary) -> void:
+	if serialized.is_empty():
+		landing_pad_filters_by_sector.erase(sector_id)
+	else:
+		landing_pad_filters_by_sector[sector_id] = serialized.duplicate(true)
+
+
+## Per-sector serialization of every Landing Pad's filter. Stored as a
+## map of "x,y" → Array[String item id]. Cross-sector launch code reads
+## the resulting dict via SaveManager.landing_pad_filters_by_sector so
+## the source side can match a pod's cargo before queuing the delivery.
+func _serialize_landing_pad_filters() -> Dictionary:
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	var out := {}
+	if logistics == null or not ("landing_pad_filters" in logistics):
+		return out
+	for anchor in logistics.landing_pad_filters:
+		var arr: Array = logistics.landing_pad_filters[anchor]
+		var serialized: Array = []
+		for sn in arr:
+			serialized.append(String(sn))
+		out[_vec2i_to_str(anchor)] = serialized
+	return out
+
+
+func _deserialize_landing_pad_filters(raw: Dictionary) -> void:
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if logistics == null or not ("landing_pad_filters" in logistics):
+		return
+	logistics.landing_pad_filters.clear()
+	for k in raw:
+		var arr_in: Array = raw[k]
+		var arr_out: Array = []
+		for s in arr_in:
+			arr_out.append(StringName(s))
+		logistics.landing_pad_filters[_str_to_vec2i(k)] = arr_out
+
+
 func _serialize_sorter_filters() -> Dictionary:
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
 	var result := {}
@@ -2492,8 +2638,80 @@ func save_campaign() -> bool:
 		"sector_production_timestamps": _serialize_production_timestamps(),
 		"sector_storage_caps": _serialize_storage_caps(),
 		"global_hints_runtime": global_hints_runtime.duplicate(true),
+		"pending_pod_deliveries": _serialize_pending_pod_deliveries(),
+		"landing_pad_filters_by_sector": _serialize_landing_pad_filters_by_sector(),
 	}
 	return _write_json(SAVES_DIR + "campaign.json", data)
+
+
+func _serialize_landing_pad_filters_by_sector() -> Dictionary:
+	var out := {}
+	for sid in landing_pad_filters_by_sector:
+		out[String(sid)] = landing_pad_filters_by_sector[sid].duplicate(true)
+	return out
+
+
+func _deserialize_landing_pad_filters_by_sector(raw: Dictionary) -> void:
+	landing_pad_filters_by_sector.clear()
+	for sid_str in raw:
+		landing_pad_filters_by_sector[StringName(sid_str)] = (raw[sid_str] as Dictionary).duplicate(true)
+
+
+func _serialize_pending_pod_deliveries() -> Dictionary:
+	# JSON dicts can't have Vector2i / StringName keys/values. Flatten
+	# every per-sector queue so the file round-trips cleanly.
+	var out := {}
+	for dest_sid in pending_pod_deliveries:
+		var arr: Array = pending_pod_deliveries[dest_sid]
+		var flat: Array = []
+		for pod in arr:
+			var items_in: Dictionary = pod.get("items", {})
+			var items_out := {}
+			for k in items_in:
+				items_out[String(k)] = int(items_in[k])
+			var fluids_in: Dictionary = pod.get("fluids", {})
+			var fluids_out := {}
+			for k in fluids_in:
+				fluids_out[String(k)] = float(fluids_in[k])
+			var routing_in: Array = pod.get("routing", [])
+			var routing_out: Array = []
+			for r in routing_in:
+				routing_out.append(String(r))
+			flat.append({
+				"items": items_out,
+				"fluids": fluids_out,
+				"from_sector": String(pod.get("from_sector", &"")),
+				"routing": routing_out,
+			})
+		out[String(dest_sid)] = flat
+	return out
+
+
+func _deserialize_pending_pod_deliveries(raw: Dictionary) -> void:
+	pending_pod_deliveries.clear()
+	for dest_str in raw:
+		var arr: Array = raw[dest_str]
+		var rebuilt: Array = []
+		for pod in arr:
+			var items_in: Dictionary = pod.get("items", {})
+			var items_out := {}
+			for k in items_in:
+				items_out[StringName(k)] = int(items_in[k])
+			var fluids_in: Dictionary = pod.get("fluids", {})
+			var fluids_out := {}
+			for k in fluids_in:
+				fluids_out[StringName(k)] = float(fluids_in[k])
+			var routing_in: Array = pod.get("routing", [])
+			var routing_out: Array = []
+			for r in routing_in:
+				routing_out.append(String(r))
+			rebuilt.append({
+				"items": items_out,
+				"fluids": fluids_out,
+				"from_sector": StringName(pod.get("from_sector", "")),
+				"routing": routing_out,
+			})
+		pending_pod_deliveries[StringName(dest_str)] = rebuilt
 
 
 func _serialize_storage_caps() -> Dictionary:
@@ -2715,6 +2933,10 @@ func load_campaign() -> bool:
 		_deserialize_storage_caps(data["sector_storage_caps"])
 	if data.has("global_hints_runtime") and data["global_hints_runtime"] is Dictionary:
 		global_hints_runtime = (data["global_hints_runtime"] as Dictionary).duplicate(true)
+	if data.has("pending_pod_deliveries") and data["pending_pod_deliveries"] is Dictionary:
+		_deserialize_pending_pod_deliveries(data["pending_pod_deliveries"])
+	if data.has("landing_pad_filters_by_sector") and data["landing_pad_filters_by_sector"] is Dictionary:
+		_deserialize_landing_pad_filters_by_sector(data["landing_pad_filters_by_sector"])
 	# Clamp any existing stockpile against its saved cap before the
 	# accrual pass — handles the "a core was destroyed last session"
 	# case, old saves that pre-date the cap, and any other over-cap

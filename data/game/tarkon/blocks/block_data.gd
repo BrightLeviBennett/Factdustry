@@ -109,13 +109,28 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## Lets specialised crushers — bauxite, etc. — face their own wall
 ## types without overlapping with the generic wall_crusher.
 @export var accepted_walls: Array[StringName] = [&"blackstone_wall"]
+## Per-wall efficiency multiplier for wall miners. Wall ids not in this
+## dict default to 1.0 (full speed). Used so a wall_crusher can chew
+## through purple_wall at 0.75× the speed it tears through plain
+## blackstone, without rejecting the placement outright.
+@export var wall_efficiency: Dictionary = {}
 ## Extra tiles BEYOND the front edge that a drill / extractor reaches
 ## when scanning for ore. 0 = front edge only (no extension), 1 = the
 ## default mechanical-drill behaviour (front + 1), higher values let
 ## plasma bores reach further into walls. Used by logistics_system's
 ## drill update + the placement-preview range visual.
 @export var mine_range: int = 1
-@export var requires_power: bool = false
+## Player-selectable factory recipes. When non-empty, this factory ignores
+## `input_items` / `output_items` and instead picks an active recipe from
+## the list at runtime (selected via the block's world menu, persisted in
+## `factory_recipe_state`). Each entry is a Dictionary with keys:
+##   "id":            StringName  unique recipe id (e.g. "graphite_rod")
+##   "display_name":  String      label shown in the picker
+##   "input":         Dictionary  item_id -> amount consumed per cycle
+##   "output":        Dictionary  item_id -> amount produced per cycle
+## A factory with `factory_recipes` set but no selection stays idle and
+## refuses any inputs (matches the Unit Refabricator's "no T2 picked" gate).
+@export var factory_recipes: Array = []
 
 
 @export_group("Combat")
@@ -142,8 +157,10 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## Max ammo this turret can stockpile (0 = no internal magazine, pulls
 ## from network on demand). Display-only for now.
 @export var ammo_capacity: int = 0
-## Maximum amount of fluid this turret / liquid-using block can buffer.
-## 0 = no liquid input. Display-only for now.
+## Maximum amount of fluid this block can buffer (turret fuel, pump
+## reservoir, condenser tank, etc.). 0 = no fluid storage. Used by
+## logistics for capacity caps and surfaced as "Liquid Capacity" in
+## the database UI.
 @export var liquid_capacity: float = 0.0
 ## Required tiles — blocks like pumps / wall crushers / condensers
 ## need to be placed on or facing specific terrain. Each entry is
@@ -210,7 +227,6 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 
 @export_group("Storage")
 @export var max_stored_items: int = 6
-@export var max_stored_fluids: float = 6.0
 
 
 @export_group("Special")

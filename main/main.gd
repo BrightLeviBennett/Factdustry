@@ -256,6 +256,7 @@ var stats_enemy_units_destroyed := 0
 var stats_play_time := 0.0
 var sector_lost := false
 
+
 # Current rotation for the NEXT building placement.
 # Player presses Q to cycle this.
 var placement_rotation := 0
@@ -299,6 +300,11 @@ signal resources_changed(resources: Dictionary)
 signal building_selected(block_id: StringName)
 signal building_placed(block_id: StringName, grid_pos: Vector2i)
 signal building_destroyed(grid_pos: Vector2i)
+## Fires only when a building is destroyed by enemy fire (HP-driven
+## destroy_building call with `by_enemy = true`). Player deconstruction
+## / swaps don't emit this. Used by particle_overlay so ruin decals
+## only mark blocks the enemy actually killed.
+@warning_ignore("unused_signal") signal building_destroyed_by_enemy(grid_pos: Vector2i)
 ## Fires once a queued build reaches 100% (build_progress >= build_time and
 ## every input resource fully paid). Distinct from building_placed which
 ## fires the moment the queue accepts the block — sector-script "placed"
@@ -447,6 +453,19 @@ func _ready() -> void:
 	building_placed.connect(func(_bid, _pos): stats_blocks_placed += 1)
 	building_destroyed.connect(func(_pos): stats_blocks_removed += 1)
 
+	# Multi-core AI shardlings: every LUMINA core that *isn't* the
+	# primary drone's spawn point gets its own AI-controlled drone.
+	# These run the priority loop (assist build → shoot enemy → heal
+	# block → idle on home core) defined in player_drone.gd.
+	# Hook `building_completed` (fires when the build reaches 100%)
+	# instead of `building_placed` (fires the moment the queue accepts
+	# the ghost) so a new core only gets its shardling AFTER it's
+	# actually built — the drone shouldn't appear hovering over a
+	# half-finished blueprint.
+	_sync_ai_shardlings()
+	building_completed.connect(_on_building_completed_for_shardlings)
+	building_destroyed.connect(_on_building_destroyed_for_shardlings)
+
 	# Sync resources to global pool whenever they change
 	resources_changed.connect(_on_resources_changed_sync)
 
@@ -518,6 +537,125 @@ func _ready() -> void:
 	# Consume the flag either way so the next time we re-enter Main
 	# without a fresh launch doesn't accidentally inherit it.
 	SaveManager.pending_landing_animation = false
+
+	# Launchpad pick-mode result: planet_select wrote {anchor, sector_id}
+	# back here after the player picked a destination. Forward it to the
+	# LaunchpadSystem so the popup picks up the new label next time it
+	# refreshes.
+	if "pending_launchpad_pick_result" in SaveManager \
+			and not SaveManager.pending_launchpad_pick_result.is_empty():
+		var pick: Dictionary = SaveManager.pending_launchpad_pick_result
+		SaveManager.pending_launchpad_pick_result = {}
+		var lp_sys = get_node_or_null("LaunchpadSystem")
+		if lp_sys and lp_sys.has_method("set_selected_sector"):
+			lp_sys.set_selected_sector(
+				pick.get("anchor", Vector2i.ZERO),
+				StringName(pick.get("sector_id", &"")))
+
+	# Drain pending pod deliveries that target this sector. Each pod's
+	# cargo is appended to the first Landing Pad's block_storage so the
+	# player can pick it up when they return.
+	_drain_pending_pod_deliveries()
+
+
+## Looks up the FIRST Landing Pad in the current sector and deposits any
+## pod cargo that was destined for this sector. Cargo lands directly in
+## the pad's `block_storage` and stays there until the player pulls it
+## off via belts (or via the storage popup). Pods stack — multiple
+## deliveries between visits accumulate.
+func _drain_pending_pod_deliveries() -> void:
+	if not "pending_pod_deliveries" in SaveManager:
+		return
+	var sid: StringName = SaveManager.active_sector_id
+	if sid == &"" or not SaveManager.pending_pod_deliveries.has(sid):
+		return
+	var queue: Array = SaveManager.pending_pod_deliveries.get(sid, [])
+	if queue.is_empty():
+		return
+	var logistics_n = get_node_or_null("LogisticsSystem")
+	if logistics_n == null:
+		return
+	# Collect every live Landing Pad anchor on the current sector. Used
+	# both for routing (does the saved priority list still resolve?)
+	# and for fallback (any pad if the routing list is now stale).
+	var live_pad_anchors: Array = []
+	for cell in placed_buildings:
+		if building_origins.get(cell, cell) != cell:
+			continue
+		if placed_buildings.get(cell, &"") == &"landing_pad":
+			live_pad_anchors.append(cell)
+	if live_pad_anchors.is_empty():
+		# Player removed every landing pad after pods were dispatched —
+		# leave the queue alone so the cargo arrives once they rebuild.
+		return
+	# Per-pod resolution: walk the saved routing list and deposit into
+	# the first live pad that has space. Falls back to any live pad if
+	# nothing in the routing list resolves (handles cases where the
+	# destination's pads were rebuilt with different filters mid-flight).
+	var remaining: Array = []
+	for pod in queue:
+		var routing: Array = pod.get("routing", [])
+		var pi: Dictionary = pod.get("items", {})
+		var pf: Dictionary = pod.get("fluids", {})
+		var target_anchor: Vector2i = _resolve_pod_target(routing, live_pad_anchors)
+		if target_anchor == Vector2i(-1, -1):
+			# No matching live pad — keep the pod queued so it lands
+			# next time the player visits with a valid pad set up.
+			remaining.append(pod)
+			continue
+		if not logistics_n.block_storage.has(target_anchor):
+			logistics_n.block_storage[target_anchor] = {"items": {}, "fluids": {}}
+		var storage: Dictionary = logistics_n.block_storage[target_anchor]
+		var items: Dictionary = storage.get("items", {})
+		var fluids: Dictionary = storage.get("fluids", {})
+		for k in pi:
+			items[StringName(k)] = int(items.get(StringName(k), 0)) + int(pi[k])
+		for k in pf:
+			fluids[StringName(k)] = float(fluids.get(StringName(k), 0.0)) + float(pf[k])
+		storage["items"] = items
+		storage["fluids"] = fluids
+		logistics_n.block_storage[target_anchor] = storage
+		# Pod-landing effect at the receiving pad.
+		var anim_n = get_node_or_null("LaunchAnimation")
+		if anim_n and anim_n.has_method("play_pod_landing"):
+			var pdata = Registry.get_block(placed_buildings.get(target_anchor, &""))
+			var gs: float = float(GRID_SIZE)
+			var pad_world: Vector2 = grid_to_world(target_anchor) + Vector2(
+				float(pdata.grid_size.x) * gs * 0.5 if pdata else gs * 0.5,
+				float(pdata.grid_size.y) * gs * 0.5 if pdata else gs * 0.5)
+			anim_n.play_pod_landing(pad_world)
+	# Re-queue any pods we couldn't resolve; clear the slot if everyone
+	# delivered.
+	if remaining.is_empty():
+		SaveManager.pending_pod_deliveries.erase(sid)
+	else:
+		SaveManager.pending_pod_deliveries[sid] = remaining
+
+
+## Resolves a pod's saved routing list (priority Array of "x,y" anchor
+## keys) against the sector's live Landing Pad anchors. Walks the list
+## in order, returning the first anchor that still exists. Returns
+## Vector2i(-1,-1) if no entry in the list resolves to a live pad and
+## there's no useful fallback.
+func _resolve_pod_target(routing: Array, live_anchors: Array) -> Vector2i:
+	var live_set: Dictionary = {}
+	for a in live_anchors:
+		live_set[a] = true
+	for key in routing:
+		var s := String(key)
+		var parts: PackedStringArray = s.split(",")
+		if parts.size() != 2:
+			continue
+		var v := Vector2i(int(parts[0]), int(parts[1]))
+		if live_set.has(v):
+			return v
+	# Fallback: if the saved routing list went completely stale, deposit
+	# into the first live pad anyway so the cargo isn't permanently
+	# orphaned. The match was already validated source-side at launch
+	# time; this just keeps the player's cargo from disappearing.
+	if live_anchors.size() > 0:
+		return live_anchors[0]
+	return Vector2i(-1, -1)
 
 
 ## Populates the _hud / _tech_ui / etc. cache. Call after the main scene tree
@@ -1060,6 +1198,28 @@ func is_building_inactive(grid_pos: Vector2i) -> bool:
 	return false
 
 
+## Looser inactive check for conveyor flow. Returns true in every
+## case `is_building_inactive` does EXCEPT when the only reason the
+## block is inactive is "queued for deconstruction but the drone
+## hasn't actually started yet" (progress == 0). Belts use this so
+## the items already on a belt keep moving while it sits in the
+## deconstruct queue; the moment the drone touches it and progress
+## advances past 0, conveying stops.
+func is_belt_conveyance_blocked(grid_pos: Vector2i) -> bool:
+	if get_building_faction(grid_pos) == Faction.DERELICT:
+		return true
+	if is_building_constructing(grid_pos):
+		return true
+	var anchor_check: Vector2i = building_origins.get(grid_pos, grid_pos)
+	var dprog = building_deconstruct_progress.get(anchor_check, null)
+	if dprog != null and float(dprog.get("progress", 0.0)) > 0.0:
+		return true
+	var la = get_node_or_null("LaunchAnimation")
+	if la and la.has_method("is_block_hidden") and la.is_block_hidden(anchor_check):
+		return true
+	return false
+
+
 ## Places a building directly without cost/range checks, assigning a specific faction.
 ## Used by sector loading and the map editor.
 func place_building_with_faction(grid_pos: Vector2i, block_id: StringName, rotation: int, faction: int) -> bool:
@@ -1283,12 +1443,21 @@ func _execute_swap_now(grid_pos: Vector2i, new_id: StringName, new_rot: int, alr
 
 	# No immediate cost deduction — progressive consumption during build.
 
-	# Place the new block at the same cell, rotation = new_rot.
-	placed_buildings[grid_pos] = new_id
+	# Place the new block at the same cell, rotation = new_rot. For
+	# multi-tile blocks (e.g. vent turbine / condenser at 3×3) we have
+	# to populate every tile of the new footprint, not just the anchor
+	# — otherwise systems that look up `placed_buildings[cell]` for the
+	# 8 non-anchor tiles will think those cells are empty, and tag-
+	# based scans (like the vent turbine's per-tile draw / state init)
+	# will only act on the anchor cell.
 	building_health[grid_pos] = new_data.max_health
-	building_rotation[grid_pos] = new_rot
-	building_origins[grid_pos] = grid_pos
-	building_factions[grid_pos] = Faction.LUMINA
+	for x in range(new_data.grid_size.x):
+		for y in range(new_data.grid_size.y):
+			var tile_pos: Vector2i = grid_pos + Vector2i(x, y)
+			placed_buildings[tile_pos] = new_id
+			building_rotation[tile_pos] = new_rot
+			building_origins[tile_pos] = grid_pos
+			building_factions[tile_pos] = Faction.LUMINA
 
 	# Start build with progressive resource consumption — unless the
 	# caller already paid the build cost out-of-band (deferred swap path
@@ -1646,6 +1815,18 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 		if bdata and bdata.armor > 0.0:
 			amount = maxf(amount - bdata.armor, 1.0)
 	building_health[anchor] -= amount
+	# Surface a flashing HUD alert when one of the player's cores takes
+	# damage so the player notices even if they're mid-build away from
+	# their base. The alert auto-clears after ~3 s of no further damage
+	# via `core_damage_alert_expires_at`.
+	if bid != &"":
+		var bdata_a = Registry.get_block(bid)
+		if bdata_a and bdata_a.tags.has("core") and get_building_faction(anchor) == Faction.LUMINA:
+			var hud_a = get_node_or_null("HUD")
+			if hud_a and hud_a.has_method("push_alert"):
+				# 3 s auto-expire — the HUD ticks it down and clears the
+				# banner automatically once damage stops landing.
+				hud_a.push_alert(&"core_damage", "<Core Is Taking Damage>", 3.0)
 	# Polish: nudge the camera so the player can feel damage land.
 	# (The white hit-flash overlay was removed — it tinted enemy
 	# blocks gray when they were under sustained fire and read as a
@@ -1656,14 +1837,16 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 		var max_hp: float = bldg_data.max_health if bldg_data else 100.0
 		fb.add_shake(clampf(amount / max_hp * 8.0, 0.0, 6.0))
 	if building_health[anchor] <= 0:
-		# Destruction shake + sound: the destroy signal handles the SFX
-		# (AudioSystem listens to building_destroyed); the shake is
-		# proportional to the building's nominal HP so a turret going
-		# down feels chunkier than a belt tile.
+		# Destruction shake reserved for enemy (FEROX) cores only —
+		# every other block / unit going down emits sound via the
+		# destroy signal but doesn't rattle the camera. Toppling an
+		# enemy core is a tide-turning moment so it gets a small
+		# punch of feedback.
 		if fb:
 			var ddata = Registry.get_block(placed_buildings.get(anchor, &""))
-			var dscale: float = (ddata.max_health if ddata else 100.0) / 100.0
-			fb.add_shake(clampf(6.0 * dscale, 2.0, 18.0))
+			var ddata_faction: int = get_building_faction(anchor)
+			if ddata and ddata.tags.has("core") and ddata_faction == Faction.FEROX:
+				fb.add_shake(4.0)
 		destroy_building(anchor, true)
 
 
@@ -1717,17 +1900,21 @@ func destroy_building_with_refund(grid_pos: Vector2i) -> void:
 		if build_time_full <= 0:
 			build_time_full = 1.0
 		starting_progress = clampf(building_build_progress[anchor], 0.0, build_time_full)
-		# Pure-ghost case: the block was queued (placement preview) but the
-		# drone never reached it — no time elapsed, no resources paid.
-		# There's nothing to deconstruct visually, so wipe the queue
-		# entry and destroy the placeholder immediately rather than
-		# playing a full-length decon animation against an empty shell.
-		var any_paid: bool = false
-		for k in total_to_refund:
-			if int(total_to_refund[k]) > 0:
-				any_paid = true
-				break
-		if starting_progress <= 0.0 and not any_paid:
+		# Instant-destroy fast path: anything that hasn't visibly started
+		# building yet (< 5 % progress) snaps away without an animation.
+		# Covers both:
+		#   • the pure-ghost case (block queued, drone never reached it)
+		#   • the "placed and immediately changed my mind" case where
+		#     one tick has nudged progress to 0.016 and consumed a single
+		#     resource unit
+		# Any resources already paid are refunded so the player isn't
+		# punished for the one-tick edge.
+		var pct_built: float = starting_progress / build_time_full
+		if pct_built < 0.05:
+			for k in total_to_refund:
+				var amt: int = int(total_to_refund[k])
+				if amt > 0:
+					_grant_resource_capped(k, amt)
 			building_build_progress.erase(anchor)
 			building_resources_consumed.erase(anchor)
 			var wi_g := work_order.find(anchor)
@@ -1874,6 +2061,23 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 		drill_timer = logistics.drill_timers[anchor]
 		logistics.drill_timers.erase(anchor)
 
+	# Capture conveyor items that sit on the picked-up footprint —
+	# every cell of the building, since belts are 1×1 but other
+	# transport blocks might be larger. Each cell's entry (if any) is
+	# copied into the payload and erased from the live map, so the
+	# items neither get lost (vanishing into a destroyed cell) nor
+	# stay orphaned at the old position. `place_payload_building`
+	# restores them to the new cells in the same local layout.
+	var conveyor_items_snapshot: Dictionary = {}
+	if logistics and "conveyor_items" in logistics:
+		for dx in range(data.grid_size.x):
+			for dy in range(data.grid_size.y):
+				var cell: Vector2i = anchor + Vector2i(dx, dy)
+				if logistics.conveyor_items.has(cell):
+					var rel_key: String = "%d,%d" % [dx, dy]
+					conveyor_items_snapshot[rel_key] = (logistics.conveyor_items[cell] as Dictionary).duplicate(true)
+					logistics.conveyor_items.erase(cell)
+
 	# Capture crane state when picking up another crane — without this
 	# the picked-up crane forgets whatever it was holding (and the
 	# crane that's holding it has no way to display the inner payload).
@@ -1884,6 +2088,16 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 	if building_sys and "crane_states" in building_sys \
 			and building_sys.crane_states.has(anchor):
 		crane_state_snapshot = (building_sys.crane_states[anchor] as Dictionary).duplicate(true)
+
+	# Capture every spinning-head state on this block (wall crusher,
+	# wall grinder, ground scraper, vent turbine, vent condenser,
+	# brass mixer). The held simulation eases each velocity toward 0
+	# so the head visibly spins down in transit instead of teleporting
+	# to a halt when grabbed; on drop, the snapshot restores so the
+	# placed block resumes from the decayed angle / velocity.
+	var spin_state_snapshot: Dictionary = {}
+	if building_sys and building_sys.has_method("_capture_spin_state"):
+		spin_state_snapshot = building_sys._capture_spin_state(anchor)
 
 	# Capture turret aim angles so the held visual freezes the heads
 	# at exactly where they were pointing the moment the crane closed —
@@ -1926,6 +2140,8 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 		"turret_aim_angle": turret_aim_angle,
 		"turret_barrel_angles": turret_barrel_angles_snapshot,
 		"internal_battery_charge": internal_battery_charge,
+		"head_spin_state": spin_state_snapshot,
+		"conveyor_items": conveyor_items_snapshot,
 	}
 
 	# Silently remove all tiles of this building
@@ -2042,6 +2258,15 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 			if data.tags.has("wall_miner"):
 				if not building_sys._is_facing_wall(grid_pos, pay_rot, block_id):
 					return false
+			elif data.tags.has("geyser_miner"):
+				# Geyser miners (mineral extractor) need a geyser tile
+				# centered under the footprint — same gate as fresh
+				# placement uses. Without this a crane could drop one
+				# anywhere.
+				if terrain:
+					var gm_center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+					if terrain.floor_tiles.get(gm_center, &"") != &"geyser":
+						return false
 			else:
 				if not building_sys._is_facing_ore(grid_pos, pay_rot, block_id):
 					return false
@@ -2050,6 +2275,16 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	if data.tags.has("vent_powered") and terrain:
 		var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
 		if terrain.floor_tiles.get(center, &"") != &"vent":
+			return false
+
+	# Condenser must be on a vent or geyser tile (same gate as the
+	# regular placement flow). Without this a crane could drop the
+	# vent condenser anywhere and the placement would silently
+	# succeed.
+	if data.tags.has("condenser") and terrain:
+		var cd_center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
+		var cd_tile = terrain.floor_tiles.get(cd_center, &"")
+		if cd_tile != &"vent" and cd_tile != &"geyser":
 			return false
 
 	var rot: int = int(payload.get("rotation", 0))
@@ -2134,6 +2369,38 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 			if "turret_barrel_angles" in combat_sys2 and not bsnap.is_empty():
 				combat_sys2.turret_barrel_angles[grid_pos] = bsnap.duplicate()
 
+	# Restore any conveyor items that were on the belt at pickup time.
+	# Keys in the snapshot are "dx,dy" offsets from the original
+	# anchor; we replay them onto the same offsets from the new
+	# anchor so a 1×1 belt with one item lands back exactly where it
+	# was relative to the block.
+	var conv_snap: Dictionary = payload.get("conveyor_items", {})
+	if not conv_snap.is_empty():
+		var logistics_drop = _logistics_ref()
+		if logistics_drop and "conveyor_items" in logistics_drop:
+			for rel_key in conv_snap:
+				var parts: PackedStringArray = String(rel_key).split(",")
+				if parts.size() != 2:
+					continue
+				var dx_i: int = int(parts[0])
+				var dy_i: int = int(parts[1])
+				var dest_cell: Vector2i = grid_pos + Vector2i(dx_i, dy_i)
+				# Only restore if the destination cell ended up as a
+				# conveyor-style block; otherwise the item would sit
+				# stranded on a non-conveyor tile.
+				logistics_drop.conveyor_items[dest_cell] = (conv_snap[rel_key] as Dictionary).duplicate(true)
+
+	# Restore head-spin state (angle + velocity for every spinning
+	# layer the block had at pickup). The placed block's tick takes
+	# it from here — vel keeps easing toward 0 (or back up to the
+	# producing spin target) so the player sees a smooth continuation
+	# instead of a snap.
+	var spin_snap: Dictionary = payload.get("head_spin_state", {})
+	if not spin_snap.is_empty():
+		var building_sys_spin = _building_sys_ref()
+		if building_sys_spin and building_sys_spin.has_method("_restore_spin_state"):
+			building_sys_spin._restore_spin_state(grid_pos, spin_snap)
+
 	# Restore the block's internal-battery charge that was draining
 	# while the block was carried. Power-only blocks don't ship a
 	# `internal_battery_charge` field — defaults to 0 (network charges
@@ -2198,6 +2465,8 @@ func destroy_building(grid_pos: Vector2i, by_enemy: bool = false) -> void:
 
 	# Emit BEFORE erasing so signal handlers can still read building data
 	building_destroyed.emit(grid_pos)
+	if by_enemy:
+		building_destroyed_by_enemy.emit(grid_pos)
 
 	# Track the cells we're about to free so we can replay any stashed
 	# platforms back onto them once the cover is gone.
@@ -2431,11 +2700,22 @@ func _convert_ferox_to_derelict() -> void:
 func convert_derelict_in_rect(from: Vector2i, to: Vector2i) -> void:
 	var min_pos := Vector2i(mini(from.x, to.x), mini(from.y, to.y))
 	var max_pos := Vector2i(maxi(from.x, to.x), maxi(from.y, to.y))
+	var building_sys = _building_sys_ref()
+	var seen_anchors: Dictionary = {}
 	for x in range(min_pos.x, max_pos.x + 1):
 		for y in range(min_pos.y, max_pos.y + 1):
 			var pos := Vector2i(x, y)
 			if building_factions.get(pos, -1) == Faction.DERELICT:
 				building_factions[pos] = Faction.LUMINA
+				# Trigger the conversion flash on each captured block's
+				# anchor exactly once — same yellow flash the launch
+				# animation paints on pre-built LUMINA blocks, minus the
+				# white kicker.
+				if building_sys and building_sys.has_method("register_conversion_flash"):
+					var anchor: Vector2i = building_origins.get(pos, pos)
+					if not seen_anchors.has(anchor):
+						seen_anchors[anchor] = true
+						building_sys.register_conversion_flash(anchor)
 
 
 ## Queue destroyed player buildings in a rect for rebuild.
@@ -2444,13 +2724,20 @@ func queue_rebuild_in_rect(from: Vector2i, to: Vector2i) -> int:
 	var min_pos := Vector2i(mini(from.x, to.x), mini(from.y, to.y))
 	var max_pos := Vector2i(maxi(from.x, to.x), maxi(from.y, to.y))
 	var count := 0
+	var drone = _drone_ref()
+	var building_sys = _building_sys_ref()
 	for anchor in destroyed_player_buildings.keys():
 		if anchor.x >= min_pos.x and anchor.x <= max_pos.x and anchor.y >= min_pos.y and anchor.y <= max_pos.y:
 			var info: Dictionary = destroyed_player_buildings[anchor]
 			var block_id: StringName = info["block_id"]
 			var rot: int = info["rotation"]
-			# Check if position is still empty
-			if is_cell_empty(anchor):
+			# Cell still empty? If something else got placed there in
+			# the meantime we just drop the ghost.
+			if not is_cell_empty(anchor):
+				destroyed_player_buildings.erase(anchor)
+				continue
+			var in_range: bool = drone == null or drone.is_in_build_range(anchor)
+			if in_range:
 				var old_building = selected_building
 				var old_rotation = placement_rotation
 				selected_building = block_id
@@ -2459,5 +2746,103 @@ func queue_rebuild_in_rect(from: Vector2i, to: Vector2i) -> int:
 				selected_building = old_building
 				placement_rotation = old_rotation
 				count += 1
+			else:
+				# Out of build range — defer to the placement queue so
+				# it gets placed automatically once the drone gets
+				# close enough. Mirrors the drag-place path which
+				# silently queues distant cells instead of dropping
+				# them. Without this, holding B over a far-away wreck
+				# silently failed and the destroyed entry was lost.
+				if building_sys != null and "_paused_queue" in building_sys:
+					var already_queued := false
+					for q in building_sys._paused_queue:
+						if q.get("grid_pos") == anchor:
+							already_queued = true
+							break
+					if not already_queued and building_sys.has_method("_can_place_ignoring_range") \
+							and building_sys._can_place_ignoring_range(anchor, block_id, rot):
+						building_sys._paused_queue.append({
+							"grid_pos": anchor,
+							"block_id": block_id,
+							"rotation": rot,
+						})
+						count += 1
 			destroyed_player_buildings.erase(anchor)
 	return count
+
+
+# =========================
+# MULTI-CORE AI SHARDLINGS
+# =========================
+# Naming convention: AI shardlings live as direct children of Main
+# with names "AIShardling_<x>_<y>" derived from their spawn-core
+# anchor. The primary PlayerDrone keeps its name "PlayerDrone" so
+# every existing /root/Main/PlayerDrone lookup still resolves to
+# the player-controlled drone. _sync_ai_shardlings walks the live
+# LUMINA-core list and spawns / despawns AI siblings so the set
+# stays consistent across save/load and mid-game core placement.
+
+var _ai_shardling_script: Script = null
+
+
+func _shardling_node_name(anchor: Vector2i) -> String:
+	return "AIShardling_%d_%d" % [anchor.x, anchor.y]
+
+
+func _is_primary_core_anchor(anchor: Vector2i) -> bool:
+	# The drone the player controls anchors on `core_position` (set
+	# by place_core in _ready). Any other LUMINA core is treated as
+	# an AI shardling host.
+	return anchor == core_position
+
+
+func _spawn_ai_shardling_for_core(anchor: Vector2i) -> void:
+	if _is_primary_core_anchor(anchor):
+		return
+	var node_name: String = _shardling_node_name(anchor)
+	if has_node(node_name):
+		return
+	if _ai_shardling_script == null:
+		_ai_shardling_script = load("res://main/player_drone.gd")
+	if _ai_shardling_script == null:
+		push_warning("Main: could not load player_drone.gd for AI shardling.")
+		return
+	var node := Node2D.new()
+	node.name = node_name
+	node.set_script(_ai_shardling_script)
+	# Set the AI flag + home core BEFORE adding to the tree so
+	# player_drone._ready (which awaits a frame for the Registry)
+	# already sees them when it parks the drone.
+	node.set("ai_controlled", true)
+	node.set("spawn_core_anchor", anchor)
+	add_child(node)
+
+
+func _despawn_ai_shardling_for_core(anchor: Vector2i) -> void:
+	var node_name: String = _shardling_node_name(anchor)
+	var node := get_node_or_null(node_name)
+	if node:
+		node.queue_free()
+
+
+func _sync_ai_shardlings() -> void:
+	# Spawn missing AI siblings for every non-primary core.
+	for anchor in get_lumina_core_anchors():
+		_spawn_ai_shardling_for_core(anchor)
+
+
+func _on_building_completed_for_shardlings(block_id: StringName, anchor: Vector2i) -> void:
+	var data = Registry.get_block(block_id)
+	if data == null or not data.tags.has("core"):
+		return
+	if get_building_faction(anchor) != Faction.LUMINA:
+		return
+	_spawn_ai_shardling_for_core(anchor)
+
+
+func _on_building_destroyed_for_shardlings(anchor: Vector2i) -> void:
+	# When a core is removed we don't know its block id any more (the
+	# entry has already been cleared from placed_buildings by this
+	# point in the signal flow), so just attempt the despawn — the
+	# helper is a no-op when no matching child exists.
+	_despawn_ai_shardling_for_core(anchor)

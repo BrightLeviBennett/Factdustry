@@ -152,6 +152,30 @@ var _flap_thruster_phase: float = 0.0
 var _underlay: Node2D = null
 var _flap_overlay: Node2D = null
 
+# Lightweight pod-effect list. Each entry:
+#   pos:    Vector2  launchpad / landing-pad world center
+#   age:    float    seconds since spawn
+#   phase:  String   "launching" → scale up + fade out / "landing" → reverse
+# Lives outside the main LAND/LAUNCH state machine because the player can
+# trigger pod launches at any time and the camera should not be captured.
+const POD_LIFE := 1.2
+var _pods: Array = []
+var _pod_tex: Texture2D = preload("res://textures/blocks/assist/LaunchPod.png")
+
+# Sector-info banner shown during RING_SWEEP. CanvasLayer so it draws in
+# screen space above every world layer. Built once in `_ready`,
+# repopulated each `play_landing` from the active sector's SectorData,
+# and faded in/out as the ring sweep starts / ends.
+const BANNER_FADE_IN := 0.25
+const BANNER_HOLD := 3.0
+const BANNER_FADE_OUT := 0.6
+var _banner_layer: CanvasLayer = null
+var _banner_root: PanelContainer = null
+var _banner_name: RichTextLabel = null
+var _banner_resources_row: HBoxContainer = null
+var _banner_alpha: float = 0.0
+var _banner_elapsed: float = 0.0   # seconds since RING_SWEEP first ticked the banner
+
 # Cached per-floor-tile-id Image used to sample dust colors from the
 # terrain underneath. ImageTexture → Image conversion is a one-time
 # cost we lazy-cache.
@@ -193,10 +217,20 @@ func _ready() -> void:
 	_flap_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
 	add_child(_flap_overlay)
 	_flap_overlay.draw.connect(_paint_flaps.bind(_flap_overlay))
+	_build_banner()
 
 
 func _process(delta: float) -> void:
-	if state == State.IDLE and _dust.is_empty() and _wind_lines.is_empty():
+	# Pod effects tick even when the main state machine is IDLE — the
+	# player can trigger pod launches mid-gameplay independent of the
+	# core land / launch cinematics.
+	if not _pods.is_empty():
+		for i in range(_pods.size() - 1, -1, -1):
+			_pods[i]["age"] += delta
+			if _pods[i]["age"] >= POD_LIFE:
+				_pods.remove_at(i)
+		queue_redraw()
+	if state == State.IDLE and _dust.is_empty() and _wind_lines.is_empty() and _banner_alpha <= 0.0 and _pods.is_empty():
 		return
 	# Freeze the entire animation pipeline while the world is paused:
 	# the flap retraction, ring expansion, block reveals, dust drift,
@@ -238,6 +272,7 @@ func _process(delta: float) -> void:
 			_tick_ring_sweep(delta)
 		State.LAUNCHING:
 			_tick_launching(delta)
+	_tick_banner(delta)
 	queue_redraw()
 	if _underlay != null:
 		_underlay.queue_redraw()
@@ -418,8 +453,55 @@ func play_landing(core_anchor: Vector2i) -> void:
 	# isn't undercut by the larger world-sized placed building peeking
 	# out around its edges. It's revealed at RING_SWEEP entry below.
 	_capture_camera()
+	_populate_banner()
+	_banner_alpha = 0.0
+	_banner_elapsed = 0.0
+	if _banner_root != null:
+		_banner_root.modulate.a = 0.0
+		_banner_root.visible = false
 	state = State.LANDING
 	_t = 0.0
+
+
+## Lightweight pod launch effect for the Launchpad — a "pod" sprite
+## scales upward from the launchpad position with a brief thruster glow
+## and fades out. The camera is NOT captured (the player keeps driving
+## the shardling), and no clouds / wind streaks spawn. The actual cargo
+## transfer is handled by LaunchpadSystem before this is called.
+func play_pod_launch(launchpad_anchor: Vector2i) -> void:
+	if main == null:
+		return
+	var data = Registry.get_block(main.placed_buildings.get(launchpad_anchor, &""))
+	if data == null:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var world: Vector2 = main.grid_to_world(launchpad_anchor) + Vector2(
+		float(data.grid_size.x) * gs * 0.5,
+		float(data.grid_size.y) * gs * 0.5)
+	# Push a transient pod effect into the in-world pod array. Drawn from
+	# `_draw` each frame; entries auto-expire after PROC_POD_LIFE.
+	_pods.append({
+		"pos": world,
+		"age": 0.0,
+		"phase": "launching",   # vs. "landing"
+	})
+	var fb = main.get_node_or_null("FeedbackSystem")
+	if fb and fb.has_method("add_shake"):
+		fb.add_shake(4.0)
+
+
+## Symmetric of play_pod_launch — plays the "pod lands" effect at the
+## given world position. Used when a pod arrives in this sector (called
+## from main._ready after `_drain_pending_pod_deliveries` finds a pad).
+func play_pod_landing(world_pos: Vector2) -> void:
+	_pods.append({
+		"pos": world_pos,
+		"age": 0.0,
+		"phase": "landing",
+	})
+	var fb = main.get_node_or_null("FeedbackSystem") if main else null
+	if fb and fb.has_method("add_shake"):
+		fb.add_shake(4.0)
 
 
 func play_launch() -> void:
@@ -457,17 +539,15 @@ const INPUT_UNLOCK_SHAKE := 0.5    # max shake amplitude (px) considered "settle
 ## flickered as the camera's steady-state lerp lag oscillated around
 ## the threshold, freezing drone movement every other frame.
 func is_input_locked() -> bool:
+	# Only the actual lift / descent locks input — once the camera
+	# hits the ground the player can move during the touchdown shake,
+	# ring sweep, etc. (Previously the shake-amp gate held input
+	# until the screen settled, which felt like a lag spike.)
 	match state:
-		State.IDLE:
-			return false
 		State.LANDING, State.LAUNCHING:
 			return true
-	if main == null:
-		return true
-	var fb = main.get_node_or_null("FeedbackSystem")
-	if fb and "_shake_amp" in fb and float(fb._shake_amp) > INPUT_UNLOCK_SHAKE:
-		return true
-	return false
+		_:
+			return false
 
 
 func _resolve_follow_target() -> Vector2:
@@ -695,7 +775,50 @@ func _init_clouds() -> void:
 
 # ----- Render -----
 
+## Paints every active pod. Drawn here (not on the underlay) so the pod
+## appears above world buildings while it ascends / descends.
+func _draw_pods() -> void:
+	for pod in _pods:
+		var t: float = clampf(float(pod["age"]) / POD_LIFE, 0.0, 1.0)
+		var phase: String = String(pod.get("phase", "launching"))
+		# Launch: pod starts at the pad and grows + lifts; alpha fades.
+		# Land: reverse — pod descends into the pad and fades in.
+		var rise: float
+		var size: float
+		var alpha: float
+		var base_size: float = float(main.GRID_SIZE) * 0.9
+		if phase == "launching":
+			rise = lerpf(0.0, -160.0, ease(t, 1.6))
+			size = lerpf(base_size, base_size * 1.4, t)
+			alpha = lerpf(1.0, 0.0, t)
+		else:
+			rise = lerpf(-160.0, 0.0, ease(t, 1.6))
+			size = lerpf(base_size * 1.4, base_size, t)
+			alpha = lerpf(0.0, 1.0, t)
+		var center: Vector2 = pod["pos"] + Vector2(0, rise)
+		# Pod sprite — fall back to a yellow rect if the texture is
+		# missing so we never get a silent invisible pod.
+		var col := Color(1.0, 1.0, 1.0, alpha)
+		if _pod_tex:
+			var rect := Rect2(center - Vector2(size * 0.5, size * 0.5), Vector2(size, size))
+			draw_texture_rect(_pod_tex, rect, false, col)
+		else:
+			draw_rect(Rect2(center - Vector2(size * 0.35, size * 0.5),
+				Vector2(size * 0.7, size)), Color(1.0, 0.85, 0.2, alpha), true)
+		# Thruster flame at the bottom — only while launching.
+		if phase == "launching":
+			var flame := PackedVector2Array([
+				center + Vector2(-size * 0.25, size * 0.5),
+				center + Vector2(0, size * 0.5 + lerpf(20.0, 70.0, t)),
+				center + Vector2(size * 0.25, size * 0.5),
+			])
+			draw_colored_polygon(flame, Color(1.0, 0.5, 0.2, alpha))
+
+
 func _draw() -> void:
+	# Pod effects render every frame regardless of land/launch state.
+	if not _pods.is_empty():
+		_draw_pods()
 	if state == State.IDLE and _dust.is_empty() and _wind_lines.is_empty():
 		return
 	# Phase progress 0..1
@@ -849,23 +972,28 @@ func _paint_flaps(canvas: Node2D) -> void:
 	#   - RING_SWEEP / IDLE: flaps live in world space so they're glued
 	#     to the placed building. Player zooming changes their on-screen
 	#     size naturally, just like every other block.
+	# Anchor every animation-phase scale against the literal
+	# ZOOM_IN_FACTOR (the landing-end / launch-start camera zoom),
+	# NOT the player's saved zoom. This keeps the on-screen size of
+	# the flaps + core sprite fixed across animations regardless of
+	# whatever zoom the player was at when the sector loaded.
 	var flap_anchor: float = 1.0
 	if state == State.LANDING:
 		var land_p: float = clampf(_t / LAND_DURATION, 0.0, 1.0)
 		var flap_scale: float = lerpf(CORE_ANCHOR_SCALE, 1.0, ease(land_p, 1.6))
-		flap_anchor = (_cam_saved_zoom / maxf(cur_zoom, 0.0001)) * flap_scale
+		flap_anchor = (ZOOM_IN_FACTOR / maxf(cur_zoom, 0.0001)) * flap_scale
 	elif state == State.LAUNCHING:
 		var launch_p: float = clampf((_t - LAUNCH_HOLD) / LAUNCH_DURATION, 0.0, 1.0)
 		var flap_scale: float = lerpf(1.0, CORE_ANCHOR_SCALE, ease(launch_p, 1.6))
-		flap_anchor = (_cam_saved_zoom / maxf(cur_zoom, 0.0001)) * flap_scale
+		flap_anchor = (ZOOM_IN_FACTOR / maxf(cur_zoom, 0.0001)) * flap_scale
 	elif state == State.LANDED_PAUSE:
 		# Match the core sprite's ease from natural on-screen size →
 		# the placed building's eventual size, so flaps shrink in sync
 		# with the core instead of popping at the RING_SWEEP boundary.
 		var pause_t: float = clampf(_t / maxf(LANDED_PAUSE, 0.0001), 0.0, 1.0)
-		var target_scale: float = cur_zoom / maxf(_cam_saved_zoom, 0.0001)
+		var target_scale: float = cur_zoom / maxf(ZOOM_IN_FACTOR, 0.0001)
 		var flap_scale: float = lerpf(1.0, target_scale, ease(pause_t, 1.6))
-		flap_anchor = (_cam_saved_zoom / maxf(cur_zoom, 0.0001)) * flap_scale
+		flap_anchor = (ZOOM_IN_FACTOR / maxf(cur_zoom, 0.0001)) * flap_scale
 	var flap_w: float = core_size * FLAP_WIDTH_FRACTION * flap_anchor
 	var flap_h: float = core_size * FLAP_SIZE_FRACTION * flap_anchor
 	var anchored_core_size: float = core_size * flap_anchor
@@ -996,15 +1124,18 @@ func _draw_core(land_p: float, launch_p: float) -> void:
 		# the touchdown snap). Without this ease the core appears to
 		# "teleport" shrink at the LANDED_PAUSE → RING_SWEEP boundary.
 		var pause_t: float = clampf(_t / maxf(LANDED_PAUSE, 0.0001), 0.0, 1.0)
-		var target_scale: float = cur_zoom / maxf(_cam_saved_zoom, 0.0001)
+		var target_scale: float = cur_zoom / maxf(ZOOM_IN_FACTOR, 0.0001)
 		scale_factor = lerpf(1.0, target_scale, ease(pause_t, 1.6))
 	elif state == State.RING_SWEEP:
 		# RING_SWEEP: animation core draws on top of the flap overlay so
 		# the placed core visually sits on top of retracting flaps.
 		# Use a scale that makes the on-screen size equal the placed
 		# building's natural world size (i.e. no inverse-zoom comp).
-		scale_factor = cur_zoom / maxf(_cam_saved_zoom, 0.0001)
-	var anchor_factor: float = (_cam_saved_zoom / maxf(cur_zoom, 0.0001)) * scale_factor
+		scale_factor = cur_zoom / maxf(ZOOM_IN_FACTOR, 0.0001)
+	# Use the literal ZOOM_IN_FACTOR as the size anchor so the
+	# animation core renders at the same on-screen size regardless of
+	# the player's saved zoom (which only kicks in after _restore_camera).
+	var anchor_factor: float = (ZOOM_IN_FACTOR / maxf(cur_zoom, 0.0001)) * scale_factor
 	var draw_size: float = size * s * anchor_factor
 	draw_set_transform(_core_world, rot, Vector2.ONE)
 	draw_texture_rect(base_tex, Rect2(-draw_size * 0.5, -draw_size * 0.5, draw_size, draw_size), false, Color(1, 1, 1, 1))
@@ -1021,3 +1152,122 @@ func _draw_ring() -> void:
 	var glow: Color = Color(RING_COLOR.r, RING_COLOR.g, RING_COLOR.b, RING_COLOR.a * 0.35)
 	draw_arc(_core_world, _ring_radius - 6.0, 0, TAU, 96, glow, RING_THICKNESS * 2.0, true)
 	draw_arc(_core_world, _ring_radius + 6.0, 0, TAU, 96, glow, RING_THICKNESS * 2.0, true)
+
+
+# ----- Sector-info banner -----
+
+func _build_banner() -> void:
+	_banner_layer = CanvasLayer.new()
+	_banner_layer.layer = 100
+	_banner_layer.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(_banner_layer)
+
+	var anchor: Control = Control.new()
+	anchor.anchor_left = 0.0
+	anchor.anchor_right = 1.0
+	anchor.anchor_top = 0.0
+	anchor.anchor_bottom = 1.0
+	anchor.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_banner_layer.add_child(anchor)
+
+	var center := CenterContainer.new()
+	center.anchor_left = 0.0
+	center.anchor_right = 1.0
+	center.anchor_top = 0.0
+	center.anchor_bottom = 1.0
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	anchor.add_child(center)
+
+	_banner_root = PanelContainer.new()
+	_banner_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.08, 0.09, 0.11, 0.7)
+	sb.border_color = Color(1.0, 0.85, 0.2, 0.55)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(6)
+	sb.content_margin_left = 16
+	sb.content_margin_right = 16
+	sb.content_margin_top = 10
+	sb.content_margin_bottom = 10
+	_banner_root.add_theme_stylebox_override("panel", sb)
+	_banner_root.visible = false
+	_banner_root.modulate = Color(1, 1, 1, 0)
+	center.add_child(_banner_root)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_banner_root.add_child(vbox)
+
+	_banner_name = RichTextLabel.new()
+	_banner_name.bbcode_enabled = true
+	_banner_name.fit_content = true
+	_banner_name.scroll_active = false
+	_banner_name.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_banner_name.add_theme_font_size_override("normal_font_size", 22)
+	_banner_name.add_theme_font_size_override("bold_font_size", 22)
+	_banner_name.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(_banner_name)
+
+	var bottom_row := HBoxContainer.new()
+	bottom_row.add_theme_constant_override("separation", 6)
+	bottom_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	bottom_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(bottom_row)
+
+	var res_label := Label.new()
+	res_label.text = "Resources:"
+	res_label.add_theme_font_size_override("font_size", 14)
+	res_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2))
+	bottom_row.add_child(res_label)
+
+	_banner_resources_row = HBoxContainer.new()
+	_banner_resources_row.add_theme_constant_override("separation", 4)
+	_banner_resources_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bottom_row.add_child(_banner_resources_row)
+
+
+func _populate_banner() -> void:
+	if _banner_root == null:
+		return
+	var sid: StringName = SaveManager.active_sector_id if "active_sector_id" in SaveManager else &""
+	var sector: SectorData = Registry.get_sector(sid) if sid != &"" else null
+	var display: String = sector.display_name if sector and sector.display_name != "" else String(sid).replace("_", " ").capitalize()
+	if display == "":
+		display = "Unknown Sector"
+	_banner_name.text = "[center][color=#ffffff][[/color][color=#ffd633]%s[/color][color=#ffffff]][/color][/center]" % display
+	for c in _banner_resources_row.get_children():
+		c.queue_free()
+	var resources: PackedStringArray = sector.available_resources if sector else PackedStringArray()
+	for item_id in resources:
+		var item = Registry.get_item_or_fluid(StringName(item_id))
+		var icon_rect := TextureRect.new()
+		icon_rect.custom_minimum_size = Vector2(20, 20)
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		if item and item.icon:
+			icon_rect.texture = item.icon
+		icon_rect.tooltip_text = item.display_name if item else String(item_id)
+		icon_rect.mouse_filter = Control.MOUSE_FILTER_PASS
+		_banner_resources_row.add_child(icon_rect)
+
+
+func _tick_banner(delta: float) -> void:
+	if _banner_root == null:
+		return
+	# Banner kicks in at RING_SWEEP start: fade in over BANNER_FADE_IN,
+	# hold fully visible for BANNER_HOLD seconds (3 s), then fade out
+	# over BANNER_FADE_OUT. The hold is fixed and independent of how
+	# long the actual ring sweep takes — by the time the animation
+	# finishes the banner is either still mid-fade or already gone.
+	if state == State.RING_SWEEP:
+		_banner_elapsed += delta
+	else:
+		_banner_elapsed = 0.0
+	var want_visible: bool = state == State.RING_SWEEP \
+		and _banner_elapsed < BANNER_FADE_IN + BANNER_HOLD
+	var target: float = 1.0 if want_visible else 0.0
+	var rate: float = (1.0 / BANNER_FADE_IN) if want_visible else (1.0 / BANNER_FADE_OUT)
+	_banner_alpha = move_toward(_banner_alpha, target, rate * delta)
+	_banner_root.modulate.a = _banner_alpha
+	_banner_root.visible = _banner_alpha > 0.001

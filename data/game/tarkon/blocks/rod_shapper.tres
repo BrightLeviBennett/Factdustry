@@ -1,0 +1,36 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"rod_shapper"
+display_name = "Rod Shapper"
+description = "Compresses raw material into reactor-grade rods. Pick a recipe before feeding it."
+category = 2
+tags = PackedStringArray("factory", "recipe_select", "omnidirectional")
+color = Color(0.85, 0.75, 0.3, 1)
+max_health = 240.0
+build_cost = {
+"copper": 220,
+"steel": 80,
+"brass": 30
+}
+build_time = 4.0
+production_time = 3.0
+electrical_power_use = 15.0
+max_stored_items = 40
+factory_recipes = [
+{
+"id": &"graphite_rod",
+"display_name": "Graphite Rod",
+"input": {"mat_graphite": 2},
+"output": {"mat_graphite_rod": 1}
+},
+{
+"id": &"uranium_rod",
+"display_name": "Uranium Rod",
+"input": {"mat_refined_uranium": 2},
+"output": {"mat_uranium_rod": 1}
+}
+]

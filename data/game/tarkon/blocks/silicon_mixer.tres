@@ -1,21 +1,18 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dhfhi5j8y7t71"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://dtiy7meokk1gx" path="res://textures/blocks/factories/SiliconMixer.png" id="1_d7k1w"]
+[ext_resource type="Texture2D" uid="uid://s7phy43lcs6s" path="res://textures/blocks/factories/Silicon Refinery/SiliconRefineryComplete.png" id="2_srcom"]
 
 [resource]
 script = ExtResource("1")
 id = &"silicon_mixer"
 display_name = "Silicon Refinery"
 description = "Refines sand and graphite into silicon. Accepts inputs and outputs on every side."
-icon = ExtResource("1_d7k1w")
+icon = ExtResource("2_srcom")
 category = 2
 tags = PackedStringArray("production", "processing", "omnidirectional")
 color = Color(0.6, 0.6, 0.7, 1)
 grid_size = Vector2i(3, 3)
-top_sprite = ExtResource("1_d7k1w")
-barrel_count = null
-barrel_spacing = null
 max_health = 520.0
 build_cost = {
 "copper": 50,
@@ -30,8 +27,5 @@ output_items = {
 "mat_silicon": 1
 }
 production_time = 0.5
-requires_power = true
-power_consumption = 3.0
 electrical_power_use = 10.0
 max_stored_items = 30
-refab_recipes = null

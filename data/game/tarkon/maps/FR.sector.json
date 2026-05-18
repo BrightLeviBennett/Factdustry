@@ -1997,9 +1997,12 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1778612863.13061
+		"timestamp": 1778882094.18719
 	},
 	"drone_position": "",
+	"duct_bridge_filters": {
+
+	},
 	"factory_buffers": {
 
 	},
@@ -15093,6 +15096,28 @@
 	"grid_height": 300,
 	"grid_width": 300,
 	"hints": [],
+	"hints_runtime": {
+		"clock": 59.5884183333307,
+		"landing_fired": true,
+		"runtime": {
+			"Mass Driver": {
+				"activated_at": 231894.702059201,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			},
+			"bridge": {
+				"activated_at": 62390.3979561385,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			}
+		}
+	},
 	"junction_items": {
 
 	},
@@ -15177,6 +15202,46 @@
 		"mat_silicon": 2965,
 		"mat_steel": 1526
 	},
+	"script_runtime": {
+		"core_counts": {
+
+		},
+		"core_unit_mined_counts": {
+
+		},
+		"current_step": -1,
+		"decoded_archive_counts": {
+
+		},
+		"deposited_baselines": {
+
+		},
+		"disabled_buildings": [],
+		"ferox_blocks_destroyed_counts": {
+
+		},
+		"hidden_tiles": [],
+		"mined_counts": {
+
+		},
+		"placed_baselines": {
+
+		},
+		"placed_counts": {
+
+		},
+		"produced_counts": {
+
+		},
+		"script_running": false,
+		"step_wait_timer": 0.0,
+		"units_destroyed_counts": {
+
+		},
+		"units_produced_counts": {
+
+		}
+	},
 	"script_steps": [
 		{
 			"actions": [
@@ -15216,7 +15281,7 @@
 				{
 					"from": "64,137",
 					"id": "MET",
-					"text": "(-white)Research the [res://textures/blocks/resource extractors/MineralExtractor.png](-yellow)Mineral Extractor(-white) and place it on a geyser to extract [res://textures/TexNotFound.png]Iron.\n(-white)You will need to power it.",
+					"text": "(-white)Research the [res://textures/blocks/resource extractors/MineralExtractor.png](-yellow)Mineral Extractor(-white) and place it on a geyser to extract [res://textures/resources/iron.png]Iron.\n(-white)You will need to power it.",
 					"to": "70,137",
 					"type": "draw_text"
 				},
@@ -15266,7 +15331,7 @@
 				{
 					"from": "67,137",
 					"id": "SFT",
-					"text": "(-white)Now research and place a [res://textures/blocks/factories/SteelFurnace.png]Steel Furnace to produce [res://textures/TexNotFound.png]Steel from [res://textures/TexNotFound.png]Iron.",
+					"text": "(-white)Now research and place a [res://textures/blocks/factories/SteelFurnace.png]Steel Furnace to produce [res://textures/resources/steel.png]Steel from [res://textures/resources/iron.png]Iron.",
 					"to": "73,137",
 					"type": "draw_text"
 				},

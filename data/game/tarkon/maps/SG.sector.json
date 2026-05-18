@@ -757,7 +757,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1778440642.06553
+		"timestamp": 1778692585.15513
 	},
 	"drone_position": "",
 	"factory_buffers": {
@@ -3256,6 +3256,36 @@
 			"text": "You need to be in command mode to command units.\nPress \"U\" to go into command mode then left-click and drag to select units; then right-click to have the units go where you right-clicked."
 		}
 	],
+	"hints_runtime": {
+		"clock": 11.6678163333331,
+		"landing_fired": true,
+		"runtime": {
+			"Mass Driver": {
+				"activated_at": 231894.702059201,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			},
+			"bridge": {
+				"activated_at": 488.219110888587,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "dismissed"
+			},
+			"move": {
+				"activated_at": 0.0322046666666666,
+				"baselines": {
+
+				},
+				"sentinel": null,
+				"state": "active"
+			}
+		}
+	},
 	"junction_items": {
 
 	},
@@ -3324,6 +3354,46 @@
 		"mat_graphite": 574,
 		"mat_silicon": 379,
 		"mat_steel": 232
+	},
+	"script_runtime": {
+		"core_counts": {
+
+		},
+		"core_unit_mined_counts": {
+
+		},
+		"current_step": -1,
+		"decoded_archive_counts": {
+
+		},
+		"deposited_baselines": {
+
+		},
+		"disabled_buildings": [],
+		"ferox_blocks_destroyed_counts": {
+
+		},
+		"hidden_tiles": [],
+		"mined_counts": {
+
+		},
+		"placed_baselines": {
+
+		},
+		"placed_counts": {
+
+		},
+		"produced_counts": {
+
+		},
+		"script_running": false,
+		"step_wait_timer": 0.0,
+		"units_destroyed_counts": {
+
+		},
+		"units_produced_counts": {
+
+		}
 	},
 	"script_steps": [
 		{
@@ -3693,7 +3763,7 @@
 				{
 					"from": "45,54",
 					"id": "PBT2",
-					"text": "(-white)Research and place a [res://textures/blocks/factories/SiliconMixer.png]Silicon Refinery.\n(-white)You'll need to provide it with graphite, sand and power.",
+					"text": "(-white)Research and place a [res://textures/blocks/factories/Silicon Refinery/SiliconRefineryComplete.png]Silicon Refinery.\n(-white)You'll need to provide it with graphite, sand and power.",
 					"to": "51,54",
 					"type": "draw_text"
 				}
@@ -3975,6 +4045,13 @@
 	"sorter_filters": {
 
 	},
+	"stats_blocks_placed": 0,
+	"stats_blocks_removed": 0,
+	"stats_enemy_blocks_destroyed": 0,
+	"stats_enemy_units_destroyed": 0,
+	"stats_play_time": 0.0,
+	"stats_units_destroyed": 0,
+	"stats_units_produced": 0,
 	"type": "sector",
 	"unloader_state": {
 

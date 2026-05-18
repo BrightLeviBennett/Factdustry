@@ -1,6 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cfy4h2yqt172o"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cqrsh34dm77cq" path="res://textures/blocks/resource extractors/WallGrinder/WallGrinderComplete.png" id="1_4i7rr"]
 [ext_resource type="Texture2D" uid="uid://84xnje87pov" path="res://textures/blocks/resource extractors/WallGrinder/WallGrinder.png" id="2_ddc7o"]
 
 [resource]
@@ -8,6 +9,7 @@ script = ExtResource("1")
 id = &"wall_grinder"
 display_name = "Wall Grinder"
 description = "Three-headed grinder that pulverises blackstone walls into sand. Must face a blackstone wall. Requires electrical power."
+icon = ExtResource("1_4i7rr")
 category = 1
 tags = PackedStringArray("mining", "extractor", "wall_miner", "grinder_heads")
 color = Color(0.6, 0.6, 0.4, 1)
@@ -23,5 +25,9 @@ output_items = {
 "mat_sand": 9
 }
 production_time = 10.0
+accepted_walls = Array[StringName]([&"blackstone_wall", &"purple_wall"])
+wall_efficiency = {
+&"purple_wall": 0.75
+}
 electrical_power_use = 18.0
 max_stored_items = 20

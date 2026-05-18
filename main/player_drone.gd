@@ -66,6 +66,23 @@ var _thruster_phase: float = 0.0
 # reset so the cycle starts again at the nearest.
 var _used_respawn_cores: Array[Vector2i] = []
 
+# --- AI SHARDLING ---
+# When a sector has multiple LUMINA cores, main.gd spawns one extra
+# PlayerDrone instance per non-primary core with ai_controlled = true.
+# Those AI shardlings skip player input + mining and instead run a
+# priority loop: assist with builds → shoot enemies → heal damaged
+# blocks → return to their spawn core when idle.
+var ai_controlled: bool = false
+var spawn_core_anchor: Vector2i = Vector2i(-1, -1)
+# Per-AI-drone fire cooldown. Mirrors combat_system.drone_attack_speed
+# for the primary drone; tracked here so each AI shardling has its
+# own clock instead of fighting over the singleton in combat_system.
+var _ai_fire_cooldown: float = 0.0
+const _AI_BUILD_REACH_TILES := 8
+const _AI_FIRE_REACH_TILES := 10
+const _AI_HEAL_REACH_TILES := HEAL_RANGE_TILES
+const _AI_IDLE_REACH_TILES := 0
+
 # --- DATA ---
 # The UnitData resource loaded from player_drone.tres
 var data: UnitData
@@ -223,7 +240,14 @@ func _ready() -> void:
 			mined_inventory[item.id] = 0
 
 	health = max_health
-	_move_to_core()
+	if ai_controlled:
+		# AI shardlings don't accept input and start parked on their
+		# assigned home core (not whatever the respawn cycle picks).
+		set_process_input(false)
+		set_process_unhandled_input(false)
+		_park_on_spawn_core()
+	else:
+		_move_to_core()
 
 
 func _process(delta: float) -> void:
@@ -232,6 +256,8 @@ func _process(delta: float) -> void:
 	_handle_destroy()
 	_handle_mining(delta)
 	_handle_healing(delta)
+	if ai_controlled:
+		_ai_fire_tick(delta)
 	# Pulse phases freeze with the world — keeps the beams / thrusters
 	# visually still during pause instead of shimmering on a frozen scene.
 	var paused: bool = "world_paused" in main and main.world_paused
@@ -313,6 +339,10 @@ func _smooth_angle(current: float, target: float, delta: float) -> float:
 func _pick_turret_aim_pos() -> Variant:
 	if not _drone_in_control():
 		return null
+	# AI shardlings don't have a player at the wheel — their turret
+	# heads should track the AI auto-fire target, never the cursor.
+	if ai_controlled:
+		return _ai_shoot_target_pos()
 	if not heal_mode:
 		# Default mode: heads follow the cursor unconditionally so the
 		# player can read where the next bullet will go without having
@@ -330,6 +360,14 @@ func _pick_turret_aim_pos() -> Variant:
 ## last pose instead of snapping back to chassis forward.
 func _pick_healer_aim_pos() -> Variant:
 	if not _drone_in_control():
+		return null
+	# AI shardlings ignore the cursor; their healer head follows
+	# whatever target the AI auto-heal locked onto, falling back to
+	# null so the head holds its last pose instead of tracking the
+	# player's mouse on a different drone.
+	if ai_controlled:
+		if _heal_beam_active:
+			return _heal_beam_endpoint
 		return null
 	if heal_mode:
 		return get_global_mouse_position()
@@ -537,6 +575,15 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _handle_movement(delta: float) -> void:
 	# Skip movement when a blocking UI is open
+	# AI shardlings ignore player input + UI gates and run their own
+	# priority loop. Pause + controlled-entity still freeze the AI to
+	# keep the world-paused contract clean.
+	if ai_controlled:
+		if main.world_paused:
+			return
+		_ai_movement_tick(delta)
+		return
+
 	if main.is_ui_blocking():
 		return
 	# Skip drone movement when world is paused (camera pans independently)
@@ -657,6 +704,9 @@ func _handle_destroy() -> void:
 # --- MINING LOGIC ---
 
 func _handle_mining(delta: float) -> void:
+	# AI shardlings don't mine — mining is the primary drone's job.
+	if ai_controlled:
+		return
 	# Pause mining when the game is paused
 	if main.world_paused:
 		return
@@ -852,9 +902,22 @@ func take_damage(amount: float) -> void:
 
 
 func _on_death() -> void:
+	# Boom + ruin decal at the death spot before we teleport home.
+	var overlay = main.get_node_or_null("ParticleOverlay") if main else null
+	if overlay:
+		if overlay.has_method("spawn_burst"):
+			overlay.spawn_burst(position, "explosion_unit")
+		if overlay.has_method("spawn_unit_ruins"):
+			var vis_size: float = data.visual_size if data else 14.0
+			overlay.spawn_unit_ruins(position, vis_size)
 	health = max_health
 	_clear_inventory()
-	_move_to_core()
+	if ai_controlled:
+		# AI shardlings respawn on their assigned home core, not the
+		# shared respawn cycle the primary drone uses.
+		_park_on_spawn_core()
+	else:
+		_move_to_core()
 
 
 ## Drops the mined inventory. Called on any respawn path — death, manual
@@ -938,6 +1001,217 @@ func _next_respawn_core_anchor(world_pos: Vector2) -> Vector2i:
 			best_dist_sq = d_sq
 			best = anchor
 	return best
+
+
+# =========================
+# AI SHARDLING BEHAVIOUR
+# =========================
+#
+# An AI-controlled PlayerDrone is one of the secondary shardlings
+# spawned for non-primary cores on a sector. It runs the priority
+# loop:
+#   1. Assist with builds  — sit within range of a queued work_order
+#      anchor so _is_in_build_range counts the AI drone toward the
+#      build tick.
+#   2. Shoot enemy units   — move into firing range of the nearest
+#      hostile and fire via _ai_fire_tick.
+#   3. Heal blocks         — move into HEAL_RANGE_TILES of the most-
+#      damaged friendly block. The existing _handle_healing flow
+#      handles the laser + HP application; the AI drone just provides
+#      proximity.
+#   4. Idle                — drift back to the spawn core and park.
+# At each step the AI tries to take a single step toward the priority
+# target this frame, so the behaviour reads as smooth motion rather
+# than a state machine click.
+
+func _park_on_spawn_core() -> void:
+	# Place the drone at the centre of its assigned home core. Falls
+	# back to the legacy `main.core_position` if the anchor is missing
+	# or its block has been destroyed since the AI was spawned.
+	var core_pos: Vector2i = spawn_core_anchor
+	var data_core: BlockData = null
+	if core_pos != Vector2i(-1, -1) and main.placed_buildings.has(core_pos):
+		data_core = Registry.get_block(main.placed_buildings[core_pos])
+	else:
+		core_pos = main.core_position
+		data_core = Registry.get_block(&"core")
+	var sz: Vector2i = data_core.grid_size if data_core else Vector2i(3, 3)
+	position = Vector2(
+		(core_pos.x + sz.x / 2.0) * main.GRID_SIZE,
+		(core_pos.y + sz.y / 2.0) * main.GRID_SIZE,
+	)
+	_velocity_smooth = Vector2.ZERO
+	_reset_orientation()
+
+
+func _ai_movement_tick(delta: float) -> void:
+	# Priority 1: in-flight builds.
+	var build_anchor: Vector2i = _ai_find_build_target()
+	if build_anchor != Vector2i(-1, -1):
+		_ai_step_toward_grid(build_anchor, _AI_BUILD_REACH_TILES, delta)
+		return
+	# Priority 2: hostile units (the auto-fire tick handles the trigger).
+	var enemy: Node2D = _ai_find_enemy_in_world()
+	if enemy != null:
+		_ai_step_toward_world(enemy.position, _AI_FIRE_REACH_TILES, delta)
+		return
+	# Priority 3: damaged friendlies — the heal handler does the rest.
+	var heal_anchor: Vector2i = _ai_find_heal_anchor()
+	if heal_anchor != Vector2i(-1, -1):
+		_ai_step_toward_grid(heal_anchor, _AI_HEAL_REACH_TILES, delta)
+		return
+	# Priority 4: drift back to spawn core and idle there.
+	if spawn_core_anchor != Vector2i(-1, -1) and main.placed_buildings.has(spawn_core_anchor):
+		_ai_step_toward_grid(spawn_core_anchor, _AI_IDLE_REACH_TILES, delta)
+		return
+	# Spawn core gone — pick a fresh LUMINA core as the fallback home.
+	var anchors: Array = main.get_lumina_core_anchors()
+	if not anchors.is_empty():
+		spawn_core_anchor = anchors[0]
+
+
+func _ai_find_build_target() -> Vector2i:
+	if not ("work_order" in main) or main.work_order.is_empty():
+		return Vector2i(-1, -1)
+	var paused: Dictionary = main.work_paused if "work_paused" in main else {}
+	var best := Vector2i(-1, -1)
+	var best_d2: float = INF
+	for a in main.work_order:
+		if paused.has(a):
+			continue
+		var c: Vector2 = main.grid_to_world(a) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+		var d2: float = position.distance_squared_to(c)
+		if d2 < best_d2:
+			best_d2 = d2
+			best = a
+	return best
+
+
+func _ai_find_enemy_in_world() -> Node2D:
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr == null or not ("enemies" in unit_mgr):
+		return null
+	var best: Node2D = null
+	var best_d2: float = INF
+	for e in unit_mgr.enemies:
+		if e == null or not is_instance_valid(e):
+			continue
+		if "is_dead" in e and e.is_dead:
+			continue
+		if "team" in e and e.team == UnitData.Team.PLAYER:
+			continue
+		var d2: float = position.distance_squared_to(e.position)
+		if d2 < best_d2:
+			best_d2 = d2
+			best = e
+	return best
+
+
+func _ai_find_heal_anchor() -> Vector2i:
+	# Reuse the existing heal-AI scanner; it returns the most-damaged
+	# friendly block inside HEAL_RANGE_TILES, or null. For motion
+	# planning we accept any damaged friendly within a wider radius
+	# so the AI drone closes the distance before _handle_healing
+	# locks on.
+	var range_px: float = HEAL_RANGE_TILES * float(main.GRID_SIZE)
+	var nearby = _find_ai_heal_target(range_px * 4.0)
+	if nearby == null:
+		return Vector2i(-1, -1)
+	if nearby is Vector2i:
+		return nearby
+	return Vector2i(-1, -1)
+
+
+func _ai_step_toward_world(target_world: Vector2, reach_tiles: int, delta: float) -> void:
+	var to: Vector2 = target_world - position
+	var dist: float = to.length()
+	var reach_px: float = reach_tiles * float(main.GRID_SIZE)
+	# Always settle when very close, even when `reach_tiles == 0` —
+	# without this floor a zero-reach idle target (e.g. parking on a
+	# core's centre) would never satisfy `dist <= reach_px` due to
+	# float jitter and the drone would oscillate around the centre
+	# forever.
+	var settle_px: float = maxf(reach_px, 4.0)
+	if dist <= settle_px:
+		# Snap to the exact centre when we're inside the settle ring,
+		# so cores read as "drone parked on the bullseye" instead of
+		# "drone wobbling near the bullseye".
+		if dist < 4.0:
+			position = target_world
+		_velocity_smooth = Vector2.ZERO
+		if to.length_squared() > 1.0:
+			_target_facing_angle = to.angle() + PI / 2.0 + PI
+		_ai_apply_facing(delta)
+		return
+	# Walk in toward the target. Use the same smoothing rates as the
+	# input-driven path so the drone feels consistent.
+	var dir: Vector2 = to.normalized()
+	_target_facing_angle = dir.angle() + PI / 2.0 + PI
+	var target_velocity: Vector2 = dir * move_speed
+	var smoothing: float = 1.0 - exp(-MOVE_ACCEL * delta)
+	_velocity_smooth = _velocity_smooth.lerp(target_velocity, smoothing)
+	var new_pos: Vector2 = position + _velocity_smooth * delta
+	new_pos.x = clamp(new_pos.x, 0.0, main.GRID_SIZE * main.GRID_WIDTH)
+	new_pos.y = clamp(new_pos.y, 0.0, main.GRID_SIZE * main.GRID_HEIGHT)
+	position = new_pos
+	_ai_apply_facing(delta)
+
+
+func _ai_step_toward_grid(anchor: Vector2i, reach_tiles: int, delta: float) -> void:
+	var bdata: BlockData = null
+	if main.placed_buildings.has(anchor):
+		bdata = Registry.get_block(main.placed_buildings[anchor])
+	var sz: Vector2i = bdata.grid_size if bdata else Vector2i.ONE
+	var target_world: Vector2 = main.grid_to_world(anchor) + Vector2(
+		sz.x * main.GRID_SIZE * 0.5,
+		sz.y * main.GRID_SIZE * 0.5,
+	)
+	_ai_step_toward_world(target_world, reach_tiles, delta)
+
+
+func _ai_apply_facing(delta: float) -> void:
+	var angle_diff: float = wrapf(_target_facing_angle - facing_angle, -PI, PI)
+	if absf(angle_diff) > 0.01:
+		var rotate_amount: float = signf(angle_diff) * ROTATION_SPEED * delta
+		if absf(rotate_amount) > absf(angle_diff):
+			facing_angle = _target_facing_angle
+		else:
+			facing_angle = wrapf(facing_angle + rotate_amount, -PI, PI)
+
+
+func _ai_fire_tick(delta: float) -> void:
+	if main.world_paused:
+		return
+	_ai_fire_cooldown -= delta
+	if _ai_fire_cooldown > 0.0:
+		return
+	var enemy: Node2D = _ai_find_enemy_in_world()
+	if enemy == null:
+		return
+	var range_px: float = _AI_FIRE_REACH_TILES * float(main.GRID_SIZE)
+	if position.distance_to(enemy.position) > range_px:
+		return
+	var combat = get_node_or_null("/root/Main/CombatSystem")
+	if combat == null or not combat.has_method("_drone_muzzle_info") \
+			or not combat.has_method("_spawn_projectile"):
+		return
+	var attack_speed: float = combat.drone_attack_speed if "drone_attack_speed" in combat else 0.6
+	var dmg: float = combat.drone_damage if "drone_damage" in combat else 8.0
+	var proj_speed: float = combat.drone_projectile_speed if "drone_projectile_speed" in combat else 600.0
+	_ai_fire_cooldown = attack_speed
+	var muzzle: Dictionary = combat._drone_muzzle_info(self, enemy.position)
+	combat._spawn_projectile(
+		muzzle["pos"],
+		enemy,
+		muzzle["pos"] + muzzle["dir"] * range_px,
+		"enemy",
+		proj_speed,
+		dmg,
+		Color(0.3, 0.9, 1.0, 1.0),
+		"drone",
+		false,
+		0.0,
+	)
 
 
 ## Restores the chassis + head rotations to neutral. Called on any
@@ -1268,14 +1542,18 @@ func _handle_healing(delta: float) -> void:
 		_heal_beam_active = false
 		heal_target = null
 		return
-	var unit_mgr = _unit_mgr_ref()
-	if unit_mgr and unit_mgr.controlled_entity != null:
-		_heal_beam_active = false
-		heal_target = null
-		return
-	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
-		_heal_beam_active = false
-		return
+	# Player-controlled-entity + UI gates only apply to the primary
+	# drone — AI shardlings keep mending damaged blocks regardless of
+	# what the player is doing.
+	if not ai_controlled:
+		var unit_mgr = _unit_mgr_ref()
+		if unit_mgr and unit_mgr.controlled_entity != null:
+			_heal_beam_active = false
+			heal_target = null
+			return
+		if main.has_method("is_ui_blocking") and main.is_ui_blocking():
+			_heal_beam_active = false
+			return
 	# Healing is a live gameplay action — block target acquisition / HP
 	# application while the world is paused so the player can't sneak a
 	# heal in during the freeze. The visual beam stays put on whatever

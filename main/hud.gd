@@ -58,9 +58,21 @@ const PORTRAIT_BAR_WIDTH := 6.0
 
 # Block menu nodes
 var block_menu: PanelContainer
+var block_menu_outer_vbox: VBoxContainer
+var block_menu_info_separator: HSeparator
 var block_grid: GridContainer
 var category_vbox: Container
 var misc_hbox: HBoxContainer
+# Unit mode panel: icon grid + command buttons
+var unit_mode_icon_grid: HFlowContainer
+var unit_mode_buttons_vbox: VBoxContainer
+var unit_mode_btn_cancel: Button
+var unit_mode_btn_hold_fire: Button
+var unit_mode_btn_payload: Button
+var unit_mode_btn_rebuild: Button
+var unit_mode_btn_mine: Button
+var unit_mode_btn_assist: Button
+var _mine_picker_popup: PopupPanel = null
 var category_buttons: Dictionary = {}  # BlockCategory → Button
 var selected_category: int = -1
 
@@ -402,7 +414,60 @@ var _autosave_timer := 60.0
 ## next tick without needing a sector restart.
 var autosave_interval: float = 60.0
 
+## Adds or refreshes a transient hazard alert displayed beneath the
+## resource panel. `id` is the unique key for this alert (so re-pushing the
+## same id just refreshes the text instead of stacking duplicates). Call
+## `clear_alert(id)` when the condition resolves. Pass `auto_expire_sec`
+## for self-clearing alerts (e.g. a core-damage notice that should fade if
+## damage stops landing).
+func push_alert(id: StringName, text: String, auto_expire_sec: float = 0.0) -> void:
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var expires_at: float = -1.0
+	if auto_expire_sec > 0.0:
+		expires_at = now + auto_expire_sec
+	for entry in _active_alerts:
+		if StringName(entry.get("id", &"")) == id:
+			entry["text"] = text
+			entry["expires_at"] = expires_at
+			return
+	_active_alerts.append({"id": id, "text": text, "expires_at": expires_at})
+
+
+func clear_alert(id: StringName) -> void:
+	for i in range(_active_alerts.size() - 1, -1, -1):
+		if StringName(_active_alerts[i].get("id", &"")) == id:
+			_active_alerts.remove_at(i)
+
+
+func _tick_alert_banner(delta: float) -> void:
+	if alert_panel == null or alert_label == null:
+		return
+	# Auto-expire alerts whose expires_at has passed (negative = persistent).
+	var now: float = Time.get_ticks_msec() / 1000.0
+	for i in range(_active_alerts.size() - 1, -1, -1):
+		var exp: float = float(_active_alerts[i].get("expires_at", -1.0))
+		if exp >= 0.0 and now >= exp:
+			_active_alerts.remove_at(i)
+	if _active_alerts.is_empty():
+		alert_panel.visible = false
+		return
+	_alert_phase += delta * TAU * 1.0   # ~1 Hz colour cycle
+	# Cycle the label colour between red and yellow on a sine. Stays high
+	# saturation so the eye catches it in peripheral vision.
+	var t: float = 0.5 + 0.5 * sin(_alert_phase)
+	var col := Color(1.0, lerpf(0.15, 0.85, t), 0.15)
+	alert_label.add_theme_color_override("font_color", col)
+	# Show all active alerts stacked on newlines — gives a single banner
+	# for "multiple things on fire" without spawning duplicate panels.
+	var lines: Array[String] = []
+	for entry in _active_alerts:
+		lines.append(String(entry.get("text", "")))
+	alert_label.text = "\n".join(lines)
+	alert_panel.visible = true
+
+
 func _process(delta: float) -> void:
+	_tick_alert_banner(delta)
 	# Track play time
 	if not main.world_paused and not main.sector_lost:
 		main.stats_play_time += delta
@@ -522,9 +587,18 @@ func _process(delta: float) -> void:
 	if block_menu:
 		block_menu.visible = not in_unit_mode
 
+	# Info-section separator: only show when one of tooltip / build-cost is
+	# visible, so the block grid sits flush against the panel chrome when
+	# there's nothing above it.
+	if block_menu_info_separator:
+		block_menu_info_separator.visible = block_tooltip.visible or build_cost_panel.visible
+
 	# Show unit mode panel when shift is held
 	# Unit mode panel — visible whenever the UnitManager is in unit mode.
 	unit_mode_panel.visible = in_unit_mode
+	if in_unit_mode:
+		_update_unit_mode_icons()
+		_update_unit_mode_buttons()
 
 	# (Portrait + objective are updated together earlier in _process so
 	#  the merged panel resolves visibility in a single pass.)
@@ -562,15 +636,29 @@ func _process(delta: float) -> void:
 
 func _create_portrait_panel() -> void:
 	portrait_panel = PanelContainer.new()
-	portrait_panel.offset_left = 10
-	portrait_panel.offset_top = 10
+	# Flush against the top-left corner — no offset, no rounded
+	# outer corners, no top/left border. The right + bottom edges
+	# still get the rounded corner / soft border so the panel reads
+	# as anchored rather than free-floating.
+	portrait_panel.offset_left = 0
+	portrait_panel.offset_top = 0
 	portrait_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(0.02, 0.03, 0.06, 0.8)
-	style.set_corner_radius_all(6)
+	# Only round the inward (bottom-right) corner so the panel reads
+	# as flush against the top-left edge of the window.
+	style.corner_radius_top_left = 0
+	style.corner_radius_top_right = 0
+	style.corner_radius_bottom_left = 0
+	style.corner_radius_bottom_right = 6
 	style.border_color = Color(0.2, 0.3, 0.4, 0.5)
-	style.set_border_width_all(1)
+	# Drop the top + left border (touching the window edge) so the
+	# panel doesn't show a hairline gap against the viewport.
+	style.border_width_left = 0
+	style.border_width_top = 0
+	style.border_width_right = 1
+	style.border_width_bottom = 1
 	style.content_margin_left = 6
 	style.content_margin_right = 6
 	style.content_margin_top = 6
@@ -660,12 +748,16 @@ func _create_portrait_panel() -> void:
 	portrait_right_bar_3_container = right_bar_3["container"]
 	portrait_right_bar_3_container.visible = false
 
-	# Name label
+	# Name label — kept as a hidden sink so the existing
+	# `portrait_name_label.text = ...` write sites in _process don't
+	# need a null check; the player just doesn't see it. The icon +
+	# health bars are clear enough on their own.
 	portrait_name_label = Label.new()
 	portrait_name_label.add_theme_font_size_override("font_size", 11)
 	portrait_name_label.add_theme_color_override("font_color", Color(0.7, 0.8, 0.9))
 	portrait_name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	portrait_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	portrait_name_label.visible = false
 	portrait_widgets_container.add_child(portrait_name_label)
 
 	# Vertical separator between the portrait section (left) and the
@@ -800,7 +892,9 @@ func _update_portrait_panel() -> void:
 			portrait_name_label.text = unit.data.display_name if unit.data else "Unit"
 			# Health on both sides
 			var pct: float = unit.health / unit.max_health if unit.max_health > 0 else 0.0
-			var hp_color: Color = Color(1.0 - pct, pct, 0.0)
+			# Solid red — health bar reads at a glance instead of the
+			# old red→green gradient that obscured the actual fill.
+			var hp_color: Color = Color(0.9, 0.15, 0.15)
 			portrait_left_bar_fill.color = hp_color
 			portrait_right_bar_1_fill.color = hp_color
 			_set_portrait_bar(portrait_left_bar_fill, pct)
@@ -831,7 +925,7 @@ func _update_portrait_panel() -> void:
 			var hp: float = main.building_health.get(hp_anchor, bdata.max_health if bdata else 100.0)
 			var max_hp: float = bdata.max_health if bdata else 100.0
 			var hp_pct: float = hp / max_hp if max_hp > 0 else 0.0
-			var hp_color: Color = Color(1.0 - hp_pct, hp_pct, 0.0)
+			var hp_color: Color = Color(0.9, 0.15, 0.15)
 			portrait_left_bar_fill.color = hp_color
 			_set_portrait_bar(portrait_left_bar_fill, hp_pct)
 			# Right bar 1: cooldown (yellow). _update_turrets skips
@@ -867,26 +961,61 @@ func _update_portrait_panel() -> void:
 			if ammo_visible:
 				portrait_right_bar_2_fill.color = Color(0.95, 0.55, 0.15)
 				_set_portrait_bar(portrait_right_bar_2_fill, ammo_pct)
-			# Right bar 3: booster (blue) — hidden unless boosting input exists
-			portrait_right_bar_3_container.visible = false
+			# Right bar 3: booster fuel. Shown whenever the turret
+			# declares at least one booster entry. Fill = the booster
+			# resource's stored amount over its container cap. Picks
+			# the first booster entry's `item_id` — multi-booster
+			# turrets are rare; this still gives a useful "is the
+			# booster fed?" read.
+			var booster_visible: bool = false
+			var booster_pct: float = 0.0
+			if bdata and not bdata.boosters.is_empty() and _logistics:
+				var first: Dictionary = {}
+				for entry in bdata.boosters:
+					if typeof(entry) == TYPE_DICTIONARY:
+						first = entry
+						break
+				if not first.is_empty():
+					var b_id: StringName = StringName(first.get("item_id", &""))
+					var b_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+					var b_is_fluid: bool = Registry.get_fluid(b_id) != null
+					var b_storage: Dictionary = _logistics.block_storage.get(b_anchor, {})
+					var b_bucket: Dictionary = b_storage.get("fluids" if b_is_fluid else "items", {})
+					var b_have: float = float(b_bucket.get(b_id, 0.0))
+					var b_cap: float = float(bdata.liquid_capacity) if b_is_fluid else float(bdata.max_stored_items)
+					if b_cap > 0.0:
+						booster_pct = clampf(b_have / b_cap, 0.0, 1.0)
+						booster_visible = true
+			portrait_right_bar_3_container.visible = booster_visible
+			if booster_visible:
+				portrait_right_bar_3_fill.color = Color(0.3, 0.6, 1.0)
+				_set_portrait_bar(portrait_right_bar_3_fill, booster_pct)
 
 	else:
 		# --- Default: Core Unit (Player Drone) ---
 		if drone:
-			# Icon
-			if drone.drone_texture:
-				portrait_icon_rect.texture = drone.drone_texture
+			# Icon — prefer the UnitData "complete" icon (e.g.
+			# ShardlingComplete.png, which includes the heads) over the
+			# in-world chassis sprite, which is just the body half of
+			# the layered drawing path.
+			var drone_icon_tex: Texture2D = null
+			if drone.data and drone.data.icon:
+				drone_icon_tex = drone.data.icon
+			elif "drone_texture" in drone:
+				drone_icon_tex = drone.drone_texture
+			if drone_icon_tex:
+				portrait_icon_rect.texture = drone_icon_tex
 				portrait_icon_rect.visible = true
 				portrait_color_rect.visible = false
 			else:
 				portrait_icon_rect.visible = false
 				portrait_color_rect.color = drone.drone_color
 				portrait_color_rect.visible = true
-			# Name
-			portrait_name_label.text = drone.data.display_name if drone.data else "Drone"
 			# Health on both sides
 			var pct: float = drone.health / drone.max_health if drone.max_health > 0 else 0.0
-			var hp_color: Color = Color(1.0 - pct, pct, 0.0)
+			# Solid red — health bar reads at a glance instead of the
+			# old red→green gradient that obscured the actual fill.
+			var hp_color: Color = Color(0.9, 0.15, 0.15)
 			portrait_left_bar_fill.color = hp_color
 			portrait_right_bar_1_fill.color = hp_color
 			portrait_right_bar_1_bg.color = Color(0.15, 0.05, 0.05, 0.8)
@@ -901,6 +1030,11 @@ func _update_portrait_panel() -> void:
 # RESOURCE PANEL (TOP CENTER)
 # =========================
 
+var alert_panel: PanelContainer = null
+var alert_label: Label = null
+var _active_alerts: Array = []   # Array of {id: StringName, text: String}
+var _alert_phase: float = 0.0
+
 func _create_resource_panel() -> void:
 	var margin = MarginContainer.new()
 	margin.anchor_left = 0.5
@@ -909,8 +1043,32 @@ func _create_resource_panel() -> void:
 	margin.add_theme_constant_override("margin_top", 10)
 	add_child(margin)
 
+	var col := VBoxContainer.new()
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", 6)
+	margin.add_child(col)
+
 	resource_panel = PanelContainer.new()
-	margin.add_child(resource_panel)
+	col.add_child(resource_panel)
+
+	# Alert banner — sits directly below the resource panel, hidden until
+	# `push_alert(id, text)` is called. Flashes between red and yellow at
+	# ~2 Hz so it reads as a hazard from peripheral vision.
+	alert_panel = PanelContainer.new()
+	alert_panel.visible = false
+	var alert_style := StyleBoxFlat.new()
+	alert_style.bg_color = Color(0, 0, 0, 0.7)
+	alert_style.set_corner_radius_all(8)
+	alert_style.content_margin_left = 14
+	alert_style.content_margin_right = 14
+	alert_style.content_margin_top = 6
+	alert_style.content_margin_bottom = 6
+	alert_panel.add_theme_stylebox_override("panel", alert_style)
+	col.add_child(alert_panel)
+	alert_label = Label.new()
+	alert_label.add_theme_font_size_override("font_size", 16)
+	alert_label.add_theme_color_override("font_color", Color(1.0, 0.2, 0.2))
+	alert_panel.add_child(alert_label)
 
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(0, 0, 0, 0.6)
@@ -952,22 +1110,35 @@ func _create_resource_panel() -> void:
 # =========================
 
 func _create_block_menu() -> void:
-	# Outer anchor: bottom-right corner
+	# Outer anchor: bottom-right corner, flush to the window edge
+	# (no offset_right / offset_bottom gap) — matches the portrait /
+	# wave / objective panel in the top-left. Height is content-driven so
+	# the panel grows upward when the info / placement sections appear.
 	block_menu = PanelContainer.new()
 	block_menu.anchor_left = 1.0
 	block_menu.anchor_right = 1.0
 	block_menu.anchor_top = 1.0
 	block_menu.anchor_bottom = 1.0
 	block_menu.offset_left = -350
-	block_menu.offset_top = -320
-	block_menu.offset_right = -10
-	block_menu.offset_bottom = -10
+	block_menu.offset_right = 0
+	block_menu.offset_bottom = 0
 	block_menu.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	block_menu.grow_vertical = Control.GROW_DIRECTION_BEGIN
 
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(0, 0, 0, 0.7)
-	style.set_corner_radius_all(8)
+	# Only round the inward (top-left) corner — the right + bottom edges
+	# touch the window so they stay square, same convention as the
+	# portrait panel.
+	style.corner_radius_top_left = 8
+	style.corner_radius_top_right = 0
+	style.corner_radius_bottom_left = 0
+	style.corner_radius_bottom_right = 0
+	style.border_color = Color(0.2, 0.3, 0.4, 0.5)
+	style.border_width_left = 1
+	style.border_width_top = 1
+	style.border_width_right = 0
+	style.border_width_bottom = 0
 	style.content_margin_left = 6
 	style.content_margin_right = 6
 	style.content_margin_top = 6
@@ -975,10 +1146,21 @@ func _create_block_menu() -> void:
 	block_menu.add_theme_stylebox_override("panel", style)
 	add_child(block_menu)
 
+	# Outer vbox: [info (block tooltip / build cost)] [separator] [blocks + categories]
+	block_menu_outer_vbox = VBoxContainer.new()
+	block_menu_outer_vbox.add_theme_constant_override("separation", 6)
+	block_menu.add_child(block_menu_outer_vbox)
+
+	# Separator between info section and the block / category grid. Hidden
+	# until either the hover tooltip or the build-cost section is shown.
+	block_menu_info_separator = HSeparator.new()
+	block_menu_info_separator.visible = false
+	block_menu_outer_vbox.add_child(block_menu_info_separator)
+
 	# Main HBox: [left column (blocks + misc)] [right column (category tabs)]
 	var main_hbox = HBoxContainer.new()
 	main_hbox.add_theme_constant_override("separation", 4)
-	block_menu.add_child(main_hbox)
+	block_menu_outer_vbox.add_child(main_hbox)
 
 	# --- Left Column ---
 	var left_vbox = VBoxContainer.new()
@@ -997,6 +1179,9 @@ func _create_block_menu() -> void:
 	grid_style.content_margin_bottom = 4
 	grid_panel.add_theme_stylebox_override("panel", grid_style)
 	grid_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# Height is content-driven now (no fixed offset_top on block_menu),
+	# so reserve enough room for a few rows of blocks before scrolling.
+	grid_panel.custom_minimum_size.y = 260
 	left_vbox.add_child(grid_panel)
 
 	var grid_scroll = ScrollContainer.new()
@@ -1257,31 +1442,16 @@ func _make_block_style(color: Color) -> StyleBoxFlat:
 # =========================
 
 func _create_block_tooltip() -> void:
+	# Now lives inside the block menu so the hover info reads as the top
+	# section of the same panel (with an HSeparator below it before the
+	# block grid). No own anchors / background — block_menu provides both.
 	block_tooltip = PanelContainer.new()
-	# Position above the block menu
-	block_tooltip.anchor_left = 1.0
-	block_tooltip.anchor_right = 1.0
-	block_tooltip.anchor_top = 1.0
-	block_tooltip.anchor_bottom = 1.0
-	block_tooltip.offset_left = -350
-	block_tooltip.offset_right = -10
-	block_tooltip.offset_bottom = -330
-	block_tooltip.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	block_tooltip.grow_vertical = Control.GROW_DIRECTION_BEGIN
-
-	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.02, 0.03, 0.06, 0.85)
-	style.set_corner_radius_all(8)
-	style.border_color = Color(0.2, 0.3, 0.4, 0.6)
-	style.set_border_width_all(1)
-	style.content_margin_left = 10
-	style.content_margin_right = 10
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
-	block_tooltip.add_theme_stylebox_override("panel", style)
+	block_tooltip.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
 	block_tooltip.visible = false
 	block_tooltip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(block_tooltip)
+	# Insert at the top of block_menu_outer_vbox (above the separator + main_hbox).
+	block_menu_outer_vbox.add_child(block_tooltip)
+	block_menu_outer_vbox.move_child(block_tooltip, 0)
 
 	tooltip_vbox = VBoxContainer.new()
 	tooltip_vbox.add_theme_constant_override("separation", 4)
@@ -1371,6 +1541,18 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					origin
 				)
 
+	# --- Fluid Storage Bar ---
+	# Pumps, condensers, fluid-boosted turrets / cranes — anything
+	# with non-zero `liquid_capacity` gets a blue bar showing
+	# stored/max. Value is read from BuildingSystem's eased display
+	# dict so the bar slides smoothly per-frame instead of snapping.
+	if data.liquid_capacity > 0.0:
+		var bs = main.get_node_or_null("BuildingSystem")
+		var disp_fl: float = 0.0
+		if bs and "_fluid_bar_display" in bs:
+			disp_fl = float(bs._fluid_bar_display.get(origin, 0.0))
+		_add_tooltip_fluid_bar(disp_fl, data.liquid_capacity)
+
 	# --- Unit Fabricator Input Progress + Unit Count ---
 	if data.produced_unit != &"":
 		if _logistics and _logistics.factory_buffers.has(origin):
@@ -1419,7 +1601,10 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		if _logistics:
 			front_cells = _logistics._get_front_edge(origin, data.grid_size, rot)
 		var front_count: int = front_cells.size()
-		var hit_count: int = 0
+		# Sum of per-cell efficiency multipliers (1.0 for a regular ore
+		# hit, e.g. 0.75 for a purple_wall hit). Divided by front_count
+		# below to land in [0, 1]. Float so wall-eff fractions survive.
+		var eff_sum_outer: float = 0.0
 		var dir: Vector2i
 		match rot:
 			0: dir = Vector2i(1, 0)
@@ -1452,36 +1637,41 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			var max_extend: int = maxi(data.mine_range, 1)
 			var accepted_walls_hud: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
 					else [&"blackstone_wall"]
+			# Per-wall efficiency multiplier so the tooltip reads the
+			# same value the runtime tick will produce (purple_wall
+			# under a wall_crusher counts as 0.75 instead of 1.0).
 			for cell in front_cells:
-				var any_hit: bool = false
+				var hit_mult: float = 0.0
 				if is_wall_miner:
+					var hit_wall_hud: StringName = &""
 					var wid_h: StringName = StringName(terrain.wall_tiles.get(cell, &""))
 					if terrain.get_ore_at(cell) == null and accepted_walls_hud.has(wid_h):
-						any_hit = true
+						hit_wall_hud = wid_h
 					else:
 						for step in range(1, max_extend + 1):
 							var scan: Vector2i = cell + dir * step
 							var wid_hs: StringName = StringName(terrain.wall_tiles.get(scan, &""))
 							if terrain.get_ore_at(scan) == null and accepted_walls_hud.has(wid_hs):
-								any_hit = true
+								hit_wall_hud = wid_hs
 								break
+					if hit_wall_hud != &"":
+						hit_mult = float(data.wall_efficiency.get(hit_wall_hud, 1.0))
 				else:
 					if terrain.get_ore_at(cell) != null:
-						any_hit = true
+						hit_mult = 1.0
 					else:
 						for step in range(1, max_extend + 1):
 							if terrain.get_ore_at(cell + dir * step) != null:
-								any_hit = true
+								hit_mult = 1.0
 								break
-				if any_hit:
-					hit_count += 1
+				eff_sum_outer += hit_mult
 		var ore_eff: float
 		if is_geyser_miner:
 			ore_eff = 1.0
 		elif is_floor_miner:
 			ore_eff = _logistics._floor_miner_efficiency(origin, data.grid_size) if _logistics else 0.0
 		else:
-			ore_eff = float(hit_count) / float(front_count) if front_count > 0 else 1.0
+			ore_eff = eff_sum_outer / float(front_count) if front_count > 0 else 1.0
 		# Power efficiency multiplies ore efficiency so the displayed %/rate
 		# matches the actual production speed (network over-draw slows drills).
 		var pow_eff: float = 1.0
@@ -1676,6 +1866,14 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		if sel_t2 == &"":
 			_add_tooltip_line("Selected Unit: (none — click to pick)", Color(0.9, 0.7, 0.3))
 
+	# --- Launchpad: pod build progress / cargo readout ---
+	# While the pad is still gathering its 60 copper + 15 steel mandatory
+	# cost we show a progress bar. Once the cost is fully present, the
+	# pod is "built"; switch the panel to a "Pod Resources" list of the
+	# extras + fluids that will ship with the pod.
+	if data.id == &"launchpad":
+		_add_launchpad_tooltip_section(origin)
+
 	# --- Archive: show contained archive ---
 	var building_sys = _building_sys_ref()
 	if data.id == &"archive" and building_sys and "archive_holdings" in building_sys:
@@ -1702,6 +1900,53 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				var prog: float = float(dstate.get("progress", 0.0))
 				var pct: int = int(clampf(prog / cycle, 0.0, 1.0) * 100.0)
 				_add_tooltip_progress_bar(pct, 100, "% Complete", Color(0.6, 0.4, 0.9))
+
+
+## Renders the launchpad-specific tooltip section. While the mandatory
+## cost isn't yet collected the section shows a single yellow progress
+## bar (% built). Once collected, the bar disappears and the section
+## becomes a "Pod Resources" list of the extra items / fluids that will
+## ship with the pod — i.e. everything in the launchpad's storage minus
+## the 60 copper + 15 steel that get burnt on launch.
+func _add_launchpad_tooltip_section(anchor: Vector2i) -> void:
+	var lp_sys = main.get_node_or_null("LaunchpadSystem")
+	if lp_sys == null or _logistics == null:
+		return
+	var pct: float = 0.0
+	if lp_sys.has_method("get_pod_build_progress"):
+		pct = clampf(lp_sys.get_pod_build_progress(anchor), 0.0, 1.0)
+	_add_tooltip_separator()
+	if pct < 1.0:
+		# Pod still under construction — single progress bar.
+		var pct_int: int = int(pct * 100.0)
+		_add_tooltip_progress_bar(pct_int, 100, "Pod Build", Color(1.0, 0.9, 0.2))
+		return
+	# Pod fully built — list every passenger item / fluid that'll ride
+	# along. The pod itself is built over time on power alone, so
+	# block_storage holds nothing but the pod's pure cargo.
+	var storage: Dictionary = _logistics.block_storage.get(anchor, {})
+	var items: Dictionary = storage.get("items", {})
+	var fluids: Dictionary = storage.get("fluids", {})
+	_add_tooltip_line("Pod Resources:", Color(1.0, 0.92, 0.4))
+	var any_listed: bool = false
+	for k in items:
+		var amt: int = int(items[k])
+		if amt <= 0:
+			continue
+		any_listed = true
+		var it = Registry.get_item_or_fluid(StringName(k))
+		var disp: String = it.display_name if it else String(k)
+		_add_tooltip_line("- %s: %d" % [disp, amt], Color(0.85, 0.9, 1.0))
+	for k in fluids:
+		var amtf: float = float(fluids[k])
+		if amtf <= 0.0:
+			continue
+		any_listed = true
+		var fl = Registry.get_item_or_fluid(StringName(k))
+		var dispf: String = fl.display_name if fl else String(k)
+		_add_tooltip_line("- %s: %.1f" % [dispf, amtf], Color(0.7, 0.85, 1.0))
+	if not any_listed:
+		_add_tooltip_line("- (empty)", Color(0.6, 0.6, 0.7))
 
 
 ## Returns a human-readable description of why an archive decoder is not currently
@@ -1818,6 +2063,53 @@ func _add_tooltip_health_bar(pct: float, current: float, max_hp: float) -> void:
 	hp_lbl.add_theme_color_override("font_color", Color(0.7, 0.75, 0.8))
 	hp_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar_container.add_child(hp_lbl)
+
+	tooltip_vbox.add_child(bar_container)
+
+
+## Adds a "Fluid Storage" bar to the hover tooltip. Mirrors the
+## health-bar layout but in blue, with a "stored/max" text label.
+## Values are floats so partial units (e.g. 2.5/10) display cleanly.
+func _add_tooltip_fluid_bar(stored: float, max_amount: float) -> void:
+	if max_amount <= 0.0:
+		return
+	var pct: float = clampf(stored / max_amount, 0.0, 1.0)
+	var bar_container := HBoxContainer.new()
+	bar_container.add_theme_constant_override("separation", 6)
+	bar_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar_bg := ColorRect.new()
+	bar_bg.custom_minimum_size = Vector2(180, 10)
+	bar_bg.color = Color(0.05, 0.12, 0.2, 0.85)
+	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar_fill := ColorRect.new()
+	bar_fill.color = Color(0.3, 0.6, 1.0)
+	bar_fill.custom_minimum_size = Vector2(180 * pct, 10)
+	bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar_panel := Control.new()
+	bar_panel.custom_minimum_size = Vector2(180, 10)
+	bar_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_panel.add_child(bar_bg)
+	bar_bg.position = Vector2.ZERO
+	bar_bg.size = Vector2(180, 10)
+	bar_panel.add_child(bar_fill)
+	bar_fill.position = Vector2.ZERO
+	bar_fill.size = Vector2(180 * pct, 10)
+
+	bar_container.add_child(bar_panel)
+
+	var fl_lbl := Label.new()
+	# Show one decimal place when the stored amount isn't a whole
+	# number — so a brand-new 0.5-unit drip reads as "0.5/10" instead
+	# of rounding to 1.
+	var stored_str: String = "%.1f" % stored if absf(stored - round(stored)) > 0.05 else "%.0f" % stored
+	fl_lbl.text = "%s / %.0f" % [stored_str, max_amount]
+	fl_lbl.add_theme_font_size_override("font_size", 11)
+	fl_lbl.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+	fl_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_container.add_child(fl_lbl)
 
 	tooltip_vbox.add_child(bar_container)
 
@@ -2055,31 +2347,17 @@ func _add_tooltip_progress_bar(current: int, max_val: int, label_text: String, b
 # =========================
 
 func _create_build_cost_panel() -> void:
+	# Lives inside the block menu, in the same slot as block_tooltip
+	# (one of the two — or neither — is visible at a time). No own
+	# anchors / background; block_menu provides both.
 	build_cost_panel = PanelContainer.new()
-	# Position above the block menu
-	build_cost_panel.anchor_left = 1.0
-	build_cost_panel.anchor_right = 1.0
-	build_cost_panel.anchor_top = 1.0
-	build_cost_panel.anchor_bottom = 1.0
-	build_cost_panel.offset_left = -350
-	build_cost_panel.offset_right = -10
-	build_cost_panel.offset_bottom = -330
-	build_cost_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	build_cost_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-
-	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.02, 0.03, 0.06, 0.85)
-	style.set_corner_radius_all(8)
-	style.border_color = Color(0.2, 0.3, 0.4, 0.6)
-	style.set_border_width_all(1)
-	style.content_margin_left = 10
-	style.content_margin_right = 10
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
-	build_cost_panel.add_theme_stylebox_override("panel", style)
+	build_cost_panel.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
 	build_cost_panel.visible = false
 	build_cost_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(build_cost_panel)
+	block_menu_outer_vbox.add_child(build_cost_panel)
+	# Sit just under the tooltip (which is at index 0) but above the
+	# separator + main_hbox.
+	block_menu_outer_vbox.move_child(build_cost_panel, 1)
 
 	build_cost_vbox = VBoxContainer.new()
 	build_cost_vbox.add_theme_constant_override("separation", 4)
@@ -2088,83 +2366,398 @@ func _create_build_cost_panel() -> void:
 
 
 func _create_unit_mode_panel() -> void:
+	# Flush to the bottom-right corner of the window — same convention as
+	# the portrait panel in the top-left and the new block menu. The panel
+	# is just an icon grid of currently-selected units; each cell has a
+	# small count badge in the bottom-right when more than one of that
+	# unit type is selected.
 	unit_mode_panel = PanelContainer.new()
 	unit_mode_panel.anchor_left = 1.0
 	unit_mode_panel.anchor_right = 1.0
 	unit_mode_panel.anchor_top = 1.0
 	unit_mode_panel.anchor_bottom = 1.0
 	unit_mode_panel.offset_left = -350
-	unit_mode_panel.offset_right = -10
-	unit_mode_panel.offset_bottom = -330
+	unit_mode_panel.offset_right = 0
+	unit_mode_panel.offset_bottom = 0
 	unit_mode_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	unit_mode_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(0.06, 0.04, 0.0, 0.85)
-	style.set_corner_radius_all(8)
+	style.corner_radius_top_left = 8
+	style.corner_radius_top_right = 0
+	style.corner_radius_bottom_left = 0
+	style.corner_radius_bottom_right = 0
 	style.border_color = Color(0.7, 0.56, 0.0, 0.6)
-	style.set_border_width_all(1)
-	style.content_margin_left = 12
-	style.content_margin_right = 12
-	style.content_margin_top = 10
-	style.content_margin_bottom = 10
+	style.border_width_left = 1
+	style.border_width_top = 1
+	style.border_width_right = 0
+	style.border_width_bottom = 0
+	style.content_margin_left = 8
+	style.content_margin_right = 8
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
 	unit_mode_panel.add_theme_stylebox_override("panel", style)
 	unit_mode_panel.visible = false
 	unit_mode_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(unit_mode_panel)
 
-	var vbox = VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 6)
-	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	unit_mode_panel.add_child(vbox)
+	var outer_vbox := VBoxContainer.new()
+	outer_vbox.add_theme_constant_override("separation", 6)
+	unit_mode_panel.add_child(outer_vbox)
 
-	# Title
-	var title = Label.new()
-	title.text = "UNIT MODE"
-	title.add_theme_font_size_override("font_size", 16)
-	title.add_theme_color_override("font_color", Color(1.0, 0.84, 0.0))
-	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(title)
+	unit_mode_icon_grid = HFlowContainer.new()
+	unit_mode_icon_grid.add_theme_constant_override("h_separation", 4)
+	unit_mode_icon_grid.add_theme_constant_override("v_separation", 4)
+	unit_mode_icon_grid.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	outer_vbox.add_child(unit_mode_icon_grid)
 
-	# Separator
-	var sep = HSeparator.new()
-	sep.add_theme_stylebox_override("separator", StyleBoxLine.new())
-	sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(sep)
+	var sep := HSeparator.new()
+	outer_vbox.add_child(sep)
 
-	# Controls
-	var controls := [
-		["Right-click + Drag", "Box select units"],
-		["Right-click unit", "Toggle select"],
-	]
-	for entry in controls:
-		var hbox = HBoxContainer.new()
-		hbox.add_theme_constant_override("separation", 8)
-		hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_mode_buttons_vbox = VBoxContainer.new()
+	unit_mode_buttons_vbox.add_theme_constant_override("separation", 3)
+	outer_vbox.add_child(unit_mode_buttons_vbox)
 
-		var key_label = Label.new()
-		key_label.text = entry[0]
-		key_label.add_theme_font_size_override("font_size", 12)
-		key_label.add_theme_color_override("font_color", Color(1.0, 0.84, 0.0, 0.8))
-		key_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		hbox.add_child(key_label)
+	unit_mode_btn_cancel = _make_unit_cmd_button("Cancel Orders", _on_unit_cmd_cancel_orders)
+	unit_mode_btn_hold_fire = _make_unit_cmd_button("Hold Fire", _on_unit_cmd_hold_fire)
+	unit_mode_btn_hold_fire.toggle_mode = true
+	unit_mode_btn_payload = _make_unit_cmd_button("Enter Payload Block", _on_unit_cmd_payload)
+	unit_mode_btn_payload.toggle_mode = true
+	unit_mode_btn_rebuild = _make_unit_cmd_button("Rebuild", _on_unit_cmd_rebuild)
+	unit_mode_btn_mine = _make_unit_cmd_button("Mine", _on_unit_cmd_mine)
+	unit_mode_btn_mine.toggle_mode = true
+	unit_mode_btn_assist = _make_unit_cmd_button("Assist Player", _on_unit_cmd_assist)
+	unit_mode_btn_assist.toggle_mode = true
 
-		var desc_label = Label.new()
-		desc_label.text = entry[1]
-		desc_label.add_theme_font_size_override("font_size", 12)
-		desc_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
-		desc_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		hbox.add_child(desc_label)
 
-		vbox.add_child(hbox)
+func _make_unit_cmd_button(label: String, cb: Callable) -> Button:
+	var b := Button.new()
+	b.text = label
+	b.add_theme_font_size_override("font_size", 12)
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.mouse_filter = Control.MOUSE_FILTER_STOP
+	b.pressed.connect(cb)
+	unit_mode_buttons_vbox.add_child(b)
+	return b
 
-	# Release hint
-	var hint = Label.new()
-	hint.text = "Release Shift to exit"
-	hint.add_theme_font_size_override("font_size", 11)
-	hint.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
-	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(hint)
+
+# --- Command-button state helpers ---
+
+func _selected_player_units() -> Array:
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr == null:
+		return []
+	var out: Array = []
+	for u in unit_mgr.selected_units:
+		if u != null and is_instance_valid(u):
+			out.append(u)
+	return out
+
+
+func _selection_can_build() -> bool:
+	for u in _selected_player_units():
+		var d = u.data if "data" in u else null
+		if d and d.category == UnitData.UnitCategory.BUILDER:
+			return true
+	return false
+
+
+func _selection_can_mine() -> bool:
+	# No dedicated capability flag yet — we treat BUILDER units as
+	# multi-role workers that can also mine. Easy to swap for a
+	# dedicated `can_mine` flag on UnitData later.
+	for u in _selected_player_units():
+		var d = u.data if "data" in u else null
+		if d and d.category == UnitData.UnitCategory.BUILDER:
+			return true
+	return false
+
+
+func _update_unit_mode_buttons() -> void:
+	var units: Array = _selected_player_units()
+	if unit_mode_btn_rebuild:
+		unit_mode_btn_rebuild.visible = _selection_can_build()
+	if unit_mode_btn_assist:
+		unit_mode_btn_assist.visible = _selection_can_build()
+		var any_assist := false
+		for u in units:
+			if "assist_player_build" in u and u.assist_player_build:
+				any_assist = true
+				break
+		unit_mode_btn_assist.set_pressed_no_signal(any_assist)
+	if unit_mode_btn_mine:
+		unit_mode_btn_mine.visible = _selection_can_mine()
+		var any_mine := false
+		for u in units:
+			if "mining_request_id" in u and u.mining_request_id != &"":
+				any_mine = true
+				break
+		unit_mode_btn_mine.set_pressed_no_signal(any_mine)
+	if unit_mode_btn_hold_fire:
+		var any_hold := false
+		for u in units:
+			if "hold_fire" in u and u.hold_fire:
+				any_hold = true
+				break
+		unit_mode_btn_hold_fire.set_pressed_no_signal(any_hold)
+	if unit_mode_btn_payload:
+		var any_payload := false
+		for u in units:
+			if "enter_payload_when_able" in u and u.enter_payload_when_able:
+				any_payload = true
+				break
+		unit_mode_btn_payload.set_pressed_no_signal(any_payload)
+
+
+# --- Button callbacks ---
+
+func _on_unit_cmd_cancel_orders() -> void:
+	for u in _selected_player_units():
+		if u.has_method("clear_all_orders"):
+			u.clear_all_orders()
+		if "hold_fire" in u:
+			u.hold_fire = false
+		if "mining_request_id" in u:
+			u.mining_request_id = &""
+		if "assist_player_build" in u:
+			u.assist_player_build = false
+		if "enter_payload_when_able" in u:
+			u.enter_payload_when_able = false
+	_unit_mode_icons_signature = ""  # force a refresh next tick
+
+
+func _on_unit_cmd_hold_fire() -> void:
+	var on: bool = unit_mode_btn_hold_fire.button_pressed
+	for u in _selected_player_units():
+		if "hold_fire" in u:
+			u.hold_fire = on
+
+
+func _on_unit_cmd_payload() -> void:
+	var on: bool = unit_mode_btn_payload.button_pressed
+	for u in _selected_player_units():
+		if "enter_payload_when_able" in u:
+			u.enter_payload_when_able = on
+
+
+func _on_unit_cmd_rebuild() -> void:
+	# Wholesale rebuild — convert any DERELICT player buildings back to
+	# LUMINA and queue every destroyed-ghost anchor for the active
+	# build pipeline (drone or assisting selected units).
+	if not main:
+		return
+	if not main.has_method("queue_rebuild_in_rect"):
+		return
+	# Compute the bounding box of every destroyed-player-building anchor
+	# and feed it to the existing rect API. Fallback to a giant box if
+	# nothing is recorded so the call is a no-op rather than an early
+	# crash. The rect function does its own per-anchor work-range gate.
+	var has_any := false
+	var min_p := Vector2i(0, 0)
+	var max_p := Vector2i(0, 0)
+	if "destroyed_player_buildings" in main:
+		for anchor in main.destroyed_player_buildings.keys():
+			if not has_any:
+				min_p = anchor
+				max_p = anchor
+				has_any = true
+			else:
+				min_p.x = mini(min_p.x, anchor.x)
+				min_p.y = mini(min_p.y, anchor.y)
+				max_p.x = maxi(max_p.x, anchor.x)
+				max_p.y = maxi(max_p.y, anchor.y)
+	if not has_any:
+		return
+	if main.has_method("convert_derelict_in_rect"):
+		main.convert_derelict_in_rect(min_p, max_p)
+	main.queue_rebuild_in_rect(min_p, max_p)
+
+
+func _on_unit_cmd_assist() -> void:
+	var on: bool = unit_mode_btn_assist.button_pressed
+	for u in _selected_player_units():
+		if "assist_player_build" in u:
+			u.assist_player_build = on
+
+
+func _on_unit_cmd_mine() -> void:
+	if unit_mode_btn_mine.button_pressed:
+		_open_mine_picker()
+	else:
+		for u in _selected_player_units():
+			if "mining_request_id" in u:
+				u.mining_request_id = &""
+
+
+func _open_mine_picker() -> void:
+	if _mine_picker_popup and is_instance_valid(_mine_picker_popup):
+		_mine_picker_popup.queue_free()
+
+	# Collect mineable ore types from the live terrain so we only show
+	# what's actually reachable on this sector.
+	var terrain = main.get_node_or_null("TerrainSystem")
+	var ore_ids: Array[StringName] = []
+	var seen: Dictionary = {}
+	if terrain and "ore_tiles" in terrain:
+		for cell in terrain.ore_tiles.keys():
+			var tile_id = terrain.ore_tiles[cell]
+			var tile_data = Registry.get_tile(tile_id)
+			if tile_data == null:
+				continue
+			var rid := StringName(tile_data.minable_resource)
+			if rid == &"" or seen.has(rid):
+				continue
+			seen[rid] = true
+			ore_ids.append(rid)
+	if ore_ids.is_empty():
+		# Nothing to mine on this map — silently un-toggle.
+		unit_mode_btn_mine.set_pressed_no_signal(false)
+		return
+
+	_mine_picker_popup = PopupPanel.new()
+	add_child(_mine_picker_popup)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 4)
+	_mine_picker_popup.add_child(v)
+	var t := Label.new()
+	t.text = "Mine what?"
+	t.add_theme_font_size_override("font_size", 13)
+	v.add_child(t)
+	for rid in ore_ids:
+		var item = Registry.get_item_or_fluid(rid)
+		var b := Button.new()
+		b.text = (item.display_name if item else String(rid))
+		if item and item.icon:
+			b.icon = item.icon
+			b.expand_icon = true
+			b.add_theme_constant_override("icon_max_width", 18)
+		b.pressed.connect(_apply_mine_choice.bind(rid))
+		v.add_child(b)
+	_mine_picker_popup.popup_centered()
+
+
+func _apply_mine_choice(item_id: StringName) -> void:
+	for u in _selected_player_units():
+		if "mining_request_id" in u:
+			u.mining_request_id = item_id
+	if _mine_picker_popup and is_instance_valid(_mine_picker_popup):
+		_mine_picker_popup.queue_free()
+		_mine_picker_popup = null
+
+
+# Tracks the last rendered selection so we don't rebuild the icon grid every
+# frame — keyed by an ordered list of "unit_id:count" pairs.
+var _unit_mode_icons_signature: String = ""
+
+
+func _update_unit_mode_icons() -> void:
+	if unit_mode_icon_grid == null:
+		return
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr == null:
+		return
+
+	# Group selected units by unit-data id and count them.
+	var counts: Dictionary = {}
+	var order: Array[StringName] = []
+	for unit in unit_mgr.selected_units:
+		if unit == null or not is_instance_valid(unit):
+			continue
+		var data = unit.data if "data" in unit else null
+		if data == null:
+			continue
+		var uid: StringName = data.id
+		if not counts.has(uid):
+			counts[uid] = {"count": 0, "icon": data.icon, "color": data.color}
+			order.append(uid)
+		counts[uid]["count"] += 1
+
+	# Cheap diff: signature is order + count tuple. Skip the rebuild when
+	# nothing observable changed.
+	var sig := ""
+	for uid in order:
+		sig += String(uid) + ":" + str(counts[uid]["count"]) + ","
+	if sig == _unit_mode_icons_signature:
+		return
+	_unit_mode_icons_signature = sig
+
+	for c in unit_mode_icon_grid.get_children():
+		c.queue_free()
+
+	for uid in order:
+		var entry: Dictionary = counts[uid]
+		unit_mode_icon_grid.add_child(_build_unit_mode_icon(entry["icon"], entry["color"], int(entry["count"])))
+
+
+func _build_unit_mode_icon(icon: Texture2D, fallback_color: Color, count: int) -> Control:
+	const CELL := 44
+
+	# Free-form Control so we can absolutely-position the count badge in
+	# the bottom-right corner on top of the icon. PanelContainer would
+	# stretch children to fill, breaking the badge placement.
+	var cell := Control.new()
+	cell.custom_minimum_size = Vector2(CELL, CELL)
+	cell.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bg := Panel.new()
+	var cell_style := StyleBoxFlat.new()
+	cell_style.bg_color = Color(0.1, 0.07, 0.0, 0.7)
+	cell_style.set_corner_radius_all(4)
+	cell_style.border_color = Color(0.7, 0.56, 0.0, 0.5)
+	cell_style.set_border_width_all(1)
+	bg.add_theme_stylebox_override("panel", cell_style)
+	bg.anchor_right = 1.0
+	bg.anchor_bottom = 1.0
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cell.add_child(bg)
+
+	if icon:
+		var tex := TextureRect.new()
+		tex.texture = icon
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		tex.anchor_right = 1.0
+		tex.anchor_bottom = 1.0
+		tex.offset_left = 4
+		tex.offset_top = 4
+		tex.offset_right = -4
+		tex.offset_bottom = -4
+		cell.add_child(tex)
+	else:
+		var sw := ColorRect.new()
+		sw.color = fallback_color
+		sw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		sw.anchor_right = 1.0
+		sw.anchor_bottom = 1.0
+		sw.offset_left = 6
+		sw.offset_top = 6
+		sw.offset_right = -6
+		sw.offset_bottom = -6
+		cell.add_child(sw)
+
+	if count > 1:
+		var count_label := Label.new()
+		count_label.text = str(count)
+		count_label.add_theme_font_size_override("font_size", 11)
+		count_label.add_theme_color_override("font_color", Color(1, 1, 1))
+		count_label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
+		count_label.add_theme_constant_override("outline_size", 3)
+		count_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		count_label.anchor_left = 1.0
+		count_label.anchor_right = 1.0
+		count_label.anchor_top = 1.0
+		count_label.anchor_bottom = 1.0
+		count_label.offset_left = -22
+		count_label.offset_top = -16
+		count_label.offset_right = -2
+		count_label.offset_bottom = -1
+		count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		count_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		cell.add_child(count_label)
+
+	return cell
 
 
 func _update_build_cost_panel(block_id: StringName) -> void:
@@ -3321,6 +3914,12 @@ func _create_hint_panel() -> void:
 	hint_text_label.add_theme_font_size_override("normal_font_size", 13)
 	hint_text_label.add_theme_color_override("default_color", Color(0.92, 0.95, 1.0))
 	hint_text_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# The project defaults canvas texture filtering to NEAREST so the
+	# block art reads as pixel art. Font glyphs get rendered into the
+	# same canvas atlas though, so without an override the hint text
+	# samples nearest and looks aliased at non-1× DPI. Force LINEAR
+	# here for crisp readable text.
+	hint_text_label.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	vbox.add_child(hint_text_label)
 
 	# OK button row — right-aligned via a spacer.

@@ -267,6 +267,7 @@ func _build_game_tab() -> void:
 	# launch_animation tunables — no need to relaunch the sector.
 	_add_button_row("Play Land", _on_play_land_pressed,
 		"Play Launch", _on_play_launch_pressed)
+	_add_button("Play Explosion", _on_play_explosion_pressed)
 
 func _get_show_fps() -> bool:
 	return Engine.is_printing_error_messages()
@@ -817,6 +818,43 @@ func _add_button_row(label_a: String, on_a: Callable, label_b: String, on_b: Cal
 	btn_b.pressed.connect(on_b)
 	hbox.add_child(btn_b)
 	content_vbox.add_child(hbox)
+
+
+## Adds a single full-width button. Used for the "Play Explosion"
+## debug control which has no natural sibling.
+func _add_button(label: String, on_pressed: Callable) -> void:
+	var btn = Button.new()
+	btn.text = label
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.pressed.connect(on_pressed)
+	content_vbox.add_child(btn)
+
+
+## Plays the explosion animation centered on the player's core.
+## No-op if Main / ExplosionSystem / core anchor aren't available.
+func _on_play_explosion_pressed() -> void:
+	var main_node = get_node_or_null("/root/Main")
+	if main_node == null:
+		push_warning("Play Explosion: no Main scene — open a sector first.")
+		return
+	var expl = main_node.get_node_or_null("ExplosionSystem")
+	if expl == null or not expl.has_method("explode"):
+		push_warning("Play Explosion: ExplosionSystem not found.")
+		return
+	var core_pos: Vector2i = main_node.core_position if "core_position" in main_node else Vector2i(-1, -1)
+	if core_pos == Vector2i(-1, -1):
+		push_warning("Play Explosion: no core_position on Main.")
+		return
+	var gs: float = float(main_node.GRID_SIZE)
+	var core_size := Vector2(3.0, 3.0)
+	var core_id: StringName = main_node.placed_buildings.get(core_pos, &"") if "placed_buildings" in main_node else &""
+	if core_id != &"":
+		var core_data = Registry.get_block(core_id)
+		if core_data:
+			core_size = Vector2(core_data.grid_size.x, core_data.grid_size.y)
+	var core_world: Vector2 = main_node.grid_to_world(core_pos) + Vector2(core_size.x * gs * 0.5, core_size.y * gs * 0.5)
+	expl.explode(core_world)
+	_close_settings_and_pause_menu()
 
 
 ## Plays the landing animation on the currently-loaded sector. No-op

@@ -1,0 +1,28 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"uranium_refinery"
+display_name = "Uranium Refinery"
+description = "Enriches raw uranium into reactor-grade pellets."
+category = 2
+tags = PackedStringArray("factory", "omnidirectional")
+color = Color(0.55, 0.95, 0.35, 1)
+max_health = 280.0
+build_cost = {
+"copper": 260,
+"steel": 100,
+"silicon": 60
+}
+build_time = 5.0
+input_items = {
+"mat_uranium": 2
+}
+output_items = {
+"mat_refined_uranium": 1
+}
+production_time = 6.0
+electrical_power_use = 25.0
+max_stored_items = 40

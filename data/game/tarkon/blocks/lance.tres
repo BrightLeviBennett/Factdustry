@@ -41,7 +41,6 @@ build_cost = {
 "steel": 30
 }
 build_time = 4.5
-requires_power = true
 power_consumption = 7.0
 attack_speed = 1.6
 attack_range = 9.0

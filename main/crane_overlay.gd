@@ -26,4 +26,9 @@ func _draw() -> void:
 		return
 	building_sys._crane_draw_canvas = self
 	building_sys._draw_cranes()
+	# Build / decon beam diamonds piggy-back on this overlay so the
+	# pulsing emitter renders above the drone (z 4095) instead of
+	# being clipped by it at the building_system's default z.
+	if building_sys.has_method("_draw_active_work_diamonds"):
+		building_sys._draw_active_work_diamonds()
 	building_sys._crane_draw_canvas = null

@@ -14,8 +14,8 @@ color = Color(0.7, 0.8, 0.4, 1)
 top_sprite = ExtResource("1_ejmak")
 max_health = 290.0
 build_cost = {
-"copper": 200,
-"silicon": 80
+"copper": 45,
+"silicon": 10
 }
 build_time = 0.5
 transport_speed = 7.0

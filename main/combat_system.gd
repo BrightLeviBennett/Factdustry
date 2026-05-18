@@ -126,6 +126,17 @@ var _shot_id_counter: int = 0
 var _shot_hits: Dictionary = {}
 var _shot_active: Dictionary = {}
 
+## Looks up the additive attack-range bonus (in tiles) granted by any
+## active LUMINA Watchtower whose 10-tile aura covers `turret_anchor`.
+## Returns 0 if no watchtower system is mounted (editor / loading) or
+## the turret is outside every aura.
+func _watchtower_range_bonus(turret_anchor: Vector2i) -> float:
+	var wt = get_node_or_null("/root/Main/WatchtowerSystem")
+	if wt and wt.has_method("get_turret_range_bonus_tiles"):
+		return float(wt.get_turret_range_bonus_tiles(turret_anchor))
+	return 0.0
+
+
 ## Checks whether a turret currently has the required booster fluid /
 ## item in its block storage and, if so, consumes one tick's worth and
 ## returns the boost multiplier (e.g. 2.5 for +150 % fire rate). Falls
@@ -137,6 +148,9 @@ func _get_active_booster_multiplier(anchor: Vector2i, data: BlockData, stat: Str
 	if logistics == null or not "block_storage" in logistics:
 		return 1.0
 	var storage: Dictionary = logistics.block_storage.get(anchor, {})
+	# block_storage is a 2-bucket structure ({items: {...}, fluids: {...}}),
+	# so a flat `storage.get(iid)` always misses fluids. Pick the right
+	# bucket based on whether the booster id is a registered fluid.
 	for entry in data.boosters:
 		if typeof(entry) != TYPE_DICTIONARY:
 			continue
@@ -144,9 +158,13 @@ func _get_active_booster_multiplier(anchor: Vector2i, data: BlockData, stat: Str
 			continue
 		var iid: StringName = StringName(entry.get("item_id", &""))
 		var per_shot: float = float(entry.get("per_sec", 0.0)) * maxf(data.attack_speed, 0.01)
-		var avail: float = float(storage.get(iid, 0.0))
+		var is_fluid: bool = Registry.get_fluid(iid) != null
+		var bucket_key: String = "fluids" if is_fluid else "items"
+		var bucket: Dictionary = storage.get(bucket_key, {})
+		var avail: float = float(bucket.get(iid, 0.0))
 		if avail >= per_shot and per_shot > 0.0:
-			storage[iid] = avail - per_shot
+			bucket[iid] = avail - per_shot
+			storage[bucket_key] = bucket
 			logistics.block_storage[anchor] = storage
 			return float(entry.get("multiplier", 1.0))
 	return 1.0
@@ -363,10 +381,11 @@ func _push_targeting_snapshot() -> void:
 		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
 			continue
 		var turret_faction: int = main.get_building_faction(anchor)
+		var range_tiles: float = data.attack_range + _watchtower_range_bonus(anchor)
 		turrets_snap.append({
 			"grid_pos": anchor,
 			"faction": turret_faction,
-			"range_pixels": data.attack_range * main.GRID_SIZE,
+			"range_pixels": range_tiles * main.GRID_SIZE,
 			"block_id": block_id,
 			"targets_air": data.targets_air,
 			"targets_ground": data.targets_ground,
@@ -619,7 +638,9 @@ func _update_turrets(delta: float) -> void:
 		# Live range re-check: the targeting worker may have pre-computed this
 		# target when it was in range, but the target may have moved away since.
 		# Skip aiming AND firing if the target is now outside attack_range.
-		var live_range_px: float = data.attack_range * main.GRID_SIZE
+		# Includes any active watchtower bonus.
+		var live_range_tiles: float = data.attack_range + _watchtower_range_bonus(grid_pos)
+		var live_range_px: float = live_range_tiles * main.GRID_SIZE
 		if live_range_px > 0.0 and turret_world.distance_to(target_world) > live_range_px:
 			continue
 
@@ -805,7 +826,8 @@ func _update_turrets(delta: float) -> void:
 		if data.inaccuracy > 0.0:
 			var miss_deg: float = randf_range(-data.inaccuracy, data.inaccuracy)
 			base_shot_dir = base_shot_dir.rotated(deg_to_rad(miss_deg))
-		var shot_distance: float = data.attack_range * main.GRID_SIZE
+		var effective_range_tiles: float = data.attack_range + _watchtower_range_bonus(grid_pos)
+		var shot_distance: float = effective_range_tiles * main.GRID_SIZE
 		var pellet_total: int = maxi(fire_pellets, 1)
 		# Multi-pellet salvos share a shot_id so repeat hits on the same
 		# target halve damage per extra pellet.
@@ -831,7 +853,7 @@ func _update_turrets(delta: float) -> void:
 			# Bullets fly to the end of the turret's range; ammo's
 			# `range_bonus` is intentionally ignored so the visible
 			# travel distance matches the turret stat the player sees.
-			var fire_max_range: float = data.attack_range * main.GRID_SIZE
+			var fire_max_range: float = effective_range_tiles * main.GRID_SIZE
 
 			if shoot_at_unit:
 				# Always fly the full range along the aim axis — every
@@ -1183,6 +1205,27 @@ func player_unit_attack_building(unit: Node2D, target_grid_pos: Vector2i, dmg: f
 		aoe_radius,
 		main.Faction.LUMINA,
 	)
+
+
+## Called by enemy_unit.gd when a FEROX unit wants to shoot a LUMINA
+## unit (in-flight engagement, not the building-targeting path).
+func enemy_attack_unit(enemy: Node2D, target_unit: Node2D, damage: float, proj_speed: float, proj_color: Color) -> bool:
+	if target_unit == null or not is_instance_valid(target_unit):
+		return false
+	_spawn_projectile(
+		enemy.position,
+		target_unit,
+		target_unit.position,
+		"enemy",
+		proj_speed,
+		damage,
+		proj_color,
+		"enemy",
+		false,
+		0.0,
+		main.Faction.FEROX,
+	)
+	return true
 
 
 ## Called by enemy_unit.gd when a ranged enemy wants to shoot.

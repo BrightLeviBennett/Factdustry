@@ -90,6 +90,22 @@ var pump_timers := {}
 #   "pending_outputs": Dictionary (rel_dir_key -> item_id, remaining outputs to push)
 var factory_buffers := {}
 
+# --- DUCT BRIDGE STATE ---
+# Round-robin index per multi-output input duct bridge. Lets a single
+# input fan out evenly across its 2 or 3 destinations instead of
+# always trying the same one first (which would starve the rest).
+#   Key = Vector2i (input bridge anchor)
+#   Value = int (next destination index to try)
+var bridge_output_rr := {}
+
+# Per-output item filter for duct bridges. Maps an output bridge
+# anchor to the single item id it'll accept (from ANY incoming
+# source). Empty / missing entry means "no filter, accept anything".
+# Edited via the world-menu UI (shift+click on an output duct bridge).
+#   Key = Vector2i (output anchor)
+#   Value = StringName (item id)
+var duct_bridge_filters := {}
+
 # --- BLOCK STORAGE ---
 # Key = Vector2i (building origin position)
 # Value = Dictionary:
@@ -157,6 +173,23 @@ var deconstructor_state := {}
 #   "out_unit_id": StringName — tier-2 unit derived from in_unit_id,
 #                  held as a payload until output conveyor accepts it.
 var refabricator_state := {}
+
+# --- FACTORY RECIPE SELECTION STATE ---
+# Key = Vector2i (factory origin / anchor).
+# Value = StringName — the active recipe id matched against
+#         `BlockData.factory_recipes[*].id`. Empty / missing keeps the
+#         factory idle (mirrors the refabricator's "pick a T2 first"
+#         gate). Populated via `set_factory_recipe(anchor, recipe_id)`.
+var factory_recipe_state := {}
+
+# --- LANDING PAD FILTERS ---
+# Key = Vector2i (landing pad anchor).
+# Value = Array[StringName] of up to 2 entries — item or fluid ids the pad
+#         accepts. An empty array means "no filter" (accepts any pod).
+# Source-side launchpad code reads `SaveManager.landing_pad_filters` (which
+# mirrors this dict per saved sector) so it can validate cross-sector
+# routing before queuing a pod.
+var landing_pad_filters := {}
 
 # --- LOADER STATE ---
 # Key = Vector2i (loader origin position)
@@ -352,29 +385,37 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 	# reach ore up to `mine_range` tiles ahead and still register at
 	# 100 %, not just at its adjacent tile.
 	var max_extend: int = maxi(data.mine_range, 1)
-	var hit_count: int = 0
+	# Mirror `_update_drills`: per-wall efficiency multiplier (so the
+	# preview tooltip reads the same number the runtime will produce).
+	var accepted_walls_eff: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
+			else [&"blackstone_wall"]
+	var eff_sum: float = 0.0
 	for cell in front_cells:
-		var any_hit: bool = false
+		var hit_mult: float = 0.0
 		if is_wall_miner:
-			if terrain.get_ore_at(cell) == null and StringName(terrain.wall_tiles.get(cell, &"")) == &"blackstone_wall":
-				any_hit = true
+			var hit_wall: StringName = &""
+			var wid_e: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+			if terrain.get_ore_at(cell) == null and accepted_walls_eff.has(wid_e):
+				hit_wall = wid_e
 			else:
 				for step in range(1, max_extend + 1):
 					var scan: Vector2i = cell + dir * step
-					if terrain.get_ore_at(scan) == null and StringName(terrain.wall_tiles.get(scan, &"")) == &"blackstone_wall":
-						any_hit = true
+					var wid_s: StringName = StringName(terrain.wall_tiles.get(scan, &""))
+					if terrain.get_ore_at(scan) == null and accepted_walls_eff.has(wid_s):
+						hit_wall = wid_s
 						break
+			if hit_wall != &"":
+				hit_mult = float(data.wall_efficiency.get(hit_wall, 1.0))
 		else:
 			if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner, data):
-				any_hit = true
+				hit_mult = 1.0
 			else:
 				for step in range(1, max_extend + 1):
 					if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
-						any_hit = true
+						hit_mult = 1.0
 						break
-		if any_hit:
-			hit_count += 1
-	return float(hit_count) / float(front_count)
+		eff_sum += hit_mult
+	return eff_sum / float(front_count)
 
 
 ## Counts how many cells of `origin`'s footprint have a floor-ore
@@ -419,7 +460,12 @@ func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: in
 		if data.tags.has("condenser"):
 			fluid_id = &"mat_water"
 			# 8 = geyser baseline; vent reads as 0.5 efficiency → 4/s.
-			return {"item_id": fluid_id, "per_sec": 8.0 * efficiency}
+			# Vent turbine produces half of a dedicated condenser at
+			# the same source.
+			var rate_preview: float = 8.0 * efficiency
+			if data.id == &"vent_turbine":
+				rate_preview *= 0.5
+			return {"item_id": fluid_id, "per_sec": rate_preview}
 		if terrain:
 			for x in range(data.grid_size.x):
 				for y in range(data.grid_size.y):
@@ -469,7 +515,14 @@ func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: in
 			continue
 		if ore.minable_resource == &"":
 			continue
-		return {"item_id": ore.minable_resource, "per_sec": efficiency / cycle}
+		# Honor per-cycle output_items override (impact drill: 6/slam)
+		# — defaults to 1 ore per cycle if the block doesn't specify.
+		var per_cycle: int = 1
+		if data.output_items.has(ore.minable_resource):
+			per_cycle = int(data.output_items[ore.minable_resource])
+		elif data.output_items.has(String(ore.minable_resource)):
+			per_cycle = int(data.output_items[String(ore.minable_resource)])
+		return {"item_id": ore.minable_resource, "per_sec": float(per_cycle) * efficiency / cycle}
 	return blank
 
 
@@ -539,12 +592,15 @@ func _update_drills(delta: float) -> void:
 		# supposed to handle.
 		var is_wall_miner: bool = data.tags.has("wall_miner")
 		var is_floor_miner: bool = data.tags.has("floor_miner")
+		var is_geyser_miner: bool = data.tags.has("geyser_miner")
 
 		# Pick the right scan window. Wall/regular drills look at the
 		# front edge + one tile beyond (they reach forward into ore
 		# walls). Floor miners pull from straight under the footprint —
 		# their target is a coal patch the block is sitting on, not
-		# something it faces.
+		# something it faces. Geyser miners ignore the scan window
+		# entirely: the geyser tile they sit on IS their resource, so
+		# they always extract their full output_items per cycle.
 		var mine_cells: Array
 		if is_floor_miner:
 			mine_cells = []
@@ -558,7 +614,11 @@ func _update_drills(delta: float) -> void:
 		var wall_found: bool = false
 		var accepted_walls: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
 				else [&"blackstone_wall"]
-		if is_wall_miner:
+		if is_geyser_miner:
+			# Placement gate already guarantees we're centered on a
+			# geyser tile; nothing to scan for. Skip ore/wall detection.
+			pass
+		elif is_wall_miner:
 			for cell in mine_cells:
 				if terrain.get_ore_at(cell) != null:
 					continue
@@ -590,11 +650,13 @@ func _update_drills(delta: float) -> void:
 		# miners and standard drills keep the front-edge coverage
 		# fraction (direct hit + one tile ahead).
 		var efficiency: float = 1.0
-		if is_floor_miner:
+		if is_geyser_miner:
+			# Geyser tile = the resource; fixed 100 % output.
+			efficiency = 1.0
+		elif is_floor_miner:
 			efficiency = _floor_miner_efficiency(origin, data.grid_size)
 		else:
 			var front_count: int = front_cells.size()
-			var hit_count: int = 0
 			var dir: Vector2i
 			match rot:
 				0: dir = Vector2i(1, 0)
@@ -609,30 +671,38 @@ func _update_drills(delta: float) -> void:
 			var max_extend: int = maxi(data.mine_range, 1)
 			var accepted_walls_eff: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
 					else [&"blackstone_wall"]
+			# Wall miners use a per-wall efficiency multiplier (so a
+			# wall_crusher chews purple_wall at 0.75× vs blackstone's
+			# 1.0×). Each front-cell's contribution is the matched
+			# wall's multiplier (1.0 if unspecified), summed and
+			# averaged. Ore drills stay binary 0/1 per cell.
+			var eff_sum: float = 0.0
 			for cell in front_cells:
-				var any_hit: bool = false
+				var hit_mult: float = 0.0
 				if is_wall_miner:
+					var hit_wall: StringName = &""
 					var wid_e: StringName = StringName(terrain.wall_tiles.get(cell, &""))
 					if terrain.get_ore_at(cell) == null and accepted_walls_eff.has(wid_e):
-						any_hit = true
+						hit_wall = wid_e
 					else:
 						for step in range(1, max_extend + 1):
 							var scan: Vector2i = cell + dir * step
 							var wid_s: StringName = StringName(terrain.wall_tiles.get(scan, &""))
 							if terrain.get_ore_at(scan) == null and accepted_walls_eff.has(wid_s):
-								any_hit = true
+								hit_wall = wid_s
 								break
+					if hit_wall != &"":
+						hit_mult = float(data.wall_efficiency.get(hit_wall, 1.0))
 				else:
 					if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner, data):
-						any_hit = true
+						hit_mult = 1.0
 					else:
 						for step in range(1, max_extend + 1):
 							if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
-								any_hit = true
+								hit_mult = 1.0
 								break
-				if any_hit:
-					hit_count += 1
-			efficiency = float(hit_count) / float(front_count) if front_count > 0 else 1.0
+				eff_sum += hit_mult
+			efficiency = eff_sum / float(front_count) if front_count > 0 else 1.0
 		extractor_efficiency[origin] = efficiency
 
 		# Electrical power: scale production speed by the network's
@@ -654,14 +724,22 @@ func _update_drills(delta: float) -> void:
 			continue
 
 		# Figure out which item(s) this cycle produces and how many of each.
-		# Regular drills produce 1 × minable_resource from the ore tile.
-		# Wall miners produce data.output_items (item_id → amount).
+		# Regular drills produce 1 × minable_resource by default, but
+		# may override the per-cycle amount via output_items entry
+		# keyed by that resource (e.g. impact drill: 6 × mat_zinc per
+		# slam). Wall miners always use the full output_items dict.
 		var produced: Dictionary = {}
-		if is_wall_miner:
+		if is_wall_miner or is_geyser_miner:
 			for raw_id in data.output_items:
 				produced[StringName(raw_id)] = int(data.output_items[raw_id])
 		else:
-			produced[ore.minable_resource] = 1
+			var resource_key: StringName = ore.minable_resource
+			var amount: int = 1
+			if data.output_items.has(resource_key):
+				amount = int(data.output_items[resource_key])
+			elif data.output_items.has(String(resource_key)):
+				amount = int(data.output_items[String(resource_key)])
+			produced[resource_key] = amount
 
 		# Don't produce if storage for any of these items is full — stall at 0.
 		var any_full: bool = false
@@ -879,6 +957,11 @@ func _update_pumps(delta: float) -> void:
 			# but the higher-yield source is the one the player placed
 			# the condenser FOR.
 			rate_per_sec = 8.0 if on_geyser else 4.0
+			# Vent turbine condenses water as a byproduct of its main
+			# job (power gen). Half the throughput of a dedicated
+			# condenser at the same source.
+			if data.id == &"vent_turbine":
+				rate_per_sec *= 0.5
 			# Efficiency overlay shows 100% on a geyser (max), 50% on a
 			# vent (half) so the live indicator matches the pump's
 			# normalized scale.
@@ -965,6 +1048,15 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 	# Can't push items onto buildings under construction
 	if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
 		return false
+	# Incinerator: destroys any item or fluid pushed in, as long as the
+	# network can cover its 5-power draw. With power down, items back
+	# up on the belt (return false) instead of vanishing for free.
+	if _is_incinerator_cell(grid_pos):
+		var power_sys_inc = _power_sys_ref()
+		var inc_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if power_sys_inc and power_sys_inc.get_electrical_efficiency(inc_anchor) <= 0.0:
+			return false
+		return true
 	# Direct deposit into the core — reject if storage full (backs up conveyor)
 	if _is_core_cell(grid_pos):
 		return _absorb_item(item_id, grid_pos)
@@ -1048,10 +1140,12 @@ func _update_conveyors(delta: float) -> void:
 			if not conveyor_items.has(grid_pos):
 				continue  # Already transferred by a previous iteration
 
-			# Items sitting on an in-progress / derelict / deconstructing
-			# transport cell don't move. They pick back up once the block
-			# finishes construction.
-			if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			# Items sitting on an in-progress / derelict / actively-
+			# decommissioning transport cell don't move. A belt that's
+			# only QUEUED for deconstruction (drone hasn't started yet)
+			# keeps conveying — the items still get a chance to clear
+			# before the belt actually disappears.
+			if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
 				continue
 
 			var item = conveyor_items[grid_pos]
@@ -1150,9 +1244,10 @@ func _update_conveyors(delta: float) -> void:
 	# Move all items forward along their conveyor cell.
 	# Each conveyor uses its own transport_speed from BlockData.
 	# Items on inactive (under-construction/derelict/decon) cells hold their
-	# progress — they literally don't slide this frame.
+	# progress — they literally don't slide this frame. Belts that are
+	# only queued (not actively decommissioning) keep advancing items.
 	for grid_pos in conveyor_items:
-		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
 			continue
 		var item = conveyor_items[grid_pos]
 		if item["progress"] < 1.0:
@@ -1173,7 +1268,7 @@ func _update_conveyors(delta: float) -> void:
 	# keeps its current exit_dir so a stalled item doesn't visually
 	# flicker between edges.
 	for grid_pos in conveyor_items:
-		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
 			continue
 		if not _is_router_cell(grid_pos):
 			continue
@@ -1196,7 +1291,7 @@ func _update_conveyors(delta: float) -> void:
 
 	# Advance junction perpendicular-axis items too
 	for grid_pos in junction_items:
-		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
 			continue
 		var item = junction_items[grid_pos]
 		if item["progress"] < 1.0:
@@ -1220,6 +1315,15 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 	# would otherwise return true for a derelict variant.
 	if not _is_core_cell(to) and main.has_method("is_building_inactive") and main.is_building_inactive(to):
 		return false
+
+	# Incinerator: destroys items / fluids on input as long as it has
+	# power. With power down, the item bounces back upstream.
+	if _is_incinerator_cell(to):
+		var power_sys_inc2 = _power_sys_ref()
+		var inc_anchor2: Vector2i = main.building_origins.get(to, to)
+		if power_sys_inc2 and power_sys_inc2.get_electrical_efficiency(inc_anchor2) <= 0.0:
+			return false
+		return true
 
 	# Core absorbs if not full — reject if storage full (item stays on belt)
 	if _is_core_cell(to):
@@ -1379,6 +1483,35 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	if data == null:
 		return false
 
+	# Launchpad — accepts any item into passenger storage, capped by
+	# max_stored_items. The pod's build cost is now power-only, so the
+	# launchpad no longer special-cases mandatory items.
+	if data.tags.has("launchpad"):
+		var lp_anchor = main.get_building_anchor(grid_pos)
+		var lp_origin: Vector2i = lp_anchor if lp_anchor != null else grid_pos
+		var storage_lp: Dictionary = block_storage.get(lp_origin, {})
+		var items_lp: Dictionary = storage_lp.get("items", {})
+		var total_lp: int = 0
+		for k in items_lp:
+			total_lp += int(items_lp[k])
+		var cap_lp: int = data.max_stored_items if data.max_stored_items > 0 else 200
+		return total_lp < cap_lp
+
+	# Nuclear reactor — accepts uranium / graphite rods on any side as
+	# long as the merged item bucket isn't full.
+	if data.tags.has("nuclear_reactor"):
+		if item_id != &"mat_uranium_rod" and item_id != &"mat_graphite_rod":
+			return false
+		var nuc_anchor = main.get_building_anchor(grid_pos)
+		var nuc_origin: Vector2i = nuc_anchor if nuc_anchor != null else grid_pos
+		var storage_n: Dictionary = block_storage.get(nuc_origin, {})
+		var items_n: Dictionary = storage_n.get("items", {})
+		var total_n: int = 0
+		for k in items_n:
+			total_n += int(items_n[k])
+		var cap_n: int = data.max_stored_items if data.max_stored_items > 0 else 8
+		return total_n < cap_n
+
 	# --- Factory-style accept (omnidirectional, side_inputs, unit_fabricator) ---
 	var is_omni: bool = data.tags.has("omnidirectional")
 	var is_unit_fab: bool = data.produced_unit != &""
@@ -1445,13 +1578,20 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 ## same-faction conveyor cell, or a non-conveyor block whose input side
 ## faces back toward the router and accepts this item. Used by the
 ## pre-decide pass to decide whether the cached exit_dir is still valid.
+##
+## A conveyor cell that's currently OCCUPIED still counts as accepting:
+## the item just visually waits at this exit edge until the downstream
+## belt clears, instead of flicking its committed direction over to
+## whatever side happens to be empty this frame. Without that rule a
+## router with one busy downstream and two bare-terrain sides would
+## animate items toward bare terrain.
 func _router_exit_accepts(grid_pos: Vector2i, dir: int, item_id: StringName) -> bool:
 	if dir < 0 or dir > 3:
 		return false
 	var next_pos: Vector2i = grid_pos + DIR_VECTORS[dir]
 	if _is_cross_faction(grid_pos, next_pos):
 		return false
-	if _is_conveyor_cell(next_pos) and not conveyor_items.has(next_pos):
+	if _is_conveyor_cell(next_pos):
 		return true
 	if main.placed_buildings.has(next_pos) and not _is_conveyor_cell(next_pos):
 		var entry_dir: int = (dir + 2) % 4
@@ -1474,9 +1614,9 @@ func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
 
 	var rr_start: int = router_output_index[grid_pos] % outputs.size()
 
-	# First pass: look for a direction with an accepting destination. Only
-	# advance round-robin when we actually commit to an output so that a
-	# fully-blocked router doesn't churn the index every frame.
+	# First pass: look for an empty downstream we can commit AND advance to
+	# this frame. Only advance round-robin when we actually commit so that
+	# a fully-blocked router doesn't churn the index every frame.
 	for attempt in range(outputs.size()):
 		var idx: int = (rr_start + attempt) % outputs.size()
 		var out_dir: int = outputs[idx]
@@ -1500,9 +1640,27 @@ func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
 				router_output_index[grid_pos] = (idx + 1) % outputs.size()
 				return out_dir
 
-	# Fallback: all outputs blocked. Return the current round-robin direction
-	# WITHOUT advancing the index, so the item waits on a stable exit edge
-	# until something frees up.
+	# Second pass: nothing accepting RIGHT NOW, but pick a direction that at
+	# least has a real downstream (conveyor or building) and wait on it. This
+	# is the key fix for the "animates the wrong way" problem: previously the
+	# fallback would happily return `outputs[rr_start]` even when that side
+	# was bare terrain, so an item would slide toward an empty cell while
+	# the actual transfer eventually happened on a different (configured)
+	# side. Don't advance round-robin yet — we haven't actually transferred.
+	for attempt in range(outputs.size()):
+		var idx2: int = (rr_start + attempt) % outputs.size()
+		var out_dir2: int = outputs[idx2]
+		var next_pos2: Vector2i = grid_pos + DIR_VECTORS[out_dir2]
+		if _is_cross_faction(grid_pos, next_pos2):
+			continue
+		if _is_conveyor_cell(next_pos2):
+			return out_dir2
+		if main.placed_buildings.has(next_pos2):
+			return out_dir2
+
+	# Truly nothing on any side — no downstream at all. Fall back to the
+	# round-robin slot just to return a valid value; the item won't transfer
+	# anyway since every side fails the transfer check.
 	return outputs[rr_start] if outputs.size() > 0 else -1
 
 
@@ -1521,37 +1679,51 @@ func _is_bridge_input(grid_pos: Vector2i) -> bool:
 	return false
 
 
-## Teleports an item from an input bridge to its linked output bridge.
+## Teleports an item from an input bridge to one of its linked output
+## bridges. Duct bridges may fan out to up to 3 destinations and merge
+## from up to 3 sources; the dispatch picks the next round-robin
+## destination that can currently accept the item (slot empty, filter
+## match, and lock allows). Belt bridges keep 1:1 behavior since their
+## cap is 1.
 func _try_bridge_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 	var power_sys = _power_sys_ref()
 	if power_sys == null:
 		return false
 
-	# Find linked partner — input bridge is pair[0], output is pair[1]
-	var partner: Variant = null
-	for pair in power_sys.linked_pairs:
-		if pair[0] == grid_pos:
-			partner = pair[1]
-			break
-
-	if partner == null:
+	# All destinations this input bridge fans out to.
+	var partners: Array = power_sys.get_links_as_source_all(grid_pos)
+	if partners.is_empty():
 		return false
 
-	if not _is_bridge_cell(partner):
-		return false
-
-	# Teleport: place item at the output bridge with progress 0.0
-	if not conveyor_items.has(partner):
+	var item_id: StringName = StringName(item.get("item_id", &""))
+	var rr_start: int = int(bridge_output_rr.get(grid_pos, 0)) % maxi(partners.size(), 1)
+	for offset in range(partners.size()):
+		var idx: int = (rr_start + offset) % partners.size()
+		var partner = partners[idx]
+		if partner == null or not _is_bridge_cell(partner):
+			continue
+		# Filter gate: per-output filter — single item id the output
+		# bridge accepts from ANY incoming source. Empty / missing
+		# entry = no filter.
+		var filt_id: StringName = StringName(duct_bridge_filters.get(partner, &""))
+		if filt_id != &"" and filt_id != item_id:
+			continue
+		# Slot gate: output bridge cell must be empty.
+		if conveyor_items.has(partner):
+			continue
+		# Push the item across.
 		var out_rot: int = main.building_rotation.get(partner, 0)
 		var entry_dir: int = (out_rot + 2) % 4  # enters from behind
 		conveyor_items[partner] = {
-			"item_id": item["item_id"],
+			"item_id": item_id,
 			"progress": 0.0,
 			"entry_dir": entry_dir,
 		}
+		# Advance round-robin so the next call tries the NEXT
+		# destination first — even spread across multi-output ducts.
+		bridge_output_rr[grid_pos] = (idx + 1) % partners.size()
 		return true
-
-	return false  # Output bridge occupied
+	return false  # No destination could accept
 
 
 # =========================
@@ -2283,6 +2455,15 @@ func _update_pipes(delta: float) -> void:
 				pipe["amount"] -= units_needed
 				if pipe["amount"] <= 0:
 					break
+				continue
+			# Booster-fluid sip: blocks like the double-barrel /
+			# payload crane that declare a fluid-based booster but
+			# aren't factories siphon water (or whatever fluid the
+			# booster references) into their generic fluid storage.
+			if _try_accept_booster_fluid(neighbor, pipe["fluid_id"]):
+				pipe["amount"] -= units_needed
+				if pipe["amount"] <= 0:
+					break
 
 	# Clean up empty pipe entries
 	for pos in to_clean:
@@ -2368,10 +2549,10 @@ func _add_to_storage(origin: Vector2i, item_id: StringName, data: BlockData) -> 
 	var is_fluid: bool = Registry.get_fluid(item_id) != null
 
 	if is_fluid:
-		if data.max_stored_fluids <= 0:
+		if data.liquid_capacity <= 0:
 			return false
 		var total_fluids := _get_total_stored_fluids(storage)
-		if total_fluids >= data.max_stored_fluids:
+		if total_fluids >= data.liquid_capacity:
 			return false
 		storage["fluids"][item_id] = storage["fluids"].get(item_id, 0.0) + 1.0
 	else:
@@ -2437,11 +2618,11 @@ func _is_item_storage_full(origin: Vector2i, data: BlockData) -> bool:
 
 ## Returns true if fluid storage is full.
 func _is_fluid_storage_full(origin: Vector2i, data: BlockData) -> bool:
-	if data.max_stored_fluids <= 0:
+	if data.liquid_capacity <= 0:
 		return false
 	if not block_storage.has(origin):
 		return false
-	return _get_total_stored_fluids(block_storage[origin]) >= data.max_stored_fluids
+	return _get_total_stored_fluids(block_storage[origin]) >= data.liquid_capacity
 
 
 ## Returns true if the building's storage is full for the given item type.
@@ -2464,14 +2645,14 @@ func _is_storage_full(origin: Vector2i, data: BlockData) -> bool:
 	if not block_storage.has(origin):
 		return false
 	var produces_items: bool = _block_produces_items(data) and data.max_stored_items > 0
-	var produces_fluids: bool = _block_produces_fluids(data) and data.max_stored_fluids > 0
+	var produces_fluids: bool = _block_produces_fluids(data) and data.liquid_capacity > 0
 	if not produces_items and not produces_fluids:
 		# Pure storage / unclassified — fall back to "any cap reached".
 		var i_full: bool = data.max_stored_items > 0 and _get_total_stored_items(block_storage[origin]) >= data.max_stored_items
-		var f_full: bool = data.max_stored_fluids > 0 and _get_total_stored_fluids(block_storage[origin]) >= data.max_stored_fluids
+		var f_full: bool = data.liquid_capacity > 0 and _get_total_stored_fluids(block_storage[origin]) >= data.liquid_capacity
 		return i_full or f_full
 	var items_full: bool = (not produces_items) or _get_total_stored_items(block_storage[origin]) >= data.max_stored_items
-	var fluids_full: bool = (not produces_fluids) or _get_total_stored_fluids(block_storage[origin]) >= data.max_stored_fluids
+	var fluids_full: bool = (not produces_fluids) or _get_total_stored_fluids(block_storage[origin]) >= data.liquid_capacity
 	return items_full and fluids_full
 
 
@@ -2778,13 +2959,6 @@ func _update_belt_unloaders(_delta: float) -> void:
 ## Ferox cores feed the ferox pool; Lumina cores feed the player pool.
 ## Tries to absorb an item into core storage. Returns true if accepted, false if full.
 func _absorb_item(item_id: StringName, core_grid_pos: Vector2i = Vector2i(-1, -1)) -> bool:
-	# Sand and coal aren't long-term core stockpile resources — cores
-	# incinerate them instead of adding to the pool. Returning true tells
-	# the conveyor/drone the deposit succeeded so the item is consumed
-	# rather than backing up the belt. Coal in particular is a fuel item:
-	# it should flow into combustion generators, not pile up in the core.
-	if item_id == &"mat_sand" or item_id == &"mat_coal":
-		return true
 	# Refuse deposits into a core that isn't fully built (under
 	# construction or actively being deconstructed). Returning false
 	# backs the conveyor up and the drone retries against the next
@@ -2928,6 +3102,15 @@ func _is_core_cell(grid_pos: Vector2i) -> bool:
 	return data.category == BlockData.BlockCategory.CORE
 
 
+func _is_incinerator_cell(grid_pos: Vector2i) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null:
+		return false
+	return data.tags.has("incinerator")
+
+
 # =========================
 # BUILDING EVENTS
 # =========================
@@ -3016,6 +3199,9 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	unloader_state.erase(grid_pos)
 	mass_driver_state.erase(grid_pos)
 	belt_unloader_state.erase(grid_pos)
+	# Duct-bridge state cleanup: filter + round-robin index.
+	duct_bridge_filters.erase(grid_pos)
+	bridge_output_rr.erase(grid_pos)
 	# Drop any in-flight projectiles to/from this driver
 	for i in range(mass_driver_projectiles.size() - 1, -1, -1):
 		var proj: Dictionary = mass_driver_projectiles[i]
@@ -3087,6 +3273,73 @@ func _try_accept_constructor_item(grid_pos: Vector2i, item_id: StringName) -> bo
 ## the turret's AmmoType entries AND the turret has spare storage capacity.
 ## Items are stored in block_storage[anchor]["items"] just like every other
 ## building, so combat_system can pull them out via remove_from_storage.
+## Pipe-side fluid intake for non-factory blocks. Any block that lists
+## a booster matching `fluid_id` AND has `liquid_capacity > 0`
+## accepts the fluid into `block_storage[anchor]["fluids"]`, capped by
+## `liquid_capacity`. This is what lets a turret / crane sip water
+## from an adjacent pipe even though it has no factory `side_inputs`.
+func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null:
+		return false
+	# Launchpad: accepts any fluid into its passenger buffer, capped by
+	# liquid_capacity. The booster-table check below would reject this,
+	# so handle it up front.
+	if data.tags.has("launchpad"):
+		if data.liquid_capacity <= 0:
+			return false
+		var lp_anchor = main.get_building_anchor(grid_pos)
+		var lp_origin: Vector2i = lp_anchor if lp_anchor != null else grid_pos
+		if not block_storage.has(lp_origin):
+			block_storage[lp_origin] = {"items": {}, "fluids": {}}
+		var lp_storage: Dictionary = block_storage[lp_origin]
+		var lp_fluids: Dictionary = lp_storage.get("fluids", {})
+		var lp_total: float = 0.0
+		for k in lp_fluids:
+			lp_total += float(lp_fluids[k])
+		if lp_total >= float(data.liquid_capacity):
+			return false
+		lp_fluids[fluid_id] = float(lp_fluids.get(fluid_id, 0.0)) + 1.0
+		lp_storage["fluids"] = lp_fluids
+		block_storage[lp_origin] = lp_storage
+		return true
+	if data.liquid_capacity <= 0 or data.boosters.is_empty():
+		return false
+	# Match against the booster table: at least one entry must reference
+	# this fluid id, otherwise the block has no business storing it.
+	var accepted := false
+	for entry in data.boosters:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		if StringName(entry.get("item_id", &"")) == fluid_id:
+			accepted = true
+			break
+	if not accepted:
+		return false
+	# Multi-tile blocks share one buffer at the anchor.
+	var anchor = main.get_building_anchor(grid_pos)
+	var origin: Vector2i = anchor if anchor != null else grid_pos
+	if not block_storage.has(origin):
+		block_storage[origin] = {"items": {}, "fluids": {}}
+	var storage: Dictionary = block_storage[origin]
+	if not storage.has("fluids"):
+		storage["fluids"] = {}
+	var fluids: Dictionary = storage["fluids"]
+	# Respect the building's liquid_capacity cap so a single pipe
+	# can't overflow the buffer.
+	var total: float = 0.0
+	for k in fluids:
+		total += float(fluids[k])
+	if total >= float(data.liquid_capacity):
+		return false
+	fluids[fluid_id] = float(fluids.get(fluid_id, 0.0)) + 1.0
+	storage["fluids"] = fluids
+	block_storage[origin] = storage
+	return true
+
+
 func _try_accept_turret_ammo(grid_pos: Vector2i, item_id: StringName) -> bool:
 	if not main.placed_buildings.has(grid_pos):
 		return false
@@ -4650,9 +4903,12 @@ func _draw() -> void:
 	_draw_items()
 	_draw_payloads()
 	_draw_mass_drivers()
-	_draw_drill_progress_bars()
-	_draw_pump_progress_bars()
-	_draw_factory_progress_bars()
+	# In-world cycle progress bars were removed — the player reads
+	# production state from tooltips / per-block visuals (slam ease,
+	# scraper spin, factory item layer) instead.
+	# _draw_drill_progress_bars()
+	# _draw_pump_progress_bars()
+	# _draw_factory_progress_bars()
 
 
 func _draw_mass_drivers() -> void:
@@ -5138,6 +5394,14 @@ func _update_factories(delta: float) -> void:
 		# the payload-in requirement.
 		if data.tags.has("refabricator"):
 			continue
+		# Extractors (drills, scrapers, impact drills, …) are driven by
+		# `_update_drills` — they have their own `drill_timers` cycle.
+		# Without this skip an `omnidirectional` extractor like the
+		# impact drill ends up tracked by BOTH loops, painting two
+		# in-world progress bars (green from the drill loop + orange
+		# from the factory loop).
+		if data.category == BlockData.BlockCategory.EXTRACTORS:
+			continue
 		# Omnidirectional factories intentionally have empty side_inputs/side_outputs,
 		# so keep them in the loop — the processing logic handles them separately.
 		if data.side_inputs.is_empty() and data.side_outputs.is_empty() and data.produced_unit == &"" and not data.tags.has("omnidirectional"):
@@ -5179,6 +5443,14 @@ func _update_factories(delta: float) -> void:
 
 		var state = factory_buffers[origin]
 
+		# Recipe-select factories (Rod Shapper etc.) stay idle until the
+		# player picks a recipe via the world menu. Without a selection the
+		# factory refuses inputs and does not advance — matches the Unit
+		# Refabricator's "pick a T2 first" gate.
+		if data.factory_recipes != null and data.factory_recipes.size() > 0:
+			if _get_selected_recipe(data, origin).is_empty():
+				continue
+
 		match state["phase"]:
 			"collecting":
 				# Don't start production if storage is full (skip for unit fabricators)
@@ -5201,7 +5473,7 @@ func _update_factories(delta: float) -> void:
 				if is_player_fab and is_unit_fabricator and main.has_method("can_spawn_unit") and not main.can_spawn_unit(data.produced_unit):
 					continue
 				# Check if all required inputs are met
-				if _factory_has_all_inputs(state, data):
+				if _factory_has_all_inputs(state, data, origin):
 					# Don't deduct upfront — _consume_progressive drains
 					# the buffer in step with the timer below so the
 					# tooltip's "have/needed" bars visibly tick down.
@@ -5221,7 +5493,7 @@ func _update_factories(delta: float) -> void:
 				# stalls until enough material returns to cover the
 				# next step. Mirrors the way drone construction stalls
 				# on a missing resource.
-				var _recipe := _get_effective_inputs(data)
+				var _recipe := _get_effective_inputs(data, origin)
 				var _t_total: float = float(state.get("timer_total", state["timer"] + 0.0001))
 				if _t_total <= 0.0:
 					_t_total = 0.0001
@@ -5260,9 +5532,13 @@ func _update_factories(delta: float) -> void:
 						var pending := {}
 						if data.tags.has("omnidirectional"):
 							var slot: int = 0
-							for raw_id in data.output_items:
+							# Recipe-select factories override output_items per
+							# the picked recipe; fall back to data.output_items
+							# for normal factories.
+							var out_dict: Dictionary = _get_effective_outputs(data, origin)
+							for raw_id in out_dict:
 								var out_sn := StringName(raw_id)
-								var amt: int = int(data.output_items[raw_id])
+								var amt: int = int(out_dict[raw_id])
 								for i in range(amt):
 									pending[str(slot)] = out_sn
 									slot += 1
@@ -5321,12 +5597,89 @@ func _update_factories(delta: float) -> void:
 ## short item ids like "copper" normalized to full runtime ids like
 ## "mat_copper" so they match what conveyors carry).
 ## For regular factories, it's the BlockData's input_items as-is.
-func _get_effective_inputs(data: BlockData) -> Dictionary:
+func _get_effective_inputs(data: BlockData, anchor: Vector2i = Vector2i(-2147483648, -2147483648)) -> Dictionary:
 	if data.produced_unit != &"":
 		var unit = Registry.get_unit(data.produced_unit)
 		if unit != null and not unit.build_cost.is_empty():
 			return _normalize_item_keys(unit.build_cost)
+	# Recipe-select factories override input_items with the active recipe.
+	# The caller passes the factory's anchor so we can look up the
+	# per-instance selection. Falls back to data.input_items when no anchor
+	# is supplied (e.g. tooltip / preview previews that just want a baseline).
+	if data.factory_recipes != null and data.factory_recipes.size() > 0:
+		var rec: Dictionary = _get_selected_recipe(data, anchor)
+		if not rec.is_empty():
+			return _normalize_item_keys(rec.get("input", {}))
+		return {}
 	return data.input_items
+
+
+## Returns the currently-selected recipe Dictionary for `anchor`, or {} if
+## no recipe is selected (factory should stay idle). Looks up
+## `factory_recipe_state[anchor]` against `data.factory_recipes`.
+func _get_selected_recipe(data: BlockData, anchor: Vector2i) -> Dictionary:
+	if data == null or data.factory_recipes == null or data.factory_recipes.size() == 0:
+		return {}
+	var sel: StringName = StringName(factory_recipe_state.get(anchor, &""))
+	if sel == &"":
+		return {}
+	for entry in data.factory_recipes:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		if StringName(entry.get("id", &"")) == sel:
+			return entry
+	return {}
+
+
+## Returns the output dict for this factory: selected recipe's output for
+## recipe-select factories, or `data.output_items` otherwise.
+func _get_effective_outputs(data: BlockData, anchor: Vector2i = Vector2i(-2147483648, -2147483648)) -> Dictionary:
+	if data.factory_recipes != null and data.factory_recipes.size() > 0:
+		var rec: Dictionary = _get_selected_recipe(data, anchor)
+		if not rec.is_empty():
+			return _normalize_item_keys(rec.get("output", {}))
+		return {}
+	return data.output_items
+
+
+## Public setter for the recipe-pick world menu. `recipe_id` must match one
+## of `BlockData.factory_recipes[*].id`, or be empty to reset the factory
+## to "no recipe — idle". Wipes the factory_buffers slot so a stale
+## in-progress production of the previous recipe doesn't leak into the new
+## one.
+## Sets the landing pad's filter slot. `slot` is 0 or 1; `item_id` may be
+## an item, fluid, or `&""` to clear the slot. The filter array always
+## stays compact (no empty middle slots) so the popup UI doesn't have
+## to special-case gap rendering.
+func set_landing_pad_filter_slot(anchor: Vector2i, slot: int, item_id: StringName) -> void:
+	var arr: Array = landing_pad_filters.get(anchor, [])
+	# Pad the array out so the slot index is valid, then assign / clear.
+	while arr.size() <= slot:
+		arr.append(&"")
+	arr[slot] = item_id
+	# Compact: drop trailing empties so the dict reads the same regardless
+	# of which slot the player cleared first.
+	while arr.size() > 0 and arr[arr.size() - 1] == &"":
+		arr.pop_back()
+	if arr.is_empty():
+		landing_pad_filters.erase(anchor)
+	else:
+		landing_pad_filters[anchor] = arr
+
+
+func get_landing_pad_filter(anchor: Vector2i) -> Array:
+	return landing_pad_filters.get(anchor, [])
+
+
+func set_factory_recipe(anchor: Vector2i, recipe_id: StringName) -> void:
+	factory_recipe_state[anchor] = recipe_id
+	# Reset the build buffer so a half-finished cycle of recipe A doesn't
+	# carry into recipe B. Inputs already in storage stay put (player can
+	# pull them back out via the storage menu).
+	if factory_buffers.has(anchor):
+		factory_buffers[anchor]["phase"] = "collecting"
+		factory_buffers[anchor]["timer"] = 0.0
+		factory_buffers[anchor]["recipe_consumed"] = {}
 
 
 ## Normalizes an item dict's keys to the full "mat_*" form used by runtime
@@ -5401,8 +5754,8 @@ func _consume_progressive(inputs: Dictionary, recipe: Dictionary, consumed: Dict
 
 ## Returns true if the factory's input buffer has all required items.
 ## Handles String/.tres keys vs StringName/runtime keys.
-func _factory_has_all_inputs(state: Dictionary, data: BlockData) -> bool:
-	var inputs := _get_effective_inputs(data)
+func _factory_has_all_inputs(state: Dictionary, data: BlockData, anchor: Vector2i = Vector2i(-2147483648, -2147483648)) -> bool:
+	var inputs := _get_effective_inputs(data, anchor)
 	for raw_id in inputs:
 		var sn_id := StringName(raw_id)
 		var needed: int = int(inputs[raw_id])
@@ -5700,7 +6053,14 @@ func _spawn_unit_at_building_front(origin: Vector2i, data: BlockData, unit_id: S
 	if unit_mgr:
 		var faction: int = main.get_building_faction(origin)
 		if faction == main.Faction.FEROX:
-			unit_mgr.spawn_enemy(spawn_world, unit_id)
+			# Route through the fabricator-squad system: the new unit
+			# rallies a few tiles in front of its fabricator until the
+			# squad has enough firepower (or it's been waiting too long)
+			# to break through the player's defenses.
+			if unit_mgr.has_method("spawn_enemy_for_fabricator"):
+				unit_mgr.spawn_enemy_for_fabricator(spawn_world, unit_id, origin)
+			else:
+				unit_mgr.spawn_enemy(spawn_world, unit_id)
 		else:
 			# Check unit cap before spawning player units
 			if main.has_method("can_spawn_unit") and not main.can_spawn_unit(unit_id):
@@ -5723,6 +6083,50 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	var data = Registry.get_block(main.placed_buildings[grid_pos])
 	if data == null:
 		return false
+
+	# Launchpad: accepts any item from any side as passenger cargo,
+	# capped by max_stored_items. The pod is power-built so the
+	# launchpad doesn't reserve any items for construction.
+	if data.tags.has("launchpad"):
+		var lp_anchor = main.get_building_anchor(grid_pos)
+		var lp_origin: Vector2i = lp_anchor if lp_anchor != null else grid_pos
+		if not block_storage.has(lp_origin):
+			block_storage[lp_origin] = {"items": {}, "fluids": {}}
+		var lp_storage: Dictionary = block_storage[lp_origin]
+		var lp_items: Dictionary = lp_storage.get("items", {})
+		var lp_total: int = 0
+		for k in lp_items:
+			lp_total += int(lp_items[k])
+		var lp_cap: int = data.max_stored_items if data.max_stored_items > 0 else 200
+		if lp_total >= lp_cap:
+			return false
+		lp_items[item_id] = int(lp_items.get(item_id, 0)) + 1
+		lp_storage["items"] = lp_items
+		block_storage[lp_origin] = lp_storage
+		return true
+
+	# Nuclear reactor: accepts uranium_rod / graphite_rod into its
+	# block_storage["items"] bucket from any side, capped by
+	# max_stored_items. The dedicated NuclearReactorSystem consumes them.
+	if data.tags.has("nuclear_reactor"):
+		if item_id != &"mat_uranium_rod" and item_id != &"mat_graphite_rod":
+			return false
+		var nuc_anchor = main.get_building_anchor(grid_pos)
+		var nuc_origin: Vector2i = nuc_anchor if nuc_anchor != null else grid_pos
+		if not block_storage.has(nuc_origin):
+			block_storage[nuc_origin] = {"items": {}, "fluids": {}}
+		var nuc_storage: Dictionary = block_storage[nuc_origin]
+		var nuc_items: Dictionary = nuc_storage.get("items", {})
+		var total: int = 0
+		for k in nuc_items:
+			total += int(nuc_items[k])
+		var nuc_cap: int = data.max_stored_items if data.max_stored_items > 0 else 8
+		if total >= nuc_cap:
+			return false
+		nuc_items[item_id] = int(nuc_items.get(item_id, 0)) + 1
+		nuc_storage["items"] = nuc_items
+		block_storage[nuc_origin] = nuc_storage
+		return true
 
 	# Omnidirectional factories accept on every side and don't need side_inputs set.
 	# Unit fabricators also accept from any side — their inputs come from the

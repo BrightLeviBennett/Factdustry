@@ -33,11 +33,10 @@ build_cost = {
 "silicon": 30
 }
 build_time = 3.0
-requires_power = true
 attack_speed = 0.5
 attack_range = 5.0
 ammo_types = Array[Resource]([SubResource("Resource_db_ammo")])
-required_tiles = null
+liquid_capacity = 10.0
 boosters = [{
 "item_id": &"mat_water",
 "multiplier": 2.5,

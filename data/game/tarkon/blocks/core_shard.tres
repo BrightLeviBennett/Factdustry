@@ -27,7 +27,6 @@ build_cost = {
 "silicon": 500
 }
 build_time = 20.0
-required_tiles = null
 sight_range = 24.0
 max_active_units = 15
 storage_capacity = 4000

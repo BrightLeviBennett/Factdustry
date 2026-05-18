@@ -98,7 +98,7 @@ Everything the player can place or own is a Resource asset under
   `top_sprite`, `feed_overlay_*`, `ferox_overlay`, `derelict_overlay`,
   `lumina_overlay`, `is_aoe`, `aoe_radius`, `transport_speed`,
   `transports_fluid`, `max_payload_size`, `max_stored_items`,
-  `max_stored_fluids`, `crane_range`, `archive_id`, `produced_unit`,
+  `liquid_capacity`, `crane_range`, `archive_id`, `produced_unit`,
   `attack_speed`, `attack_range`, etc. `is_turret()` returns true iff
   the block has at least one ammo type *and* a non-zero attack range.
 - **`AmmoType`** — per-shot stats (damage, projectile speed, splash,

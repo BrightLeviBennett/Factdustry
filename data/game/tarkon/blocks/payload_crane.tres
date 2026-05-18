@@ -1,21 +1,32 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://po2lbed6wbtg"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://y8s5yh7aoyls" path="res://textures/blocks/units/PayloadCrane/PayloadCraneBase.png" id="2_pcbase"]
 
 [resource]
 script = ExtResource("1")
 id = &"payload_crane"
 display_name = "Payload Crane"
 description = "Articulated crane arm that can pick up and place buildings and units. Ctrl+click to control manually, press E to grab/drop. Can also drop payloads onto payload conveyors."
+icon = ExtResource("2_pcbase")
 category = 6
-tags = PackedStringArray("construction", "crane", "controllable")
+tags = PackedStringArray("construction", "crane", "controllable", "storage")
 color = Color(0.7, 0.6, 0.3, 1)
 grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("2_pcbase")
 max_health = 400.0
 build_cost = {
 "copper": 200,
 "silicon": 80
 }
 build_time = 3.0
+liquid_capacity = 10.0
+boosters = [{
+"item_id": &"mat_water",
+"multiplier": 1.5,
+"per_sec": 0.5,
+"stat": "Speed"
+}]
 max_payload_size = 3
 crane_range = 25.0
+electrical_power_use = 10.0

@@ -20,11 +20,6 @@ build_cost = {
 "copper": 12
 }
 build_time = 2.0
-output_items = {
-"ore": 4
-}
-accepted_ores = null
-accepted_walls = null
 mine_range = 2
 electrical_power_use = 10.0
 max_stored_items = 10

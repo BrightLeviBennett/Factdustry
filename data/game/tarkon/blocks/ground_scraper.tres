@@ -23,6 +23,5 @@ build_cost = {
 build_time = 4.0
 production_time = 2.0
 accepted_ores = Array[StringName]([&"coal_ore", &"sulfur_ore"])
-requires_power = true
 electrical_power_use = 10.0
 max_stored_items = 10

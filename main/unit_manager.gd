@@ -41,6 +41,37 @@ var nests: Array[Node2D] = []
 @export var path_update_interval := 2.0
 var path_update_timer := 0.0
 
+# --- FEROX FABRICATOR SQUAD SYSTEM ---
+# Each FEROX fabricator builds a "squad" of newly-spawned units that
+# wait at a rally point a few tiles in front of the fabricator instead
+# of marching off the moment they roll off the line. Periodically the
+# squad scans the player's defenses; once the squad's combined offense
+# is enough to plausibly punch through, or the squad has been waiting
+# too long, it releases — every unit picks a high-value target and
+# paths off in a coordinated push.
+#
+# Schema:
+#   enemy_squads[fab_anchor] = {
+#     "units":        Array[Node2D]   # rallying units (alive, not yet released)
+#     "rally_pos":    Vector2         # world-space hold point
+#     "release_at":   int             # member count required to dispatch
+#     "first_spawn":  float           # seconds since first member joined
+#     "released":     bool            # once true, squad just sits empty
+#                                     # until cleared on next fabricator tick
+#   }
+var enemy_squads: Dictionary = {}
+var _squad_scan_timer: float = 0.0
+const _SQUAD_SCAN_INTERVAL := 1.5         # seconds between threat reassessments
+const _SQUAD_RALLY_TILES := 2.0           # rally point distance in front of fabricator
+const _SQUAD_TIMEOUT_SECONDS := 30.0      # release no matter what after this long
+const _SQUAD_MIN_SIZE := 1                # squad never holds below this
+const _SQUAD_MAX_SIZE := 8                # …and never above this
+## Approximate "DPS" of an average FEROX unit used to translate the
+## player's measured threat into a target squad size. The squad scales
+## release_at = ceil(player_threat / _SQUAD_AVG_UNIT_DPS) clamped to
+## [MIN, MAX]. Bigger = squads stay smaller.
+const _SQUAD_AVG_UNIT_DPS := 8.0
+
 # --- COLLISION ---
 ## Separation strength — how hard units push apart per frame
 const SEPARATION_STRENGTH := 150.0
@@ -130,6 +161,17 @@ func _ready() -> void:
 	main.building_placed.connect(_on_building_placed)
 	call_deferred("_spawn_test_nests")
 
+	# Ctrl-hover overlay: dedicated child so the yellow tint sits above
+	# unit / turret-head canvases (z=4099). z_as_relative=false locks
+	# the absolute z so it survives even if UnitManager's z changes.
+	_ctrl_hover_overlay = Node2D.new()
+	_ctrl_hover_overlay.name = "CtrlHoverOverlay"
+	_ctrl_hover_overlay.z_index = 4099
+	_ctrl_hover_overlay.z_as_relative = false
+	_ctrl_hover_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(_ctrl_hover_overlay)
+	_ctrl_hover_overlay.draw.connect(_draw_ctrl_hover_on_overlay)
+
 
 func _exit_tree() -> void:
 	if _path_worker:
@@ -137,9 +179,22 @@ func _exit_tree() -> void:
 		_path_worker = null
 
 
+var _ctrl_hover_phase: float = 0.0
+# Dedicated high-z overlay so the yellow tint paints OVER unit sprites
+# and turret heads. The main UnitManager draws at default z=0; units
+# and turret-head canvases sit higher, which previously buried the
+# control-hover fill. Built in `_ready`.
+var _ctrl_hover_overlay: Node2D = null
+
+
 func _process(delta: float) -> void:
 	# Use deferred reset so the flag survives through all _process calls this frame
 	call_deferred("_clear_handled_flag")
+
+	# Spin the Ctrl-hover arrow ring CCW regardless of paused state.
+	_ctrl_hover_phase += delta * 1.5
+	if _ctrl_hover_overlay:
+		_ctrl_hover_overlay.queue_redraw()
 
 	# Skip unit updates when world is paused (camera/drone still move)
 	if main.world_paused:
@@ -153,6 +208,7 @@ func _process(delta: float) -> void:
 	if path_update_timer <= 0:
 		path_update_timer = path_update_interval
 		_update_all_enemy_paths()
+	_tick_enemy_squads(delta)
 	_resolve_unit_collisions(delta)
 	_update_controlled_entity(delta)
 	queue_redraw()
@@ -219,6 +275,22 @@ func _input(event: InputEvent) -> void:
 
 	# --- LEFT-CLICK: box-select drag (only in unit mode, no building queued) ---
 	if unit_mode_active and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		# Clicks landing on a HUD Control (the unit-mode command buttons,
+		# the build / portrait panels, etc.) shouldn't start a box-select.
+		# Without this guard, pressing the Cancel Orders / Hold Fire /
+		# Mine / … buttons would start a zero-width drag on press, finish
+		# it on release, and `_finish_box_select` would treat the tiny
+		# rect as a "click on empty space" and deselect everything.
+		var hovered_ctrl: Control = get_viewport().gui_get_hovered_control()
+		if hovered_ctrl != null:
+			# On press, drop the event so we don't seed a drag. On
+			# release, only consume it if we WEREN'T already mid-drag —
+			# a drag that started in the world but ended over the HUD
+			# should still finalize the selection.
+			if event.pressed:
+				return
+			elif not _box_selecting:
+				return
 		var lm_world := get_global_mouse_position()
 		if event.pressed:
 			if controlled_entity == null and main.selected_building == &"":
@@ -1019,7 +1091,10 @@ func _update_controlled_turret(_delta: float) -> void:
 				if not ammo_found:
 					return  # Out of ammo — can't fire even when manually controlled
 
-				_control_attack_timer = bdata.attack_speed * fire_reload_mult
+				var booster_mult: float = 1.0
+				if combat.has_method("_get_active_booster_multiplier"):
+					booster_mult = combat._get_active_booster_multiplier(grid_pos, bdata, "Fire Rate")
+				_control_attack_timer = (bdata.attack_speed * fire_reload_mult) / maxf(booster_mult, 0.0001)
 				# Match the auto-fire math in combat_system: derive barrel
 				# length from the head texture so bullets spawn at the
 				# visible muzzle, and offset perpendicular to the aim axis
@@ -1396,25 +1471,78 @@ func on_building_destroyed(grid_pos: Vector2i) -> void:
 # SPAWNING
 # =========================
 
+## Spawns an enemy of the given UnitData ID at the given position AND
+## enrolls it in the FEROX fabricator's squad. The unit holds at a
+## rally point a few tiles ahead of the fabricator instead of marching
+## off on its own — the squad releases as a group once it judges
+## itself strong enough to break through, or after a timeout.
+##
+## Returns the spawned unit, or null on failure.
+func spawn_enemy_for_fabricator(spawn_position: Vector2, unit_id: StringName, fab_anchor: Vector2i) -> Node2D:
+	var enemy: Node2D = _spawn_enemy_internal(spawn_position, unit_id)
+	if enemy == null:
+		return null
+	if "squad_anchor" in enemy:
+		enemy.squad_anchor = fab_anchor
+	if "is_rallying" in enemy:
+		enemy.is_rallying = true
+
+	# Make sure the squad bucket exists, then enroll this unit and
+	# point it at the rally hold position so it doesn't immediately
+	# pathfind to the player's base.
+	if not enemy_squads.has(fab_anchor):
+		enemy_squads[fab_anchor] = {
+			"units": [] as Array[Node2D],
+			"rally_pos": _compute_rally_point(fab_anchor),
+			"release_at": _SQUAD_MIN_SIZE,
+			"first_spawn": 0.0,
+			"released": false,
+		}
+		# Seed the release threshold immediately so newly-built fabs
+		# don't have to wait for the next scan tick.
+		enemy_squads[fab_anchor]["release_at"] = _compute_release_threshold(_assess_player_threat())
+	var squad: Dictionary = enemy_squads[fab_anchor]
+	# A previous squad cycle marked released — start fresh.
+	if squad.get("released", false):
+		squad["units"] = [] as Array[Node2D]
+		squad["released"] = false
+		squad["first_spawn"] = 0.0
+		squad["rally_pos"] = _compute_rally_point(fab_anchor)
+	if squad["units"].is_empty():
+		squad["first_spawn"] = 0.0
+	(squad["units"] as Array).append(enemy)
+	# Path the new unit to the rally hold position instead of letting
+	# it pick its own nearest-LUMINA-building target.
+	assign_path_to_position(enemy, squad["rally_pos"])
+	return enemy
+
+
 ## Spawns an enemy of the given UnitData ID at the given position.
 func spawn_enemy(spawn_position: Vector2, unit_id: StringName = &"basic_cell") -> void:
+	var enemy: Node2D = _spawn_enemy_internal(spawn_position, unit_id)
+	if enemy != null:
+		# Lone-spawn (waves, nests): march straight at the player.
+		_assign_path_to_enemy(enemy)
+
+
+## Shared body of spawn_enemy / spawn_enemy_for_fabricator. Creates the
+## node, validates the cell, and adds it to the scene + enemies array.
+## Pathing is the caller's responsibility — wave / nest enemies pick the
+## standard nearest-LUMINA-building target, fabricator enemies park at
+## the squad rally point first.
+func _spawn_enemy_internal(spawn_position: Vector2, unit_id: StringName) -> Node2D:
 	var unit_data = Registry.get_unit(unit_id)
 	if unit_data == null:
 		push_warning("UnitManager: Unit '%s' not found in Registry — using fallback stats." % unit_id)
 
-	# Validate spawn position. If the requested cell isn't walkable for
-	# this unit's movement layer (void / wall / building), look for the
-	# nearest walkable neighbour. Failing that, abort the spawn — better
-	# to drop one wave-spawn than to plant an enemy inside a wall where
-	# it can't be reached AND can shoot from infinite range.
 	var ml_e: int = unit_data.movement_layer if unit_data else 0
 	var corrected_e: Variant = _validate_spawn_position(spawn_position, ml_e)
 	if corrected_e == null:
 		push_warning("UnitManager: refused to spawn '%s' — no walkable cell near %s" % [unit_id, str(spawn_position)])
-		return
+		return null
 	var enemy = Node2D.new()
 	enemy.set_script(enemy_script)
-	enemy.data = unit_data  # Pass the UnitData resource (may be null — enemy uses fallbacks)
+	enemy.data = unit_data
 	enemy.team = UnitData.Team.ENEMY
 	enemy.main = main
 	enemy.unit_manager = self
@@ -1422,7 +1550,7 @@ func spawn_enemy(spawn_position: Vector2, unit_id: StringName = &"basic_cell") -
 
 	add_child(enemy)
 	enemies.append(enemy)
-	_assign_path_to_enemy(enemy)
+	return enemy
 
 
 ## Spawns a player unit at the given position (produced by a fabricator).
@@ -1490,6 +1618,12 @@ func _update_all_enemy_paths() -> void:
 func _assign_path_to_enemy(enemy: Node2D) -> void:
 	if _path_worker == null:
 		return
+	# Squad members holding at a rally point shouldn't be repathed to
+	# the player's base by the periodic _update_all_enemy_paths sweep —
+	# that's exactly the "march independently" behaviour the squad
+	# system is trying to suppress.
+	if "is_rallying" in enemy and enemy.is_rallying:
+		return
 
 	var enemy_grid: Vector2i = main.world_to_grid(enemy.position)
 	enemy_grid.x = clampi(enemy_grid.x, 0, main.GRID_WIDTH - 1)
@@ -1502,7 +1636,16 @@ func _assign_path_to_enemy(enemy: Node2D) -> void:
 		target_faction = main.Faction.LUMINA
 	elif enemy.team == UnitData.Team.PLAYER:
 		target_faction = main.Faction.FEROX
-	var nearest_building = _find_nearest_building(enemy_grid, target_faction)
+	# Released FEROX squad members + FEROX units in general now use the
+	# weighted target scorer so a unit walking past walls toward a fat
+	# turret no longer wastes time chewing through random outer blocks.
+	var nearest_building: Variant
+	if enemy.team == UnitData.Team.ENEMY:
+		nearest_building = _find_priority_building_target(enemy_grid, target_faction)
+		if nearest_building == null:
+			nearest_building = _find_nearest_building(enemy_grid, target_faction)
+	else:
+		nearest_building = _find_nearest_building(enemy_grid, target_faction)
 	if nearest_building == null:
 		enemy.set_path(PackedVector2Array(), null)
 		return
@@ -1542,6 +1685,228 @@ func _find_nearest_building(from: Vector2i, target_faction: int = -1) -> Variant
 			nearest = grid_pos
 
 	return nearest
+
+
+## Weighted variant of _find_nearest_building. Score blocks by type-weight
+## (cores > turrets > factories > … > walls) divided by distance, so an
+## enemy walking past a wall toward an exposed turret will hit the turret
+## first. Falls back to nearest building when nothing scores. Used for
+## squad target acquisition and enemy retargeting on stuck/dead-target.
+func _find_priority_building_target(from: Vector2i, target_faction: int = -1) -> Variant:
+	var best: Variant = null
+	var best_score := -1.0
+	for grid_pos in main.placed_buildings:
+		if target_faction >= 0 and main.get_building_faction(grid_pos) != target_faction:
+			continue
+		var bid: StringName = main.placed_buildings[grid_pos]
+		var bdata = Registry.get_block(bid)
+		if bdata == null or bdata.tags.has("platform"):
+			continue
+		var w: float = _building_target_weight(bdata)
+		if w <= 0.0:
+			continue
+		var dx = abs(grid_pos.x - from.x)
+		var dy = abs(grid_pos.y - from.y)
+		var dist = float(max(dx, dy))
+		# 1 + dist/12 keeps very-close buildings from totally dominating,
+		# so a high-value target a bit further away still beats a wall
+		# next door. Tune the divisor up to favour proximity, down to
+		# favour value.
+		var score: float = w / (1.0 + dist / 12.0)
+		if score > best_score:
+			best_score = score
+			best = grid_pos
+	return best
+
+
+func _building_target_weight(bdata: BlockData) -> float:
+	# Hand-tuned weights. Anything not in the list gets the generic 1.0.
+	var tags: PackedStringArray = bdata.tags
+	if tags.has("core"):
+		return 10.0
+	if tags.has("turret") or tags.has("defense") or tags.has("mender"):
+		return 6.0
+	if tags.has("fabricator") or tags.has("factory") or tags.has("constructor"):
+		return 3.5
+	if tags.has("drill") or tags.has("extractor") or tags.has("crusher") or tags.has("grinder"):
+		return 2.5
+	if tags.has("conduit") or tags.has("pipe") or tags.has("duct") \
+			or tags.has("payload") or tags.has("freight") \
+			or bdata.tags.has("belt") or tags.has("cable"):
+		return 0.5
+	if tags.has("wall"):
+		return 0.2
+	return 1.0
+
+
+# =========================
+# SQUAD: rally / release helpers
+# =========================
+
+func _compute_rally_point(fab_anchor: Vector2i) -> Vector2:
+	# Park the squad ~2 tiles in front of the fabricator (the cell the
+	# units actually walked out into), so the rally is clearly outside
+	# the fabricator's footprint regardless of the building's size.
+	if not main.placed_buildings.has(fab_anchor):
+		return main.grid_to_world(fab_anchor) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+	var bdata = Registry.get_block(main.placed_buildings[fab_anchor])
+	var sx: int = bdata.grid_size.x if bdata else 1
+	var sy: int = bdata.grid_size.y if bdata else 1
+	var rot: int = main.building_rotation.get(fab_anchor, 0)
+	var gs: float = float(main.GRID_SIZE)
+	var center := Vector2(
+		(fab_anchor.x + sx * 0.5) * gs,
+		(fab_anchor.y + sy * 0.5) * gs,
+	)
+	var dx_t: float = sx * 0.5 + _SQUAD_RALLY_TILES
+	var dy_t: float = sy * 0.5 + _SQUAD_RALLY_TILES
+	match rot:
+		0: return center + Vector2(dx_t * gs, 0)
+		1: return center + Vector2(0, dy_t * gs)
+		2: return center + Vector2(-dx_t * gs, 0)
+		3: return center + Vector2(0, -dy_t * gs)
+	return center + Vector2(dx_t * gs, 0)
+
+
+## Estimated combat "damage per second" the player currently throws at
+## a unit walking into the base. Sums every LUMINA turret on the map:
+##     turret.attack_damage / max(turret.attack_speed, 0.1)
+## Tiny turrets contribute their share; high-DPS turrets dominate. Used
+## as the input to `_compute_release_threshold`.
+func _assess_player_threat() -> float:
+	var total: float = 0.0
+	for grid_pos in main.placed_buildings:
+		if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
+			continue
+		var bdata = Registry.get_block(main.placed_buildings[grid_pos])
+		if bdata == null:
+			continue
+		var is_turret: bool = bdata.tags.has("turret")
+		if not is_turret and bdata.has_method("is_turret"):
+			is_turret = bdata.is_turret()
+		if not is_turret:
+			continue
+		var dmg: float = bdata.attack_damage if "attack_damage" in bdata else 0.0
+		var spd: float = bdata.attack_speed if "attack_speed" in bdata else 1.0
+		if spd <= 0.0:
+			spd = 1.0
+		total += dmg / spd
+	# Add a small contribution per player unit so a swarm of shardlings
+	# also forces the squad to wait for backup.
+	for u in player_units:
+		if u == null or not is_instance_valid(u) or u.is_dead:
+			continue
+		var udata = u.data if "data" in u else null
+		if udata:
+			var udmg: float = udata.attack_damage if "attack_damage" in udata else 0.0
+			var uspd: float = udata.attack_speed if "attack_speed" in udata else 1.0
+			if uspd <= 0.0:
+				uspd = 1.0
+			total += udmg / uspd
+	return total
+
+
+func _compute_release_threshold(player_threat: float) -> int:
+	# Translate measured DPS into a target squad size, biased toward
+	# fewer-but-bigger pushes against heavy defenses.
+	if player_threat <= 0.1:
+		return _SQUAD_MIN_SIZE
+	var raw: int = int(ceil(player_threat / _SQUAD_AVG_UNIT_DPS))
+	return clampi(raw, _SQUAD_MIN_SIZE, _SQUAD_MAX_SIZE)
+
+
+## Releases the squad — every member picks a high-value LUMINA target
+## and starts pathing. Members are spread across a few different
+## targets so an entire push doesn't suicide-stack on a single wall
+## tile when the priority scorer returns the same anchor for everyone.
+func _release_squad(fab_anchor: Vector2i) -> void:
+	if not enemy_squads.has(fab_anchor):
+		return
+	var squad: Dictionary = enemy_squads[fab_anchor]
+	var members: Array = squad.get("units", [])
+	for unit in members:
+		if unit == null or not is_instance_valid(unit) or unit.is_dead:
+			continue
+		if "is_rallying" in unit:
+			unit.is_rallying = false
+		_assign_priority_path_to_enemy(unit)
+	squad["units"] = [] as Array[Node2D]
+	squad["released"] = true
+	squad["first_spawn"] = 0.0
+
+
+func _assign_priority_path_to_enemy(enemy: Node2D) -> void:
+	if _path_worker == null:
+		return
+	var enemy_grid: Vector2i = main.world_to_grid(enemy.position)
+	enemy_grid.x = clampi(enemy_grid.x, 0, main.GRID_WIDTH - 1)
+	enemy_grid.y = clampi(enemy_grid.y, 0, main.GRID_HEIGHT - 1)
+	var target: Variant = _find_priority_building_target(enemy_grid, main.Faction.LUMINA)
+	if target == null:
+		target = _find_nearest_building(enemy_grid, main.Faction.LUMINA)
+	if target == null:
+		enemy.set_path(PackedVector2Array(), null)
+		return
+	var ml: int = enemy.data.movement_layer if enemy.data else 0
+	var bldg_id: int = _pack_grid_pos(target)
+	_path_worker.request_path(
+		enemy.get_instance_id(),
+		enemy_grid,
+		target as Vector2i,
+		ml,
+		bldg_id,
+	)
+
+
+func _tick_enemy_squads(delta: float) -> void:
+	if enemy_squads.is_empty():
+		return
+	# Throttled threat reassessment — scanning every frame is wasteful.
+	_squad_scan_timer -= delta
+	var threat: float = 0.0
+	var did_scan: bool = false
+	if _squad_scan_timer <= 0.0:
+		_squad_scan_timer = _SQUAD_SCAN_INTERVAL
+		threat = _assess_player_threat()
+		did_scan = true
+
+	# Walk every squad. Bookkeeping first (drop dead members), then
+	# decision logic (refresh threshold, age timer, maybe release).
+	var dead_keys: Array[Vector2i] = []
+	for fab_anchor in enemy_squads.keys():
+		var squad: Dictionary = enemy_squads[fab_anchor]
+		# If the fabricator itself is gone, dump the squad's units into
+		# the standard nearest-target flow and drop the bucket.
+		if not main.placed_buildings.has(fab_anchor):
+			for u in squad.get("units", []):
+				if u != null and is_instance_valid(u) and not u.is_dead:
+					if "is_rallying" in u:
+						u.is_rallying = false
+					_assign_priority_path_to_enemy(u)
+			dead_keys.append(fab_anchor)
+			continue
+		# Prune dead / freed units.
+		var alive: Array[Node2D] = [] as Array[Node2D]
+		for u in squad.get("units", []):
+			if u != null and is_instance_valid(u) and not u.is_dead:
+				alive.append(u)
+		squad["units"] = alive
+		# Refresh release threshold whenever we just rescanned.
+		if did_scan:
+			squad["release_at"] = _compute_release_threshold(threat)
+			squad["rally_pos"] = _compute_rally_point(fab_anchor)
+		# Age the squad's "first member spawned" timer for the timeout.
+		if not alive.is_empty():
+			squad["first_spawn"] = float(squad.get("first_spawn", 0.0)) + delta
+		else:
+			squad["first_spawn"] = 0.0
+		var release_at: int = int(squad.get("release_at", _SQUAD_MIN_SIZE))
+		var ready_by_size: bool = alive.size() >= release_at
+		var ready_by_time: bool = not alive.is_empty() and float(squad["first_spawn"]) >= _SQUAD_TIMEOUT_SECONDS
+		if ready_by_size or ready_by_time:
+			_release_squad(fab_anchor)
+	for k in dead_keys:
+		enemy_squads.erase(k)
 
 
 func _find_adjacent_walkable_on_grid(grid_pos: Vector2i, grid: AStarGrid2D) -> Variant:
@@ -1987,17 +2352,98 @@ func _draw() -> void:
 		draw_rect(rect, Color(1.0, 0.84, 0.0, 0.12), true)
 		draw_rect(rect, Color(1.0, 0.84, 0.0, 0.6), false, 1.5)
 
-	# Draw control indicator for manually controlled turret
-	if controlled_entity != null and controlled_type == "turret":
-		var grid_pos: Vector2i = controlled_entity
-		var center: Vector2 = main.grid_to_world(grid_pos) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-		var ring_radius: float = main.GRID_SIZE * 0.55
-		draw_arc(center, ring_radius, 0, TAU, 24, Color(0.3, 0.8, 1.0, 0.8), 2.0)
-		draw_arc(center, ring_radius + 1.5, 0, TAU, 24, Color(0.3, 0.8, 1.0, 0.3), 1.0)
+	# Ctrl-hover highlight is rendered on the dedicated `_ctrl_hover_overlay`
+	# child (z=4099) — drawing it here, at the UnitManager's default
+	# z=0, leaves the yellow tint buried under units / turret heads.
 
 	# Draw move-target diamonds and path lines for selected units — unit mode only
 	if unit_mode_active:
 		_draw_move_targets()
+
+
+## Draw callback for the dedicated Ctrl-hover overlay (z=4099). Renders
+## a translucent yellow tint covering the hovered LUMINA turret / unit /
+## crane plus four arrowheads orbiting it CCW. Turret coverage is a
+## rect padded outward by 1 tile in every direction so the tint includes
+## the turret's heads (multi-barrel layouts have heads sticking past
+## the base footprint). Units use a circle scaled to their unit_size.
+func _draw_ctrl_hover_on_overlay() -> void:
+	if main == null or main.is_ui_blocking():
+		return
+	if not (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
+		return
+	var mouse_world: Vector2 = get_global_mouse_position()
+	# Allied unit takes priority over a building underneath it.
+	var hovered_unit := _get_player_unit_at(mouse_world)
+	if hovered_unit and is_instance_valid(hovered_unit) and not hovered_unit.is_dead:
+		var u_radius: float = float(hovered_unit.unit_size) if "unit_size" in hovered_unit else 18.0
+		_paint_ctrl_hover_circle(hovered_unit.position, u_radius)
+		return
+	var grid_pos: Vector2i = main.world_to_grid(mouse_world)
+	if not main.placed_buildings.has(grid_pos):
+		return
+	var block_id: StringName = main.placed_buildings[grid_pos]
+	var bdata = Registry.get_block(block_id)
+	if bdata == null:
+		return
+	if not (bdata.is_turret() or bdata.tags.has("crane")):
+		return
+	if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var adata = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if adata == null:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var size_x: float = float(maxi(adata.grid_size.x, 1)) * gs
+	var size_y: float = float(maxi(adata.grid_size.y, 1)) * gs
+	var base_pos: Vector2 = main.grid_to_world(anchor)
+	# Pad the rect by one tile in each direction so the yellow tint
+	# fully covers protruding heads on multi-barrel turrets. Cranes
+	# get the same treatment so the grabber arm sits inside the tint.
+	var pad: float = gs * 1.0
+	var rect_pos: Vector2 = base_pos - Vector2(pad, pad)
+	var rect_size: Vector2 = Vector2(size_x + pad * 2.0, size_y + pad * 2.0)
+	_paint_ctrl_hover_rect(rect_pos, rect_size)
+
+
+func _paint_ctrl_hover_circle(center: Vector2, radius: float) -> void:
+	if _ctrl_hover_overlay == null:
+		return
+	var fill_color := Color(1.0, 0.85, 0.2, 0.55)
+	_ctrl_hover_overlay.draw_circle(center, radius, fill_color)
+	_paint_ctrl_hover_arrows(center, radius)
+
+
+func _paint_ctrl_hover_rect(top_left: Vector2, size: Vector2) -> void:
+	if _ctrl_hover_overlay == null:
+		return
+	var fill_color := Color(1.0, 0.85, 0.2, 0.55)
+	_ctrl_hover_overlay.draw_rect(Rect2(top_left, size), fill_color, true)
+	var center: Vector2 = top_left + size * 0.5
+	# Arrow orbit radius scales with the rect's larger half-axis so the
+	# four arrows always sit just outside the tinted region.
+	var orbit_r: float = maxf(size.x, size.y) * 0.5 + 6.0
+	_paint_ctrl_hover_arrows(center, orbit_r - 8.0)
+
+
+func _paint_ctrl_hover_arrows(center: Vector2, target_radius: float) -> void:
+	if _ctrl_hover_overlay == null:
+		return
+	var orbit_r: float = target_radius + 14.0
+	var arrow_len: float = 12.0
+	var arrow_half: float = 7.0
+	var arrow_color := Color(1.0, 0.92, 0.25, 1.0)
+	for i in range(4):
+		var angle: float = -_ctrl_hover_phase + float(i) * TAU * 0.25
+		var tip: Vector2 = center + Vector2.from_angle(angle) * orbit_r
+		var inward: Vector2 = (center - tip).normalized()
+		var perp: Vector2 = Vector2(-inward.y, inward.x)
+		var back: Vector2 = tip - inward * arrow_len
+		var p_left: Vector2 = back + perp * arrow_half
+		var p_right: Vector2 = back - perp * arrow_half
+		_ctrl_hover_overlay.draw_colored_polygon(
+			PackedVector2Array([tip, p_left, p_right]), arrow_color)
 
 
 ## Draws a small diamond at each selected unit's move target and a line from

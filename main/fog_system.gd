@@ -60,6 +60,20 @@ var _static_dirty: bool = true
 var _fog_mesh: ArrayMesh = null
 const FOG_BAKE_MARGIN := 16         # extra tiles around viewport so small camera nudges don't reveal a seam
 
+# Throttle: rebuild dynamic visibility + bake the mesh at this cadence
+# rather than every frame. Player units move slowly enough that 10 Hz
+# fog updates are invisible to the eye but cut a 60 fps frame budget's
+# fog cost by 6×. A change in the static cache (block placed/destroyed)
+# bypasses the timer so the player gets immediate feedback when they
+# place a building.
+const _FOG_REBUILD_INTERVAL: float = 0.1
+var _fog_rebuild_accum: float = 0.0
+# Cached "is anything meaningfully different from last bake?" signals.
+# Avoids the per-frame allocation + memcpy on a fully-static map.
+var _last_cam_pos: Vector2 = Vector2(NAN, NAN)
+var _last_cam_zoom: Vector2 = Vector2(NAN, NAN)
+var _last_unit_sig: int = 0
+
 # Set to true to disable fog entirely (debug / sandbox / map editor).
 var disabled: bool = false
 
@@ -100,15 +114,71 @@ func _process(_delta: float) -> void:
 	_ensure_grid_arrays()
 	# Static (buildings) vision is cached and only recomputed when a
 	# building is placed / destroyed / completes. Dynamic vision (drone
-	# + units) is cheap and runs every frame so a moving shardling's
-	# unfade region tracks it smoothly instead of jumping in 200 ms
-	# blocks.
+	# + units) and the per-frame mesh bake are throttled to ~10 Hz so
+	# a large map / zoomed-out view doesn't eat the frame budget on
+	# every tick. The interval is short enough to feel smooth on a
+	# moving shardling but cheap enough to disappear on a static
+	# screen.
+	var force_rebake: bool = false
 	if _static_dirty:
 		_rebuild_static_visible()
 		_static_dirty = false
+		force_rebake = true  # bypass timer + change-detection
+	_fog_rebuild_accum += _delta
+	if not force_rebake and _fog_rebuild_accum < _FOG_REBUILD_INTERVAL:
+		return
+	# Cheap change-detection: skip the dynamic-rebuild + mesh-bake when
+	# nothing's actually moved this interval. A perfectly static screen
+	# (no unit motion, no camera nudge) keeps reusing the previous
+	# baked mesh. Static-dirty (block placed / destroyed) bypasses this
+	# so the player gets immediate visual feedback.
+	if not force_rebake and _state_unchanged_since_last_bake():
+		_fog_rebuild_accum = 0.0
+		return
+	_fog_rebuild_accum = 0.0
 	_rebuild_dynamic_visible()
 	_rebuild_fog_mesh()
 	queue_redraw()
+
+
+## True when neither the camera nor any vision-emitting unit has moved
+## meaningfully since the last bake. Cheap O(player_unit_count) hash;
+## skips the expensive dynamic rebuild + mesh bake on idle frames.
+## Tolerates sub-tile camera drift so micro-pans don't force a rebake
+## every frame.
+func _state_unchanged_since_last_bake() -> bool:
+	if main == null:
+		return false
+	var camera := get_viewport().get_camera_2d() if get_viewport() else null
+	var cam_pos: Vector2 = camera.get_screen_center_position() if camera else Vector2.ZERO
+	var cam_zoom: Vector2 = camera.zoom if camera else Vector2.ONE
+	# Threshold ≈ 1/4 tile so jitter inside a single grid cell doesn't
+	# force a rebake. The fog mesh has per-cell granularity anyway, so
+	# nothing visible changes until the camera crosses a tile boundary.
+	var gs_quarter: float = float(main.GRID_SIZE) * 0.25
+	if not is_finite(_last_cam_pos.x) or _last_cam_pos.distance_to(cam_pos) > gs_quarter \
+			or _last_cam_zoom != cam_zoom:
+		_last_cam_pos = cam_pos
+		_last_cam_zoom = cam_zoom
+		return false
+	# Hash unit + drone grid positions. A position change of >= 1 tile
+	# in any source flips the hash.
+	var sig: int = 0
+	var drone = main.get_node_or_null("PlayerDrone")
+	if drone:
+		var dg: Vector2i = main.world_to_grid(drone.position)
+		sig = hash(sig + dg.x * 73856093 + dg.y * 19349663)
+	var unit_mgr = main.get_node_or_null("UnitManager")
+	if unit_mgr and "player_units" in unit_mgr:
+		for u in unit_mgr.player_units:
+			if u == null or not is_instance_valid(u) or u.is_dead:
+				continue
+			var ug: Vector2i = main.world_to_grid(u.position)
+			sig = hash(sig + ug.x * 73856093 + ug.y * 19349663)
+	if sig != _last_unit_sig:
+		_last_unit_sig = sig
+		return false
+	return true
 
 
 # ----- Rebuild -----

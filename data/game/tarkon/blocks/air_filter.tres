@@ -19,5 +19,4 @@ build_cost = {
 }
 build_time = 3.0
 production_time = 3.0
-requires_power = true
 power_consumption = 5.0

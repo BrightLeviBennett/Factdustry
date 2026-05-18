@@ -75,6 +75,18 @@ var camera_focus := Vector3.ZERO
 var is_dragging := false
 var _press_pos := Vector2(-1, -1)
 
+# --- Drag inertia ---
+# Spin velocity captured from the most recent mouse motions during a
+# drag. After release, _process applies this to yaw/pitch each frame
+# and exp-decays it so the planet keeps coasting briefly instead of
+# stopping the instant the mouse stops moving.
+var _drag_velocity: Vector2 = Vector2.ZERO
+# Decay rate (1/seconds). e^(-rate * dt). 2.5 ≈ half-life of ~0.28 s.
+const _DRAG_DECAY_RATE := 2.5
+# Velocity below this magnitude is rounded to zero so the planet
+# actually comes to rest instead of asymptoting forever.
+const _DRAG_VELOCITY_EPSILON := 1.0
+
 ## Maps StaticBody3D → PlanetData (for planet clicking in solar view)
 var planet_bodies: Dictionary = {}
 ## Maps PlanetData.id → Node3D (the planet's root node)
@@ -143,7 +155,15 @@ var tech_tree_ui: CanvasLayer
 # INITIALIZATION
 # =========================
 
+## True while this scene was opened in launchpad-pick mode (the
+## launchpad's "Select sector" button). The Launch button becomes
+## "Select sector" and routes through `_on_launchpad_pick_pressed`
+## instead of starting a full sector launch.
+var _launchpad_pick_mode: bool = false
+
 func _ready() -> void:
+	_launchpad_pick_mode = "launchpad_pick_request" in SaveManager \
+		and not SaveManager.launchpad_pick_request.is_empty()
 	_build_hud()
 
 	# If planets are already loaded (sync), build immediately
@@ -158,6 +178,34 @@ func _ready() -> void:
 		_update_camera()
 		_update_info_panel()
 		Registry.all_resources_loaded.connect(_on_registry_loaded, CONNECT_ONE_SHOT)
+
+
+## Launchpad pick-mode handler. Writes the selected sector id back into
+## SaveManager.pending_launchpad_pick_result and returns to the source
+## sector so the launchpad popup can pick the result up on main._ready.
+func _on_launchpad_pick_pressed() -> void:
+	if not _launchpad_pick_mode or selected_sector == null:
+		return
+	var req: Dictionary = SaveManager.launchpad_pick_request
+	SaveManager.pending_launchpad_pick_result = {
+		"anchor": req.get("anchor", Vector2i.ZERO),
+		"sector_id": selected_sector.id,
+	}
+	SaveManager.launchpad_pick_request = {}
+	# Reload the source sector. Reuse the standard sector-launch path so
+	# the active save / parked main flow still works.
+	var src: StringName = StringName(req.get("source_sector", &""))
+	if src != &"":
+		SaveManager.pending_sector_id = src
+		var save_path: String = SaveManager.SAVES_DIR + str(src) + ".sector.json"
+		if FileAccess.file_exists(save_path):
+			SaveManager.pending_map_path = save_path
+		else:
+			# No save (shouldn't happen if the player came from this sector
+			# moments ago) — fall back to the registered sector map.
+			var sd = Registry.get_sector(src)
+			SaveManager.pending_map_path = sd.map_path if sd else ""
+	get_tree().change_scene_to_file("res://main/Main.tscn")
 
 
 func _deferred_zoom_to_planet() -> void:
@@ -929,6 +977,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			if mb.pressed:
 				_press_pos = mb.position
 				is_dragging = false
+				# Grabbing the planet kills any in-flight inertia so the
+				# new press starts from rest — without this, a fresh
+				# click on a still-spinning planet would feel "sticky".
+				_drag_velocity = Vector2.ZERO
 			else:
 				if _press_pos.distance_to(mb.position) < 5.0:
 					_handle_click()
@@ -944,9 +996,24 @@ func _unhandled_input(event: InputEvent) -> void:
 			camera_yaw -= mm.relative.x * ORBIT_SENSITIVITY
 			camera_pitch -= mm.relative.y * ORBIT_SENSITIVITY
 			_update_camera()
+			# Track the latest drag velocity in screen-pixels/sec so we
+			# can keep spinning the planet briefly after the player
+			# releases the mouse. Approximating motion-per-physics-frame
+			# at 60 fps gives a stable enough estimate without needing
+			# a real timestamp.
+			_drag_velocity = mm.relative * 60.0
 
 
 func _process(_delta: float) -> void:
+	# Drag-release inertia: keep spinning yaw/pitch from the residual
+	# `_drag_velocity` and exp-decay it to zero. Only ticks while NOT
+	# actively dragging — a live drag is already steering directly.
+	if not is_dragging and _drag_velocity.length() > _DRAG_VELOCITY_EPSILON:
+		camera_yaw -= _drag_velocity.x * ORBIT_SENSITIVITY * _delta
+		camera_pitch -= _drag_velocity.y * ORBIT_SENSITIVITY * _delta
+		_drag_velocity *= exp(-_DRAG_DECAY_RATE * _delta)
+		if _drag_velocity.length() <= _DRAG_VELOCITY_EPSILON:
+			_drag_velocity = Vector2.ZERO
 	if not camera_pivot:
 		return
 
@@ -1111,6 +1178,11 @@ func _build_hud() -> void:
 	_build_back_button()
 	_build_planet_tabs()
 	_build_tech_tree_button()
+	# Launchpad pick mode: hide the planet tabs so the view is locked to
+	# Tarkon (the default). The tech-tree button and resource panels stay
+	# visible so the player can still glance at sector resources.
+	if _launchpad_pick_mode and planet_tabs_hbox:
+		planet_tabs_hbox.visible = false
 
 func _build_planet_tabs() -> void:
 	# MarginContainer anchored to top-left
@@ -1319,6 +1391,23 @@ func _on_tech_tree_pressed() -> void:
 
 
 func _on_back_pressed() -> void:
+	# Launchpad pick mode: back returns to the source sector without
+	# changing the launchpad's selection. Clear the request so the next
+	# planet-select open isn't accidentally still in pick mode.
+	if _launchpad_pick_mode:
+		var src: StringName = StringName(SaveManager.launchpad_pick_request.get("source_sector", &""))
+		SaveManager.launchpad_pick_request = {}
+		SaveManager.pending_launchpad_pick_result = {}
+		if src != &"":
+			SaveManager.pending_sector_id = src
+			var save_path: String = SaveManager.SAVES_DIR + str(src) + ".sector.json"
+			if FileAccess.file_exists(save_path):
+				SaveManager.pending_map_path = save_path
+			else:
+				var sd = Registry.get_sector(src)
+				SaveManager.pending_map_path = sd.map_path if sd else ""
+		get_tree().change_scene_to_file("res://main/Main.tscn")
+		return
 	if SaveManager.return_to_game:
 		SaveManager.return_to_game = false
 		# Fast path: the live Main scene is parked under SaveManager.
@@ -1385,13 +1474,18 @@ func _update_info_panel() -> void:
 	# Only show launch for unlocked/researched sectors
 	if selected_sector != null and not TechTree.is_locked(selected_sector.id):
 		launch_btn.visible = true
-		match _launch_state(selected_sector):
-			"LAUNCH", "LAUNCH_FREE":
-				launch_btn.text = "▶ LAUNCH"
-			"CONTINUE":
-				launch_btn.text = "▶ CONTINUE"
-			"PLAY":
-				launch_btn.text = "▶ PLAY"
+		if _launchpad_pick_mode:
+			# Pick mode: the button just records the selection and reloads
+			# the source sector. No CONTINUE / PLAY variants.
+			launch_btn.text = "Select sector"
+		else:
+			match _launch_state(selected_sector):
+				"LAUNCH", "LAUNCH_FREE":
+					launch_btn.text = "▶ LAUNCH"
+				"CONTINUE":
+					launch_btn.text = "▶ CONTINUE"
+				"PLAY":
+					launch_btn.text = "▶ PLAY"
 	else:
 		launch_btn.visible = false
 
@@ -1494,6 +1588,11 @@ func _make_tab_style(c: Color) -> StyleBoxFlat:
 
 func _on_launch_pressed() -> void:
 	if not selected_sector:
+		return
+	# Launchpad pick mode: short-circuit to the pick handler instead of
+	# launching a sector start.
+	if _launchpad_pick_mode:
+		_on_launchpad_pick_pressed()
 		return
 	# LAUNCH state gates on resources from the source sector; everything
 	# else (CONTINUE / PLAY / starting_grounds) skips the overlay and loads

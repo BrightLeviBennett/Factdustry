@@ -53,9 +53,47 @@ var manual_target_building: Variant = null   # Vector2i or null
 ## so the unit stops attacking instead of chewing on the wrong target.
 var manual_target_building_block_id: StringName = &""
 
+# --- COMMAND TOGGLES (player issued via the unit-mode button row) ---
+## Skip every attack call for this unit while true. Movement / pathing
+## still runs normally; only the fire path is gated.
+var hold_fire: bool = false
+## Toggle: while true, the unit will turn itself into a payload as soon
+## as it's standing on a payload-receiving block (payload / freight
+## conveyor, mass driver, or deconstructor). Cleared automatically once
+## the unit has been ingested. The player can re-toggle it off before
+## ingestion to abort.
+var enter_payload_when_able: bool = false
+## Toggle: while true, the unit pulls from main.work_order — paths to
+## the nearest in-flight build plan and stays in range so the build
+## tick can keep progressing. Only meaningful for units whose data.id
+## opts into building (`data.category == UnitData.UnitCategory.BUILDER`).
+var assist_player_build: bool = false
+## Set to the item_id the unit is currently mining toward (e.g.
+## "mat_copper"). Empty StringName = not mining. Only meaningful for
+## units whose data.id opts into mining (see `can_mine_units` in
+## UnitManager). The unit seeks the nearest matching ore, mines into
+## `mined_inventory`, and delivers to the closest core.
+var mining_request_id: StringName = &""
+## Per-unit pickup inventory for mining. item_id → count. Capped by
+## `mined_inventory_cap`.
+var mined_inventory: Dictionary = {}
+var mined_inventory_cap: int = 30
+var _mine_timer: float = 0.0
+var _mine_target_cell: Vector2i = Vector2i(-9999, -9999)
+var _mine_deliver_cell: Vector2i = Vector2i(-9999, -9999)
+
 # --- RUNTIME TEAM ---
 # Set by UnitManager at spawn time (overrides team which defaults to PLAYER in .tres)
 var team: int = UnitData.Team.ENEMY
+
+# --- FEROX SQUAD MEMBERSHIP ---
+## Grid anchor of the fabricator that spawned this enemy. Vector2i(-1, -1)
+## for wave/nest enemies that don't belong to a squad.
+var squad_anchor: Vector2i = Vector2i(-1, -1)
+## True while the unit is waiting at the squad's rally point. When the
+## squad releases (or the unit gets pulled into an engagement), this
+## flips to false and normal pathing / attack flow resumes.
+var is_rallying: bool = false
 
 # --- REBUILD (Ferox core unit) ---
 # When a ferox ENEMY unit has category SUPPORT and id "rebuild", it will
@@ -302,10 +340,30 @@ func _process(delta: float) -> void:
 	if data and team == UnitData.Team.PLAYER:
 		_player_update(delta)
 	else:
+		# In-flight engagement: a FEROX unit walking past a vulnerable
+		# player unit shouldn't just keep marching while taking fire.
+		# Snap onto the nearest in-range LUMINA unit, hold position,
+		# and shoot until it dies / leaves range. Rallying enemies
+		# defend themselves too — the squad shouldn't be a sitting duck.
+		if data and main.enemies_attack:
+			var hostile := _ferox_find_engageable_player_unit()
+			if hostile != null:
+				_ferox_engage_unit(hostile, delta)
+				_check_stuck(delta)
+				_check_wall_overlap(delta)
+				_tick_water(delta)
+				_tick_aim_angle(delta)
+				_tick_facing_angle(delta)
+				queue_redraw()
+				return
 		if path.size() > 0 and path_index < path.size():
 			_follow_path(delta)
 		elif _is_rebuilder():
 			_try_rebuild(delta)
+		elif is_rallying:
+			# Sitting at the rally point with no path left — just hold
+			# position. Squad release will push us back into the world.
+			pass
 		else:
 			_try_attack(delta)
 
@@ -515,6 +573,30 @@ func _tick_water(delta: float) -> void:
 ## - Otherwise auto-combat finds opportunistic targets.
 ## - Opportunistic firing runs EVERY frame so units can shoot while moving.
 func _player_update(delta: float) -> void:
+	# Player-issued command toggles take priority over any other AI.
+	# Enter-Payload: if the unit is sitting on a payload-receiving block,
+	# hand it off and let the despawn handler clean up. The toggle stays
+	# armed until that hand-off succeeds OR the player turns it back off.
+	if enter_payload_when_able:
+		if _try_enter_payload_block():
+			return  # We've been removed from the world; nothing else to tick.
+
+	# Hold-fire is a pure "skip the trigger". Manual move / auto-combat
+	# pursuit (which moves the unit into range) still runs — only the
+	# actual attack call is gated, inside the fire helpers below.
+
+	# Mining and assist-build pull on the unit when the player has no
+	# manual order outstanding. They short-circuit the rest of the tick
+	# when they own the unit's movement this frame.
+	if mining_request_id != &"" and manual_target_unit == null and manual_target_building == null and move_target == null:
+		if _tick_mining(delta):
+			_opportunistic_fire()
+			return
+	if assist_player_build and manual_target_unit == null and manual_target_building == null and move_target == null:
+		if _tick_assist_build(delta):
+			_opportunistic_fire()
+			return
+
 	# Validate manual targets (they might be destroyed meanwhile)
 	if manual_target_unit != null:
 		if not is_instance_valid(manual_target_unit) or manual_target_unit.is_dead:
@@ -595,6 +677,8 @@ func _pursue_manual_target(delta: float) -> void:
 		path = PackedVector2Array()
 		path_index = 0
 
+	if hold_fire:
+		return
 	if attack_timer > 0:
 		return
 	attack_timer = attack_cooldown
@@ -607,6 +691,8 @@ func _pursue_manual_target(delta: float) -> void:
 ## Scans for any in-range hostile and fires a shot if the attack timer is ready.
 ## Does NOT move or change path. Runs every frame for all player units.
 func _opportunistic_fire() -> void:
+	if hold_fire:
+		return
 	if attack_timer > 0:
 		return
 	var atk_range: float = data.attack_range if data else 0.0
@@ -926,6 +1012,8 @@ func _try_player_combat(_delta: float) -> void:
 	if path.size() > 0:
 		path = PackedVector2Array()
 		path_index = 0
+	if hold_fire:
+		return
 	if attack_timer > 0:
 		return
 	attack_timer = attack_cooldown
@@ -1002,6 +1090,74 @@ func _attack_enemy_unit() -> void:
 		)
 	else:
 		target_unit.take_damage(damage)
+
+
+# =========================
+# FEROX IN-FLIGHT ENGAGEMENT
+# =========================
+
+## Find a LUMINA unit close enough that this enemy should stop and
+## shoot at it instead of marching past. Engagement range slightly
+## extends the attack range so units commit to a fight rather than
+## strafe back-and-forth at the boundary.
+func _ferox_find_engageable_player_unit() -> Node2D:
+	if data == null:
+		return null
+	var atk_range: float = data.attack_range
+	if atk_range <= 0.0:
+		# Melee enemies engage at melee range.
+		atk_range = main.GRID_SIZE * 1.2
+	# A bit of bonus reach so an enemy doesn't perpetually flicker into
+	# and out of engagement mode at the edge of its range.
+	var engage_range: float = atk_range * 1.15
+	var range_sq: float = engage_range * engage_range
+	var best: Node2D = null
+	var best_d2: float = INF
+	for u in unit_manager.player_units:
+		if u == null or not is_instance_valid(u):
+			continue
+		if "is_dead" in u and u.is_dead:
+			continue
+		var d2: float = position.distance_squared_to(u.position)
+		if d2 > range_sq:
+			continue
+		if d2 < best_d2:
+			best_d2 = d2
+			best = u
+	return best
+
+
+## Hold position and fire at the engaged player unit. The path is
+## dropped so the enemy doesn't keep marching past. Once the target
+## dies / leaves range, the regular path-following branch picks back
+## up next frame.
+func _ferox_engage_unit(target: Node2D, delta: float) -> void:
+	# Stop moving — engagements are stationary fire.
+	if path.size() > 0:
+		path = PackedVector2Array()
+		path_index = 0
+	target_unit = target
+	target_building = null
+	attack_timer -= delta
+	if attack_timer > 0.0:
+		return
+	var atk_range: float = data.attack_range if data else 0.0
+	if atk_range > 0.0:
+		# Ranged FEROX: spawn a projectile.
+		attack_timer = attack_cooldown
+		var combat = _combat_sys_ref()
+		if combat and combat.has_method("enemy_attack_unit"):
+			var proj_speed := 300.0
+			var proj_color: Color = unit_color.lightened(0.3)
+			combat.enemy_attack_unit(self, target, damage, proj_speed, proj_color)
+		elif target.has_method("take_damage"):
+			target.take_damage(damage)
+	else:
+		# Melee FEROX: punch directly if in range.
+		if position.distance_to(target.position) <= main.GRID_SIZE * 1.2:
+			attack_timer = attack_cooldown
+			if target.has_method("take_damage"):
+				target.take_damage(damage)
 
 
 ## Fire a projectile at the targeted FEROX building.
@@ -1307,12 +1463,9 @@ func take_damage(amount: float) -> void:
 	if data:
 		actual_damage = data.calc_damage_taken(amount)
 	health -= actual_damage
-	# Polish: hit-flash + audio. Read by enemy_unit's _draw to tint the
-	# sprite white briefly. Sound is played positionally so a unit being
-	# shot far off-screen sounds quieter than one right next to you.
-	var fb = main.get_node_or_null("FeedbackSystem")
-	if fb and fb.has_method("kick_unit_flash"):
-		fb.kick_unit_flash(self)
+	# Hit-flash intentionally disabled — the white tint on damage was
+	# noisy when many units were taking fire at once. Damage feedback
+	# now lives in the audio cue + health bar only.
 	var asys = main.get_node_or_null("AudioSystem")
 	if asys and asys.has_method("play"):
 		asys.play("hit_unit", position, -4.0)
@@ -1330,6 +1483,18 @@ func _on_death() -> void:
 			if main.resources.has(item_id):
 				main.resources[item_id] += data.drops[item_id]
 		main.resources_changed.emit(main.resources)
+
+	# Ring + shrapnel-line burst at the unit's last position, plus a
+	# ruin decal afterward. Routed through ExplosionSystem so the
+	# visual matches the new building-explosion style.
+	var expl_u = main.get_node_or_null("ExplosionSystem") if main else null
+	if expl_u and expl_u.has_method("explode"):
+		# Small ring for unit-scale blasts.
+		expl_u.explode(position, 2.0)
+	var overlay = main.get_node_or_null("ParticleOverlay") if main else null
+	if overlay and overlay.has_method("spawn_unit_ruins"):
+		var vis_size: float = data.visual_size if data else 12.0
+		overlay.spawn_unit_ruins(position, vis_size)
 
 	if data and team == UnitData.Team.PLAYER:
 		unit_manager.on_player_unit_died(self)
@@ -1354,6 +1519,239 @@ func move_to_position(world_pos: Vector2) -> void:
 	unit_manager.assign_path_to_position(self, world_pos)
 
 
+## Drops every outstanding command on this unit — manual targets, move
+## orders, paths, auto-combat picks. Wired to the "Cancel Orders" button
+## under the selected-unit list.
+func clear_all_orders() -> void:
+	manual_target_unit = null
+	manual_target_building = null
+	manual_target_building_block_id = &""
+	target_unit = null
+	target_building = null
+	move_target = null
+	path = PackedVector2Array()
+	path_index = 0
+	_stuck_timer = 0.0
+
+
+# --- ENTER PAYLOAD BLOCK ---
+## True if the block at `cell` will accept the unit as a payload — either
+## a payload/freight conveyor or a mass driver, or a deconstructor's body.
+func _payload_block_at(cell: Vector2i) -> Vector2i:
+	if not main.placed_buildings.has(cell):
+		return Vector2i(-9999, -9999)
+	var anchor: Vector2i = main.building_origins.get(cell, cell)
+	var bid: StringName = main.placed_buildings.get(anchor, &"")
+	var bdata = Registry.get_block(bid)
+	if bdata == null:
+		return Vector2i(-9999, -9999)
+	# Faction gate — only LUMINA blocks accept the player's units.
+	if main.get_building_faction(anchor) != main.Faction.LUMINA:
+		return Vector2i(-9999, -9999)
+	var tags: PackedStringArray = bdata.tags
+	var ok := tags.has("payload") or tags.has("freight") or tags.has("mass_driver") or tags.has("deconstructor")
+	return anchor if ok else Vector2i(-9999, -9999)
+
+
+## Returns true when the unit was successfully consumed by a payload
+## block (it's been queue_freed and should not tick further).
+func _try_enter_payload_block() -> bool:
+	var ug: Vector2i = main.world_to_grid(position)
+	var anchor: Vector2i = _payload_block_at(ug)
+	if anchor == Vector2i(-9999, -9999):
+		return false
+	var bs = main.get_node_or_null("BuildingSystem")
+	if bs == null or not bs.has_method("inject_unit_as_payload"):
+		return false
+	var payload := {
+		"type": "unit",
+		"unit_id": String(data.id) if data else "",
+		"health": health,
+	}
+	if "facing_angle" in self:
+		payload["facing_angle"] = facing_angle
+	if "aim_angle" in self:
+		payload["aim_angle"] = aim_angle
+	if bs.inject_unit_as_payload(anchor, payload):
+		# We've handed our state off — leave the world. Erase the unit
+		# from the UnitManager's player_units / selected_units arrays
+		# directly (without going through on_player_unit_died, which
+		# bumps the "destroyed" stat — being picked up isn't a death).
+		is_dead = true
+		if unit_manager:
+			if "player_units" in unit_manager:
+				unit_manager.player_units.erase(self)
+			if "selected_units" in unit_manager:
+				unit_manager.selected_units.erase(self)
+		queue_free()
+		return true
+	return false
+
+
+# --- MINING ---
+const _MINE_RANGE_TILES := 4
+const _MINE_DEPOSIT_RANGE_TILES := 6
+
+
+func _tick_mining(delta: float) -> bool:
+	if data == null:
+		return false
+	# Deposit phase — full or no more ore left.
+	var inv_total := 0
+	for k in mined_inventory:
+		inv_total += int(mined_inventory[k])
+	var must_deposit: bool = inv_total >= mined_inventory_cap
+	# If the requested ore is gone from the world, deposit what we have and bail.
+	if not must_deposit and mining_request_id != &"" and inv_total > 0 and not _any_ore_exists_for(mining_request_id):
+		must_deposit = true
+
+	if inv_total > 0 and must_deposit:
+		return _seek_and_deposit_core(delta)
+
+	# Mining phase — seek nearest matching ore.
+	var ore_cell: Vector2i = _find_nearest_ore_cell(mining_request_id)
+	if ore_cell == Vector2i(-9999, -9999):
+		# No reachable ore — fall through so the unit can idle / auto-combat.
+		return false
+
+	var unit_grid: Vector2i = main.world_to_grid(position)
+	var dx: int = absi(unit_grid.x - ore_cell.x)
+	var dy: int = absi(unit_grid.y - ore_cell.y)
+	if max(dx, dy) > _MINE_RANGE_TILES:
+		if _mine_target_cell != ore_cell:
+			_mine_target_cell = ore_cell
+			var world_target: Vector2 = main.grid_to_world(ore_cell) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+			unit_manager.assign_path_to_position(self, world_target)
+		if path.size() > 0 and path_index < path.size():
+			_follow_path(delta)
+		return true
+
+	# In range — mine.
+	if path.size() > 0:
+		path = PackedVector2Array()
+		path_index = 0
+	var period: float = attack_cooldown if attack_cooldown > 0.0 else 1.0
+	_mine_timer += delta
+	if _mine_timer >= period:
+		_mine_timer = 0.0
+		mined_inventory[mining_request_id] = int(mined_inventory.get(mining_request_id, 0)) + 1
+	return true
+
+
+func _any_ore_exists_for(item_id: StringName) -> bool:
+	var terrain = main.get_node_or_null("TerrainSystem")
+	if terrain == null:
+		return false
+	for cell in terrain.ore_tiles.keys():
+		var tile_id = terrain.ore_tiles[cell]
+		var tile_data = Registry.get_tile(tile_id)
+		if tile_data != null and StringName(tile_data.minable_resource) == item_id:
+			return true
+	return false
+
+
+func _find_nearest_ore_cell(item_id: StringName) -> Vector2i:
+	var terrain = main.get_node_or_null("TerrainSystem")
+	if terrain == null:
+		return Vector2i(-9999, -9999)
+	var unit_grid: Vector2i = main.world_to_grid(position)
+	var best: Vector2i = Vector2i(-9999, -9999)
+	var best_d2: int = 0x7FFFFFFF
+	for cell in terrain.ore_tiles.keys():
+		var tile_id = terrain.ore_tiles[cell]
+		var tile_data = Registry.get_tile(tile_id)
+		if tile_data == null or StringName(tile_data.minable_resource) != item_id:
+			continue
+		var d2: int = (cell.x - unit_grid.x) * (cell.x - unit_grid.x) + (cell.y - unit_grid.y) * (cell.y - unit_grid.y)
+		if d2 < best_d2:
+			best_d2 = d2
+			best = cell
+	return best
+
+
+func _find_nearest_core_cell() -> Vector2i:
+	var unit_grid: Vector2i = main.world_to_grid(position)
+	var best: Vector2i = Vector2i(-9999, -9999)
+	var best_d2: int = 0x7FFFFFFF
+	for anchor in main.placed_buildings.keys():
+		var bid: StringName = main.placed_buildings[anchor]
+		var bdata = Registry.get_block(bid)
+		if bdata == null:
+			continue
+		if not bdata.tags.has("core"):
+			continue
+		if main.get_building_faction(anchor) != main.Faction.LUMINA:
+			continue
+		var d2: int = (anchor.x - unit_grid.x) * (anchor.x - unit_grid.x) + (anchor.y - unit_grid.y) * (anchor.y - unit_grid.y)
+		if d2 < best_d2:
+			best_d2 = d2
+			best = anchor
+	return best
+
+
+func _seek_and_deposit_core(delta: float) -> bool:
+	var core_cell: Vector2i = _find_nearest_core_cell()
+	if core_cell == Vector2i(-9999, -9999):
+		return false
+	var unit_grid: Vector2i = main.world_to_grid(position)
+	var dx: int = absi(unit_grid.x - core_cell.x)
+	var dy: int = absi(unit_grid.y - core_cell.y)
+	if max(dx, dy) > _MINE_DEPOSIT_RANGE_TILES:
+		if _mine_deliver_cell != core_cell:
+			_mine_deliver_cell = core_cell
+			var target_world: Vector2 = main.grid_to_world(core_cell) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+			unit_manager.assign_path_to_position(self, target_world)
+		if path.size() > 0 and path_index < path.size():
+			_follow_path(delta)
+		return true
+	# Deposit everything into main.resources.
+	if path.size() > 0:
+		path = PackedVector2Array()
+		path_index = 0
+	for k in mined_inventory.keys():
+		var amt: int = int(mined_inventory[k])
+		if amt > 0:
+			main.resources[k] = int(main.resources.get(k, 0)) + amt
+	mined_inventory.clear()
+	main.resources_changed.emit(main.resources)
+	_mine_deliver_cell = Vector2i(-9999, -9999)
+	return true
+
+
+# --- ASSIST PLAYER (build plan helper) ---
+func _tick_assist_build(delta: float) -> bool:
+	if not ("work_order" in main) or main.work_order.is_empty():
+		return false
+	var unit_grid: Vector2i = main.world_to_grid(position)
+	var best: Vector2i = Vector2i(-9999, -9999)
+	var best_d2: int = 0x7FFFFFFF
+	for a in main.work_order:
+		var d2: int = (a.x - unit_grid.x) * (a.x - unit_grid.x) + (a.y - unit_grid.y) * (a.y - unit_grid.y)
+		if d2 < best_d2:
+			best_d2 = d2
+			best = a
+	if best == Vector2i(-9999, -9999):
+		return false
+	var dx: int = absi(unit_grid.x - best.x)
+	var dy: int = absi(unit_grid.y - best.y)
+	# Anything inside ~10 tiles counts as "in range" — the building tick
+	# is gated on `_is_in_build_range` which the BuildingSystem will
+	# extend for assisting units (see _is_in_build_range patch).
+	if max(dx, dy) > 8:
+		var target_world: Vector2 = main.grid_to_world(best) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		if path.size() == 0 or path_index >= path.size():
+			unit_manager.assign_path_to_position(self, target_world)
+		else:
+			_follow_path(delta)
+		return true
+	# In build range — sit still; building_system._tick_progressive_build
+	# will advance because our presence extends the build range.
+	if path.size() > 0:
+		path = PackedVector2Array()
+		path_index = 0
+	return true
+
+
 # --- DRAWING ---
 var _flash_until: float = 0.0  # Set by FeedbackSystem.kick_unit_flash()
 
@@ -1362,15 +1760,8 @@ func _draw() -> void:
 	if is_dead:
 		return
 
-	# Hit-flash: tint everything brighter for ~0.08 s after a damage
-	# event. Multiplying modulate works for both textured units and the
-	# primitive-shape fallbacks because all draws inherit it.
-	var now: float = Time.get_ticks_msec() / 1000.0
-	if _flash_until > now:
-		var t: float = clampf((_flash_until - now) / 0.08, 0.0, 1.0)
-		modulate = Color(1, 1, 1).lerp(Color(2.5, 2.5, 2.5), t)
-	elif modulate != Color(1, 1, 1):
-		modulate = Color(1, 1, 1)
+	# Hit-flash removed — see take_damage. modulate is left untouched
+	# so other systems can tint the unit if they ever need to.
 
 	# Textured rendering (turret-style: base + rotating head) takes precedence
 	# over the primitive-shape fallbacks whenever the .tres supplies sprites.

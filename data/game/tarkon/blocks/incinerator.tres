@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b8x4tinfact01"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cgdd8r5ussiu5" path="res://textures/blocks/item transportation/Incinerator-NP.png" id="1_1iji6"]
+
+[resource]
+script = ExtResource("1")
+id = &"incinerator"
+display_name = "Incinerator"
+description = "Incinerates any inputted item/fluid. Takes 5 power."
+icon = ExtResource("1_1iji6")
+tags = PackedStringArray("incinerator", "omnidirectional")
+color = Color(0.9, 0.45, 0.2, 1)
+top_sprite = ExtResource("1_1iji6")
+max_health = 160.0
+build_cost = {
+"copper": 15,
+"silicon": 5
+}
+build_time = 1.0
+electrical_power_use = 5.0

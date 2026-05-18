@@ -12,7 +12,6 @@ color = Color(0.9, 0.3, 0.3, 1)
 max_health = 500.0
 build_cost = { "copper": 500, "silicon": 250 }
 build_time = 5.0
-requires_power = true
 power_consumption = 6.0
 attack_damage = 130.0
 attack_speed = 4.0
