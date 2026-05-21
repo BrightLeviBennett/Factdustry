@@ -112,7 +112,6 @@ func get_state(id: StringName) -> NodeState:
 	return NodeState.UNLOCKED
 
 func is_researched(id: StringName) -> bool: return get_state(id) == NodeState.RESEARCHED
-func is_unlocked(id: StringName) -> bool: return get_state(id) == NodeState.UNLOCKED
 func is_locked(id: StringName) -> bool: return get_state(id) == NodeState.LOCKED
 
 ## Returns true if the player has actually captured this sector (beat its
@@ -155,26 +154,6 @@ func was_sector_abandoned(sector_id: StringName) -> bool:
 # PUBLIC API — Resource Spending
 # ================================
 
-func spend_resources(id: StringName, player_resources: Dictionary) -> bool:
-	if get_state(id) != NodeState.UNLOCKED: return false
-	var node = nodes[id]
-	var any_spent := false
-	for item_id in node["research_cost"]:
-		var required: int = node["research_cost"][item_id]
-		var already_spent: int = node["amount_spent"].get(item_id, 0)
-		var still_needed: int = required - already_spent
-		if still_needed <= 0: continue
-		var available: int = player_resources.get(item_id, 0)
-		if available <= 0: continue
-		var to_spend: int = mini(still_needed, available)
-		node["amount_spent"][item_id] = already_spent + to_spend
-		player_resources[item_id] -= to_spend
-		any_spent = true
-	if any_spent:
-		resources_spent.emit(id)
-		if _is_fully_paid(id):
-			node_state_changed.emit(id, NodeState.RESEARCHED)
-	return any_spent
 
 ## Spends resources toward a node using the global pool (all sectors combined).
 ## Deducts from whichever sector has the most of each resource.
@@ -206,17 +185,8 @@ func get_spent(id: StringName, item_id: StringName) -> int:
 	if not nodes.has(id): return 0
 	return nodes[id]["amount_spent"].get(item_id, 0)
 
-func get_cost(id: StringName, item_id: StringName) -> int:
-	if not nodes.has(id): return 0
-	return nodes[id]["research_cost"].get(item_id, 0)
 
-func get_research_cost(id: StringName) -> Dictionary:
-	if not nodes.has(id): return {}
-	return nodes[id]["research_cost"]
 
-func get_amount_spent(id: StringName) -> Dictionary:
-	if not nodes.has(id): return {}
-	return nodes[id]["amount_spent"]
 
 func get_progress(id: StringName) -> float:
 	if not nodes.has(id): return 0.0
@@ -239,12 +209,6 @@ func get_node_data(id: StringName) -> Variant:
 	return nodes.get(id, null)
 
 
-func get_tech_children(id: StringName) -> Array[StringName]:
-	var result: Array[StringName] = []
-	for node_id in nodes:
-		if id in nodes[node_id]["parents"] or id in nodes[node_id].get("dependencies", []):
-			result.append(node_id)
-	return result
 
 func get_depth(id: StringName) -> int:
 	if not nodes.has(id): return 0
@@ -547,9 +511,9 @@ func _register_cores() -> void:
 	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 18000, &"mat_graphite": 16000, &"mat_silicon": 8500, &"mat_steel": 6500, &"mat_aluminum": 2000}, Vector2(0, 8))
 	# Archive line — shifted right by 1 so the core line sits directly above
 	# core_shard with no overlap.
-	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-waterfront_ruins"], {&"mat_copper": 180}, Vector2(-1, 1))
+	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-waterfront_ruins"], {&"mat_copper": 80}, Vector2(-1, 1))
 	_add(&"data_cable",        "Data Cable",         [&"archive_scanner"],[], {&"mat_copper": 40}, Vector2(-2, 1))
-	_add(&"archive_decoder",   "Archive Decoder",    [&"archive_scanner"],[], {&"mat_copper": 240}, Vector2(-1, 2))
+	_add(&"archive_decoder",   "Archive Decoder",    [&"archive_scanner"],[], {&"mat_copper": 140}, Vector2(-1, 2))
 
 func _register_campaign() -> void:
 	_add(&"starting_grounds",    "Starting Grounds",    [&"core_shard"],          [], {}, Vector2(2, 1), true)
@@ -572,59 +536,59 @@ func _register_power() -> void:
 	# solar — with Nuclear Reactor as the late-game combustion sibling.
 	_add(&"vent_turbine",         "Vent Turbine",         [&"core_shard"],              [&"mat_copper"], {&"mat_copper": 30}, Vector2(9, -1))
 	# Combustion branch
-	_add(&"combustion_generator", "Combustion Generator", [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(7, -2))
-	_add(&"nuclear_reactor",      "Nuclear Reactor",      [&"combustion_generator"],    [&"mat_uranium_rod"], {&"mat_copper": 800, &"mat_steel": 250, &"mat_silicon": 150, &"mat_aluminum": 50}, Vector2(6, -3))
-	_add(&"combustion_reactor",   "Combustion Reactor",   [&"combustion_generator"],    [&"Not unlockable in campaign"], {&"mat_copper": 120, &"mat_silicon": 40, &"mat_graphite": 20}, Vector2(7, -3))
+	_add(&"combustion_generator", "Combustion Generator", [&"vent_turbine"],            [&"mat_coal"], {&"mat_copper": 80, &"mat_silicon": 40, &"mat_steel": 20}, Vector2(7, -2))
+	_add(&"nuclear_reactor",      "Nuclear Reactor",      [&"combustion_generator"],    [&"mat_uranium"], {&"mat_copper": 600, &"mat_steel": 250, &"mat_silicon": 150, &"mat_brass": 50}, Vector2(6, -3))
+	_add(&"combustion_reactor",   "Combustion Reactor",   [&"combustion_generator"],    [&"-L-dark_valley"], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_steel": 40, &"mat_brass": 20}, Vector2(7, -3))
 	# Battery branch
-	_add(&"small_battery",        "Small Battery",        [&"vent_turbine"],            [], {&"mat_copper": 30, &"mat_silicon": 10}, Vector2(8, -2))
-	_add(&"large_battery",        "Large Battery",        [&"small_battery"],           [], {&"mat_copper": 100, &"mat_silicon": 40, &"mat_steel": 15}, Vector2(8, -3))
-	_add(&"huge_battery",         "Huge Battery",         [&"large_battery"],           [&"Not unlockable in campaign"], {&"mat_copper": 240, &"mat_silicon": 100, &"mat_steel": 60}, Vector2(8, -4))
+	_add(&"small_battery",        "Small Battery",        [&"vent_turbine"],            [&"mat_steel"], {&"mat_copper": 30, &"mat_silicon": 15, &"mat_steel": 10}, Vector2(8, -2))
+	_add(&"large_battery",        "Large Battery",        [&"small_battery"],           [&"mat_brass"], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_steel": 25, &"mat_brass": 15}, Vector2(8, -3))
+	_add(&"huge_battery",         "Huge Battery",         [&"large_battery"],           [&"mat_aluminum"], {&"mat_copper": 160, &"mat_silicon": 60, &"mat_steel": 60, &"mat_aluminum": 15}, Vector2(8, -4))
 	# Cable branch
 	_add(&"cable_node",           "Cable Node",           [&"vent_turbine"],            [], {&"mat_copper": 15}, Vector2(9, -2))
-	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [&"Not unlockable in campaign"], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(9, -3))
-	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [&"Not unlockable in campaign"], {&"mat_copper": 400, &"mat_silicon": 150, &"mat_steel": 140}, Vector2(9, -4))
+	_add(&"cable_tower",          "Cable Tower",          [&"cable_node"],              [&"Not unlockable in campaign"], {&"mat_copper": 50, &"mat_steel": 15}, Vector2(9, -3))
+	_add(&"power_distributor",    "Power Distributor",    [&"cable_tower"],             [&"Not unlockable in campaign"], {&"mat_copper": 130, &"mat_steel": 40}, Vector2(9, -4))
 	# Solar branch
 	_add(&"solar_panel",          "Solar Panel",          [&"vent_turbine"],            [&"mat_steel"], {&"mat_copper": 50, &"mat_silicon": 20, &"mat_steel": 10}, Vector2(10, -2))
 	_add(&"large_solar_panel",    "Large Solar Panel",    [&"solar_panel"],             [], {&"mat_copper": 90, &"mat_silicon": 40, &"mat_steel": 20}, Vector2(10, -3))
-	_add(&"solar_array",          "Solar Array",          [&"large_solar_panel"],       [&"mat_silver"], {&"mat_copper": 120, &"mat_silicon": 60}, Vector2(10, -4))
+	_add(&"solar_array",          "Solar Array",          [&"large_solar_panel"],       [&"mat_silver"], {&"mat_copper": 190, &"mat_silicon": 150, &"mat_steel": 60}, Vector2(10, -4))
 
 func _register_belt_transport() -> void:
 	_add(&"conveyor_belt",       "Conveyor Belt",       [&"core_shard"],        [&"mat_copper"], {&"mat_copper": 20}, Vector2(5, 1))
-	_add(&"belt_junction",       "Belt Junction",       [&"conveyor_belt"],     [], {&"mat_copper": 60}, Vector2(3, 2))
-	_add(&"belt_router",         "Belt Router",         [&"conveyor_belt"],     [], {&"mat_copper": 60}, Vector2(4, 2))
-	_add(&"incinerator",         "Incinerator",         [&"belt_router"],       [&"mat_silicon"], {&"mat_copper": 20, &"mat_silicon": 5}, Vector2(4, 3))
-	_add(&"belt_bridge",         "Belt Bridge",         [&"conveyor_belt"],     [], {&"mat_copper": 80}, Vector2(5, 2))
-	_add(&"belt_sorter",         "Belt Sorter",         [&"conveyor_belt"],     [], {&"mat_copper": 80}, Vector2(6, 2))
-	_add(&"overflow_belt",       "Overflow Belt",       [&"conveyor_belt"],     [], {&"mat_copper": 70}, Vector2(7, 2))
-	_add(&"inverted_belt_sorter","Inverted Belt Sorter", [&"belt_sorter"],      [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(6, 3))
-	_add(&"underflow_belt",      "Underflow Belt",      [&"overflow_belt"],     [], {&"mat_copper": 120, &"mat_silicon": 50, &"mat_graphite": 20}, Vector2(7, 3))
+	_add(&"belt_junction",       "Belt Junction",       [&"conveyor_belt"],     [], {&"mat_copper": 25}, Vector2(3, 2))
+	_add(&"belt_router",         "Belt Router",         [&"conveyor_belt"],     [], {&"mat_copper": 25}, Vector2(4, 2))
+	_add(&"incinerator",         "Incinerator",         [&"belt_router"],       [&"mat_silicon"], {&"mat_copper": 40, &"mat_silicon": 5}, Vector2(4, 3))
+	_add(&"belt_bridge",         "Belt Bridge",         [&"conveyor_belt"],     [], {&"mat_copper": 40}, Vector2(5, 2))
+	_add(&"belt_sorter",         "Belt Sorter",         [&"conveyor_belt"],     [], {&"mat_copper": 35, &"mat_silicon": 10}, Vector2(6, 2))
+	_add(&"overflow_belt",       "Overflow Belt",       [&"conveyor_belt"],     [], {&"mat_copper": 35}, Vector2(7, 2))
+	_add(&"inverted_belt_sorter","Inverted Belt Sorter",[&"belt_sorter"],       [], {&"mat_copper": 35, &"mat_silicon": 10}, Vector2(6, 3))
+	_add(&"underflow_belt",      "Underflow Belt",      [&"overflow_belt"],     [], {&"mat_copper": 35}, Vector2(7, 3))
 	
-	_add(&"unloader",            "Unloader",            [&"conveyor_belt"],     [&"mat_silicon"], {&"mat_copper": 60, &"mat_silicon": 25}, Vector2(8, 2))
+	_add(&"unloader",            "Unloader",            [&"conveyor_belt"],     [&"mat_silicon"], {&"mat_copper": 40, &"mat_silicon": 15}, Vector2(8, 2))
 	_add(&"small_container",     "Small Container",     [&"unloader"],          [], {&"mat_copper": 150}, Vector2(8, 3))
 	_add(&"large_container",     "Large Container",     [&"small_container"],   [&"mat_steel"], {&"mat_copper": 300, &"mat_steel": 20}, Vector2(8, 4))
-	_add(&"huge_container",      "Huge Container",      [&"large_container"],   [&"mat_zinc"],   {&"mat_copper": 500, &"mat_steel": 45, &"mat_zinc": 30}, Vector2(8, 5))
+	_add(&"huge_container",      "Huge Container",      [&"large_container"],   [&"mat_brass"],   {&"mat_copper": 500, &"mat_steel": 45, &"mat_brass": 30}, Vector2(8, 5))
 
 func _register_duct_transport() -> void:
-	_add(&"duct",                  "Duct",                  [&"conveyor_belt"],    [&"mat_steel"], {&"mat_copper": 80, &"mat_graphite": 20}, Vector2(11, 2))
-	_add(&"duct_junction",         "Duct Junction",         [&"duct"],             [], {&"mat_copper": 120, &"mat_graphite": 40, &"mat_silicon": 20}, Vector2(9, 3))
-	_add(&"duct_router",           "Duct Router",           [&"duct"],             [], {&"mat_copper": 120, &"mat_graphite": 40, &"mat_silicon": 20}, Vector2(10, 3))
-	_add(&"duct_bridge",           "Duct Bridge",           [&"duct"],             [], {&"mat_copper": 140, &"mat_graphite": 50, &"mat_silicon": 25}, Vector2(11, 3))
-	_add(&"duct_sorter",           "Duct Sorter",           [&"duct"],             [], {&"mat_copper": 140, &"mat_silicon": 50, &"mat_graphite": 30}, Vector2(12, 3))
-	_add(&"overflow_duct",         "Overflow Duct",         [&"duct"],             [], {&"mat_copper": 130, &"mat_silicon": 45, &"mat_graphite": 25}, Vector2(13, 3))
-	_add(&"inverted_duct_sorter",  "Inverted Duct Sorter",  [&"duct_sorter"],      [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 30}, Vector2(12, 4))
-	_add(&"underflow_duct",        "Underflow Duct",        [&"overflow_duct"],    [], {&"mat_copper": 200, &"mat_silicon": 80, &"mat_steel": 30}, Vector2(13, 4))
+	_add(&"duct",                  "Duct",                  [&"conveyor_belt"],    [&"mat_steel"], {&"mat_copper": 40, &"mat_steel": 15}, Vector2(11, 2))
+	_add(&"duct_junction",         "Duct Junction",         [&"duct"],             [], {&"mat_copper": 50, &"mat_steel": 15}, Vector2(9, 3))
+	_add(&"duct_router",           "Duct Router",           [&"duct"],             [], {&"mat_copper": 50, &"mat_steel": 15}, Vector2(10, 3))
+	_add(&"duct_bridge",           "Duct Bridge",           [&"duct"],             [], {&"mat_copper": 70, &"mat_steel": 35}, Vector2(11, 3))
+	_add(&"duct_sorter",           "Duct Sorter",           [&"duct"],             [], {&"mat_copper": 70, &"mat_steel": 25}, Vector2(12, 3))
+	_add(&"overflow_duct",         "Overflow Duct",         [&"duct"],             [], {&"mat_copper": 70, &"mat_steel": 25}, Vector2(13, 3))
+	_add(&"inverted_duct_sorter",  "Inverted Duct Sorter",  [&"duct_sorter"],      [], {&"mat_copper": 70, &"mat_steel": 25}, Vector2(12, 4))
+	_add(&"underflow_duct",        "Underflow Duct",        [&"overflow_duct"],    [], {&"mat_copper": 70, &"mat_steel": 25}, Vector2(13, 4))
 
 func _register_fluid_transport() -> void:
-	_add(&"fluid_conduit",              "Fluid Conduit",              [&"core_shard"],          [&"mat_steel"], {&"mat_copper": 25, &"mat_graphite": 10}, Vector2(18, 1))
-	_add(&"fluid_pump",                 "Fluid Pump",                 [&"fluid_conduit"],       [], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_graphite": 15}, Vector2(14, 2))
-	_add(&"vent_condenser",             "Vent Condenser",             [&"fluid_conduit"],       [], {&"mat_copper": 70, &"mat_graphite": 25}, Vector2(15, 2))
-	_add(&"conduit_junction",           "Conduit Junction",           [&"fluid_conduit"],       [], {&"mat_copper": 60, &"mat_graphite": 20}, Vector2(16, 2))
-	_add(&"conduit_router",             "Conduit Router",             [&"fluid_conduit"],       [], {&"mat_copper": 60, &"mat_graphite": 20}, Vector2(17, 2))
-	_add(&"conduit_bridge",             "Conduit Bridge",             [&"fluid_conduit"],       [], {&"mat_copper": 80, &"mat_graphite": 25, &"mat_silicon": 15}, Vector2(18, 2))
-	_add(&"conduit_sorter",             "Conduit Sorter",             [&"fluid_conduit"],       [], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_graphite": 15}, Vector2(19, 2))
-	_add(&"overflow_conduit",           "Overflow Conduit",           [&"fluid_conduit"],       [], {&"mat_copper": 70, &"mat_silicon": 25, &"mat_graphite": 15}, Vector2(20, 2))
-	_add(&"inverted_conduit_sorter",    "Inverted Conduit Sorter",    [&"conduit_sorter"],      [], {&"mat_copper": 130, &"mat_silicon": 50, &"mat_steel": 20}, Vector2(19, 3))
-	_add(&"underflow_conduit",          "Underflow Conduit",          [&"overflow_conduit"],    [], {&"mat_copper": 130, &"mat_silicon": 50, &"mat_steel": 20}, Vector2(20, 3))
+	_add(&"fluid_pipe",              "Fluid Pipe",              [&"core_shard"],          [&"mat_steel"], {&"mat_copper": 25, &"mat_graphite": 10}, Vector2(18, 1))
+	_add(&"fluid_pump",                 "Fluid Pump",                 [&"fluid_pipe"],       [], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_graphite": 15}, Vector2(14, 2))
+	_add(&"vent_condenser",             "Vent Condenser",             [&"fluid_pipe"],       [], {&"mat_copper": 70, &"mat_graphite": 25}, Vector2(15, 2))
+	_add(&"pipe_junction",           "Pipe Junction",           [&"fluid_pipe"],       [], {&"mat_copper": 60, &"mat_graphite": 20}, Vector2(16, 2))
+	_add(&"pipe_router",             "Pipe Router",             [&"fluid_pipe"],       [], {&"mat_copper": 60, &"mat_graphite": 20}, Vector2(17, 2))
+	_add(&"pipe_bridge",             "Pipe Bridge",             [&"fluid_pipe"],       [], {&"mat_copper": 80, &"mat_graphite": 25, &"mat_silicon": 15}, Vector2(18, 2))
+	_add(&"pipe_sorter",             "Pipe Sorter",             [&"fluid_pipe"],       [], {&"mat_copper": 80, &"mat_silicon": 30, &"mat_graphite": 15}, Vector2(19, 2))
+	_add(&"overflow_pipe",           "Overflow Pipe",           [&"fluid_pipe"],       [], {&"mat_copper": 70, &"mat_silicon": 25, &"mat_graphite": 15}, Vector2(20, 2))
+	_add(&"inverted_pipe_sorter",    "Inverted Pipe Sorter",    [&"pipe_sorter"],      [], {&"mat_copper": 130, &"mat_silicon": 50, &"mat_steel": 20}, Vector2(19, 3))
+	_add(&"underflow_pipe",          "Underflow Pipe",          [&"overflow_pipe"],    [], {&"mat_copper": 130, &"mat_silicon": 50, &"mat_steel": 20}, Vector2(20, 3))
 
 func _register_mining() -> void:
 	_add(&"mechanical_drill",      "Mechanical Drill",      [&"core_shard"],            [&"mat_copper"], {&"mat_copper": 30}, Vector2(22, -1))
@@ -749,103 +713,107 @@ func _register_support() -> void:
 	# Assist / support tree relocated to sit immediately left of the drill
 	# tree (cols 13-19) using negative rows so progression reads downward —
 	# matching the drill tree's tier orientation.
-	_add(&"watchtower",                     "Watchtower",                     [&"core_shard"],                  [], {&"mat_copper": 80, &"mat_silicon": 25}, Vector2(13, -1))
+	_add(&"watchtower",                     "Watchtower",                     [&"core_shard"],                    [&"mat_steel"], {&"mat_copper": 80, &"mat_silicon": 25, &"mat_steel": 5}, Vector2(13, -1))
 
-	_add(&"build_tower",                    "Build Tower",                    [&"core_shard"],                  [], {&"mat_copper": 150, &"mat_steel": 50}, Vector2(14, -1))
-	_add(&"large_build_tower",              "Large Build Tower",              [&"build_tower"],                   [], {&"mat_copper": 250, &"mat_steel": 80, &"mat_graphite": 30}, Vector2(14, -2))
-	_add(&"huge_build_tower",               "Huge Build Tower",               [&"large_build_tower"],             [], {&"mat_copper": 400, &"mat_graphite": 50, &"mat_steel": 150}, Vector2(14, -3))
+	_add(&"build_tower",                    "Build Tower",                    [&"core_shard"],                    [&"mat_brass"], {&"mat_copper": 150, &"mat_steel": 50}, Vector2(14, -1))
+	_add(&"large_build_tower",              "Large Build Tower",              [&"build_tower"],                   [&"mat_aluminum"], {&"mat_copper": 250, &"mat_steel": 80, &"mat_graphite": 30}, Vector2(14, -2))
+	_add(&"huge_build_tower",               "Huge Build Tower",               [&"large_build_tower"],             [&"ruins archive"], {&"mat_copper": 400, &"mat_graphite": 50, &"mat_steel": 150}, Vector2(14, -3))
 
-	_add(&"barrier_projector",              "Barrier Projector",              [&"core_shard"],                  [], {&"mat_copper": 200, &"mat_steel": 80, &"mat_silicon": 40}, Vector2(15, -1))
-	_add(&"force_field_projector",          "Force Field Projector",          [&"barrier_projector"],             [], {&"mat_copper": 400, &"mat_steel": 210, &"mat_silicon": 80}, Vector2(15, -2))
-	_add(&"shield_projector",               "Shield Projector",               [&"force_field_projector"],         [], {&"mat_copper": 800, &"mat_steel": 450, &"mat_silicon": 120}, Vector2(15, -3))
+	_add(&"barrier_projector",              "Barrier Projector",              [&"core_shard"],                    [&"-D-archive_better_turrets"], {&"mat_copper": 200, &"mat_steel": 80, &"mat_silicon": 40}, Vector2(15, -1))
+	_add(&"force_field_projector",          "Force Field Projector",          [&"barrier_projector"],             [&"mat_brass"], {&"mat_copper": 400, &"mat_steel": 210, &"mat_silicon": 80}, Vector2(15, -2))
+	_add(&"shield_projector",               "Shield Projector",               [&"force_field_projector"],         [&"ruins archive"], {&"mat_copper": 800, &"mat_steel": 450, &"mat_silicon": 120}, Vector2(15, -3))
 
 	# Mender chain — image 2 shows tier order as Mender → Mending Field →
 	# Mending Dome. Re-parented to match: field is now tier 2, dome tier 3.
-	_add(&"mender",                         "Mender",                         [&"core_shard"],                  [], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 50}, Vector2(16, -1))
-	_add(&"mending_field",                  "Mending Field",                  [&"mender"],                        [], {&"mat_copper": 350, &"mat_steel": 170, &"mat_silicon": 70}, Vector2(16, -2))
-	_add(&"mending_dome",                   "Mending Dome",                   [&"mending_field"],                 [], {&"mat_copper": 650, &"mat_steel": 340, &"mat_silicon": 100}, Vector2(16, -3))
+	_add(&"mender",                         "Mender",                         [&"core_shard"],                    [&"mat_steel"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_silicon": 50}, Vector2(16, -1))
+	_add(&"mending_field",                  "Mending Field",                  [&"mender"],                        [&"mat_brass"], {&"mat_copper": 350, &"mat_steel": 170, &"mat_silicon": 70}, Vector2(16, -2))
+	_add(&"mending_dome",                   "Mending Dome",                   [&"mending_field"],                 [&"ruins archive"], {&"mat_copper": 650, &"mat_steel": 340, &"mat_silicon": 100}, Vector2(16, -3))
 
 	# Overdriver chain — same tier swap as Mender (field is tier 2, dome tier 3).
-	_add(&"overdriver",                     "Overdriver",                     [&"core_shard"],                  [], {&"mat_copper": 220, &"mat_steel": 70, &"mat_silicon": 45}, Vector2(17, -1))
-	_add(&"overdrive_field",                "Overdrive Field",                [&"overdriver"],                    [], {&"mat_copper": 380, &"mat_steel": 185, &"mat_silicon": 60}, Vector2(17, -2))
-	_add(&"overdrive_dome",                 "Overdrive Dome",                 [&"overdrive_field"],               [], {&"mat_copper": 700, &"mat_steel": 380, &"mat_silicon": 110}, Vector2(17, -3))
+	_add(&"overdriver",                     "Overdriver",                     [&"core_shard"],                    [&"mat_steel"], {&"mat_copper": 220, &"mat_steel": 70, &"mat_silicon": 45}, Vector2(17, -1))
+	_add(&"overdrive_field",                "Overdrive Field",                [&"overdriver"],                    [&"mat_brass"], {&"mat_copper": 380, &"mat_steel": 185, &"mat_silicon": 60}, Vector2(17, -2))
+	_add(&"overdrive_dome",                 "Overdrive Dome",                 [&"overdrive_field"],               [&"ruins archive"], {&"mat_copper": 700, &"mat_steel": 380, &"mat_silicon": 110}, Vector2(17, -3))
 
-	_add(&"launchpad",                      "Launchpad",                      [&"core_shard"],                  [&"-D-archive_launch_systems"], {&"mat_copper": 450, &"mat_steel": 230}, Vector2(18, -1))
+	_add(&"launchpad",                      "Launchpad",                      [&"core_shard"],                    [&"-D-archive_launch_systems"], {&"mat_copper": 450, &"mat_steel": 230}, Vector2(18, -1))
 	_add(&"landing_pad",                    "Landing Pad",                    [&"launchpad"],                     [&"-D-archive_launch_systems"], {&"mat_copper": 600, &"mat_steel": 300, &"mat_graphite": 60}, Vector2(18, -2))
 	_add(&"interplanetary_launchpad",       "Interplanetary Launchpad",       [&"landing_pad"],                   [&"-D-archive_interplanetary_launch_systems"], {&"mat_copper": 750, &"mat_steel": 440, &"mat_aluminum": 40}, Vector2(18, -3))
 	_add(&"interplanetary_core_launchpad",  "Interplanetary Core Launchpad",  [&"interplanetary_launchpad"],      [&"-D-archive_interplanetary_launch_systems"], {&"mat_copper": 250, &"mat_steel": 120}, Vector2(18, -4))
 
-	_add(&"satellite_launchpad",            "Satellite Launchpad",            [&"launchpad"], [&"-D-archive_launch_systems", &"mat_zinc"], {&"mat_copper": 500, &"mat_steel": 260, &"mat_graphite": 40}, Vector2(19, -1))
+	_add(&"satellite_launchpad",            "Satellite Launchpad",            [&"launchpad"], [&"-D-archive_launch_systems", &"mat_brass"], {&"mat_copper": 500, &"mat_steel": 260, &"mat_graphite": 40}, Vector2(19, -1))
 
 func _register_units() -> void:
 	_add(&"tank_fabricator",          "Tank Fabricator",          [&"core_shard"],                [], {&"mat_copper": 60}, Vector2(-26, 1))
 	# Tank line: Press → Breach → Overrun → Subdue → Raze
 	_add(&"press",                    "Press",                    [&"tank_fabricator"],           [], {&"mat_copper": 100}, Vector2(-26, 2))
 	_add(&"breach",                   "Breach",                   [&"press"],                     [&"unit_refabricator"], {&"mat_copper": 180, &"mat_steel": 60, &"mat_graphite": 20}, Vector2(-26, 3))
-	_add(&"overrun",                  "Overrun",                  [&"breach"],                    [&"unit_upgrader"], {&"mat_copper": 300, &"mat_steel": 130}, Vector2(-26, 4))
+	_add(&"overrun",                  "Overrun",                  [&"breach"],                    [&"unit_reconstructor"], {&"mat_copper": 300, &"mat_steel": 130}, Vector2(-26, 4))
 	_add(&"subdue",                   "Subdue",                   [&"overrun"],                   [&"unit_assembler"], {&"mat_copper": 480, &"mat_steel": 220, &"mat_graphite": 60}, Vector2(-26, 5))
 	_add(&"raze",                     "Raze",                     [&"subdue"],                    [&"unit_reassembler"], {&"mat_copper": 800, &"mat_steel": 360, &"mat_graphite": 120}, Vector2(-26, 6))
 	# Naval line: Wade → Drift → Plunge → Engulf → Deluge
 	_add(&"naval_fabricator",         "Naval Fabricator",         [&"tank_fabricator"],           [&"-D-archive_naval_units"], {&"mat_copper": 160, &"mat_graphite": 50}, Vector2(-30, 2))
 	_add(&"wade",                     "Wade",                     [&"naval_fabricator"],          [], {&"mat_copper": 220, &"mat_silicon": 70}, Vector2(-30, 3))
 	_add(&"drift",                    "Drift",                    [&"wade"],                      [&"unit_refabricator"], {&"mat_copper": 360, &"mat_silicon": 120, &"mat_steel": 50}, Vector2(-30, 4))
-	_add(&"plunge",                   "Plunge",                   [&"drift"],                     [&"unit_upgrader"], {&"mat_copper": 540, &"mat_silicon": 180, &"mat_steel": 130}, Vector2(-30, 5))
+	_add(&"plunge",                   "Plunge",                   [&"drift"],                     [&"unit_reconstructor"], {&"mat_copper": 540, &"mat_silicon": 180, &"mat_steel": 130}, Vector2(-30, 5))
 	_add(&"engulf",                   "Engulf",                   [&"plunge"],                    [&"unit_assembler"], {&"mat_copper": 780, &"mat_silicon": 280, &"mat_steel": 220}, Vector2(-30, 6))
 	_add(&"deluge",                   "Deluge",                   [&"engulf"],                    [&"unit_reassembler"], {&"mat_copper": 1150, &"mat_silicon": 420, &"mat_steel": 360, &"mat_aluminum": 30}, Vector2(-30, 7))
 	# Crawler line: Scout → Trace → Intercept → Survey → Moniter
 	_add(&"crawler_fabricator",       "Crawler Fabricator",       [&"tank_fabricator"],           [&"mat_aluminum"], {&"mat_copper": 120, &"mat_silicon": 40}, Vector2(-29, 2))
 	_add(&"scout",                    "Scout",                    [&"crawler_fabricator"],        [], {&"mat_copper": 250, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(-29, 3))
 	_add(&"trace",                    "Trace",                    [&"scout"],                     [&"unit_refabricator"], {&"mat_copper": 400, &"mat_silicon": 130, &"mat_steel": 80}, Vector2(-29, 4))
-	_add(&"intercept",                "Intercept",                [&"trace"],                     [&"unit_upgrader"], {&"mat_copper": 600, &"mat_silicon": 200, &"mat_steel": 150}, Vector2(-29, 5))
+	_add(&"intercept",                "Intercept",                [&"trace"],                     [&"unit_reconstructor"], {&"mat_copper": 600, &"mat_silicon": 200, &"mat_steel": 150}, Vector2(-29, 5))
 	_add(&"survey",                   "Survey",                   [&"intercept"],                 [&"unit_assembler"], {&"mat_copper": 800, &"mat_silicon": 300, &"mat_steel": 230}, Vector2(-29, 6))
 	_add(&"moniter",                  "Moniter",                  [&"survey"],                    [&"unit_reassembler"], {&"mat_copper": 1200, &"mat_silicon": 450, &"mat_steel": 370, &"mat_aluminum": 30}, Vector2(-29, 7))
 	# Support Hover line: Mend → Rebuild → Sustain → Support → Protect
 	_add(&"support_hover_fabricator", "Support Hover Fabricator", [&"tank_fabricator"],           [&"mat_steel"], {&"mat_copper": 110, &"mat_graphite": 35}, Vector2(-28, 2))
 	_add(&"mend",                     "Mend",                     [&"support_hover_fabricator"],  [], {&"mat_copper": 200, &"mat_graphite": 60, &"mat_steel": 30}, Vector2(-28, 3))
 	_add(&"rebuild",                  "Rebuild",                  [&"mend"],                      [&"unit_refabricator"], {&"mat_copper": 300, &"mat_graphite": 100, &"mat_steel": 50}, Vector2(-28, 4))
-	_add(&"sustain",                  "Sustain",                  [&"rebuild"],                   [&"unit_upgrader"], {&"mat_copper": 450, &"mat_graphite": 150, &"mat_steel": 105}, Vector2(-28, 5))
+	_add(&"sustain",                  "Sustain",                  [&"rebuild"],                   [&"unit_reconstructor"], {&"mat_copper": 450, &"mat_graphite": 150, &"mat_steel": 105}, Vector2(-28, 5))
 	_add(&"support",                  "Support",                  [&"sustain"],                   [&"unit_assembler"], {&"mat_copper": 650, &"mat_graphite": 220, &"mat_steel": 170}, Vector2(-28, 6))
 	_add(&"protect",                  "Protect",                  [&"support"],                   [&"unit_reassembler"], {&"mat_copper": 900, &"mat_graphite": 300, &"mat_steel": 270}, Vector2(-28, 7))
 	# Hover line: Hoverboard → Hover-transport → Hoverlift → Hovercraft → Hovership
 	_add(&"hover_fabricator",         "Hover Fabricator",         [&"tank_fabricator"],           [&"-L-crevice"], {&"mat_copper": 130}, Vector2(-27, 2))
 	_add(&"hoverboard",               "Hoverboard",               [&"hover_fabricator"],          [], {&"mat_copper": 220, &"mat_graphite": 25}, Vector2(-27, 3))
 	_add(&"hover_transport",          "Hover-transport",          [&"hoverboard"],                [&"unit_refabricator"], {&"mat_copper": 350, &"mat_silicon": 120, &"mat_steel": 40}, Vector2(-27, 4))
-	_add(&"hoverlift",                "Hoverlift",                [&"hover_transport"],           [&"unit_upgrader"], {&"mat_copper": 500, &"mat_silicon": 180, &"mat_steel": 95}, Vector2(-27, 5))
+	_add(&"hoverlift",                "Hoverlift",                [&"hover_transport"],           [&"unit_reconstructor"], {&"mat_copper": 500, &"mat_silicon": 180, &"mat_steel": 95}, Vector2(-27, 5))
 	_add(&"hovercraft",               "Hovercraft",               [&"hoverlift"],                 [&"unit_assembler"], {&"mat_copper": 700, &"mat_silicon": 250, &"mat_steel": 165}, Vector2(-27, 6))
 	_add(&"hovership",                "Hovership",                [&"hovercraft"],                [&"unit_reassembler"], {&"mat_copper": 1000, &"mat_silicon": 380, &"mat_steel": 250}, Vector2(-27, 7))
 	# Flying line: Skim → Glide → Soar → Pierce → Ascend
 	_add(&"flying_fabricator",        "Flying Fabricator",        [&"tank_fabricator"],           [&"dark_valley"], {&"mat_copper": 140, &"mat_graphite": 40}, Vector2(-25, 2))
 	_add(&"skim",                     "Skim",                     [&"flying_fabricator"],         [], {&"mat_copper": 230, &"mat_graphite": 70, &"mat_steel": 25}, Vector2(-25, 3))
 	_add(&"glide",                    "Glide",                    [&"skim"],                      [&"unit_refabricator"], {&"mat_copper": 360, &"mat_graphite": 120, &"mat_steel": 50}, Vector2(-25, 4))
-	_add(&"soar",                     "Soar",                     [&"glide"],                     [&"unit_upgrader"], {&"mat_copper": 520, &"mat_graphite": 180, &"mat_steel": 110}, Vector2(-25, 5))
+	_add(&"soar",                     "Soar",                     [&"glide"],                     [&"unit_reconstructor"], {&"mat_copper": 520, &"mat_graphite": 180, &"mat_steel": 110}, Vector2(-25, 5))
 	_add(&"pierce",                   "Pierce",                   [&"soar"],                      [&"unit_assembler"], {&"mat_copper": 750, &"mat_graphite": 260, &"mat_steel": 190}, Vector2(-25, 6))
 	_add(&"ascend",                   "Ascend",                   [&"pierce"],                    [&"unit_reassembler"], {&"mat_copper": 1100, &"mat_graphite": 400, &"mat_steel": 300}, Vector2(-25, 7))
-	# Unit Upgrader branch
+	# Unit Reconstructor branch (vertical chain) + Unit Upgrader sibling
 	_add(&"unit_refabricator",        "Unit Refabricator",        [&"tank_fabricator"],           [&"mat_steel"], {&"mat_copper": 150, &"mat_silicon": 50, &"mat_steel": 50}, Vector2(-24, 2))
-	_add(&"unit_upgrader",            "Unit Upgrader",            [&"unit_refabricator"],         [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_silicon": 90, &"mat_steel": 35}, Vector2(-24, 3))
-	_add(&"unit_assembler",           "Unit Assembler",           [&"unit_upgrader"],             [], {&"mat_copper": 420, &"mat_silicon": 140, &"mat_steel": 80}, Vector2(-24, 4))
+	_add(&"unit_reconstructor",       "Unit Reconstructor",       [&"unit_refabricator"],         [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_silicon": 90, &"mat_steel": 35}, Vector2(-24, 3))
+	_add(&"unit_upgrader",            "Unit Upgrader",            [&"unit_refabricator"],         [&"Not unlockable in campaign"], {&"mat_copper": 280, &"mat_silicon": 90, &"mat_steel": 35}, Vector2(-23, 3))
+	_add(&"unit_assembler",           "Unit Assembler",           [&"unit_reconstructor"],        [], {&"mat_copper": 420, &"mat_silicon": 140, &"mat_steel": 80}, Vector2(-24, 4))
 	_add(&"unit_reassembler",         "Unit Reassembler",         [&"unit_assembler"],            [&"-L-ruins"], {&"mat_copper": 580, &"mat_silicon": 200, &"mat_steel": 130}, Vector2(-24, 5))
 
 func _register_payload_freight() -> void:
-	_add(&"payload_conveyor",    "Payload Conveyor",    [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-22, 2))
-	_add(&"payload_router",      "Payload Router",      [&"payload_conveyor"],    [&"-D-archive_payload_systems"], {}, Vector2(-23, 3))
+	# Payload / freight tree shifted +1 in x to make room for the new
+	# Unit Upgrader at (-23, 3). Previous range -23 → -17 is now
+	# -22 → -16.
+	_add(&"payload_conveyor",    "Payload Conveyor",    [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-21, 2))
+	_add(&"payload_router",      "Payload Router",      [&"payload_conveyor"],    [&"-D-archive_payload_systems"], {}, Vector2(-22, 3))
 
-	_add(&"freight_conveyor",    "Freight Conveyor",    [&"payload_conveyor"],    [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-22, 3))
-	_add(&"freight_router",      "Freight Router",      [&"freight_conveyor"],    [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-22, 4))
-	
-	_add(&"payload_mass_driver", "Payload Mass Driver", [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-19, 2))
-	_add(&"freight_mass_driver", "Freight Mass Driver", [&"payload_mass_driver"], [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-19, 3))
-	
-	_add(&"payload_loader",      "Payload Loader",      [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-21, 2))
-	_add(&"payload_unloader",    "Payload Unloader",    [&"payload_loader"],      [&"-D-archive_payload_systems"], {}, Vector2(-21, 3))
-	_add(&"freight_loader",      "Freight Loader",      [&"payload_loader"],      [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-20, 3))
-	_add(&"freight_unloader",    "Freight Unloader",    [&"freight_loader"],      [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-20, 4))
-	
-	_add(&"constructor",         "Constructor",         [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-18, 2))
-	_add(&"deconstructor",       "Deconstructor",       [&"constructor"],         [&"-D-archive_payload_systems"], {}, Vector2(-18, 3))
-	_add(&"payload_crane",       "Payload Crane",       [&"tank_fabricator"],     [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-17, 2))
-	_add(&"large_constructor",   "Large Constructor",   [&"deconstructor"],       [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-18, 4))
-	_add(&"large_deconstructor", "Large Deconstructor", [&"large_constructor"],   [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-18, 5))
+	_add(&"freight_conveyor",    "Freight Conveyor",    [&"payload_conveyor"],    [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-21, 3))
+	_add(&"freight_router",      "Freight Router",      [&"freight_conveyor"],    [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-21, 4))
+
+	_add(&"payload_mass_driver", "Payload Mass Driver", [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-18, 2))
+	_add(&"freight_mass_driver", "Freight Mass Driver", [&"payload_mass_driver"], [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-18, 3))
+
+	_add(&"payload_loader",      "Payload Loader",      [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-20, 2))
+	_add(&"payload_unloader",    "Payload Unloader",    [&"payload_loader"],      [&"-D-archive_payload_systems"], {}, Vector2(-20, 3))
+	_add(&"freight_loader",      "Freight Loader",      [&"payload_loader"],      [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-19, 3))
+	_add(&"freight_unloader",    "Freight Unloader",    [&"freight_loader"],      [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-19, 4))
+
+	_add(&"constructor",         "Constructor",         [&"tank_fabricator"],     [&"-D-archive_payload_systems"], {}, Vector2(-17, 2))
+	_add(&"deconstructor",       "Deconstructor",       [&"constructor"],         [&"-D-archive_payload_systems"], {}, Vector2(-17, 3))
+	_add(&"payload_crane",       "Payload Crane",       [&"tank_fabricator"],     [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-16, 2))
+	_add(&"large_constructor",   "Large Constructor",   [&"deconstructor"],       [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-17, 4))
+	_add(&"large_deconstructor", "Large Deconstructor", [&"large_constructor"],   [&"-D-archive_freight_systems", &"mat_brass"], {&"mat_copper": 1}, Vector2(-17, 5))
 
 func _register_walls() -> void:
 	# Copper tier (base)

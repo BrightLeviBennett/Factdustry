@@ -63,11 +63,15 @@ const _MAIN_PACKED_SCENE: PackedScene = preload("res://main/Main.tscn")
 ## scene tearing down and the new one's first frame. Caller should
 ## set `pending_map_path` / `pending_sector_id` first; Main._ready
 ## reads those during the add_child below.
+##
+## If the outgoing scene is a PlanetSelect (identified by the marker
+## `refresh_for_reentry` method), it is PARKED under us instead of
+## freed so the next visit reuses the live instance.
 func swap_scene_to_main() -> void:
-	# Hide the outgoing scene immediately so any render before this
-	# frame ends doesn't briefly composite both worlds.
 	var tree := get_tree()
 	var old: Node = tree.current_scene
+	var park_outgoing: bool = old != null and is_instance_valid(old) \
+		and old.has_method("refresh_for_reentry")
 	if old != null:
 		if old is CanvasItem:
 			(old as CanvasItem).visible = false
@@ -77,23 +81,65 @@ func swap_scene_to_main() -> void:
 		# Rename + remove the outgoing Main out of /root BEFORE the
 		# new one is added — otherwise both nodes share the name
 		# "Main" for a frame and `/root/Main` resolves to the OLD
-		# (now-freeing) instance. Every child of the new Main that
-		# does `@onready var main = get_node("/root/Main")` would
-		# capture the dying old Main and crash the moment it tried
-		# to use it.
+		# (now-freeing) instance.
 		if old.name == "Main":
 			old.name = "MainOld"
 		var old_parent := old.get_parent()
 		if old_parent:
 			old_parent.remove_child(old)
 	var fresh: Node = _MAIN_PACKED_SCENE.instantiate()
-	# Add to /root before swapping current_scene so absolute paths
-	# (e.g. `/root/Main/...`) resolve immediately when Main._ready
-	# runs in the add_child call.
 	tree.root.add_child(fresh)
 	tree.current_scene = fresh
 	if old != null:
+		if park_outgoing:
+			# park_planet_select expects a detached or attached node —
+			# either way it ends up reparented under us. queue_free
+			# does NOT run.
+			park_planet_select(old)
+		else:
+			old.queue_free()
+
+
+## Same idea as `swap_scene_to_main`, but the destination is
+## PlanetSelect — uses the parked instance if one exists (instant
+## revisit, no rebuild) and falls back to instantiating from the
+## PackedScene resource. Outgoing scene is freed.
+func swap_scene_to_planet_select() -> bool:
+	var tree := get_tree()
+	var old: Node = tree.current_scene
+	if old != null:
+		if old is CanvasItem:
+			(old as CanvasItem).visible = false
+		elif old is Node3D:
+			(old as Node3D).visible = false
+		old.process_mode = Node.PROCESS_MODE_DISABLED
+		# Rename outgoing Main so /root/Main resolves to the new scene
+		# if it ever lands at the same name slot.
+		if old.name == "Main":
+			old.name = "MainOld"
+		var old_parent := old.get_parent()
+		if old_parent:
+			old_parent.remove_child(old)
+	var fresh: Node = null
+	if has_parked_planet_select():
+		fresh = unpark_planet_select_to_tree()
+		if fresh and fresh.has_method("refresh_for_reentry"):
+			fresh.refresh_for_reentry()
+	else:
+		var packed: PackedScene = load("res://main/PlanetSelect.tscn") as PackedScene
+		if packed != null:
+			fresh = packed.instantiate()
+			tree.root.add_child(fresh)
+			tree.current_scene = fresh
+	if fresh == null:
+		# Last-resort fallback to the deferred scene swap.
+		if old != null and old.get_parent() == null:
+			tree.root.add_child(old)
+		tree.change_scene_to_file("res://main/PlanetSelect.tscn")
+		return false
+	if old != null and is_instance_valid(old):
 		old.queue_free()
+	return true
 
 
 func park_main_for_planet_view(main_node: Node) -> bool:
@@ -130,11 +176,26 @@ func park_main_for_planet_view(main_node: Node) -> bool:
 	if parent:
 		parent.remove_child(main_node)
 	add_child(main_node)
+	# The caller (e.g. HUD's planet-map button) will immediately swap
+	# to a new scene. If we leave `tree.current_scene` pointing at the
+	# parked Main, any downstream `var old = tree.current_scene` (in
+	# swap_scene_to_planet_select, change_scene_to_file's deferred
+	# free, etc.) will treat the parked node as the outgoing scene and
+	# queue_free it — destroying the park and leaving a dangling
+	# `_parked_main` reference. Clear the pointer so the next swap
+	# operates on a clean slate.
+	get_tree().current_scene = null
 	return true
 
 
 func has_parked_main() -> bool:
-	return _parked_main != null and is_instance_valid(_parked_main)
+	# Self-heal a dangling reference (the parked instance was freed
+	# elsewhere). Without this, every subsequent has_parked_main()
+	# call returns false but `_parked_main` keeps the freed pointer,
+	# masking the bug from the discard path.
+	if _parked_main != null and not is_instance_valid(_parked_main):
+		_parked_main = null
+	return _parked_main != null
 
 
 ## Plays the launch animation in the parked Main (sector A) before
@@ -167,12 +228,16 @@ func queue_launch_with_animation() -> void:
 	if not unpark_main_to_tree():
 		swap_scene_to_main()
 		return
-	# ONLY free the outgoing scene — NOT every other root child.
-	# Autoloads (Registry, TechTree, SaveManager itself, …) live as
-	# root children and freeing them detonates the next time any
-	# system tries to call Registry.get_block().
+	# ONLY release the outgoing scene — NOT every other root child.
+	# Autoloads live as root children and freeing them detonates the
+	# next time any system tries to call Registry.get_block().
+	# PlanetSelect is parked (marker: `refresh_for_reentry`) instead
+	# of freed so the next visit reuses the live instance.
 	if outgoing != null and is_instance_valid(outgoing) and outgoing != tree.current_scene:
-		outgoing.queue_free()
+		if outgoing.has_method("refresh_for_reentry"):
+			park_planet_select(outgoing)
+		else:
+			outgoing.queue_free()
 	# Kick the launch animation on Main's LaunchAnimation node, then
 	# swap to the new Main when it finishes.
 	var main_node = tree.current_scene
@@ -214,6 +279,102 @@ func discard_parked_main() -> void:
 	if has_parked_main():
 		_parked_main.queue_free()
 	_parked_main = null
+
+
+## Holds the live PlanetSelect scene while the player is in a sector
+## (or anywhere else). Same idea as `_parked_main`: parking saves the
+## ~second-or-two it costs to instantiate the 3D planet grid + UI on
+## every revisit. The instance lives under us (an autoload) so
+## scene-change calls don't free it.
+var _parked_planet_select: Node = null
+
+
+## Parks a PlanetSelect instance under us instead of letting it free.
+## Caller should remove the node from the tree (or let
+## `change_scene_to_file` swap it out) AFTER this returns. Returns
+## true on success.
+func park_planet_select(ps_node: Node) -> bool:
+	if ps_node == null:
+		return false
+	if _parked_planet_select != null and _parked_planet_select != ps_node:
+		# Stale park — release the previous one so we don't leak it.
+		if is_instance_valid(_parked_planet_select):
+			_parked_planet_select.queue_free()
+		_parked_planet_select = null
+	_parked_planet_select = ps_node
+	# Hide the Node3D subtree pre-emptively so any pre-_ready paint
+	# doesn't leak through.
+	if ps_node is Node3D:
+		(ps_node as Node3D).visible = false
+	var parent := ps_node.get_parent()
+	if parent:
+		parent.remove_child(ps_node)
+	# add_child triggers `_ready` on a fresh instance (boot-time
+	# pre-park path). During _ready PlanetSelect builds a CanvasLayer
+	# HUD with the planet tabs, tech-tree button, etc.; those would
+	# render on top of the main menu unless we hide them AFTER they
+	# exist. The full disable + visibility sweep therefore runs AFTER
+	# add_child, not before.
+	add_child(ps_node)
+	ps_node.process_mode = Node.PROCESS_MODE_DISABLED
+	if ps_node is Node3D:
+		(ps_node as Node3D).visible = false
+	_hide_planet_select_canvas_layers(ps_node)
+	return true
+
+
+## Walks every direct + nested child of a PlanetSelect tree and flips
+## any CanvasLayer it finds to `visible = false`. CanvasLayers render
+## independently of their parent's visibility, so a plain
+## `Node3D.visible = false` on PlanetSelect doesn't hide the HUD.
+func _hide_planet_select_canvas_layers(root: Node) -> void:
+	for c in root.get_children():
+		if c is CanvasLayer:
+			(c as CanvasLayer).visible = false
+		# Nested CanvasLayers (rare but possible — e.g. database UI
+		# popup inside the planet-select HUD) need the same treatment.
+		_hide_planet_select_canvas_layers(c)
+
+
+func has_parked_planet_select() -> bool:
+	# Self-heal a dangling reference if the parked instance was freed
+	# elsewhere — same pattern as `has_parked_main` above.
+	if _parked_planet_select != null and not is_instance_valid(_parked_planet_select):
+		_parked_planet_select = null
+	return _parked_planet_select != null
+
+
+## Re-attaches the parked PlanetSelect back into /root as the current
+## scene. Returns the node on success (so the caller can immediately
+## invoke any refresh-on-reentry method), null on failure.
+func unpark_planet_select_to_tree() -> Node:
+	if not has_parked_planet_select():
+		return null
+	var ps: Node = _parked_planet_select
+	_parked_planet_select = null
+	remove_child(ps)
+	get_tree().root.add_child(ps)
+	get_tree().current_scene = ps
+	ps.process_mode = Node.PROCESS_MODE_INHERIT
+	if ps is Node3D:
+		(ps as Node3D).visible = true
+	_show_planet_select_canvas_layers(ps)
+	return ps
+
+
+## Mirror of `_hide_planet_select_canvas_layers` — restores every
+## CanvasLayer that was hidden by parking.
+func _show_planet_select_canvas_layers(root: Node) -> void:
+	for c in root.get_children():
+		if c is CanvasLayer:
+			(c as CanvasLayer).visible = true
+		_show_planet_select_canvas_layers(c)
+
+
+func discard_parked_planet_select() -> void:
+	if has_parked_planet_select():
+		_parked_planet_select.queue_free()
+	_parked_planet_select = null
 
 ## Set to true when navigating to PlanetSelect from the main menu.
 ## PlanetSelect checks this to show a "Back to Menu" button.
@@ -546,212 +707,24 @@ func _process(delta: float) -> void:
 				main.resources_changed.emit(main.resources)
 
 
-## Check if a sector has fallen while the player was away.
-## Returns a Dictionary: {fallen: bool, time_remaining: float, summary: String}
-func check_sector_status(sector_id: StringName) -> Dictionary:
-	var save_path := SAVE_DIR + str(sector_id) + ".sector.json"
-	var data = _read_json(save_path)
-	if data == null or not data.has("defense_sim"):
-		return {"fallen": false, "time_remaining": INF, "summary": "No data"}
-
-	var sim = data["defense_sim"]
-	var is_stable: bool = sim.get("is_stable", true)
-	if is_stable:
-		return {"fallen": false, "time_remaining": INF, "summary": "Stable"}
-
-	var time_to_fall: float = float(sim.get("time_to_fall", -1.0))
-	if time_to_fall < 0:
-		return {"fallen": false, "time_remaining": INF, "summary": "Stable"}
-
-	var save_timestamp: float = float(sim.get("timestamp", 0.0))
-	var now: float = Time.get_unix_time_from_system()
-	var elapsed: float = now - save_timestamp
-	var remaining: float = time_to_fall - elapsed
-
-	if remaining <= 0:
-		return {"fallen": true, "time_remaining": 0.0, "summary": "SECTOR LOST"}
-	else:
-		return {
-			"fallen": false,
-			"time_remaining": remaining,
-			"summary": SectorDefenseSim._format_time(remaining) + " remaining",
-		}
 
 
 # =========================
 # SAVE: FULL GAME STATE
 # =========================
 
-## Saves everything: tiles, buildings, resources, drone position.
-func save_game(save_name: String) -> bool:
-	var main = get_node_or_null("/root/Main")
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
-	var drone = get_node_or_null("/root/Main/PlayerDrone")
-	if main == null or terrain == null:
-		push_warning("SaveManager: Can't find Main or TerrainSystem!")
-		return false
-
-	var data := {
-		"version": 2,
-		"type": "save",
-		"save_name": save_name,
-		"grid_width": main.GRID_WIDTH,
-		"grid_height": main.GRID_HEIGHT,
-
-		# Tiles (separate layers so overlapping tiles are preserved)
-		"floor_tiles": _serialize_tiles(terrain.floor_tiles),
-		"wall_tiles": _serialize_tiles(terrain.wall_tiles),
-		"ore_tiles": _serialize_tiles(terrain.ore_tiles),
-		"tile_health": _serialize_health(terrain.tile_health),
-
-		# Buildings
-		"buildings": _serialize_buildings(main.placed_buildings),
-		"building_health": _serialize_health(main.building_health),
-		"building_rotation": _serialize_rotation(main.building_rotation),
-		"building_factions": _serialize_factions(main.building_factions),
-
-		# Resources
-		"resources": _serialize_resources(main.resources),
-		"ferox_resources": _serialize_resources(main.ferox_resources),
-		"ferox_rebuild_queue": _serialize_rebuild_queue(main.ferox_rebuild_queue),
-
-		# Core
-		"core_position": _vec2i_to_str(main.core_position),
-
-		# Drone
-		"drone_position": _vec2_to_array(drone.position) if drone else [0, 0],
-		"drone_health": drone.health if drone else 100.0,
-	}
-
-	return _write_json(SAVES_DIR + save_name + ".save.json", data)
 
 
 # =========================
 # LOAD: FULL GAME STATE
 # =========================
 
-## Loads a complete game state.
-func load_game(save_name: String) -> bool:
-	var main = get_node_or_null("/root/Main")
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
-	var drone = get_node_or_null("/root/Main/PlayerDrone")
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-	if main == null or terrain == null:
-		push_warning("SaveManager: Can't find required nodes!")
-		return false
-
-	var data = _read_json(SAVES_DIR + save_name + ".save.json")
-	if data == null:
-		return false
-
-	if data.get("type") != "save":
-		push_warning("SaveManager: File is not a full save!")
-		return false
-
-	# --- Clear everything ---
-	terrain.floor_tiles.clear()
-	terrain.wall_tiles.clear()
-	terrain.ore_tiles.clear()
-	terrain.tile_health.clear()
-	terrain.multi_tile_origins.clear()
-	main.placed_buildings.clear()
-	main.building_health.clear()
-	main.building_rotation.clear()
-	main.building_factions.clear()
-
-	# --- Restore map size ---
-	if data.has("grid_width"):
-		main.GRID_WIDTH = int(data["grid_width"])
-	if data.has("grid_height"):
-		main.GRID_HEIGHT = int(data["grid_height"])
-
-	# --- Load tiles ---
-	var version = data.get("version", 1)
-	if version >= 2:
-		_deserialize_layer(terrain.floor_tiles, data.get("floor_tiles", {}))
-		_deserialize_layer(terrain.wall_tiles, data.get("wall_tiles", {}))
-		_deserialize_layer(terrain.ore_tiles, data.get("ore_tiles", {}))
-	else:
-		_deserialize_tiles_layered(terrain, data.get("tiles", {}))
-	_deserialize_tile_health(terrain, data.get("tile_health", {}))
-	_rebuild_multi_tile_origins(terrain)
-
-	# --- Load buildings ---
-	_deserialize_buildings(main, data.get("buildings", {}))
-	_deserialize_building_health(main, data.get("building_health", {}))
-	_deserialize_building_rotation(main, data.get("building_rotation", {}))
-	_deserialize_building_factions(main, data.get("building_factions", {}))
-
-	# --- Load resources ---
-	var saved_resources = data.get("resources", {})
-	for key in saved_resources:
-		main.resources[StringName(key)] = int(saved_resources[key])
-	main.resources_changed.emit(main.resources)
-	# Sync event-only material unlocks (mat_steel, mat_iron, …) against
-	# the player's current stockpile. Without this, loading a save where
-	# you already produced steel leaves the `mat_steel` node locked
-	# because the original `item_produced` signal fired pre-load and
-	# every dependent (Unit Refabricator, etc.) stays locked behind a
-	# dependency it visibly satisfies.
-	TechTree.sync_event_unlocks_from_resources(main.resources)
-
-	# --- Load ferox resources ---
-	var saved_ferox = data.get("ferox_resources", {})
-	for key in saved_ferox:
-		main.ferox_resources[StringName(key)] = int(saved_ferox[key])
-	main.ferox_resources_changed.emit(main.ferox_resources)
-
-	# --- Load ferox rebuild queue ---
-	main.ferox_rebuild_queue = _deserialize_rebuild_queue(data.get("ferox_rebuild_queue", []))
-
-	# --- Load core position ---
-	if data.has("core_position"):
-		main.core_position = _str_to_vec2i(data["core_position"])
-
-	# --- Load drone ---
-	if drone and data.has("drone_position"):
-		var pos = data["drone_position"]
-		drone.position = Vector2(pos[0], pos[1])
-		drone.health = data.get("drone_health", drone.max_health)
-
-	# --- Rebuild pathfinding ---
-	# Both the main-thread astar AND the threaded path_worker need a
-	# fresh solids list — the worker was started at unit_manager._ready
-	# with whatever terrain existed at that moment (often empty, before
-	# the sector load populated walls / floor tiles), so leaving it
-	# stale causes async paths to walk right across walls into void.
-	if unit_mgr:
-		unit_mgr._setup_astar()
-		unit_mgr._setup_path_worker()
-
-	# --- Redraw ---
-	# Bulk-loaded terrain bypassed the `place_tile` dirty hooks, so any
-	# rebuild triggered between map-clear and now ran against an empty
-	# floor_tiles set and latched _water_depth_dirty / _floor_edge_dirty
-	# to false. Re-arm them so the next draw pass actually bakes the
-	# gradient meshes against the real tile set.
-	terrain._water_depth_dirty = true
-	terrain._floor_edge_dirty = true
-	terrain.walls_changed.emit()
-	terrain.queue_redraw()
-	if building_sys:
-		building_sys.queue_redraw()
-
-	var total_tiles: int = terrain.floor_tiles.size() + terrain.wall_tiles.size() + terrain.ore_tiles.size()
-	print("SaveManager: Game '%s' loaded (%d tiles, %d buildings)" % [
-		save_name, total_tiles, main.placed_buildings.size()
-	])
-	return true
 
 
 # =========================
 # LIST SAVES
 # =========================
 
-## Returns an array of available full save names.
-func list_saves() -> PackedStringArray:
-	return _list_files(SAVES_DIR, ".save.json")
 
 
 ## Returns an array of available sector names.
@@ -780,13 +753,6 @@ func _list_files(dir_path: String, suffix: String) -> PackedStringArray:
 # DELETE
 # =========================
 
-## Deletes a full save file.
-func delete_save(save_name: String) -> bool:
-	var path = SAVES_DIR + save_name + ".save.json"
-	if FileAccess.file_exists(path):
-		DirAccess.remove_absolute(path)
-		return true
-	return false
 
 
 ## Deletes a sector file.
@@ -1937,11 +1903,13 @@ func load_sector_from_path(path: String) -> bool:
 			building_sys.archive_holdings[_str_to_vec2i(key)] = StringName(data["archive_holdings"][key])
 
 	# --- Restore archive decoder state ---
-	if building_sys and "archive_decoder_state" in building_sys and data.has("archive_decoder_state") and data["archive_decoder_state"] is Dictionary:
-		building_sys.archive_decoder_state.clear()
+	# State now lives on the ArchiveDecoderSystem sibling node.
+	var ad_sys_load = get_node_or_null("/root/Main/ArchiveDecoderSystem")
+	if ad_sys_load and "states" in ad_sys_load and data.has("archive_decoder_state") and data["archive_decoder_state"] is Dictionary:
+		ad_sys_load.states.clear()
 		for key in data["archive_decoder_state"]:
 			var saved_a = data["archive_decoder_state"][key]
-			building_sys.archive_decoder_state[_str_to_vec2i(key)] = {
+			ad_sys_load.states[_str_to_vec2i(key)] = {
 				"progress": float(saved_a.get("progress", 0.0)),
 				"archive_id": StringName(saved_a.get("archive_id", "")),
 				"scanner": Vector2i(-9999, -9999),
@@ -2070,8 +2038,6 @@ func _str_to_vec2i(s: String) -> Vector2i:
 	var parts = s.split(",")
 	return Vector2i(int(parts[0]), int(parts[1]))
 
-func _vec2_to_array(v: Vector2) -> Array:
-	return [v.x, v.y]
 
 
 func _serialize_tiles(tiles: Dictionary) -> Dictionary:
@@ -2095,47 +2061,12 @@ func _serialize_health(health_dict: Dictionary) -> Dictionary:
 	return result
 
 
-func _serialize_resources(resources: Dictionary) -> Dictionary:
-	var result := {}
-	for key in resources:
-		result[String(key)] = resources[key]
-	return result
 
 
-func _serialize_rebuild_queue(queue: Array) -> Array:
-	var result := []
-	for entry in queue:
-		result.append({
-			"block_id": String(entry["block_id"]),
-			"grid_pos": _vec2i_to_str(entry["grid_pos"]),
-			"rotation": entry["rotation"],
-		})
-	return result
 
 
-func _deserialize_rebuild_queue(arr: Array) -> Array:
-	var result := []
-	for entry in arr:
-		result.append({
-			"block_id": StringName(entry.get("block_id", "")),
-			"grid_pos": _str_to_vec2i(entry.get("grid_pos", "0,0")),
-			"rotation": int(entry.get("rotation", 0)),
-		})
-	return result
 
 
-func _deserialize_tiles(terrain: Node2D, tiles_data: Dictionary) -> void:
-	for pos_str in tiles_data:
-		var grid_pos = _str_to_vec2i(pos_str)
-		var tile_id = StringName(tiles_data[pos_str])
-		terrain.placed_tiles[grid_pos] = tile_id
-
-		# Set wall tiles as solid in pathfinding
-		var data = Registry.get_tile(tile_id)
-		if data and data.is_wall():
-			var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-			if unit_mgr and unit_mgr.astar:
-				unit_mgr.astar.set_point_solid(grid_pos, true)
 
 
 ## Deserializes a single tile layer dictionary from save data.
@@ -2144,26 +2075,8 @@ func _deserialize_layer(layer_dict: Dictionary, data: Dictionary) -> void:
 		layer_dict[_str_to_vec2i(pos_str)] = StringName(data[pos_str])
 
 
-## Deserializes v1 merged tiles into separate layers by looking up tile category.
-func _deserialize_tiles_layered(terrain: Node2D, tiles_data: Dictionary) -> void:
-	for pos_str in tiles_data:
-		var grid_pos = _str_to_vec2i(pos_str)
-		var tile_id = StringName(tiles_data[pos_str])
-		var tile_data = Registry.get_tile(tile_id)
-		if tile_data == null:
-			continue
-		if tile_data.is_ore():
-			terrain.ore_tiles[grid_pos] = tile_id
-		elif tile_data.is_wall():
-			terrain.wall_tiles[grid_pos] = tile_id
-		else:
-			terrain.floor_tiles[grid_pos] = tile_id
 
 
-func _deserialize_tile_health(terrain: Node2D, health_data: Dictionary) -> void:
-	for pos_str in health_data:
-		var grid_pos = _str_to_vec2i(pos_str)
-		terrain.tile_health[grid_pos] = float(health_data[pos_str])
 
 
 func _deserialize_buildings(main: Node2D, buildings_data: Dictionary) -> void:
@@ -2222,12 +2135,13 @@ func _serialize_archive_holdings() -> Dictionary:
 
 
 func _serialize_archive_decoder_state() -> Dictionary:
-	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
-	if building_sys == null or not "archive_decoder_state" in building_sys:
+	# State moved to the ArchiveDecoderSystem sibling node.
+	var ad_sys = get_node_or_null("/root/Main/ArchiveDecoderSystem")
+	if ad_sys == null or not "states" in ad_sys:
 		return {}
 	var result := {}
-	for grid_pos in building_sys.archive_decoder_state:
-		var s = building_sys.archive_decoder_state[grid_pos]
+	for grid_pos in ad_sys.states:
+		var s = ad_sys.states[grid_pos]
 		result[_vec2i_to_str(grid_pos)] = {
 			"progress": float(s.get("progress", 0.0)),
 			"archive_id": String(s.get("archive_id", "")),
@@ -2433,10 +2347,6 @@ func save_global_hints_file(hints: Array) -> bool:
 	return true
 
 
-## Returns "pending", "active", or "dismissed" for a global hint id —
-## same vocabulary SectorScript uses for per-sector hint runtime.
-func get_global_hint_state(id: String) -> String:
-	return String(global_hints_runtime.get(id, {}).get("state", "pending"))
 
 
 ## Records a global hint's runtime state. Persists to disk via

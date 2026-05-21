@@ -550,27 +550,6 @@ func is_input_locked() -> bool:
 			return false
 
 
-func _resolve_follow_target() -> Vector2:
-	# Mirrors camera_controller's follow priority: controlled entity,
-	# then PlayerDrone. Returns Vector2.INF when there's nothing valid
-	# to follow yet.
-	var unit_mgr = main.get_node_or_null("UnitManager")
-	if unit_mgr and "controlled_entity" in unit_mgr and unit_mgr.controlled_entity != null:
-		if "controlled_type" in unit_mgr:
-			if unit_mgr.controlled_type == "unit":
-				var u = unit_mgr.controlled_entity
-				if is_instance_valid(u):
-					return u.position
-			elif unit_mgr.controlled_type == "turret":
-				var grid_pos: Vector2i = unit_mgr.controlled_entity
-				return main.grid_to_world(grid_pos) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
-	var drone = main.get_node_or_null("PlayerDrone")
-	if drone and is_instance_valid(drone):
-		return drone.position
-	return Vector2.INF
-
-
-# ----- Camera control -----
 
 func _capture_camera() -> void:
 	_cam = get_viewport().get_camera_2d()

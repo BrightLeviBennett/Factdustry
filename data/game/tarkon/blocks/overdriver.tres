@@ -1,18 +1,24 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dt44pwunncxsn"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dakwy4mhgwt5a" path="res://textures/blocks/assist/Overdriver.png" id="1_hiwrh"]
 
 [resource]
 script = ExtResource("1")
 id = &"overdriver"
 display_name = "Overdriver"
 description = "Boosts production speed of adjacent buildings."
+icon = ExtResource("1_hiwrh")
 category = 7
-color = Color(0.9, 0.7, 0.2, 1)
-max_health = 470.0
-build_cost = { "copper": 350, "silicon": 150 }
-build_time = 3.0
 tags = PackedStringArray("support", "overdrive")
+color = Color(0.9, 0.7, 0.2, 1)
+top_sprite = ExtResource("1_hiwrh")
+max_health = 470.0
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
+build_time = 3.0
+electrical_power_use = 60.0
 overdrive_multiplier = 2.25
 overdrive_radius = 3.0
-electrical_power_use = 60.0

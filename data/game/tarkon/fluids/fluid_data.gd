@@ -67,7 +67,3 @@ extends Resource
 # =========================
 # HELPER METHODS
 # =========================
-
-## Returns the effective flow speed (inverse of viscosity).
-func get_flow_speed() -> float:
-	return 1.0 / max(viscosity, 0.01)

@@ -257,44 +257,6 @@ func _poll_threaded_loads() -> void:
 # SYNCHRONOUS LOADING (for essential resources)
 # =========================
 
-func _load_all_resources(path: String, dict: Dictionary, list: Array) -> void:
-	var dir = DirAccess.open(path)
-	if dir == null:
-		push_warning("Registry: Could not open directory: " + path)
-		return
-
-	dir.list_dir_begin()
-	var file_name = dir.get_next()
-	var seen := {}
-
-	while file_name != "":
-		var resource_path := ""
-		if file_name.ends_with(".tres"):
-			resource_path = path + file_name
-		elif file_name.ends_with(".res"):
-			resource_path = path + file_name.get_basename() + ".tres"
-		elif file_name.ends_with(".tres.remap"):
-			resource_path = path + file_name.trim_suffix(".remap")
-		elif file_name.ends_with(".res.remap"):
-			resource_path = path + file_name.trim_suffix(".res.remap") + ".tres"
-
-		if resource_path != "" and not seen.has(resource_path):
-			seen[resource_path] = true
-			var resource = load(resource_path)
-
-			if resource and "id" in resource:
-				var id = resource.id
-				if id != &"":
-					dict[id] = resource
-					list.append(resource)
-				else:
-					push_warning("Registry: Resource has empty id: " + resource_path)
-			else:
-				push_warning("Registry: Could not load or invalid resource: " + resource_path)
-
-		file_name = dir.get_next()
-
-	dir.list_dir_end()
 
 
 # =========================
@@ -380,20 +342,8 @@ func get_blocks_by_category(category: BlockData.BlockCategory) -> Array[BlockDat
 	return result
 
 
-func get_units_by_team(team: UnitData.Team) -> Array[UnitData]:
-	var result: Array[UnitData] = []
-	for unit in units_list:
-		if unit.team == team:
-			result.append(unit)
-	return result
 
 
-func get_items_by_category(category: ItemData.ItemCategory) -> Array[ItemData]:
-	var result: Array[ItemData] = []
-	for item in items_list:
-		if item.category == category:
-			result.append(item)
-	return result
 
 
 
@@ -406,28 +356,12 @@ func get_tiles_by_category(category: TerrainTileData.TileCategory) -> Array[Terr
 	return result
 
 
-func get_floor_tiles() -> Array[TerrainTileData]:
-	return get_tiles_by_category(TerrainTileData.TileCategory.FLOOR)
 
 
-func get_wall_tiles() -> Array[TerrainTileData]:
-	return get_tiles_by_category(TerrainTileData.TileCategory.WALL)
 
 
-func get_debuffs() -> Array[StatusEffectData]:
-	var result: Array[StatusEffectData] = []
-	for effect in status_effects_list:
-		if effect.is_negative():
-			result.append(effect)
-	return result
 
 
-func get_buffs() -> Array[StatusEffectData]:
-	var result: Array[StatusEffectData] = []
-	for effect in status_effects_list:
-		if not effect.is_negative():
-			result.append(effect)
-	return result
 
 
 # =========================

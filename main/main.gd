@@ -295,9 +295,9 @@ var _auto_paused_by_focus := false
 # PlayerDrone, BuildingSystem, SectorScript) which call main.<signal>.emit(...).
 # GDScript's "unused_signal" warning only inspects the declaring class, so we
 # suppress it here since the cross-module emits are legitimate.
-signal resources_changed(resources: Dictionary)
+@warning_ignore("unused_signal") signal resources_changed(resources: Dictionary)
 @warning_ignore("unused_signal") signal ferox_resources_changed(ferox_resources: Dictionary)
-signal building_selected(block_id: StringName)
+@warning_ignore("unused_signal") signal building_selected(block_id: StringName)
 signal building_placed(block_id: StringName, grid_pos: Vector2i)
 signal building_destroyed(grid_pos: Vector2i)
 ## Fires only when a building is destroyed by enemy fire (HP-driven
@@ -352,6 +352,23 @@ func _ready() -> void:
 	# Allow Main to process input even while paused (for space to unpause)
 	process_mode = Node.PROCESS_MODE_ALWAYS
 
+	# Hide everything until _ready completes its async init. The two
+	# `await get_tree().process_frame` calls below let the engine render
+	# several frames while the drone is still at scene-default (0, 0)
+	# and the camera hasn't been snapped to the core yet — that's the
+	# "shardling on black for a few seconds before the landing
+	# animation" the player sees. Setting `visible = false` keeps every
+	# Node2D descendant out of the render until we've placed the core,
+	# moved the drone, snapped the camera, and kicked the landing
+	# animation. Also walk children to flip any CanvasLayer (HUD,
+	# overlays) off — those render independently of parent visibility.
+	visible = false
+	var _hidden_canvas_layers: Array[CanvasLayer] = []
+	for c in get_children():
+		if c is CanvasLayer and (c as CanvasLayer).visible:
+			_hidden_canvas_layers.append(c)
+			(c as CanvasLayer).visible = false
+
 	# Wait for Registry ESSENTIALS (items, blocks, units, fluids, tiles) only.
 	# Non-essential groups (status_effects, sectors, planets) keep loading in the
 	# background after the sector is already playable.
@@ -372,6 +389,67 @@ func _ready() -> void:
 		wm.set_script(wave_mgr_scene)
 		wm.name = "WaveManager"
 		add_child(wm)
+
+	# Gameplay subsystems previously hard-wired in Main.tscn. Kept as
+	# code-instantiated siblings so the scene file only declares the
+	# core simulation surface — anything that's "another script that
+	# walks placed_buildings each frame" lives here instead. Names
+	# match the original .tscn slots so every `get_node("…")` lookup
+	# elsewhere keeps resolving.
+	var nuc_script = load("res://main/nuclear_reactor_system.gd")
+	if nuc_script:
+		var nuc = Node.new()
+		nuc.set_script(nuc_script)
+		nuc.name = "NuclearReactorSystem"
+		add_child(nuc)
+	var wt_script = load("res://main/watchtower_system.gd")
+	if wt_script:
+		var wt = Node.new()
+		wt.set_script(wt_script)
+		wt.name = "WatchtowerSystem"
+		add_child(wt)
+	var lp_script = load("res://main/launchpad_system.gd")
+	if lp_script:
+		var lp = Node.new()
+		lp.set_script(lp_script)
+		lp.name = "LaunchpadSystem"
+		add_child(lp)
+	var ad_script = load("res://main/archive_decoder_system.gd")
+	if ad_script:
+		var ad = Node.new()
+		ad.set_script(ad_script)
+		ad.name = "ArchiveDecoderSystem"
+		add_child(ad)
+	var schem_script = load("res://main/schematic_system.gd")
+	if schem_script:
+		var schem = Node.new()
+		schem.set_script(schem_script)
+		schem.name = "SchematicSystem"
+		add_child(schem)
+	var heads_script = load("res://main/spinner_head_system.gd")
+	if heads_script:
+		var heads = Node.new()
+		heads.set_script(heads_script)
+		heads.name = "SpinnerHeadSystem"
+		add_child(heads)
+	var ui_script = load("res://main/world_ui_system.gd")
+	if ui_script:
+		var ui = Node.new()
+		ui.set_script(ui_script)
+		ui.name = "WorldUiSystem"
+		add_child(ui)
+	var crane_script = load("res://main/crane_system.gd")
+	if crane_script:
+		var crane = Node.new()
+		crane.set_script(crane_script)
+		crane.name = "CraneSystem"
+		add_child(crane)
+	var shield_script = load("res://main/shield_system.gd")
+	if shield_script:
+		var shield = Node2D.new()
+		shield.set_script(shield_script)
+		shield.name = "ShieldSystem"
+		add_child(shield)
 
 	# Polish layer: sound, camera shake / hit flash, particle overlay.
 	# Each is a sibling of every other system; the building / unit /
@@ -537,6 +615,16 @@ func _ready() -> void:
 	# Consume the flag either way so the next time we re-enter Main
 	# without a fresh launch doesn't accidentally inherit it.
 	SaveManager.pending_landing_animation = false
+
+	# Reveal the world now that everything's positioned + the landing
+	# animation (if any) has been kicked. From this point on the player
+	# sees either the landing-animation overlay drawing on top of the
+	# world, or — for continue / direct-PLAY paths — the world already
+	# framed on the drone's core. No more shardling-at-(0,0) gap.
+	visible = true
+	for c in _hidden_canvas_layers:
+		if is_instance_valid(c):
+			c.visible = true
 
 	# Launchpad pick-mode result: planet_select wrote {anchor, sector_id}
 	# back here after the player picked a destination. Forward it to the
@@ -960,23 +1048,6 @@ func get_lumina_core_anchors() -> Array:
 	return anchors
 
 
-## Returns the LUMINA core anchor closest to `world_pos`, or Vector2i(-1, -1)
-## if no LUMINA core exists. Used for drone respawn targeting.
-func get_nearest_lumina_core_anchor(world_pos: Vector2) -> Vector2i:
-	var best := Vector2i(-1, -1)
-	var best_dist_sq := INF
-	for anchor in get_lumina_core_anchors():
-		var data = Registry.get_block(placed_buildings[anchor])
-		var sz: Vector2i = data.grid_size if data else Vector2i(3, 3)
-		var center := Vector2(
-			(anchor.x + sz.x / 2.0) * GRID_SIZE,
-			(anchor.y + sz.y / 2.0) * GRID_SIZE
-		)
-		var d_sq: float = world_pos.distance_squared_to(center)
-		if d_sq < best_dist_sq:
-			best_dist_sq = d_sq
-			best = anchor
-	return best
 
 
 ## Returns the production multiplier applied to a block at `grid_pos`
@@ -1146,12 +1217,6 @@ func clamp_resources_to_cap() -> void:
 		resources_changed.emit(resources)
 
 
-## Returns how much room is left for a specific resource.
-func get_resource_room(item_id: StringName) -> int:
-	var cap: int = get_storage_cap_per_resource()
-	if cap <= 0:
-		return 999999
-	return maxi(0, cap - resources.get(item_id, 0))
 
 
 ## Returns build progress as 0.0–1.0 (1.0 = fully built).
@@ -1220,32 +1285,6 @@ func is_belt_conveyance_blocked(grid_pos: Vector2i) -> bool:
 	return false
 
 
-## Places a building directly without cost/range checks, assigning a specific faction.
-## Used by sector loading and the map editor.
-func place_building_with_faction(grid_pos: Vector2i, block_id: StringName, rotation: int, faction: int) -> bool:
-	var data = Registry.get_block(block_id)
-	if data == null:
-		return false
-
-	for x in range(data.grid_size.x):
-		for y in range(data.grid_size.y):
-			var tile_pos = grid_pos + Vector2i(x, y)
-			if not is_within_bounds(tile_pos):
-				return false
-
-	# Health is tracked per-building (anchor only) — multi-tile buildings
-	# share a single HP entry instead of one per tile.
-	building_health[grid_pos] = data.max_health
-	for x in range(data.grid_size.x):
-		for y in range(data.grid_size.y):
-			var tile_pos = grid_pos + Vector2i(x, y)
-			placed_buildings[tile_pos] = block_id
-			building_rotation[tile_pos] = rotation
-			building_origins[tile_pos] = grid_pos
-			building_factions[tile_pos] = faction
-
-	building_placed.emit(block_id, grid_pos)
-	return true
 
 
 ## Returns a swap-group identifier for a block, or &"" if the block isn't
@@ -1258,7 +1297,7 @@ func place_building_with_faction(grid_pos: Vector2i, block_id: StringName, rotat
 ##                    routers, sorters, bridges, overflow/underflow). Belts
 ##                    and ducts share a group so either can swap onto the
 ##                    other in place.
-##   &"conduit"     — fluid conduits and their variants
+##   &"pipe"        — fluid pipes and their variants
 ##   &"payload"     — payload transport parts
 ##   &"freight"     — freight transport parts
 ##   &"shaft_power" — shaft, gearbox, overhead belt (legacy power-line group)
@@ -1276,11 +1315,11 @@ func _get_swap_group(data: BlockData) -> StringName:
 			or id_str == "overflow_duct" or id_str == "underflow_duct" \
 			or id_str == "inverted_duct_sorter":
 		return &"belt_duct"
-	# Fluid conduits
-	if id_str == "fluid_conduit" or id_str.begins_with("conduit_") \
-			or id_str == "overflow_conduit" or id_str == "underflow_conduit" \
-			or id_str == "inverted_conduit_sorter":
-		return &"conduit"
+	# Fluid pipes
+	if id_str == "fluid_pipe" or id_str.begins_with("pipe_") \
+			or id_str == "overflow_pipe" or id_str == "underflow_pipe" \
+			or id_str == "inverted_pipe_sorter":
+		return &"pipe"
 	# Payload transport
 	if id_str == "payload_conveyor" or id_str == "payload_router" \
 			or id_str == "payload_loader" or id_str == "payload_unloader":
@@ -1527,7 +1566,7 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 			return true
 
 	# --- Same-group swap: placing a part of one of the swap families
-	# (belt / duct / conduit / payload / freight / shaft / wall) on top
+	# (belt / duct / pipe / payload / freight / shaft / wall) on top
 	# of another member of the same family replaces the existing block.
 	# Footprints must match — a 1×1 belt overlay is fine because every
 	# belt part is 1×1, and walls swap as long as the new wall has the
@@ -2096,8 +2135,9 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 	# to a halt when grabbed; on drop, the snapshot restores so the
 	# placed block resumes from the decayed angle / velocity.
 	var spin_state_snapshot: Dictionary = {}
-	if building_sys and building_sys.has_method("_capture_spin_state"):
-		spin_state_snapshot = building_sys._capture_spin_state(anchor)
+	var heads_sys = get_node_or_null("SpinnerHeadSystem")
+	if heads_sys and heads_sys.has_method("capture_spin_state"):
+		spin_state_snapshot = heads_sys.capture_spin_state(anchor)
 
 	# Capture turret aim angles so the held visual freezes the heads
 	# at exactly where they were pointing the moment the crane closed —
@@ -2198,8 +2238,9 @@ func pickup_building(grid_pos: Vector2i) -> Dictionary:
 		building_sys.crane_states.erase(anchor)
 	if building_sys and "archive_holdings" in building_sys:
 		building_sys.archive_holdings.erase(anchor)
-	if building_sys and "archive_decoder_state" in building_sys:
-		building_sys.archive_decoder_state.erase(anchor)
+	var ad_sys_main = get_node_or_null("ArchiveDecoderSystem")
+	if ad_sys_main and ad_sys_main.has_method("unregister"):
+		ad_sys_main.unregister(anchor)
 
 	# Clean up conveyor items on this building's tiles
 	if logistics:
@@ -2397,9 +2438,9 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	# instead of a snap.
 	var spin_snap: Dictionary = payload.get("head_spin_state", {})
 	if not spin_snap.is_empty():
-		var building_sys_spin = _building_sys_ref()
-		if building_sys_spin and building_sys_spin.has_method("_restore_spin_state"):
-			building_sys_spin._restore_spin_state(grid_pos, spin_snap)
+		var heads_sys_restore = get_node_or_null("SpinnerHeadSystem")
+		if heads_sys_restore and heads_sys_restore.has_method("restore_spin_state"):
+			heads_sys_restore.restore_spin_state(grid_pos, spin_snap)
 
 	# Restore the block's internal-battery charge that was draining
 	# while the block was carried. Power-only blocks don't ship a
@@ -2416,13 +2457,6 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	return true
 
 
-## Returns the deconstruct progress (0.0 = just started, 1.0 = done) or -1.0 if not deconstructing.
-func get_deconstruct_pct(grid_pos: Vector2i) -> float:
-	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
-	if not building_deconstruct_progress.has(anchor):
-		return -1.0
-	var entry: Dictionary = building_deconstruct_progress[anchor]
-	return clampf(entry["progress"] / entry["build_time"], 0.0, 1.0)
 
 
 # Completely removes a building from the grid.
@@ -2789,11 +2823,35 @@ func _shardling_node_name(anchor: Vector2i) -> String:
 	return "AIShardling_%d_%d" % [anchor.x, anchor.y]
 
 
+func _ferox_shardling_node_name(anchor: Vector2i) -> String:
+	return "FeroxShardling_%d_%d" % [anchor.x, anchor.y]
+
+
 func _is_primary_core_anchor(anchor: Vector2i) -> bool:
 	# The drone the player controls anchors on `core_position` (set
 	# by place_core in _ready). Any other LUMINA core is treated as
 	# an AI shardling host.
 	return anchor == core_position
+
+
+## Returns the anchors of every active FEROX core. Mirrors
+## `get_lumina_core_anchors` but for the enemy faction — used by the
+## FEROX shardling system so the enemy gets a small auto-rebuilder /
+## auto-healer drone per core, similar to the player's secondary cores.
+func get_ferox_core_anchors() -> Array:
+	var anchors: Array = []
+	for grid_pos in placed_buildings:
+		if building_origins.get(grid_pos, grid_pos) != grid_pos:
+			continue
+		if get_building_faction(grid_pos) != Faction.FEROX:
+			continue
+		var data = Registry.get_block(placed_buildings[grid_pos])
+		if data == null or not data.tags.has("core"):
+			continue
+		if is_building_inactive(grid_pos):
+			continue
+		anchors.append(grid_pos)
+	return anchors
 
 
 func _spawn_ai_shardling_for_core(anchor: Vector2i) -> void:
@@ -2818,8 +2876,37 @@ func _spawn_ai_shardling_for_core(anchor: Vector2i) -> void:
 	add_child(node)
 
 
+## Spawns a FEROX-controlled shardling at the given enemy core. Same
+## script as the player AI shardling but with `ferox_controlled = true`
+## so it targets the FEROX faction for healing / rebuilding and treats
+## LUMINA units / buildings as hostile.
+func _spawn_ferox_shardling_for_core(anchor: Vector2i) -> void:
+	var node_name: String = _ferox_shardling_node_name(anchor)
+	if has_node(node_name):
+		return
+	if _ai_shardling_script == null:
+		_ai_shardling_script = load("res://main/player_drone.gd")
+	if _ai_shardling_script == null:
+		push_warning("Main: could not load player_drone.gd for FEROX shardling.")
+		return
+	var node := Node2D.new()
+	node.name = node_name
+	node.set_script(_ai_shardling_script)
+	node.set("ai_controlled", true)
+	node.set("ferox_controlled", true)
+	node.set("spawn_core_anchor", anchor)
+	add_child(node)
+
+
 func _despawn_ai_shardling_for_core(anchor: Vector2i) -> void:
 	var node_name: String = _shardling_node_name(anchor)
+	var node := get_node_or_null(node_name)
+	if node:
+		node.queue_free()
+
+
+func _despawn_ferox_shardling_for_core(anchor: Vector2i) -> void:
+	var node_name: String = _ferox_shardling_node_name(anchor)
 	var node := get_node_or_null(node_name)
 	if node:
 		node.queue_free()
@@ -2829,20 +2916,26 @@ func _sync_ai_shardlings() -> void:
 	# Spawn missing AI siblings for every non-primary core.
 	for anchor in get_lumina_core_anchors():
 		_spawn_ai_shardling_for_core(anchor)
+	# And one FEROX shardling per enemy core.
+	for anchor in get_ferox_core_anchors():
+		_spawn_ferox_shardling_for_core(anchor)
 
 
 func _on_building_completed_for_shardlings(block_id: StringName, anchor: Vector2i) -> void:
 	var data = Registry.get_block(block_id)
 	if data == null or not data.tags.has("core"):
 		return
-	if get_building_faction(anchor) != Faction.LUMINA:
-		return
-	_spawn_ai_shardling_for_core(anchor)
+	var faction: int = get_building_faction(anchor)
+	if faction == Faction.LUMINA:
+		_spawn_ai_shardling_for_core(anchor)
+	elif faction == Faction.FEROX:
+		_spawn_ferox_shardling_for_core(anchor)
 
 
 func _on_building_destroyed_for_shardlings(anchor: Vector2i) -> void:
 	# When a core is removed we don't know its block id any more (the
 	# entry has already been cleared from placed_buildings by this
-	# point in the signal flow), so just attempt the despawn — the
-	# helper is a no-op when no matching child exists.
+	# point in the signal flow), so just attempt both despawns — the
+	# helpers are no-ops when no matching child exists.
 	_despawn_ai_shardling_for_core(anchor)
+	_despawn_ferox_shardling_for_core(anchor)

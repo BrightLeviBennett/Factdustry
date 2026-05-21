@@ -1061,7 +1061,7 @@ func _show_unit_details(unit: UnitData) -> void:
 	# Mindustry-style "Produced By" / "Upgraded By" icon grids.
 	var produced_by: Array[BlockData] = []
 	var upgraded_by: Array[BlockData] = []
-	var upgrades_into: Array[UnitData] = []
+	var _upgrades_into: Array[UnitData] = []
 	for b in Registry.blocks_list:
 		if b == null:
 			continue
@@ -1209,16 +1209,6 @@ func _show_sector_details(sector: SectorData) -> void:
 # UI HELPER WIDGETS
 # =========================
 
-func _add_header(text: String, color: Color) -> void:
-	var label = Label.new()
-	label.text = text
-	label.add_theme_font_size_override("font_size", 20)
-	label.add_theme_color_override("font_color", color)
-	_detail_container.add_child(label)
-
-
-## Mindustry-style header: icon + display name (colored) + id subtitle
-## on the second line. Used by every entry type that has an icon.
 func _add_header_with_icon(entry: Resource, color: Color) -> void:
 	var hbox = HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
@@ -1462,38 +1452,8 @@ func _add_ammo_entry(turret: BlockData, ammo: AmmoType) -> void:
 	_detail_container.add_child(spacer)
 
 
-func _add_modifier_stat(label_text: String, modifier: float) -> void:
-	var pct = (modifier - 1.0) * 100.0
-	var prefix = "+" if pct > 0 else ""
-	var color = Color(0.4, 1.0, 0.4) if pct > 0 else Color(1.0, 0.4, 0.4)
-	if label_text == "Defense":
-		color = Color(1.0, 0.4, 0.4) if pct > 0 else Color(0.4, 1.0, 0.4)
-	_add_stat(label_text, "%s%.0f%%" % [prefix, pct], color)
 
 
-func _add_color_swatch(label_text: String, swatch_color: Color) -> void:
-	var hbox = HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 8)
-
-	var label = Label.new()
-	label.text = label_text + ":"
-	label.add_theme_font_size_override("font_size", 14)
-	label.add_theme_color_override("font_color", dim_text_color)
-	label.custom_minimum_size.x = 140
-	hbox.add_child(label)
-
-	var swatch = ColorRect.new()
-	swatch.color = swatch_color
-	swatch.custom_minimum_size = Vector2(24, 14)
-	hbox.add_child(swatch)
-
-	var hex = Label.new()
-	hex.text = swatch_color.to_html(false)
-	hex.add_theme_font_size_override("font_size", 12)
-	hex.add_theme_color_override("font_color", dim_text_color)
-	hbox.add_child(hex)
-
-	_detail_container.add_child(hbox)
 
 
 func _add_separator() -> void:
@@ -2057,7 +2017,7 @@ func _fmt_amount(n: int) -> String:
 ## Mindustry-style ammo card: ammo icon + name as header, then
 ## damage / vs-buildings / knockback / homing / ammo-per-shot in a
 ## tidy block. Replaces the older _add_ammo_entry for the new layout.
-func _add_ammo_card(turret: BlockData, ammo: AmmoType) -> void:
+func _add_ammo_card(_turret: BlockData, ammo: AmmoType) -> void:
 	# Outer card panel
 	var card = PanelContainer.new()
 	var sb = StyleBoxFlat.new()
@@ -2187,14 +2147,6 @@ func _add_ammo_card(turret: BlockData, ammo: AmmoType) -> void:
 # ENUM NAME HELPERS
 # =========================
 
-func _item_category_name(cat: ItemData.ItemCategory) -> String:
-	match cat:
-		ItemData.ItemCategory.RAW_RESOURCE: return "Raw Resource"
-		ItemData.ItemCategory.REFINED: return "Refined"
-		ItemData.ItemCategory.ADVANCED: return "Advanced"
-		ItemData.ItemCategory.COMPONENT: return "Component"
-		ItemData.ItemCategory.SPECIAL: return "Special"
-	return "Unknown"
 
 func _block_category_name(cat: BlockData.BlockCategory) -> String:
 	match cat:
@@ -2311,14 +2263,3 @@ func _hide_ui() -> void:
 # =========================
 # EXTERNAL API
 # =========================
-
-## Called by TechTreeUI to navigate directly to an entry.
-func navigate_to_entry(entry_id: StringName) -> void:
-	_show_ui()
-	# Find the entry across all categories
-	for cat_key in categories:
-		var cat = categories[cat_key]
-		for entry in cat["list"]:
-			if entry.id == entry_id:
-				_show_detail(entry, cat_key)
-				return

@@ -4,9 +4,9 @@
 
 [resource]
 script = ExtResource("1")
-id = &"conduit_router"
-display_name = "Conduit Router"
-description = "Splits fluid flow into three output directions."
+id = &"pipe_bridge"
+display_name = "Pipe Bridge"
+description = "Bridges fluid pipes over other infrastructure."
 category = 9
 color = Color(0.3, 0.6, 0.9, 1)
 max_health = 200.0

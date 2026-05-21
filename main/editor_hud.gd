@@ -709,7 +709,11 @@ func _select_block(block_id: StringName, btn: Button) -> void:
 # =========================
 
 func _create_script_editor() -> void:
-	var se = load("res://main/script_editor.gd").new()
+	# The new node-graph editor replaces the legacy right-side panel.
+	# It still exposes the same `set_script_data` / `get_script_data`
+	# / `show_panel` / `hide_panel` API so editor_hud, save_manager,
+	# and the rest of the integration points work unmodified.
+	var se = load("res://main/node_script_editor.gd").new()
 	add_child(se)
 	script_editor_panel = se
 	main.script_editor = se

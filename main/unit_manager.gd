@@ -28,6 +28,15 @@ var _crawler_passable_walls: Dictionary = {}  # Vector2i -> true (small wall seg
 var _hover_passable_walls: Dictionary = {}    # Vector2i -> true (wall segments <= 8)
 var _path_worker: PathfindingWorker  # Background thread for enemy/unit pathfinding
 
+# --- WATER-PLATFORM RESERVATIONS ---
+# Vector2i (grid cell) -> int (unit instance ID).
+# A ground / crawler unit reserves the next platform cell it intends to
+# step onto when that cell is over water. Other ground units treat
+# reserved cells as temporarily impassable, so platform crossings happen
+# strictly single-file and one unit can't shove another off the planks
+# into deep water.
+var _water_platform_reservation: Dictionary = {}
+
 # --- TRACKING ---
 var enemies: Array[Node2D] = []
 var player_units: Array[Node2D] = []
@@ -72,7 +81,64 @@ const _SQUAD_MAX_SIZE := 8                # …and never above this
 ## [MIN, MAX]. Bigger = squads stay smaller.
 const _SQUAD_AVG_UNIT_DPS := 8.0
 
+# --- FLOW FIELDS ---
+# When a squad releases (or a multi-target push from RtsAI fires), we
+# build a single flow field per (target, movement_layer) instead of
+# running A* per unit. Each unit traces the field by gradient descent.
+# Fields are cached for a short window so a second push at the same
+# target reuses the same compute.
+# Key: PackedInt32Array([target.x, target.y, movement_layer]) packed
+# into an int via `_flow_key`. Value: { "field": FlowField, "age": float }.
+var _flow_field_cache: Dictionary = {}
+const _FLOW_FIELD_TTL: float = 4.0
+var _flow_field_age_timer: float = 0.0
+
+# --- RTSAI BASE CLUSTERS ---
+# FEROX bases are clusters of nearby fabricators/cores. Each cluster
+# gets a single RtsAI controller that:
+#   • Aggregates all member fabricators' squads into one pool.
+#   • Picks ONE attack target per push.
+#   • Holds back `defender_ratio` of newly-produced units near home.
+#   • Recalls attackers when home buildings take damage.
+# Clusters are recomputed lazily when fabricators are added/removed.
+# Schema: ferox_bases[base_id] = {
+#   "anchor":         Vector2i  — representative tile (centroid-ish)
+#   "members":        Array[Vector2i] — fabricator anchors in this base
+#   "attack_target":  Variant — Vector2i or null
+#   "next_attack_at": float — seconds until next push
+#   "pressure_acc":   float — accumulated pressure for this base
+# }
+var ferox_bases: Dictionary = {}
+var _base_dirty: bool = true
+var _base_tick_timer: float = 0.0
+const _BASE_TICK_INTERVAL: float = 2.0
+## Two fabricators within this many tiles of each other are in the same
+## base cluster (transitively).
+const _BASE_CLUSTER_RADIUS: int = 18
+## Fraction of a base's produced units kept home as defenders.
+const _BASE_DEFENDER_RATIO: float = 0.25
+## Base seconds between consecutive attacks from a single cluster.
+const _BASE_ATTACK_COOLDOWN: float = 22.0
+
+# --- PRESSURE ---
+# Global FEROX aggression float. Ramps slowly with time and with the
+# player's expansion (turret count, fabricator count, unit count).
+# Higher pressure → bigger required squads, shorter cooldown between
+# pushes, more aggressive (deeper) target picks.
+var ferox_pressure: float = 0.0
+var _pressure_tick_timer: float = 0.0
+const _PRESSURE_TICK_INTERVAL: float = 5.0
+## Pressure passive gain per second.
+const _PRESSURE_PASSIVE_RAMP: float = 0.012
+## Per-LUMINA-turret pressure contribution per tick.
+const _PRESSURE_PER_TURRET: float = 0.05
+## Per-LUMINA-fabricator pressure contribution per tick.
+const _PRESSURE_PER_FAB: float = 0.08
+## Soft cap. Above this we still grow but slower.
+const _PRESSURE_SOFT_CAP: float = 10.0
+
 # --- COLLISION ---
+## Separation strength — how hard units push apart per frame
 ## Separation strength — how hard units push apart per frame
 const SEPARATION_STRENGTH := 150.0
 ## Minimum distance to avoid division-by-zero; units closer than this get a random nudge
@@ -158,6 +224,7 @@ func _ready() -> void:
 
 	_setup_astar()
 	_setup_path_worker()
+	_target_icon_tex = load("res://textures/mouse heads/TargetMouse.png") as Texture2D
 	main.building_placed.connect(_on_building_placed)
 	call_deferred("_spawn_test_nests")
 
@@ -185,6 +252,20 @@ var _ctrl_hover_phase: float = 0.0
 # and turret-head canvases sit higher, which previously buried the
 # control-hover fill. Built in `_ready`.
 var _ctrl_hover_overlay: Node2D = null
+
+# --- COMMAND INDICATORS ---
+# The most recent right-click command. When a group is told to move,
+# we keep the *original click point* here (not each unit's spread-out
+# formation slot) so the on-screen indicator is a single dot + N lines
+# instead of N scattered dots. Set in _command_move; cleared when no
+# selected unit is still pursuing the order.
+var _move_command_point: Vector2 = Vector2.INF
+# When the most recent right-click was an attack-building command we
+# show the TargetMouse.png at the block's center + lines from each
+# selected unit to that icon (mirrors the move indicator).
+var _attack_command_anchor: Vector2i = Vector2i(-9999, -9999)
+# Cached target-icon texture loaded once (same asset the cursor uses).
+var _target_icon_tex: Texture2D = null
 
 
 func _process(delta: float) -> void:
@@ -386,12 +467,21 @@ func _issue_right_click_command(world_pos: Vector2) -> void:
 		_command_attack_unit(clicked_enemy)
 		return
 
-	# 2. Ferox building under cursor?
+	# 2. Building under cursor? Two sub-cases:
+	#    a) LUMINA payload-accepting block + at least one selected unit
+	#       has `enter_payload_when_able` on → direct those units to
+	#       walk up and feed themselves in (the new behaviour). Other
+	#       selected units fall through to the move command below so
+	#       a mixed selection still does something sensible.
+	#    b) FEROX building → attack as before.
 	var grid_pos: Vector2i = main.world_to_grid(world_pos)
 	if main.placed_buildings.has(grid_pos):
-		var faction: int = main.get_building_faction(grid_pos)
-		if faction == main.Faction.FEROX:
-			var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		var faction: int = main.get_building_faction(anchor)
+		if faction == main.Faction.LUMINA and _is_payload_block_anchor(anchor):
+			if _command_payload_target(anchor):
+				return
+		elif faction == main.Faction.FEROX:
 			_command_attack_building(anchor)
 			return
 
@@ -399,8 +489,62 @@ func _issue_right_click_command(world_pos: Vector2) -> void:
 	_command_move(world_pos)
 
 
+## True if the block at `anchor` is one of the four payload-accepting
+## kinds: payload conveyor, freight conveyor, mass driver, or
+## deconstructor. Matches the eligibility filter `_payload_block_at` in
+## enemy_unit.gd.
+func _is_payload_block_anchor(anchor: Vector2i) -> bool:
+	var bid: StringName = main.placed_buildings.get(anchor, &"")
+	if bid == &"":
+		return false
+	var data = Registry.get_block(bid)
+	if data == null:
+		return false
+	var tags: PackedStringArray = data.tags
+	return tags.has("payload") or tags.has("freight") \
+			or tags.has("mass_driver") or tags.has("deconstructor")
+
+
+## Issues a "go feed yourself into this block" order to every selected
+## unit whose `enter_payload_when_able` toggle is on. Returns true if at
+## least one unit took the order — the caller treats that as the
+## right-click being consumed.
+func _command_payload_target(anchor: Vector2i) -> bool:
+	var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null:
+		return false
+	# Target the geometric center of the building. `assign_path_to_position`
+	# clamps to the nearest walkable cell when the target itself is solid,
+	# which for a deconstructor means landing right at its edge.
+	var target_world: Vector2 = main.grid_to_world(anchor) + Vector2(
+		data.grid_size.x * main.GRID_SIZE * 0.5,
+		data.grid_size.y * main.GRID_SIZE * 0.5,
+	)
+	var any: bool = false
+	for unit in selected_units:
+		if not is_instance_valid(unit) or unit.is_dead:
+			continue
+		if unit == controlled_entity:
+			continue
+		if not ("enter_payload_when_able" in unit and unit.enter_payload_when_able):
+			continue
+		# Clear other manual orders so this becomes the unit's focus.
+		unit.manual_target_unit = null
+		unit.manual_target_building = null
+		unit.manual_target_building_block_id = &""
+		unit.target_unit = null
+		unit.target_building = null
+		unit.payload_target_anchor = anchor
+		unit.move_to_position(target_world)
+		any = true
+	return any
+
+
 ## Assigns an enemy unit as the manual target for all selected units.
 func _command_attack_unit(enemy: Node2D) -> void:
+	# Live enemy units move every frame — no static indicator to paint.
+	_move_command_point = Vector2.INF
+	_attack_command_anchor = Vector2i(-9999, -9999)
 	for unit in selected_units:
 		if not is_instance_valid(unit) or unit.is_dead:
 			continue
@@ -414,10 +558,17 @@ func _command_attack_unit(enemy: Node2D) -> void:
 		unit.target_building = null
 		unit.path = PackedVector2Array()
 		unit.path_index = 0
+		if "payload_target_anchor" in unit:
+			unit.payload_target_anchor = Vector2i(-9999, -9999)
 
 
 ## Assigns a building as the manual target for all selected units.
 func _command_attack_building(bldg_anchor: Vector2i) -> void:
+	# Stamp the indicator anchor so the renderer paints the TargetMouse
+	# icon at the block + lines from every selected unit. A subsequent
+	# move/attack-unit command clears it again.
+	_attack_command_anchor = bldg_anchor
+	_move_command_point = Vector2.INF
 	for unit in selected_units:
 		if not is_instance_valid(unit) or unit.is_dead:
 			continue
@@ -436,6 +587,8 @@ func _command_attack_building(bldg_anchor: Vector2i) -> void:
 		unit.target_unit = null
 		unit.path = PackedVector2Array()
 		unit.path_index = 0
+		if "payload_target_anchor" in unit:
+			unit.payload_target_anchor = Vector2i(-9999, -9999)
 
 
 func _command_move(world_pos: Vector2) -> void:
@@ -449,10 +602,19 @@ func _command_move(world_pos: Vector2) -> void:
 			unit.manual_target_unit = null
 			unit.manual_target_building = null
 			unit.manual_target_building_block_id = &""
+			if "payload_target_anchor" in unit:
+				unit.payload_target_anchor = Vector2i(-9999, -9999)
 			living.append(unit)
 
 	if living.size() == 0:
 		return
+
+	# Stamp the single command anchor for the indicator. Even though
+	# individual units fan out to formation slots around `world_pos`,
+	# the on-screen marker is just one dot at the player's actual
+	# click point with lines back to each unit.
+	_move_command_point = world_pos
+	_attack_command_anchor = Vector2i(-9999, -9999)
 
 	# Single unit — move directly to the target
 	if living.size() == 1:
@@ -1211,7 +1373,7 @@ func _update_controlled_turret(_delta: float) -> void:
 ## `world_pos`. FLYING is always permitted; HOVER uses astar_hover; ground
 ## uses astar; crawlers use astar_crawler. Out-of-bounds and unset grids
 ## are treated as walkable to avoid false positives blocking edge nudges.
-func is_world_pos_walkable(world_pos: Vector2, ml: int) -> bool:
+func is_world_pos_walkable(world_pos: Vector2, ml: int, team: int = -1) -> bool:
 	if ml == UnitData.MovementLayer.FLYING:
 		return true
 	var grid: Vector2i = main.world_to_grid(world_pos)
@@ -1225,164 +1387,256 @@ func is_world_pos_walkable(world_pos: Vector2, ml: int) -> bool:
 			astar_grid = astar_crawler
 		UnitData.MovementLayer.HOVER:
 			astar_grid = astar_hover
-	if astar_grid == null:
+	if astar_grid != null and astar_grid.is_point_solid(grid):
+		return false
+	# Hostile unit-blocking shields count as solid for the asking
+	# team. `team == -1` means "no faction filter" (legacy callers
+	# that don't care about shields).
+	if team != -1:
+		var shield_sys = main.get_node_or_null("ShieldSystem")
+		if shield_sys and shield_sys.has_method("is_unit_blocked_at"):
+			if shield_sys.is_unit_blocked_at(world_pos, team):
+				return false
+	return true
+
+
+## True if the cell is a platform sitting over water — the kind that
+## should only carry one ground unit at a time.
+func _is_water_platform_cell(grid_pos: Vector2i) -> bool:
+	return _is_platform_cell(grid_pos) and _is_water_floor(grid_pos)
+
+
+## Try to reserve a water-platform cell for the given unit. Returns true
+## if the unit already holds the reservation or if the cell was free and
+## is now reserved. Returns false if a different unit is already on it,
+## in which case the caller should pause / re-plan.
+func try_reserve_platform(unit: Node2D, grid_pos: Vector2i) -> bool:
+	if unit == null:
+		return false
+	if not _is_water_platform_cell(grid_pos):
+		return true  # Not a water platform — no gating.
+	var uid: int = unit.get_instance_id()
+	if not _water_platform_reservation.has(grid_pos):
+		_water_platform_reservation[grid_pos] = uid
 		return true
-	return not astar_grid.is_point_solid(grid)
+	# Stale reservation (holder despawned)? Take it over.
+	var holder_id: int = int(_water_platform_reservation[grid_pos])
+	if holder_id == uid:
+		return true
+	var holder = instance_from_id(holder_id)
+	if holder == null or not is_instance_valid(holder):
+		_water_platform_reservation[grid_pos] = uid
+		return true
+	return false
+
+
+## Releases this unit's reservation on a water-platform cell (no-op if
+## someone else holds it). Called by enemy_unit as it leaves the tile.
+func release_platform(unit: Node2D, grid_pos: Vector2i) -> void:
+	if unit == null:
+		return
+	if not _water_platform_reservation.has(grid_pos):
+		return
+	if int(_water_platform_reservation[grid_pos]) == unit.get_instance_id():
+		_water_platform_reservation.erase(grid_pos)
+
+
+
+
+## Cached output of `_build_solidity_sets()` — held only across the
+## back-to-back `_setup_astar()` → `_setup_path_worker()` call pair so
+## the second function doesn't redo the same per-cell scans the first
+## one just finished. The pair is always called together (at sector
+## load, save load, and unit_manager._ready), so this is exactly the
+## window the cache needs to cover. Cleared at the end of
+## `_setup_path_worker` to avoid retaining stale data between sectors.
+var _cached_solidity: Dictionary = {}
+
+
+## Single-pass scan of the grid that produces every solid set + the
+## water-bias weight list, all three movement layers at once.
+##
+## Replaces what used to be ~6 independent full-grid loops scattered
+## across `_setup_astar` and `_setup_path_worker` (each ~GRID_WIDTH ×
+## GRID_HEIGHT, plus separate iterations of `placed_buildings` and
+## `wall_tiles`). For a 200×200 map this brings setup-time grid
+## traversals down from ~6×40 000 = 240 000 to one 40 000-cell sweep
+## + two small dict iterations — most of the visible "hitch" at
+## sector transitions came from those redundant scans.
+func _build_solidity_sets() -> Dictionary:
+	var terrain_sys = _terrain_ref()
+	var sector_script = _sector_script_ref()
+	var ground_set: Dictionary = {}
+	var crawler_set: Dictionary = {}
+	var hover_set: Dictionary = {}
+	var ground_weights: Dictionary = {}  # grid_pos -> float, deduped
+	var floor_dict: Dictionary = terrain_sys.floor_tiles if terrain_sys else {}
+	var wall_dict: Dictionary = terrain_sys.wall_tiles if terrain_sys else {}
+
+	# --- Buildings (single pass) ---
+	# One iteration over placed_buildings serves all three layers + the
+	# is_wall classification crawler needs. The per-cell predicate calls
+	# (`_is_ground_passable_building`, `_is_building_wall`) are cheap
+	# tag lookups; what was expensive before was iterating the building
+	# dict 3-4 separate times.
+	for grid_pos in main.placed_buildings:
+		var passable: bool = _is_ground_passable_building(grid_pos)
+		if not passable:
+			ground_set[grid_pos] = true
+			hover_set[grid_pos] = true
+		if _is_building_wall(grid_pos):
+			crawler_set[grid_pos] = true
+
+	# --- Terrain walls (single pass) ---
+	# Only walls flagged as `blocks_pathfinding` count as obstacles for
+	# any movement layer — decorative walls (low rocks, etc.) without
+	# the flag should let units pass through. Match the old behaviour
+	# exactly (old code applied this filter to all three layers).
+	# `_recompute_crawler_wall_passability` then prunes small wall
+	# segments out of the crawler / hover layers in a second pass.
+	if terrain_sys:
+		for grid_pos in wall_dict:
+			var tile_data = Registry.get_tile(wall_dict[grid_pos])
+			if tile_data and tile_data.blocks_pathfinding:
+				ground_set[grid_pos] = true
+				crawler_set[grid_pos] = true
+				hover_set[grid_pos] = true
+
+	# --- Whole-grid sweep: void + hidden + water (one walk) ---
+	# Was three separate GRID_WIDTH × GRID_HEIGHT loops before. Each
+	# cell now pays only a couple dict lookups and (rarely) a
+	# water-tile registry hit.
+	for x in range(main.GRID_WIDTH):
+		for y in range(main.GRID_HEIGHT):
+			var gp := Vector2i(x, y)
+			var has_floor: bool = floor_dict.has(gp)
+			var has_wall: bool = wall_dict.has(gp)
+			# VOID — no floor + no wall = nothing to walk / hover on.
+			if not has_floor and not has_wall:
+				ground_set[gp] = true
+				crawler_set[gp] = true
+				hover_set[gp] = true
+				continue
+			# Sector-script hidden tiles are an impassable barrier for
+			# every layer.
+			if sector_script and sector_script.is_tile_hidden(gp):
+				ground_set[gp] = true
+				crawler_set[gp] = true
+				hover_set[gp] = true
+				continue
+			# WATER bias — only for cells that have a water floor and
+			# no covering building (a platform / floating transport
+			# overrides the bias and lands them on dry land).
+			if has_floor and not main.placed_buildings.has(gp):
+				var td: TerrainTileData = Registry.get_tile(floor_dict[gp])
+				if td and td.is_liquid and td.tags.has("water"):
+					var w: float = _water_cell_weight(gp)
+					if w > 1.0:
+						ground_weights[gp] = w
+
+	return {
+		"ground": ground_set,
+		"crawler": crawler_set,
+		"hover": hover_set,
+		"ground_weights": ground_weights,
+	}
 
 
 func _setup_astar() -> void:
-	# --- GROUND AStar (blocked by all buildings + terrain walls) ---
+	# Build the shared solidity sets once and stash them so
+	# `_setup_path_worker` (which always runs right after) can reuse
+	# them instead of redoing the same scans.
+	var sets: Dictionary = _build_solidity_sets()
+	_cached_solidity = sets
+	var ground_set: Dictionary = sets["ground"]
+	var crawler_set: Dictionary = sets["crawler"]
+	var hover_set: Dictionary = sets["hover"]
+	var ground_weights: Dictionary = sets["ground_weights"]
+
+	# --- GROUND AStar ---
 	astar = AStarGrid2D.new()
 	astar.region = Rect2i(0, 0, main.GRID_WIDTH, main.GRID_HEIGHT)
 	astar.cell_size = Vector2(main.GRID_SIZE, main.GRID_SIZE)
 	astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
 	astar.update()
+	for gp in ground_set:
+		astar.set_point_solid(gp, true)
+	for gp in ground_weights:
+		astar.set_point_weight_scale(gp, float(ground_weights[gp]))
 
-	# --- CRAWLER AStar (small wall segments passable) ---
+	# --- CRAWLER AStar ---
 	astar_crawler = AStarGrid2D.new()
 	astar_crawler.region = Rect2i(0, 0, main.GRID_WIDTH, main.GRID_HEIGHT)
 	astar_crawler.cell_size = Vector2(main.GRID_SIZE, main.GRID_SIZE)
 	astar_crawler.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
 	astar_crawler.update()
+	for gp in crawler_set:
+		astar_crawler.set_point_solid(gp, true)
+	for gp in ground_weights:
+		astar_crawler.set_point_weight_scale(gp, float(ground_weights[gp]))
 
-	# Mark terrain walls as solid in GROUND grid
-	var terrain_sys = _terrain_ref()
-	if terrain_sys:
-		for grid_pos in terrain_sys.wall_tiles:
-			var tile_data = Registry.get_tile(terrain_sys.wall_tiles[grid_pos])
-			if tile_data and tile_data.blocks_pathfinding:
-				astar.set_point_solid(grid_pos, true)
-
-	# Mark existing buildings as solid in GROUND grid
-	# Transport buildings (conveyors, pipes, bridges, etc.) are passable for ground units
-	for grid_pos in main.placed_buildings:
-		if not _is_ground_passable_building(grid_pos):
-			astar.set_point_solid(grid_pos, true)
-
-	# Mark building walls as solid in CRAWLER grid
-	for grid_pos in main.placed_buildings:
-		if _is_building_wall(grid_pos):
-			astar_crawler.set_point_solid(grid_pos, true)
-
-	# Mark VOID cells (no floor tile) as solid for ground & crawler: they
-	# can't walk on nothing. Without this guard, ground units could
-	# pathfind across empty map regions and physically stand on void.
-	# Hover/flying can still cross void (handled by not touching astar_hover
-	# here). A cell with a wall but no floor still counts as "has content"
-	# via wall_tiles and would already have been marked by the wall pass,
-	# so this only flips the all-empty cells.
-	if terrain_sys:
-		for x in range(main.GRID_WIDTH):
-			for y in range(main.GRID_HEIGHT):
-				var gp := Vector2i(x, y)
-				if terrain_sys.floor_tiles.has(gp):
-					continue
-				if terrain_sys.wall_tiles.has(gp):
-					continue
-				astar.set_point_solid(gp, true)
-				astar_crawler.set_point_solid(gp, true)
-
-	# --- HOVER AStar (blocked only by large terrain wall segments) ---
+	# --- HOVER AStar ---
 	astar_hover = AStarGrid2D.new()
 	astar_hover.region = Rect2i(0, 0, main.GRID_WIDTH, main.GRID_HEIGHT)
 	astar_hover.cell_size = Vector2(main.GRID_SIZE, main.GRID_SIZE)
 	astar_hover.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
 	astar_hover.update()
+	for gp in hover_set:
+		astar_hover.set_point_solid(gp, true)
 
-	# Analyze terrain wall segments for crawler passability
+	# Analyze terrain wall segments for crawler / hover passability.
+	# Mutates astar_crawler and astar_hover in place: small wall segments
+	# get flipped back to non-solid for crawlers, medium ones for hover.
 	_recompute_crawler_wall_passability()
-
-	# Mark hidden tiles as solid in ALL grids (impassable barrier)
-	var sector_script = _sector_script_ref()
-	if sector_script:
-		for x in range(main.GRID_WIDTH):
-			for y in range(main.GRID_HEIGHT):
-				var gp := Vector2i(x, y)
-				if sector_script.is_tile_hidden(gp):
-					astar.set_point_solid(gp, true)
-					astar_crawler.set_point_solid(gp, true)
-					astar_hover.set_point_solid(gp, true)
 
 
 func _setup_path_worker() -> void:
-	var terrain_sys = _terrain_ref()
+	# Reuse the solidity sets computed by `_setup_astar` (always called
+	# right before this). Falling back to a fresh build keeps the
+	# function callable standalone in case anything ever calls it
+	# without the paired setup.
+	var sets: Dictionary = _cached_solidity if not _cached_solidity.is_empty() \
+			else _build_solidity_sets()
+	_cached_solidity = {}  # don't hold across the next sector load
 
-	# Build solid sets as Dictionaries (O(1) membership) then flatten to
-	# arrays at the end. Using Array.has() inside a full-grid loop is
-	# O(n²) and blows up load time on mid-sized maps.
-	var ground_set: Dictionary = {}
-	var crawler_set: Dictionary = {}
-	var hover_set: Dictionary = {}
+	var ground_set: Dictionary = sets["ground"]
+	var crawler_set: Dictionary = sets["crawler"]
+	var hover_set: Dictionary = sets["hover"]
+	var ground_weights_dict: Dictionary = sets["ground_weights"]
 
-	# GROUND solids: non-transport buildings + terrain walls that block pathfinding
-	for grid_pos in main.placed_buildings:
-		if not _is_ground_passable_building(grid_pos):
-			ground_set[grid_pos] = true
-	if terrain_sys:
-		for grid_pos in terrain_sys.wall_tiles:
-			var tile_data = Registry.get_tile(terrain_sys.wall_tiles[grid_pos])
-			if tile_data and tile_data.blocks_pathfinding:
-				ground_set[grid_pos] = true
+	# Crawler wall passability already pruned small segments from
+	# `astar_crawler`; mirror those exclusions into the worker's set so
+	# the background grid agrees with the main-thread grid.
+	for gp in _crawler_passable_walls:
+		crawler_set.erase(gp)
+	for gp in _hover_passable_walls:
+		hover_set.erase(gp)
 
-	# CRAWLER solids: building walls + large terrain wall segments (>= 4 cells)
-	for grid_pos in main.placed_buildings:
-		if _is_building_wall(grid_pos):
-			crawler_set[grid_pos] = true
-	if terrain_sys:
-		for grid_pos in terrain_sys.wall_tiles:
-			if not _crawler_passable_walls.has(grid_pos):
-				crawler_set[grid_pos] = true
-
-	# HOVER solids: only large terrain wall segments (> 8 cells)
-	if terrain_sys:
-		for grid_pos in terrain_sys.wall_tiles:
-			if not _hover_passable_walls.has(grid_pos):
-				hover_set[grid_pos] = true
-
-	# VOID cells (no floor, no wall) block ground + crawler movement — a
-	# ground ant should never pathfind across an empty map region. Hover
-	# and flying layers are unaffected.
-	if terrain_sys:
-		for x in range(main.GRID_WIDTH):
-			for y in range(main.GRID_HEIGHT):
-				var gp := Vector2i(x, y)
-				if terrain_sys.floor_tiles.has(gp):
-					continue
-				if terrain_sys.wall_tiles.has(gp):
-					continue
-				ground_set[gp] = true
-				crawler_set[gp] = true
-
-	# Add hidden tiles to all solid lists (impassable barrier)
-	var sector_script = _sector_script_ref()
-	if sector_script:
-		for x in range(main.GRID_WIDTH):
-			for y in range(main.GRID_HEIGHT):
-				var gp := Vector2i(x, y)
-				if sector_script.is_tile_hidden(gp):
-					ground_set[gp] = true
-					crawler_set[gp] = true
-					hover_set[gp] = true
-
+	# Flatten to typed arrays for the worker API.
 	var ground_solids: Array[Vector2i] = []
 	var crawler_solids: Array[Vector2i] = []
 	var hover_solids: Array[Vector2i] = []
 	for gp in ground_set: ground_solids.append(gp)
 	for gp in crawler_set: crawler_solids.append(gp)
 	for gp in hover_set: hover_solids.append(gp)
+	var ground_weights: Array = []
+	var crawler_weights: Array = []
+	for gp in ground_weights_dict:
+		var entry := [gp, float(ground_weights_dict[gp])]
+		ground_weights.append(entry)
+		crawler_weights.append(entry)
 
-	# Tear down any previously-running worker before spawning a new one,
-	# otherwise reloading a sector leaks a thread and the old worker
-	# continues to answer pathfind requests with its stale (empty)
-	# grid — which is exactly how ground ants end up pathing across
-	# walls that WERE in the up-to-date main-thread astar but weren't
-	# in the old worker's initial solids list.
+	# Tear down any previously-running worker before spawning a new one.
+	# Without this the old thread keeps answering pathfind requests with
+	# its stale grid and ground units happily walk through walls that
+	# WERE in the up-to-date main-thread astar.
 	if _path_worker:
 		_path_worker.stop()
 		_path_worker = null
 	_path_worker = PathfindingWorker.new()
 	_path_worker.start(main.GRID_WIDTH, main.GRID_HEIGHT, main.GRID_SIZE,
-		ground_solids, crawler_solids, hover_solids)
+		ground_solids, crawler_solids, hover_solids,
+		ground_weights, crawler_weights)
 
 
 func _poll_path_results() -> void:
@@ -1410,7 +1664,76 @@ func _poll_path_results() -> void:
 			if not main.placed_buildings.has(target_bldg):
 				target_bldg = null
 
+		# Empty path + valid target = target unreachable (player walled off
+		# the base). Without a fallback the enemy parks forever:
+		# `_try_attack` rejects the range check, never re-requests a path,
+		# and the FEROX wave looks like it gave up. Retarget to the
+		# nearest LUMINA structure we CAN actually walk to (typically the
+		# closest segment of the wall the player just built) so the unit
+		# chews its way in instead of sitting idle.
+		if path.is_empty() and target_bldg != null and unit.team == UnitData.Team.ENEMY:
+			var reachable = _find_nearest_reachable_building(unit, main.Faction.LUMINA)
+			if reachable != null:
+				_path_worker.request_path(
+					unit.get_instance_id(),
+					main.world_to_grid(unit.position),
+					reachable as Vector2i,
+					unit.data.movement_layer if unit.data else 0,
+					_pack_grid_pos(reachable),
+				)
+				continue
+
 		unit.set_path(path, target_bldg)
+
+
+## BFS-based fallback target picker. Floods walkable cells outward from
+## `unit`'s current grid position on its movement layer's AStarGrid2D
+## (capped at REACHABLE_BFS_BUDGET cells so a giant open map doesn't
+## stall). For every reached cell, checks the 4 cardinal neighbours for
+## a placed building of `target_faction` — first one found is returned
+## as a guaranteed-reachable target. Returns null if the unit is
+## genuinely walled into a void pocket.
+const REACHABLE_BFS_BUDGET := 4000
+func _find_nearest_reachable_building(unit: Node2D, target_faction: int) -> Variant:
+	var grid: AStarGrid2D = _get_grid_for_unit(unit)
+	if grid == null:
+		return null
+	var start: Vector2i = main.world_to_grid(unit.position)
+	start.x = clampi(start.x, 0, main.GRID_WIDTH - 1)
+	start.y = clampi(start.y, 0, main.GRID_HEIGHT - 1)
+	if grid.is_point_solid(start):
+		# Find adjacent walkable so the BFS has somewhere to begin.
+		var adj: Variant = _find_adjacent_walkable_on_grid(start, grid)
+		if adj == null:
+			return null
+		start = adj as Vector2i
+	var visited: Dictionary = {start: true}
+	var queue: Array[Vector2i] = [start]
+	var head := 0
+	var dirs: Array[Vector2i] = [
+		Vector2i(0, -1), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(1, 0),
+	]
+	while head < queue.size() and visited.size() < REACHABLE_BFS_BUDGET:
+		var cell: Vector2i = queue[head]
+		head += 1
+		# Check the four neighbours for a hostile building anchor.
+		for d in dirs:
+			var nb: Vector2i = cell + d
+			if not main.is_within_bounds(nb):
+				continue
+			if main.placed_buildings.has(nb):
+				if main.get_building_faction(nb) == target_faction:
+					var bdata = Registry.get_block(main.placed_buildings[nb])
+					if not (bdata and bdata.tags.has("platform")):
+						return main.building_origins.get(nb, nb)
+				continue
+			if visited.has(nb):
+				continue
+			if grid.is_point_solid(nb):
+				continue
+			visited[nb] = true
+			queue.append(nb)
+	return null
 
 
 ## Pack a Vector2i into an int for thread-safe transfer
@@ -1429,8 +1752,17 @@ func _unpack_grid_pos(packed: int) -> Vector2i:
 
 
 func _on_building_placed(_block_id: StringName, grid_pos: Vector2i) -> void:
+	# Any structural change invalidates the flow-field cache (a new wall
+	# can block a previously-fine route; a destroyed wall can open one).
+	# Same for base-cluster topology — recompute lazily next tick.
+	_invalidate_flow_fields()
+	_base_dirty = true
 	var data = Registry.get_block(_block_id)
-	var is_passable: bool = data != null and (data.transport_speed > 0 or data.transports_fluid)
+	# Platforms now count as passable so ground units can cross water
+	# bodies via the planks the player laid down.
+	var is_passable: bool = data != null and (
+		data.transport_speed > 0 or data.transports_fluid or data.tags.has("platform")
+	)
 	var is_wall: bool = data != null and data.category == BlockData.BlockCategory.WALLS
 
 	if data:
@@ -1438,17 +1770,42 @@ func _on_building_placed(_block_id: StringName, grid_pos: Vector2i) -> void:
 			for y in range(data.grid_size.y):
 				var tile_pos = grid_pos + Vector2i(x, y)
 				if main.is_within_bounds(tile_pos):
-					# GROUND: solid unless transport building
-					if not is_passable:
+					# GROUND: solid unless this building is passable.
+					if is_passable:
+						astar.set_point_solid(tile_pos, false)
+						# Passable building over water replaces water's
+						# pathfinding penalty with a normal weight so
+						# A* treats the platform deck as dry land.
+						astar.set_point_weight_scale(tile_pos, 1.0)
+						if _path_worker:
+							_path_worker.queue_set_solid(tile_pos, false, "ground")
+							_path_worker.queue_set_weight(tile_pos, 1.0, "ground")
+					else:
 						astar.set_point_solid(tile_pos, true)
-					if _path_worker and not is_passable:
-						_path_worker.queue_set_solid(tile_pos, true, "ground")
-					# CRAWLER: only walls block
+						if _path_worker:
+							_path_worker.queue_set_solid(tile_pos, true, "ground")
+					# CRAWLER: only walls block.
 					if is_wall:
 						astar_crawler.set_point_solid(tile_pos, true)
 						if _path_worker:
 							_path_worker.queue_set_solid(tile_pos, true, "crawler")
-					# HOVER: buildings never block hover
+					elif is_passable and _is_water_floor(tile_pos):
+						astar_crawler.set_point_solid(tile_pos, false)
+						astar_crawler.set_point_weight_scale(tile_pos, 1.0)
+						if _path_worker:
+							_path_worker.queue_set_solid(tile_pos, false, "crawler")
+							_path_worker.queue_set_weight(tile_pos, 1.0, "crawler")
+					# HOVER: same passability rule as ground. Hover units
+					# can't skim over a wall or a factory the way they used
+					# to — only over water (handled at setup time).
+					if is_passable:
+						astar_hover.set_point_solid(tile_pos, false)
+						if _path_worker:
+							_path_worker.queue_set_solid(tile_pos, false, "hover")
+					else:
+						astar_hover.set_point_solid(tile_pos, true)
+						if _path_worker:
+							_path_worker.queue_set_solid(tile_pos, true, "hover")
 	else:
 		astar.set_point_solid(grid_pos, true)
 		if _path_worker:
@@ -1458,13 +1815,26 @@ func _on_building_placed(_block_id: StringName, grid_pos: Vector2i) -> void:
 
 
 func on_building_destroyed(grid_pos: Vector2i) -> void:
-	# Clear from all grids (safe even if it wasn't solid in some)
+	_invalidate_flow_fields()
+	_base_dirty = true
+	# Always non-solid for ground / crawler (water is no longer hard-
+	# blocked). Water cells get their pathfinding penalty restored so
+	# units once again prefer dry routes around the cell. Hover ignores
+	# water — clears to walkable regardless of the floor.
 	astar.set_point_solid(grid_pos, false)
 	astar_crawler.set_point_solid(grid_pos, false)
-	# Don't clear hover — buildings never blocked hover
+	astar_hover.set_point_solid(grid_pos, false)
+	var restored_weight: float = _water_cell_weight(grid_pos)
+	astar.set_point_weight_scale(grid_pos, restored_weight)
+	astar_crawler.set_point_weight_scale(grid_pos, restored_weight)
 	if _path_worker:
 		_path_worker.queue_set_solid(grid_pos, false, "ground")
 		_path_worker.queue_set_solid(grid_pos, false, "crawler")
+		_path_worker.queue_set_solid(grid_pos, false, "hover")
+		_path_worker.queue_set_weight(grid_pos, restored_weight, "ground")
+		_path_worker.queue_set_weight(grid_pos, restored_weight, "crawler")
+	# Drop any reservation on a destroyed platform cell.
+	_water_platform_reservation.erase(grid_pos)
 
 
 # =========================
@@ -1687,14 +2057,20 @@ func _find_nearest_building(from: Vector2i, target_faction: int = -1) -> Variant
 	return nearest
 
 
-## Weighted variant of _find_nearest_building. Score blocks by type-weight
-## (cores > turrets > factories > … > walls) divided by distance, so an
-## enemy walking past a wall toward an exposed turret will hit the turret
-## first. Falls back to nearest building when nothing scores. Used for
-## squad target acquisition and enemy retargeting on stuck/dead-target.
+## Weighted variant of _find_nearest_building. Score blocks via
+## `_score_building_for_attack` (type weight × vulnerability × HP-bonus
+## ÷ distance falloff), so an enemy walking past a wall toward an
+## exposed turret will hit the turret first. Falls back to nearest
+## building when nothing scores. Used for squad target acquisition and
+## enemy retargeting on stuck/dead-target.
+##
+## Pressure pushes target depth: at higher pressure the distance
+## divisor is softened so deep-base targets (cores, fabs) outscore
+## shallow ones.
 func _find_priority_building_target(from: Vector2i, target_faction: int = -1) -> Variant:
 	var best: Variant = null
 	var best_score := -1.0
+	var aggression: float = _pressure_mult()
 	for grid_pos in main.placed_buildings:
 		if target_faction >= 0 and main.get_building_faction(grid_pos) != target_faction:
 			continue
@@ -1702,35 +2078,102 @@ func _find_priority_building_target(from: Vector2i, target_faction: int = -1) ->
 		var bdata = Registry.get_block(bid)
 		if bdata == null or bdata.tags.has("platform"):
 			continue
-		var w: float = _building_target_weight(bdata)
-		if w <= 0.0:
-			continue
-		var dx = abs(grid_pos.x - from.x)
-		var dy = abs(grid_pos.y - from.y)
-		var dist = float(max(dx, dy))
-		# 1 + dist/12 keeps very-close buildings from totally dominating,
-		# so a high-value target a bit further away still beats a wall
-		# next door. Tune the divisor up to favour proximity, down to
-		# favour value.
-		var score: float = w / (1.0 + dist / 12.0)
+		var score: float = _score_building_for_attack(grid_pos, bdata, from, aggression)
 		if score > best_score:
 			best_score = score
 			best = grid_pos
 	return best
 
 
+## Score a candidate LUMINA building from the attacker's POV. Higher =
+## more attractive to push toward. Components:
+##   • base type weight (core / turret / fab / drill / etc.)
+##   • vulnerability — buildings buried in walls score lower
+##   • damage bonus — a building below 50% HP gets a finisher boost
+##   • distance falloff — softer at higher pressure
+##
+## All factors are tunable. Score 0 means "ignore this building entirely."
+func _score_building_for_attack(grid_pos: Vector2i, bdata: BlockData, from: Vector2i, aggression: float = 1.0) -> float:
+	var w: float = _building_target_weight(bdata)
+	if w <= 0.0:
+		return 0.0
+	# Vulnerability: count solid wall tiles within a 3-tile ring around
+	# the building. Lots of walls → lower score (the squad needs to
+	# break through before scoring damage). Range 0..1, applied as
+	# 0.4..1.0 multiplier so even walled-in cores still attract a push.
+	var vuln: float = _building_vulnerability(grid_pos)
+	# HP bonus — finish the wounded. Buildings under 50% HP get up to
+	# +50% score, scaling linearly.
+	var hp_bonus: float = 1.0
+	if main.building_health.has(grid_pos) and bdata.max_health > 0.0:
+		var hp_frac: float = clampf(float(main.building_health[grid_pos]) / float(bdata.max_health), 0.0, 1.0)
+		if hp_frac < 0.5:
+			hp_bonus = 1.0 + (0.5 - hp_frac)
+	var dx = abs(grid_pos.x - from.x)
+	var dy = abs(grid_pos.y - from.y)
+	var dist = float(max(dx, dy))
+	# Higher aggression flattens distance — pushes will go deeper.
+	var divisor_scale: float = 12.0 + (aggression - 1.0) * 18.0
+	var score: float = w * vuln * hp_bonus / (1.0 + dist / divisor_scale)
+	return score
+
+
+## Returns a 0.4 .. 1.0 vulnerability factor. 1.0 = no surrounding
+## walls. 0.4 = densely walled in. Cheap 8-neighbour scan around the
+## building footprint.
+func _building_vulnerability(grid_pos: Vector2i) -> float:
+	var wall_n: int = 0
+	var checked: int = 0
+	# 3x3 footprint scan around the anchor is good enough — we don't
+	# need to be exact, just approximate.
+	for dx in [-2, -1, 0, 1, 2]:
+		for dy in [-2, -1, 0, 1, 2]:
+			if dx == 0 and dy == 0:
+				continue
+			var p: Vector2i = grid_pos + Vector2i(dx, dy)
+			if not main.is_within_bounds(p):
+				continue
+			checked += 1
+			if not main.placed_buildings.has(p):
+				continue
+			var nbid: StringName = main.placed_buildings[p]
+			var nbd = Registry.get_block(nbid)
+			if nbd == null:
+				continue
+			if nbd.tags.has("wall"):
+				wall_n += 1
+	if checked == 0:
+		return 1.0
+	var dense: float = clampf(float(wall_n) / float(checked), 0.0, 1.0)
+	return lerpf(1.0, 0.4, dense)
+
+
 func _building_target_weight(bdata: BlockData) -> float:
 	# Hand-tuned weights. Anything not in the list gets the generic 1.0.
+	# Cores are the win-condition target; turrets and fabs are the
+	# next-most-valuable since killing them shrinks the player's
+	# offensive AND defensive output.
 	var tags: PackedStringArray = bdata.tags
 	if tags.has("core"):
-		return 10.0
-	if tags.has("turret") or tags.has("defense") or tags.has("mender"):
-		return 6.0
+		return 12.0
+	if tags.has("turret") or tags.has("defense"):
+		return 6.5
+	if tags.has("mender"):
+		return 5.5
+	# Power generation / nodes — destroying these dominoes into
+	# unpowering the whole base. Worth more than raw factories.
+	if tags.has("power") or tags.has("generator") or tags.has("reactor") or tags.has("solar"):
+		return 4.5
 	if tags.has("fabricator") or tags.has("factory") or tags.has("constructor"):
-		return 3.5
-	if tags.has("drill") or tags.has("extractor") or tags.has("crusher") or tags.has("grinder"):
-		return 2.5
-	if tags.has("conduit") or tags.has("pipe") or tags.has("duct") \
+		return 4.0
+	# Resource production — second-order economic value.
+	if tags.has("drill") or tags.has("extractor") or tags.has("crusher") or tags.has("grinder") or tags.has("pump"):
+		return 2.8
+	# Storage — taking these out denies the player buffer to weather
+	# disruptions. Slightly above transports.
+	if tags.has("vault") or tags.has("container") or tags.has("storage"):
+		return 1.4
+	if tags.has("pipe") or tags.has("duct") \
 			or tags.has("payload") or tags.has("freight") \
 			or bdata.tags.has("belt") or tags.has("cable"):
 		return 0.5
@@ -1808,10 +2251,17 @@ func _assess_player_threat() -> float:
 
 func _compute_release_threshold(player_threat: float) -> int:
 	# Translate measured DPS into a target squad size, biased toward
-	# fewer-but-bigger pushes against heavy defenses.
-	if player_threat <= 0.1:
+	# fewer-but-bigger pushes against heavy defenses. Pressure scales
+	# the required squad size up — under high pressure even a low-threat
+	# player will face larger pushes.
+	var pm: float = _pressure_mult()
+	if player_threat <= 0.1 and pm <= 1.05:
 		return _SQUAD_MIN_SIZE
 	var raw: int = int(ceil(player_threat / _SQUAD_AVG_UNIT_DPS))
+	# Pressure bonus: +1 unit per 0.2 above baseline (so 1.0 → +0,
+	# 1.4 → +2, 1.6 → +3). Layered on top of DPS-derived raw.
+	var pressure_bonus: int = int(round(max(0.0, (pm - 1.0)) * 5.0))
+	raw += pressure_bonus
 	return clampi(raw, _SQUAD_MIN_SIZE, _SQUAD_MAX_SIZE)
 
 
@@ -1819,20 +2269,374 @@ func _compute_release_threshold(player_threat: float) -> int:
 ## and starts pathing. Members are spread across a few different
 ## targets so an entire push doesn't suicide-stack on a single wall
 ## tile when the priority scorer returns the same anchor for everyone.
+##
+## Flow-field accelerated: when a squad releases, it picks a small
+## handful (1-3) of high-value LUMINA targets, builds a flow field per
+## (target, movement_layer) pair, and traces each member through the
+## field instead of running A* per unit. This scales to large pushes
+## almost for free.
 func _release_squad(fab_anchor: Vector2i) -> void:
 	if not enemy_squads.has(fab_anchor):
 		return
 	var squad: Dictionary = enemy_squads[fab_anchor]
 	var members: Array = squad.get("units", [])
+
+	# Collect a representative spawn point (rally pos or fab center) and
+	# pick a few targets to spread the push across.
+	var origin_cell: Vector2i = fab_anchor
+	var targets: Array[Vector2i] = _pick_push_targets(origin_cell, 3)
+
+	if targets.is_empty():
+		# Nothing to attack — fall back to single-unit nearest sweep.
+		for unit in members:
+			if unit == null or not is_instance_valid(unit) or unit.is_dead:
+				continue
+			if "is_rallying" in unit:
+				unit.is_rallying = false
+			_assign_priority_path_to_enemy(unit)
+		squad["units"] = [] as Array[Node2D]
+		squad["released"] = true
+		squad["first_spawn"] = 0.0
+		return
+
+	# Distribute units across the chosen targets round-robin. Flow fields
+	# are built lazily on first use via _get_flow_field.
+	var ti: int = 0
 	for unit in members:
 		if unit == null or not is_instance_valid(unit) or unit.is_dead:
 			continue
 		if "is_rallying" in unit:
 			unit.is_rallying = false
-		_assign_priority_path_to_enemy(unit)
+		var target_cell: Vector2i = targets[ti % targets.size()]
+		ti += 1
+		_assign_flow_path_to_enemy(unit, target_cell)
 	squad["units"] = [] as Array[Node2D]
 	squad["released"] = true
 	squad["first_spawn"] = 0.0
+
+
+## Picks up to `count` high-value LUMINA targets to split a push across.
+## Targets are well-separated to avoid the squad suicide-stacking on
+## one wall tile. Uses the same building-target scoring as the per-unit
+## picker (so squad-level and unit-level decisions agree on what's
+## worth attacking).
+func _pick_push_targets(origin: Vector2i, count: int, faction: int = -1) -> Array[Vector2i]:
+	var target_faction: int = main.Faction.LUMINA if faction < 0 else faction
+	var scored: Array = []
+	var aggression: float = _pressure_mult()
+	for grid_pos in main.placed_buildings:
+		if main.get_building_faction(grid_pos) != target_faction:
+			continue
+		var bid: StringName = main.placed_buildings[grid_pos]
+		var bdata = Registry.get_block(bid)
+		if bdata == null or bdata.tags.has("platform"):
+			continue
+		var score: float = _score_building_for_attack(grid_pos, bdata, origin, aggression)
+		if score <= 0.0:
+			continue
+		scored.append({"pos": grid_pos, "score": score})
+	scored.sort_custom(func(a, b): return a["score"] > b["score"])
+	var out: Array[Vector2i] = []
+	var min_sep_sq: int = 8 * 8
+	for entry in scored:
+		var p: Vector2i = entry["pos"]
+		var ok: bool = true
+		for q in out:
+			var dxq = p.x - q.x
+			var dyq = p.y - q.y
+			if dxq * dxq + dyq * dyq < min_sep_sq:
+				ok = false
+				break
+		if ok:
+			out.append(p)
+		if out.size() >= count:
+			break
+	if out.is_empty() and not scored.is_empty():
+		out.append(scored[0]["pos"])
+	return out
+
+
+## Pack (target, movement_layer) into a string key for the cache.
+func _flow_key(target: Vector2i, ml: int) -> String:
+	return "%d,%d,%d" % [target.x, target.y, ml]
+
+
+## Returns the AStarGrid2D the given movement layer should consult for
+## solidity. FLYING returns null (always passable).
+func _astar_for_layer(ml: int) -> AStarGrid2D:
+	# Layer enum mirrors UnitData.MovementLayer: 0=GROUND, 1=CRAWLER,
+	# 2=HOVER, 3=FLYING.
+	match ml:
+		1: return astar_crawler
+		2: return astar_hover
+		3: return null
+		_: return astar
+
+
+## Look up a cached flow field for (target, movement_layer) or build a
+## new one. Built fields persist for _FLOW_FIELD_TTL seconds after their
+## last use; building changes invalidate the entire cache.
+func _get_flow_field(target: Vector2i, ml: int) -> FlowField:
+	var key: String = _flow_key(target, ml)
+	if _flow_field_cache.has(key):
+		var entry: Dictionary = _flow_field_cache[key]
+		entry["age"] = 0.0
+		return entry["field"]
+	var grid: AStarGrid2D = _astar_for_layer(ml)
+	# FLYING doesn't need a flow field — fall back to direct pathing.
+	if grid == null:
+		return null
+	var field := FlowField.new()
+	field.build(target, grid, main.GRID_WIDTH, main.GRID_HEIGHT, float(main.GRID_SIZE), ml)
+	_flow_field_cache[key] = {"field": field, "age": 0.0}
+	return field
+
+
+## Clear the flow-field cache. Called whenever a building is placed
+## or destroyed because that change may have created or broken a route.
+func _invalidate_flow_fields() -> void:
+	_flow_field_cache.clear()
+
+
+## Trace a flow-field path for one enemy toward a target cell. Falls
+## back to the threaded A* path worker if the field can't be built
+## (e.g. flying units).
+func _assign_flow_path_to_enemy(enemy: Node2D, target_cell: Vector2i) -> void:
+	var enemy_grid: Vector2i = main.world_to_grid(enemy.position)
+	enemy_grid.x = clampi(enemy_grid.x, 0, main.GRID_WIDTH - 1)
+	enemy_grid.y = clampi(enemy_grid.y, 0, main.GRID_HEIGHT - 1)
+	var ml: int = enemy.data.movement_layer if enemy.data else 0
+	# FLYING — straight-line direct path.
+	if ml == 3:
+		var half: Vector2 = Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+		var direct := PackedVector2Array([
+			Vector2(target_cell.x * main.GRID_SIZE, target_cell.y * main.GRID_SIZE) + half
+		])
+		enemy.set_path(direct, target_cell)
+		return
+	var field: FlowField = _get_flow_field(target_cell, ml)
+	if field == null or not field.is_reachable(enemy_grid):
+		# Field unusable from this start — back-fill with the threaded
+		# A* worker so the unit still gets *some* path.
+		if _path_worker != null:
+			var bldg_id: int = _pack_grid_pos(target_cell)
+			_path_worker.request_path(enemy.get_instance_id(), enemy_grid,
+				target_cell, ml, bldg_id)
+		else:
+			enemy.set_path(PackedVector2Array(), null)
+		return
+	var path: PackedVector2Array = field.trace_path(enemy_grid)
+	enemy.set_path(path, target_cell)
+
+
+# =========================
+# PRESSURE / RTSAI BASES
+# =========================
+# Implementations live further down. These tick stubs are called by
+# `_tick_enemy_squads` every frame so the base / pressure systems keep
+# pace with the squad logic.
+
+func _tick_pressure(delta: float) -> void:
+	_pressure_tick_timer -= delta
+	if _pressure_tick_timer > 0.0:
+		return
+	_pressure_tick_timer = _PRESSURE_TICK_INTERVAL
+	# Passive ramp: pressure always trickles up over time so a player who
+	# turtles for an hour still eventually gets pushed on.
+	ferox_pressure += _PRESSURE_PASSIVE_RAMP * _PRESSURE_TICK_INTERVAL
+	# Player expansion contribution. We count LUMINA turrets / fabs
+	# rather than DPS so the pressure curve doesn't double-count the
+	# same effect already baked into `_assess_player_threat`.
+	var turret_n: int = 0
+	var fab_n: int = 0
+	for gp in main.placed_buildings:
+		if main.get_building_faction(gp) != main.Faction.LUMINA:
+			continue
+		var bdata = Registry.get_block(main.placed_buildings[gp])
+		if bdata == null:
+			continue
+		var tags: PackedStringArray = bdata.tags
+		if tags.has("turret"):
+			turret_n += 1
+		elif tags.has("fabricator") or tags.has("factory"):
+			fab_n += 1
+	ferox_pressure += turret_n * _PRESSURE_PER_TURRET * _PRESSURE_TICK_INTERVAL * 0.05
+	ferox_pressure += fab_n * _PRESSURE_PER_FAB * _PRESSURE_TICK_INTERVAL * 0.05
+	# Soft cap — above the cap, growth is halved (still grows, but slow).
+	if ferox_pressure > _PRESSURE_SOFT_CAP:
+		ferox_pressure = _PRESSURE_SOFT_CAP + (ferox_pressure - _PRESSURE_SOFT_CAP) * 0.5
+
+
+## Multiplier applied to release thresholds, cooldowns, and target
+## aggression. Pressure 0 → 1.0; pressure soft-cap → 1.6; bounded.
+func _pressure_mult() -> float:
+	return 1.0 + clampf(ferox_pressure / _PRESSURE_SOFT_CAP, 0.0, 1.5) * 0.6
+
+
+func _tick_ferox_bases(delta: float) -> void:
+	_base_tick_timer -= delta
+	if _base_tick_timer > 0.0:
+		# Even between full ticks, count down per-base cooldowns so the
+		# attack timing stays smooth.
+		for bid in ferox_bases:
+			var b: Dictionary = ferox_bases[bid]
+			b["next_attack_at"] = max(0.0, float(b.get("next_attack_at", 0.0)) - delta)
+		return
+	_base_tick_timer = _BASE_TICK_INTERVAL
+	if _base_dirty:
+		_rebuild_ferox_bases()
+		_base_dirty = false
+	# Per-base attack scheduler — see _maybe_launch_base_attack.
+	for bid in ferox_bases:
+		var b: Dictionary = ferox_bases[bid]
+		b["next_attack_at"] = max(0.0, float(b.get("next_attack_at", 0.0)) - _BASE_TICK_INTERVAL)
+		_maybe_launch_base_attack(bid)
+
+
+## Rebuild the ferox_bases dictionary by clustering FEROX fabricators
+## by proximity (transitive within _BASE_CLUSTER_RADIUS tiles).
+func _rebuild_ferox_bases() -> void:
+	var fabs: Array[Vector2i] = []
+	for gp in main.placed_buildings:
+		if main.get_building_faction(gp) != main.Faction.FEROX:
+			continue
+		var bdata = Registry.get_block(main.placed_buildings[gp])
+		if bdata == null:
+			continue
+		var tags: PackedStringArray = bdata.tags
+		if tags.has("fabricator") or tags.has("factory") or tags.has("core"):
+			fabs.append(gp)
+
+	# Union-find over fabs by proximity.
+	var parent: Array[int] = []
+	for i in range(fabs.size()):
+		parent.append(i)
+	var find = func(x):
+		var v: int = x
+		while parent[v] != v:
+			parent[v] = parent[parent[v]]
+			v = parent[v]
+		return v
+	var r2: int = _BASE_CLUSTER_RADIUS * _BASE_CLUSTER_RADIUS
+	for i in range(fabs.size()):
+		for j in range(i + 1, fabs.size()):
+			var dx = fabs[i].x - fabs[j].x
+			var dy = fabs[i].y - fabs[j].y
+			if dx * dx + dy * dy <= r2:
+				var ri: int = find.call(i)
+				var rj: int = find.call(j)
+				if ri != rj:
+					parent[ri] = rj
+
+	# Bucket fabs by root → new base entries. Preserve attack_target /
+	# cooldowns from old entries with overlapping members so a re-cluster
+	# from a single fab being added doesn't reset every base.
+	var clusters: Dictionary = {}
+	for i in range(fabs.size()):
+		var r: int = find.call(i)
+		if not clusters.has(r):
+			clusters[r] = [] as Array[Vector2i]
+		(clusters[r] as Array).append(fabs[i])
+
+	var new_bases: Dictionary = {}
+	for r in clusters:
+		var members: Array = clusters[r]
+		var cx: int = 0
+		var cy: int = 0
+		for m in members:
+			cx += m.x
+			cy += m.y
+		cx /= members.size()
+		cy /= members.size()
+		var anchor: Vector2i = Vector2i(cx, cy)
+		var key: String = "%d,%d" % [anchor.x, anchor.y]
+		var prev: Dictionary = _find_overlapping_old_base(members)
+		new_bases[key] = {
+			"anchor": anchor,
+			"members": members,
+			"attack_target": prev.get("attack_target", null),
+			"next_attack_at": float(prev.get("next_attack_at", _BASE_ATTACK_COOLDOWN)),
+			"pressure_acc": float(prev.get("pressure_acc", 0.0)),
+		}
+	ferox_bases = new_bases
+
+
+func _find_overlapping_old_base(members: Array) -> Dictionary:
+	for k in ferox_bases:
+		var b: Dictionary = ferox_bases[k]
+		var existing: Array = b.get("members", [])
+		for m in members:
+			if existing.has(m):
+				return b
+	return {}
+
+
+## Per-base attack scheduler. When cooldown elapses, the base picks a
+## single high-value target and orders its squads to push together.
+## A `_BASE_DEFENDER_RATIO` share of units stays at home as defenders
+## (the existing squad rally point already keeps newly-built units near
+## the fabricator, so "stay home" just means we don't release them).
+func _maybe_launch_base_attack(base_key: String) -> void:
+	var b: Dictionary = ferox_bases[base_key]
+	if float(b.get("next_attack_at", 0.0)) > 0.0:
+		return
+	# Gather all currently-rallying units across this base's squads.
+	var pool: Array[Node2D] = [] as Array[Node2D]
+	for fab in b.get("members", []):
+		if not enemy_squads.has(fab):
+			continue
+		for u in enemy_squads[fab].get("units", []):
+			if u != null and is_instance_valid(u) and not u.is_dead:
+				pool.append(u)
+	if pool.is_empty():
+		return
+	# Need at least min_strength to bother attacking. Scales with pressure.
+	var min_strength: int = int(ceil(_pressure_mult() * 2.0))
+	if pool.size() < min_strength:
+		return
+
+	# Hold back defender ratio.
+	var defenders_n: int = int(round(pool.size() * _BASE_DEFENDER_RATIO))
+	var attackers: Array[Node2D] = [] as Array[Node2D]
+	for i in range(pool.size()):
+		if i < defenders_n:
+			continue
+		attackers.append(pool[i])
+	if attackers.is_empty():
+		return
+
+	# Pick targets to spread across (deeper-into-base picks at higher
+	# pressure).
+	var origin: Vector2i = b["anchor"]
+	var num_targets: int = clampi(int(round(_pressure_mult())), 1, 3)
+	var targets: Array[Vector2i] = _pick_push_targets(origin, num_targets)
+	if targets.is_empty():
+		# No valid LUMINA target — reset cooldown and try again later.
+		b["next_attack_at"] = _BASE_ATTACK_COOLDOWN
+		return
+
+	var ti: int = 0
+	for unit in attackers:
+		if "is_rallying" in unit:
+			unit.is_rallying = false
+		_assign_flow_path_to_enemy(unit, targets[ti % targets.size()])
+		ti += 1
+	# Pull the released units out of their squads so the next squad tick
+	# doesn't re-rally them.
+	for fab in b.get("members", []):
+		if not enemy_squads.has(fab):
+			continue
+		var squad: Dictionary = enemy_squads[fab]
+		var kept: Array[Node2D] = [] as Array[Node2D]
+		for u in squad.get("units", []):
+			if attackers.has(u):
+				continue
+			kept.append(u)
+		squad["units"] = kept
+
+	# Cooldown shrinks with pressure (more aggression → faster pushes).
+	var pm: float = _pressure_mult()
+	b["next_attack_at"] = _BASE_ATTACK_COOLDOWN / pm
 
 
 func _assign_priority_path_to_enemy(enemy: Node2D) -> void:
@@ -1847,18 +2651,31 @@ func _assign_priority_path_to_enemy(enemy: Node2D) -> void:
 	if target == null:
 		enemy.set_path(PackedVector2Array(), null)
 		return
-	var ml: int = enemy.data.movement_layer if enemy.data else 0
-	var bldg_id: int = _pack_grid_pos(target)
-	_path_worker.request_path(
-		enemy.get_instance_id(),
-		enemy_grid,
-		target as Vector2i,
-		ml,
-		bldg_id,
-	)
+	# Try the flow-field cache first — if a field for this target already
+	# exists (or building it is cheap enough), gradient-descent the path
+	# directly. Falls back to threaded A* when the field rejects the
+	# start cell (e.g. unreachable due to walls).
+	_assign_flow_path_to_enemy(enemy, target as Vector2i)
 
 
 func _tick_enemy_squads(delta: float) -> void:
+	# Age out stale flow fields even when no squads are active so the
+	# cache doesn't outlive its accuracy.
+	_flow_field_age_timer += delta
+	if _flow_field_age_timer >= 1.0:
+		_flow_field_age_timer = 0.0
+		var expired: Array = []
+		for k in _flow_field_cache:
+			var e: Dictionary = _flow_field_cache[k]
+			e["age"] = float(e.get("age", 0.0)) + 1.0
+			if e["age"] >= _FLOW_FIELD_TTL:
+				expired.append(k)
+		for k in expired:
+			_flow_field_cache.erase(k)
+	# Pressure & RtsAI base ticks always run, even when no squads are
+	# active (so cluster bookkeeping stays current as buildings change).
+	_tick_pressure(delta)
+	_tick_ferox_bases(delta)
 	if enemy_squads.is_empty():
 		return
 	# Throttled threat reassessment — scanning every frame is wasteful.
@@ -2223,7 +3040,72 @@ func _is_ground_passable_building(grid_pos: Vector2i) -> bool:
 	if data == null:
 		return false
 	# Transport buildings are passable (conveyors, pipes, bridges, junctions, sorters, etc.)
-	return data.transport_speed > 0 or data.transports_fluid
+	# Platforms are also passable — they're the primary way for ground units
+	# to cross water bodies. The per-platform "one unit at a time" gate is
+	# enforced separately via _water_platform_reservation.
+	if data.transport_speed > 0 or data.transports_fluid:
+		return true
+	if data.tags.has("platform"):
+		return true
+	return false
+
+
+## A* weight-scale used to bias the pathfinder away from a water cell.
+## Shallow (depth=1) reads as sand-through-the-surface and is walked
+## like dry land. Medium (2) and deep (3) get progressively harsher
+## penalties so a 6- or 8-tile detour around the lake "wins" over
+## wading straight through — but the unit CAN still cross if there
+## isn't a dry route, or if the player orders it in.
+## A* weight-scale for water cells. Tuned so the platform / dry-land
+## detour wins against a direct swim by a wide margin — even a ~20-tile
+## detour around the lake beats a 1-tile deep-water dive.
+##
+## Depth 1 (shallow / sand-through-the-surface) stays cheap; ground
+## units wade through it freely. Depth 2+ snaps the cost up sharply so
+## the pathfinder almost always routes around or onto any platform the
+## player has laid down.
+##
+## Old values (depth 2 = 8, depth 3+ = 16) let a 9-tile straight dive
+## win against a 10-tile platform detour, so units would clump in the
+## water when a clear plank route was right next to them.
+func _water_cell_weight(grid_pos: Vector2i) -> float:
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return 1.0
+	var depth: int = terrain.get_water_depth_at(grid_pos)
+	match depth:
+		0: return 1.0
+		1: return 2.0    # shallow wading — mild bias toward dry/platform
+		2: return 30.0   # medium water — strongly prefer detour up to ~30 tiles
+		_: return 60.0   # deep water — almost any dry route beats this
+
+
+## True if a water (liquid) floor tile sits at `grid_pos`. Used by ground
+## pathfinding to bias water cells (so units route around) unless a
+## building covers the cell (platform / floating transport).
+func _is_water_floor(grid_pos: Vector2i) -> bool:
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return false
+	if not terrain.floor_tiles.has(grid_pos):
+		return false
+	var td: TerrainTileData = Registry.get_tile(terrain.floor_tiles[grid_pos])
+	if td == null:
+		return false
+	return td.is_liquid and td.tags.has("water")
+
+
+## True if a "platform" building (tag = "platform") sits at `grid_pos`.
+## Walking onto a platform cell that's over water is gated through the
+## reservation system so only one ground unit crosses each cell at a time.
+func _is_platform_cell(grid_pos: Vector2i) -> bool:
+	var block_id = main.placed_buildings.get(grid_pos, &"")
+	if block_id == &"":
+		return false
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return false
+	return data.tags.has("platform")
 
 
 ## Returns true if the building at grid_pos is a wall (category WALLS).
@@ -2448,44 +3330,89 @@ func _paint_ctrl_hover_arrows(center: Vector2, target_radius: float) -> void:
 
 ## Draws a small diamond at each selected unit's move target and a line from
 ## the unit to the diamond, using the same gold color as the selection ring.
+## Paints a single command indicator at the player's click point — one
+## diamond for a move order or the TargetMouse.png crosshair for an
+## attack-building order — with lines from every selected unit that's
+## still pursuing the command. Drawing only ONE marker (rather than
+## one per unit at each formation slot) matches the player's mental
+## model: "I clicked here, send everyone over."
 func _draw_move_targets() -> void:
 	const LINE_COLOR := Color(1.0, 0.84, 0.0, 0.45)
+	const ATTACK_LINE_COLOR := Color(1.0, 0.3, 0.25, 0.55)
 	const DIAMOND_COLOR := Color(1.0, 0.84, 0.0, 0.8)
-	const DIAMOND_SIZE := 5.0
+	const DIAMOND_OUTLINE := Color(1.0, 0.84, 0.0, 1.0)
+	const DIAMOND_SIZE := 6.0
+	const ATTACK_ICON_SIZE := 24.0
 
-	# Collect unique move targets so we only draw each diamond once
-	var drawn_diamonds: Dictionary = {}  # Vector2 → true
+	# --- Attack-building indicator (TargetMouse.png + lines) -----------
+	if _attack_command_anchor != Vector2i(-9999, -9999) \
+			and main.placed_buildings.has(_attack_command_anchor):
+		var bdata = Registry.get_block(main.placed_buildings[_attack_command_anchor])
+		if bdata != null:
+			var gs: float = float(main.GRID_SIZE)
+			var center: Vector2 = main.grid_to_world(_attack_command_anchor) + Vector2(
+				bdata.grid_size.x * gs * 0.5,
+				bdata.grid_size.y * gs * 0.5,
+			)
+			var any_pursuing: bool = false
+			for unit in selected_units:
+				if not is_instance_valid(unit) or unit.is_dead:
+					continue
+				if "manual_target_building" in unit \
+						and unit.manual_target_building == _attack_command_anchor:
+					draw_line(unit.position, center, ATTACK_LINE_COLOR, 1.5)
+					any_pursuing = true
+			if any_pursuing:
+				if _target_icon_tex:
+					var rect := Rect2(
+						center - Vector2(ATTACK_ICON_SIZE, ATTACK_ICON_SIZE),
+						Vector2(ATTACK_ICON_SIZE * 2.0, ATTACK_ICON_SIZE * 2.0),
+					)
+					draw_texture_rect(_target_icon_tex, rect, false)
+				else:
+					# Fallback if the texture didn't load — a red diamond.
+					var d := DIAMOND_SIZE
+					var pts := PackedVector2Array([
+						center + Vector2(0, -d), center + Vector2(d, 0),
+						center + Vector2(0, d), center + Vector2(-d, 0),
+					])
+					draw_colored_polygon(pts, Color(1.0, 0.25, 0.25, 0.85))
+			else:
+				_attack_command_anchor = Vector2i(-9999, -9999)
+		else:
+			_attack_command_anchor = Vector2i(-9999, -9999)
+	elif _attack_command_anchor != Vector2i(-9999, -9999):
+		# Target building destroyed — drop the indicator.
+		_attack_command_anchor = Vector2i(-9999, -9999)
 
-	for unit in selected_units:
-		if not is_instance_valid(unit) or unit.is_dead:
-			continue
-		if unit.move_target == null:
-			continue
-
-		var target: Vector2 = unit.move_target
-
-		# Draw line from unit to its move target
-		draw_line(unit.position, target, LINE_COLOR, 1.0)
-
-		# Draw diamond at the target (only once per unique position)
-		var key := Vector2(snapped(target.x, 0.5), snapped(target.y, 0.5))
-		if not drawn_diamonds.has(key):
-			drawn_diamonds[key] = true
+	# --- Move-command indicator (one diamond + lines from each unit) ---
+	if _move_command_point != Vector2.INF:
+		var any_moving: bool = false
+		for unit in selected_units:
+			if not is_instance_valid(unit) or unit.is_dead:
+				continue
+			if unit.move_target == null:
+				continue
+			draw_line(unit.position, _move_command_point, LINE_COLOR, 1.0)
+			any_moving = true
+		if any_moving:
 			var d := DIAMOND_SIZE
 			var diamond := PackedVector2Array([
-				target + Vector2(0, -d),
-				target + Vector2(d, 0),
-				target + Vector2(0, d),
-				target + Vector2(-d, 0),
+				_move_command_point + Vector2(0, -d),
+				_move_command_point + Vector2(d, 0),
+				_move_command_point + Vector2(0, d),
+				_move_command_point + Vector2(-d, 0),
 			])
 			draw_colored_polygon(diamond, DIAMOND_COLOR)
 			draw_polyline(
 				PackedVector2Array([
-					target + Vector2(0, -d),
-					target + Vector2(d, 0),
-					target + Vector2(0, d),
-					target + Vector2(-d, 0),
-					target + Vector2(0, -d),
+					_move_command_point + Vector2(0, -d),
+					_move_command_point + Vector2(d, 0),
+					_move_command_point + Vector2(0, d),
+					_move_command_point + Vector2(-d, 0),
+					_move_command_point + Vector2(0, -d),
 				]),
-				Color(1.0, 0.84, 0.0, 1.0), 1.5
+				DIAMOND_OUTLINE, 1.5
 			)
+		else:
+			_move_command_point = Vector2.INF

@@ -28,6 +28,7 @@ var _terrain: Node2D
 var _building_sys: Node
 var _sector_script: Node
 var _logistics: Node2D
+var _watchtower_sys: Node
 
 # --- PROJECTILE DATA ---
 # Each projectile is a Dictionary with these keys:
@@ -131,9 +132,11 @@ var _shot_active: Dictionary = {}
 ## Returns 0 if no watchtower system is mounted (editor / loading) or
 ## the turret is outside every aura.
 func _watchtower_range_bonus(turret_anchor: Vector2i) -> float:
-	var wt = get_node_or_null("/root/Main/WatchtowerSystem")
-	if wt and wt.has_method("get_turret_range_bonus_tiles"):
-		return float(wt.get_turret_range_bonus_tiles(turret_anchor))
+	# Reuse cached `_watchtower_sys` ref — the previous per-call
+	# `get_node_or_null` was walking the scene tree once per turret per
+	# combat tick (commonly 3-4× per frame per turret).
+	if _watchtower_sys and _watchtower_sys.has_method("get_turret_range_bonus_tiles"):
+		return float(_watchtower_sys.get_turret_range_bonus_tiles(turret_anchor))
 	return 0.0
 
 
@@ -144,7 +147,9 @@ func _watchtower_range_bonus(turret_anchor: Vector2i) -> float:
 func _get_active_booster_multiplier(anchor: Vector2i, data: BlockData, stat: String) -> float:
 	if data == null or data.boosters.is_empty():
 		return 1.0
-	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	# Cached `_logistics` instead of re-querying the scene tree every
+	# turret tick.
+	var logistics = _logistics
 	if logistics == null or not "block_storage" in logistics:
 		return 1.0
 	var storage: Dictionary = logistics.block_storage.get(anchor, {})
@@ -282,6 +287,7 @@ func _ready() -> void:
 	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
 	_sector_script = get_node_or_null("/root/Main/SectorScript")
 	_logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	_watchtower_sys = get_node_or_null("/root/Main/WatchtowerSystem")
 	main.building_placed.connect(_on_building_placed)
 	main.building_destroyed.connect(_on_building_destroyed)
 	_targeting_worker = TargetingWorker.new()
@@ -1373,16 +1379,59 @@ func _update_projectiles(delta: float) -> void:
 			to_remove.append(i)
 			continue
 
-		# --- Direct-fire bullets (drone, controlled unit/turret): hit enemies and buildings along path ---
-		if proj["target_type"] == "none" and unit_mgr:
-			var hit_enemy = _check_bullet_hit_enemy(move_pos, proj["pos"], unit_mgr)
-			if hit_enemy:
-				hit_enemy.take_damage(_shot_damage(proj, hit_enemy.get_instance_id(), proj["damage"]))
+		# --- Shield collision ---
+		# Hostile shields swallow bullets that cross their boundary
+		# from OUTSIDE → INSIDE. Each hit subtracts `proj.damage` from
+		# the shield's HP pool; the shield breaks at 0 and respawns
+		# after its cooldown. Friendly bullets and bullets travelling
+		# from inside outward are not intercepted.
+		var shield_sys = get_node_or_null("/root/Main/ShieldSystem")
+		if shield_sys and shield_sys.has_method("intercept_bullet"):
+			var src_faction_s: int = int(proj.get("source_faction", -1))
+			var hit_info: Dictionary = shield_sys.intercept_bullet(proj["pos"], move_pos, src_faction_s)
+			if not hit_info.is_empty():
+				var anchor_h: Vector2i = hit_info.get("anchor", Vector2i.ZERO)
+				shield_sys.apply_bullet_damage(anchor_h, float(proj.get("damage", 0.0)))
+				# Spawn the impact at the actual boundary crossing so
+				# the muzzle flash / spark reads as hitting the shield.
+				proj["pos"] = hit_info.get("hit_pos", move_pos)
 				to_remove.append(i)
 				continue
-			# Check if the bullet hits an opposing-faction building
-			var source_faction: int = proj.get("source_faction", 0)
-			var hit_bldg: Vector2i = _check_bullet_hit_building(move_pos, proj["pos"], source_faction)
+
+		# --- In-path collision (any projectile type) ---
+		# Every bullet now dies on first contact with an opposing-faction
+		# unit / building, regardless of whether it was direct-fire or
+		# locked onto a specific target. Previously, only `target_type ==
+		# "none"` (drone / controlled-unit shots) checked for in-path
+		# hits — a turret aimed at enemy A would happily fly straight
+		# through enemy B if B walked into the line. Now B intercepts
+		# and the bullet despawns there.
+		#
+		# AoE / status / knockback are preserved for the case where the
+		# intercepted entity IS the bullet's originally-intended target:
+		# we route through `_on_projectile_hit` so splash etc. still
+		# fires at that position. Incidental in-path intercepts get
+		# direct damage + knockback + status only.
+		if unit_mgr:
+			var src_faction: int = proj.get("source_faction", main.Faction.LUMINA)
+			var src_team: int = UnitData.Team.PLAYER if src_faction == main.Faction.LUMINA \
+					else UnitData.Team.ENEMY
+			var hit_unit: Node2D = _find_opposing_unit_on_segment(
+					proj["pos"], move_pos, src_team, unit_mgr)
+			if hit_unit:
+				var orig_target = proj.get("target_ref")
+				var hit_is_target: bool = (proj.get("target_type", "") == "enemy" \
+						and orig_target == hit_unit)
+				if hit_is_target and bool(proj.get("aoe", false)):
+					proj["target_pos"] = hit_unit.position
+					_on_projectile_hit(proj, unit_mgr)
+				else:
+					hit_unit.take_damage(_shot_damage(proj, hit_unit.get_instance_id(), proj["damage"]))
+					_apply_knockback(hit_unit, proj["pos"], float(proj.get("knockback", 0.0)))
+					_apply_status(hit_unit, proj.get("status"))
+				to_remove.append(i)
+				continue
+			var hit_bldg: Vector2i = _check_bullet_hit_building(move_pos, proj["pos"], src_faction)
 			if hit_bldg != Vector2i(-1, -1):
 				main.damage_building(hit_bldg, _shot_damage(proj, hit_bldg, proj["damage"]))
 				to_remove.append(i)
@@ -1808,16 +1857,24 @@ func _find_nearest_enemy_building(from_pos: Vector2, range_px: float) -> Vector2
 			best_anchor = anchor
 	return best_anchor
 
-## Checks if a drone bullet is close enough to any enemy to hit it.
-## Uses line-segment collision so fast bullets can't skip over enemies.
-func _check_bullet_hit_enemy(bullet_pos: Vector2, bullet_prev: Vector2, unit_mgr: Node2D) -> Node2D:
-	for enemy in unit_mgr.enemies:
-		if not is_instance_valid(enemy) or enemy.is_dead:
-			continue
-		# Check distance from enemy to the line segment (prev → current)
-		var closest = Geometry2D.get_closest_point_to_segment(enemy.position, bullet_prev, bullet_pos)
-		if closest.distance_to(enemy.position) < hit_radius + enemy.unit_size:
-			return enemy
+
+
+## Faction-aware in-path collision check. Walks both `enemies` and
+## `player_units` (since a FEROX bullet can hit player units and a
+## LUMINA bullet can hit enemy units), skipping anything whose `team`
+## matches the shooter. Returns the first unit whose hitbox intersects
+## the segment, or null.
+func _find_opposing_unit_on_segment(bullet_prev: Vector2, bullet_pos: Vector2,
+		source_team: int, unit_mgr: Node2D) -> Node2D:
+	for lst in [unit_mgr.enemies, unit_mgr.player_units]:
+		for u in lst:
+			if not is_instance_valid(u) or u.is_dead:
+				continue
+			if "team" in u and u.team == source_team:
+				continue
+			var closest: Vector2 = Geometry2D.get_closest_point_to_segment(u.position, bullet_prev, bullet_pos)
+			if closest.distance_to(u.position) < hit_radius + u.unit_size:
+				return u
 	return null
 
 
@@ -1897,7 +1954,6 @@ func _is_friendly_wall(grid_pos: Vector2i, source_faction: int) -> bool:
 
 func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, source_faction: int) -> Vector2i:
 	var opposing_faction: int = main.Faction.FEROX if source_faction == main.Faction.LUMINA else main.Faction.LUMINA
-	var half := Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 
 	# Check grid cells along the bullet path
 	# Sample the line at small intervals to catch buildings the bullet passes through
@@ -2111,10 +2167,3 @@ func _draw_projectiles(canvas: CanvasItem) -> void:
 			var aoe_r: float = float(proj.get("aoe_radius", 0.0))
 			if aoe_r > 0.0:
 				canvas.draw_arc(pos, aoe_r, 0, TAU, 48, Color(1.0, 0.5, 0.0, 0.7), 1.0)
-
-
-## Legacy turret-range circle. No longer wired to `_draw` — superseded
-## by BuildingSystem's dashed white indicator. Kept as a no-op stub in
-## case anything still references it.
-func _draw_turret_ranges() -> void:
-	pass

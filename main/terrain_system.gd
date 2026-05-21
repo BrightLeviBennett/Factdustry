@@ -547,13 +547,6 @@ func remove_tile(grid_pos: Vector2i) -> void:
 	queue_redraw()
 
 
-func damage_tile(grid_pos: Vector2i, amount: float) -> void:
-	if not tile_health.has(grid_pos):
-		return
-	tile_health[grid_pos] -= amount
-	if tile_health[grid_pos] <= 0:
-		remove_tile(grid_pos)
-	queue_redraw()
 
 
 # =========================
@@ -607,14 +600,6 @@ func _remove_multi_tile(origin: Vector2i) -> void:
 # GETTERS
 # =========================
 
-## Returns the TerrainTileData at a position.
-## Checks wall layer first (top), then floor layer.
-func get_tile_at(grid_pos: Vector2i) -> TerrainTileData:
-	if wall_tiles.has(grid_pos):
-		return Registry.get_tile(wall_tiles[grid_pos])
-	if floor_tiles.has(grid_pos):
-		return Registry.get_tile(floor_tiles[grid_pos])
-	return null
 
 
 ## Returns the floor tile at a position (ignoring walls).
@@ -624,11 +609,6 @@ func get_floor_at(grid_pos: Vector2i) -> TerrainTileData:
 	return null
 
 
-## Returns the wall tile at a position (ignoring floors).
-func get_wall_at(grid_pos: Vector2i) -> TerrainTileData:
-	if wall_tiles.has(grid_pos):
-		return Registry.get_tile(wall_tiles[grid_pos])
-	return null
 
 ## Returns the ore tile at a position, or null.
 func get_ore_at(grid_pos: Vector2i) -> TerrainTileData:
@@ -681,16 +661,6 @@ func get_water_depth_at(grid_pos: Vector2i) -> int:
 	return _water_depth_map.get(grid_pos, 0)
 
 
-## Returns the speed modifier at a position.
-## Walls override floor modifiers.
-func get_speed_modifier(grid_pos: Vector2i) -> float:
-	var wall_data = get_wall_at(grid_pos)
-	if wall_data:
-		return wall_data.speed_modifier
-	var floor_data = get_floor_at(grid_pos)
-	if floor_data:
-		return floor_data.speed_modifier
-	return 1.0
 
 
 # =========================
@@ -709,20 +679,10 @@ var placed_tiles: Dictionary:
 # PAINT MODE
 # =========================
 
-func enter_paint_mode() -> void:
-	paint_mode = true
-	main.select_building(&"")
 
 
-func exit_paint_mode() -> void:
-	paint_mode = false
-	selected_tile = &""
-	queue_redraw()
 
 
-func select_tile(tile_id: StringName) -> void:
-	selected_tile = tile_id
-	enter_paint_mode()
 
 
 # =========================
@@ -1185,19 +1145,6 @@ func _rebuild_fade_mesh() -> void:
 	_fade_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 
 
-## Returns the fade alpha for a floor tile (1.0 = fully visible, 0.0 = fully dark).
-## Floors within FLOOR_FADE_START tiles of void fade to black.
-func _get_floor_fade_alpha(grid_pos: Vector2i) -> float:
-	var sector_script = _sector_script_ref()
-	if sector_script and sector_script.is_tile_hidden(grid_pos):
-		return 0.0
-	if not _floor_edge_distance.has(grid_pos):
-		return 1.0
-	var dist: int = _floor_edge_distance[grid_pos]
-	if dist >= FLOOR_FADE_START:
-		return 1.0
-	# dist 0 = at void edge (darkest), dist FLOOR_FADE_START = fully visible
-	return clampf(float(dist) / float(FLOOR_FADE_START), 0.0, 1.0)
 
 
 ## Returns the effective edge distance for a position (for per-corner interpolation).
@@ -1480,124 +1427,7 @@ func _draw_multi_tiles() -> void:
 			draw_rect(rect, color, true)
 
 
-## Draws all wall tiles. If a wall has render_tile_underneath = true,
-## the floor tile at that position is drawn first, then the wall on top.
-func _draw_wall_tiles() -> void:
-	var building_sys = _building_sys_ref()
-	var camera = get_viewport().get_camera_2d()
-	var cam_center = camera.get_screen_center_position() if camera else Vector2.ZERO
 
-	# Sort walls so further ones draw first (painter's algorithm)
-	var sorted_walls: Array[Vector2i] = []
-	for grid_pos in wall_tiles:
-		sorted_walls.append(grid_pos)
-	sorted_walls.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		var world_a = main.grid_to_world(a)
-		var world_b = main.grid_to_world(b)
-		return world_a.distance_squared_to(cam_center) > world_b.distance_squared_to(cam_center)
-	)
-
-	# --- PASS 1: Draw floor underneath + sides ---
-	for grid_pos in sorted_walls:
-		var tile_id = wall_tiles[grid_pos]
-		var data = Registry.get_tile(tile_id)
-		if data == null:
-			continue
-
-		var world_pos = main.grid_to_world(grid_pos)
-		var size = float(main.GRID_SIZE)
-
-		# If this wall allows the floor to show through, draw the floor first
-		if data.render_tile_underneath and floor_tiles.has(grid_pos):
-			var floor_data = Registry.get_tile(floor_tiles[grid_pos])
-			if floor_data:
-				_draw_tile_texture(floor_data, world_pos, size, floor_data.opacity)
-
-		# Calculate parallax offset — use same offset as buildings so walls are flush
-		var offset = Vector2.ZERO
-		if building_sys and data.height > 0:
-			offset = building_sys._get_top_offset(world_pos)
-
-		if abs(offset.x) > 0.5 or abs(offset.y) > 0.5:
-			var sc = data.get_side_color()
-			var scd = data.get_side_color_dark()
-
-			# Match building margin so walls sit flush with adjacent blocks
-			var margin := -1.0
-			var b_tl = world_pos + Vector2(margin, margin)
-			var b_tr = world_pos + Vector2(size - margin, margin)
-			var b_br = world_pos + Vector2(size - margin, size - margin)
-			var b_bl = world_pos + Vector2(margin, size - margin)
-			var t_tl = b_tl + offset
-			var t_tr = b_tr + offset
-			var t_br = b_br + offset
-			var t_bl = b_bl + offset
-
-			# Skip sides where an adjacent wall occludes them
-			var has_south = wall_tiles.has(grid_pos + Vector2i(0, 1))
-			var has_north = wall_tiles.has(grid_pos + Vector2i(0, -1))
-			var has_east = wall_tiles.has(grid_pos + Vector2i(1, 0))
-			var has_west = wall_tiles.has(grid_pos + Vector2i(-1, 0))
-
-			# Bottom side (visible when camera above, offset.y < 0)
-			if offset.y < 0 and not has_south:
-				draw_polygon([b_bl, b_br, t_br, t_bl], [sc, sc, sc, sc])
-			# Top side (visible when camera below, offset.y > 0)
-			if offset.y > 0 and not has_north:
-				draw_polygon([b_tl, b_tr, t_tr, t_tl], [sc, sc, sc, sc])
-			# Right side (visible when camera left, offset.x < 0)
-			if offset.x < 0 and not has_east:
-				draw_polygon([b_tr, b_br, t_br, t_tr], [scd, scd, scd, scd])
-			# Left side (visible when camera right, offset.x > 0)
-			if offset.x > 0 and not has_west:
-				draw_polygon([b_tl, b_bl, t_bl, t_tl], [scd, scd, scd, scd])
-
-	# --- PASS 2: Draw all top faces ---
-	for grid_pos in sorted_walls:
-		var tile_id = wall_tiles[grid_pos]
-		var data = Registry.get_tile(tile_id)
-		if data == null:
-			continue
-
-		var world_pos = main.grid_to_world(grid_pos)
-		var size = float(main.GRID_SIZE)
-
-		var offset = Vector2.ZERO
-		if building_sys and data.height > 0:
-			offset = building_sys._get_top_offset(world_pos)
-
-		var margin := -1.0
-		var top_pos = world_pos + offset + Vector2(margin, margin)
-		var top_size = size - margin * 2
-		_draw_tile_texture(data, top_pos, top_size, 1.0)
-
-		# Health bar for destructible walls
-		if data.destructible and tile_health.has(grid_pos):
-			var pct = tile_health[grid_pos] / data.max_health
-			if pct < 1.0:
-				_draw_tile_health_bar(top_pos, pct)
-
-## Draws ore overlays on top of walls.
-func _draw_ore_tiles() -> void:
-	for grid_pos in ore_tiles:
-		var tile_id = ore_tiles[grid_pos]
-		var data = Registry.get_tile(tile_id)
-		if data == null:
-			continue
-
-		var world_pos = main.grid_to_world(grid_pos)
-		var size = float(main.GRID_SIZE)
-
-		# Apply same parallax offset as the wall underneath
-		var offset = Vector2.ZERO
-		var building_sys = _building_sys_ref()
-		if building_sys and wall_tiles.has(grid_pos):
-			var wall_data = Registry.get_tile(wall_tiles[grid_pos])
-			if wall_data and wall_data.height > 0:
-				offset = building_sys._get_top_offset(world_pos)
-
-		var top_pos = world_pos + offset
-		_draw_tile_texture(data, top_pos, size, data.opacity)
 
 ## Draws a tile using its texture if available, falling back to color.
 func _draw_tile_texture(data: TerrainTileData, pos: Vector2, size: float, alpha: float) -> void:
@@ -1610,12 +1440,6 @@ func _draw_tile_texture(data: TerrainTileData, pos: Vector2, size: float, alpha:
 		color.a = alpha
 		draw_rect(rect, color, true)
 
-func _draw_tile_health_bar(world_pos: Vector2, pct: float) -> void:
-	var bar_w := 40.0
-	var bar_h := 4.0
-	var bar_pos = world_pos + Vector2((main.GRID_SIZE - bar_w) / 2.0, -8.0)
-	draw_rect(Rect2(bar_pos, Vector2(bar_w, bar_h)), Color(0.2, 0, 0, 0.8), true)
-	draw_rect(Rect2(bar_pos, Vector2(bar_w * pct, bar_h)), Color(1.0 - pct, pct, 0), true)
 
 
 func _draw_paint_preview() -> void:

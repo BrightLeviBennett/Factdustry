@@ -1,16 +1,34 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dvoebn4s8q0nu"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://jverr4ly5v4a" path="res://textures/blocks/assist/BarrierProjector.png" id="1_ltl4v"]
 
 [resource]
 script = ExtResource("1")
 id = &"barrier_projector"
 display_name = "Barrier Projector"
 description = "Creates a protective energy barrier around nearby structures."
+icon = ExtResource("1_ltl4v")
 category = 7
-color = Color(0.5, 0.5, 0.9, 1)
-max_health = 470.0
-build_cost = { "copper": 350, "silicon": 150 }
-build_time = 3.0
-power_consumption = 6.0
 tags = PackedStringArray("support")
+color = Color(0.5, 0.5, 0.9, 1)
+grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("1_ltl4v")
+max_health = 470.0
+shield_shape = "rect"
+shield_size = Vector2(2, 10)
+shield_offset = Vector2(0, 5)
+shield_blocks = "bullets"
+shield_health = 700.0
+shield_cooldown = 10.0
+shield_idle_power = 15.0
+shield_recharge_power = 20.0
+shield_water_boost_mult = 1.5
+electrical_power_use = 15.0
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
+build_time = 3.0
+mend_radius = null
+mend_amount = null

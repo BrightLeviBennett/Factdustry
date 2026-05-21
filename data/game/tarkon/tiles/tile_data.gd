@@ -90,17 +90,11 @@ enum TileCategory {
 func is_wall() -> bool:
 	return category == TileCategory.WALL
 
-## Returns true if this is a floor (walkable).
-func is_floor() -> bool:
-	return category == TileCategory.FLOOR
 
 ## Returns true if this is an ore deposit (placed on walls, mined by drills).
 func is_ore() -> bool:
 	return category == TileCategory.ORE
 
-## Returns true if this is a pumpable liquid source tile.
-func is_liquid_source() -> bool:
-	return is_liquid and extracted_liquid != &""
 
 
 ## Returns a display-friendly name: `display_name` if set, otherwise

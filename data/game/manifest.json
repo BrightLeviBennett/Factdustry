@@ -16,7 +16,7 @@
 	"res://data/game/tarkon/items/mat_steel.tres",
 	"res://data/game/tarkon/items/mat_uranium.tres",
 	"res://data/game/tarkon/items/mat_uranium_rod.tres",
-    "res://data/game/tarkon/items/mat_zinc.tres"
+	"res://data/game/tarkon/items/mat_zinc.tres"
   ],
   "blocks": [
 	"res://data/game/tarkon/blocks/advanced_plasma_bore.tres",
@@ -47,10 +47,10 @@
 	"res://data/game/tarkon/blocks/circuit_printer.tres",
 	"res://data/game/tarkon/blocks/combustion_generator.tres",
 	"res://data/game/tarkon/blocks/combustion_reactor.tres",
-	"res://data/game/tarkon/blocks/conduit_bridge.tres",
-	"res://data/game/tarkon/blocks/conduit_junction.tres",
-	"res://data/game/tarkon/blocks/conduit_router.tres",
-	"res://data/game/tarkon/blocks/conduit_sorter.tres",
+	"res://data/game/tarkon/blocks/pipe_bridge.tres",
+	"res://data/game/tarkon/blocks/pipe_junction.tres",
+	"res://data/game/tarkon/blocks/pipe_router.tres",
+	"res://data/game/tarkon/blocks/pipe_sorter.tres",
 	"res://data/game/tarkon/blocks/constructor.tres",
 	"res://data/game/tarkon/blocks/conveyor_belt.tres",
 	"res://data/game/tarkon/blocks/copper_platform.tres",
@@ -79,7 +79,7 @@
 	"res://data/game/tarkon/blocks/earthquake_harvester.tres",
 	"res://data/game/tarkon/blocks/eclipse.tres",
 	"res://data/game/tarkon/blocks/eruption_harvester.tres",
-	"res://data/game/tarkon/blocks/fluid_conduit.tres",
+	"res://data/game/tarkon/blocks/fluid_pipe.tres",
 	"res://data/game/tarkon/blocks/fluid_pump.tres",
 	"res://data/game/tarkon/blocks/force_field_projector.tres",
 	"res://data/game/tarkon/blocks/freight_conveyor.tres",
@@ -111,7 +111,7 @@
 	"res://data/game/tarkon/blocks/interplanetary_core_launchpad.tres",
 	"res://data/game/tarkon/blocks/interplanetary_launchpad.tres",
 	"res://data/game/tarkon/blocks/inverted_belt_sorter.tres",
-	"res://data/game/tarkon/blocks/inverted_conduit_sorter.tres",
+	"res://data/game/tarkon/blocks/inverted_pipe_sorter.tres",
 	"res://data/game/tarkon/blocks/inverted_duct_sorter.tres",
 	"res://data/game/tarkon/blocks/lance.tres",
 	"res://data/game/tarkon/blocks/landing_pad.tres",
@@ -139,7 +139,7 @@
 	"res://data/game/tarkon/blocks/overdrive_field.tres",
 	"res://data/game/tarkon/blocks/overdriver.tres",
 	"res://data/game/tarkon/blocks/overflow_belt.tres",
-	"res://data/game/tarkon/blocks/overflow_conduit.tres",
+	"res://data/game/tarkon/blocks/overflow_pipe.tres",
 	"res://data/game/tarkon/blocks/overflow_duct.tres",
 	"res://data/game/tarkon/blocks/payload_conveyor.tres",
 	"res://data/game/tarkon/blocks/payload_crane.tres",
@@ -170,10 +170,11 @@
 	"res://data/game/tarkon/blocks/support_hover_fabricator.tres",
 	"res://data/game/tarkon/blocks/tank_fabricator.tres",
 	"res://data/game/tarkon/blocks/underflow_belt.tres",
-	"res://data/game/tarkon/blocks/underflow_conduit.tres",
+	"res://data/game/tarkon/blocks/underflow_pipe.tres",
 	"res://data/game/tarkon/blocks/underflow_duct.tres",
 	"res://data/game/tarkon/blocks/unit_assembler.tres",
 	"res://data/game/tarkon/blocks/unit_reassembler.tres",
+	"res://data/game/tarkon/blocks/unit_reconstructor.tres",
 	"res://data/game/tarkon/blocks/unit_refabricator.tres",
 	"res://data/game/tarkon/blocks/unit_upgrader.tres",
 	"res://data/game/tarkon/blocks/unloader.tres",
@@ -182,7 +183,7 @@
 	"res://data/game/tarkon/blocks/vent_turbine.tres",
 	"res://data/game/tarkon/blocks/wall_crusher.tres",
 	"res://data/game/tarkon/blocks/wall_grinder.tres",
-    "res://data/game/tarkon/blocks/water_filter.tres"
+	"res://data/game/tarkon/blocks/water_filter.tres"
   ],
   "units": [
 	"res://data/game/tarkon/units/ascend.tres",
@@ -228,7 +229,7 @@
 	"res://data/game/tarkon/fluids/mat_petroleum.tres",
 	"res://data/game/tarkon/fluids/mat_propane.tres",
 	"res://data/game/tarkon/fluids/mat_salt_water.tres",
-    "res://data/game/tarkon/fluids/mat_water.tres"
+	"res://data/game/tarkon/fluids/mat_water.tres"
   ],
   "tiles": [
 	"res://data/game/tarkon/tiles/bauxite_wall.tres",
@@ -262,7 +263,7 @@
 	"res://data/game/tarkon/status_effects/emp_3.tres",
 	"res://data/game/tarkon/status_effects/freezing.tres",
 	"res://data/game/tarkon/status_effects/shocked.tres",
-    "res://data/game/tarkon/status_effects/slowed.tres"
+	"res://data/game/tarkon/status_effects/slowed.tres"
   ],
   "sectors": [
 	"res://data/game/tarkon/sectors/aluminum_mountains.tres",
@@ -278,11 +279,11 @@
 	"res://data/game/tarkon/sectors/starting_grounds.tres",
 	"res://data/game/tarkon/sectors/the_nexus.tres",
 	"res://data/game/tarkon/sectors/waterfront_ruins.tres",
-    "res://data/game/tarkon/sectors/zinc_deposits.tres"
+	"res://data/game/tarkon/sectors/zinc_deposits.tres"
   ],
   "planets": [
 	"res://data/game/planets/Aziris.tres",
 	"res://data/game/planets/Tarkon.tres",
-    "res://data/game/planets/Yndora.tres"
+	"res://data/game/planets/Yndora.tres"
   ]
 }

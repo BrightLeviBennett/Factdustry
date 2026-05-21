@@ -32,11 +32,9 @@ build_cost = {
 "silicon": 30
 }
 build_time = 4.0
-input_items = {
-"mat_copper": 15,
-"mat_silicon": 10,
-"mat_steel": 5
-}
 production_time = 6.0
+factory_recipes = null
 electrical_power_use = 25.0
 max_stored_items = 60
+mend_radius = null
+mend_amount = null

@@ -113,6 +113,29 @@ var _power_bar_label: Label = null
 var _power_bar_half_w: float = 0.0
 var _power_bar_height: float = 0.0
 var _last_hovered_grid := Vector2i(-9999, -9999)
+# --- CUSTOM CURSORS ---
+# We draw the cursor ourselves (TextureRect on a top-of-stack
+# CanvasLayer) instead of using Input.set_custom_mouse_cursor.
+# Godot 4's `set_custom_mouse_cursor` has a long-standing macOS bug
+# where the OS-level texture doesn't refresh until the window loses
+# and regains focus — every workaround (set_default_cursor_shape
+# cycle, MOUSE_MODE toggle, warp_mouse) either flickers, fails to
+# clear, or moves the cursor. Mindustry sidesteps the whole issue
+# because libGDX talks to the platform API directly; for us, the
+# robust equivalent is "hide the system cursor, paint our own sprite
+# at the mouse position".
+const _CURSOR_DRILL_PATH := "res://textures/mouse heads/DrillMouse.png"
+const _CURSOR_TARGET_PATH := "res://textures/mouse heads/TargetMouse.png"
+var _cursor_drill_tex: Texture2D = null
+var _cursor_target_tex: Texture2D = null
+var _cursor_layer: CanvasLayer = null
+var _cursor_sprite: TextureRect = null
+# Current custom texture (or null = show system cursor)
+var _cursor_active_tex: Texture2D = null
+# Target on-screen size for the custom cursor in pixels. Source PNGs
+# are authored at a much higher resolution so they stay crisp when
+# scaled — we resize them down to roughly system-cursor scale here.
+const _CURSOR_DISPLAY_SIZE := 64.0
 var _logistics: Node2D
 # Cached sibling refs (populated in _ready). Avoid re-looking-up from _process.
 var _unit_mgr: Node
@@ -267,6 +290,10 @@ func _ready() -> void:
 	_combat_sys = get_node_or_null("/root/Main/CombatSystem")
 	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
 	_power_sys = get_node_or_null("/root/Main/PowerSystem")
+
+	_cursor_drill_tex = load(_CURSOR_DRILL_PATH) as Texture2D
+	_cursor_target_tex = load(_CURSOR_TARGET_PATH) as Texture2D
+	_create_custom_cursor()
 
 	_create_portrait_panel()
 	_create_resource_panel()
@@ -466,6 +493,80 @@ func _tick_alert_banner(delta: float) -> void:
 	alert_panel.visible = true
 
 
+## Sets up the CanvasLayer + TextureRect we use to paint our custom
+## cursor sprite. Top-of-stack layer so the sprite renders over every
+## other HUD element. `mouse_filter = IGNORE` so the sprite never eats
+## clicks meant for the world below.
+func _create_custom_cursor() -> void:
+	_cursor_layer = CanvasLayer.new()
+	_cursor_layer.layer = 1000
+	add_child(_cursor_layer)
+	_cursor_sprite = TextureRect.new()
+	_cursor_sprite.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_cursor_sprite.visible = false
+	_cursor_sprite.z_as_relative = false
+	_cursor_sprite.z_index = 4096
+	# Scale the (high-res) source texture down to cursor size, keeping
+	# aspect ratio so non-square sprites don't squash.
+	_cursor_sprite.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_cursor_sprite.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_cursor_layer.add_child(_cursor_sprite)
+
+
+## Picks a custom mouse cursor based on what the cursor is hovering over.
+## TargetMouse: in unit mode with units selected, over a FEROX building.
+## DrillMouse: over any tile that has an ore overlay.
+## Default arrow otherwise — we show the system cursor for that case.
+##
+## The cursor sprite is repositioned every frame (no caching needed)
+## because we're drawing it ourselves; only the system cursor's hidden /
+## visible state has any latency, and we toggle that only when the
+## custom texture changes (or clears).
+func _update_mouse_cursor(hovered_grid: Vector2i, in_unit_mode: bool, unit_mgr) -> void:
+	var desired_tex: Texture2D = null
+	# TARGET cursor — enemy under cursor + unit-mode + selection.
+	if in_unit_mode and unit_mgr != null and "selected_units" in unit_mgr \
+			and (unit_mgr.selected_units as Array).size() > 0 \
+			and _cursor_target_tex != null \
+			and main.placed_buildings.has(hovered_grid) \
+			and main.get_building_faction(hovered_grid) == main.Faction.FEROX:
+		desired_tex = _cursor_target_tex
+	# DRILL cursor — any ore overlay on the hovered cell.
+	elif _cursor_drill_tex != null:
+		var terrain = main.get_node_or_null("TerrainSystem")
+		if terrain != null and "ore_tiles" in terrain and terrain.ore_tiles.has(hovered_grid):
+			desired_tex = _cursor_drill_tex
+	# Swap textures when the choice changes, and toggle the system
+	# cursor accordingly. Show the system cursor (MOUSE_MODE_VISIBLE)
+	# when no custom texture is active; hide it (MOUSE_MODE_HIDDEN)
+	# while a custom one is up so we don't get two cursors stacked.
+	if desired_tex != _cursor_active_tex:
+		_cursor_active_tex = desired_tex
+		if _cursor_sprite != null:
+			_cursor_sprite.texture = desired_tex
+			_cursor_sprite.visible = desired_tex != null
+			if desired_tex != null:
+				# Source PNGs are authored at a much larger resolution
+				# than a cursor needs; clamp the on-screen size to
+				# _CURSOR_DISPLAY_SIZE (square box) and let
+				# STRETCH_KEEP_ASPECT_CENTERED preserve aspect ratio.
+				_cursor_sprite.size = Vector2(_CURSOR_DISPLAY_SIZE, _CURSOR_DISPLAY_SIZE)
+		if desired_tex != null:
+			if Input.get_mouse_mode() != Input.MOUSE_MODE_HIDDEN:
+				Input.set_mouse_mode(Input.MOUSE_MODE_HIDDEN)
+		else:
+			if Input.get_mouse_mode() != Input.MOUSE_MODE_VISIBLE:
+				Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+	# Reposition every frame so the sprite tracks the pointer.
+	if _cursor_sprite != null and _cursor_sprite.visible:
+		var vp := get_viewport()
+		if vp != null:
+			var m: Vector2 = vp.get_mouse_position()
+			# Anchor on the hotspot (sprite center) so the click point
+			# lines up with the center of the crosshair / drill icon.
+			_cursor_sprite.position = m - _cursor_sprite.size * 0.5
+
+
 func _process(delta: float) -> void:
 	_tick_alert_banner(delta)
 	# Track play time
@@ -541,6 +642,15 @@ func _process(delta: float) -> void:
 	# can't bleed in either.
 	var unit_mgr = _unit_mgr_ref()
 	var in_unit_mode: bool = unit_mgr != null and "unit_mode_active" in unit_mgr and unit_mgr.unit_mode_active
+
+	# Custom mouse cursor:
+	#   - TargetMouse when in unit mode with units selected AND hovering
+	#     an enemy (FEROX) building — the right-click here orders an
+	#     attack.
+	#   - DrillMouse when hovering a tile that has ore on it (regardless
+	#     of unit mode), as a hint that the cell is a mining target.
+	#   - Default arrow otherwise.
+	_update_mouse_cursor(hovered_grid, in_unit_mode, unit_mgr)
 
 	if in_unit_mode:
 		block_tooltip.visible = false
@@ -1585,13 +1695,20 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 	# already visible in the world.)
 
 	# --- Pipe Contents ---
+	# Pipes show a fluid bar coloured by the carried fluid instead of a
+	# "Fluid: X (NN%)" text line — matches how tanks / pumps / vent
+	# condensers display their stored fluid via `_add_tooltip_fluid_bar`.
 	if _logistics and data.transports_fluid:
 		if _logistics.pipe_contents.has(grid_pos):
 			var pipe = _logistics.pipe_contents[grid_pos]
 			var fluid = Registry.get_fluid(pipe["fluid_id"])
 			if fluid:
-				var fill_pct: float = float(pipe["amount"]) / fluid.units_per_segment * 100.0
-				_add_tooltip_line("Fluid: %s (%.0f%%)" % [fluid.display_name, fill_pct], fluid.color)
+				_add_tooltip_fluid_bar(
+					float(pipe["amount"]),
+					float(fluid.units_per_segment),
+					fluid.color,
+					fluid.display_name
+				)
 
 	# --- Extractor Efficiency ---
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
@@ -1830,15 +1947,12 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 	var is_unloader: bool = data.tags.has("payload_unloader") or data.tags.has("freight_unloader")
 	if _logistics and (is_loader or is_unloader):
 		var lpayload: Dictionary = {}
-		var lphase: String = ""
 		if is_loader and "loader_state" in _logistics and _logistics.loader_state.has(origin):
 			var ls: Dictionary = _logistics.loader_state[origin]
-			lphase = String(ls.get("phase", ""))
 			if ls.get("payload") != null and ls["payload"] is Dictionary:
 				lpayload = ls["payload"]
 		elif is_unloader and "unloader_state" in _logistics and _logistics.unloader_state.has(origin):
 			var us: Dictionary = _logistics.unloader_state[origin]
-			lphase = String(us.get("phase", ""))
 			if us.get("payload") != null and us["payload"] is Dictionary:
 				lpayload = us["payload"]
 		if not lpayload.is_empty():
@@ -1886,20 +2000,24 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			_add_tooltip_line("Contains Archive: %s" % aname, Color(0.85, 0.7, 1.0))
 
 	# --- Archive Decoder: show decoding progress ---
-	if data.tags.has("archive_decoder") and building_sys and "archive_decoder_state" in building_sys:
-		if building_sys.archive_decoder_state.has(origin):
-			var dstate: Dictionary = building_sys.archive_decoder_state[origin]
-			var did: StringName = dstate.get("archive_id", &"")
-			if did == &"":
-				_add_tooltip_line("Decoding Archive: (idle)", Color(0.7, 0.7, 0.7))
-			else:
-				var dnd = TechTree.get_node_data(did)
-				var dname: String = dnd["name"] if dnd else String(did)
-				_add_tooltip_line("Decoding Archive: %s" % dname, Color(0.85, 0.7, 1.0))
-				var cycle: float = data.production_time if data.production_time > 0 else 8.0
-				var prog: float = float(dstate.get("progress", 0.0))
-				var pct: int = int(clampf(prog / cycle, 0.0, 1.0) * 100.0)
-				_add_tooltip_progress_bar(pct, 100, "% Complete", Color(0.6, 0.4, 0.9))
+	# State now lives on the ArchiveDecoderSystem sibling; query it via
+	# `get_state(anchor)` instead of reaching into BuildingSystem.
+	if data.tags.has("archive_decoder"):
+		var ad_sys = main.get_node_or_null("ArchiveDecoderSystem")
+		if ad_sys and ad_sys.has_method("get_state"):
+			var dstate: Dictionary = ad_sys.get_state(origin)
+			if not dstate.is_empty():
+				var did: StringName = dstate.get("archive_id", &"")
+				if did == &"":
+					_add_tooltip_line("Decoding Archive: (idle)", Color(0.7, 0.7, 0.7))
+				else:
+					var dnd = TechTree.get_node_data(did)
+					var dname: String = dnd["name"] if dnd else String(did)
+					_add_tooltip_line("Decoding Archive: %s" % dname, Color(0.85, 0.7, 1.0))
+					var cycle: float = data.production_time if data.production_time > 0 else 8.0
+					var prog: float = float(dstate.get("progress", 0.0))
+					var pct: int = int(clampf(prog / cycle, 0.0, 1.0) * 100.0)
+					_add_tooltip_progress_bar(pct, 100, "% Complete", Color(0.6, 0.4, 0.9))
 
 
 ## Renders the launchpad-specific tooltip section. While the mandatory
@@ -1949,65 +2067,6 @@ func _add_launchpad_tooltip_section(anchor: Vector2i) -> void:
 		_add_tooltip_line("- (empty)", Color(0.6, 0.6, 0.7))
 
 
-## Returns a human-readable description of why an archive decoder is not currently
-## decoding (or "ready" if it should be).
-func _diagnose_archive_decoder(anchor: Vector2i) -> String:
-	var power_sys = _power_sys_ref()
-	if power_sys and not power_sys.is_electrical_powered(anchor):
-		return "no electrical power"
-	# Walk the decoder's full footprint perimeter so the diagnostic
-	# matches what the actual decoder tick checks (4-DIR-from-anchor was
-	# blind to anything next to a non-anchor tile of a multi-tile decoder).
-	var building_sys = _building_sys_ref()
-	if building_sys == null:
-		return "unknown"
-	var dec_data = Registry.get_block(main.placed_buildings.get(anchor, &""))
-	var dec_size: Vector2i = dec_data.grid_size if dec_data else Vector2i.ONE
-	var perimeter: Array[Vector2i] = building_sys._get_block_perimeter_cells(anchor, dec_size)
-	var found_scanner := false
-	var scanner_powered := false
-	var scanner_faces_archive := false
-	var archive_id_set := false
-	var seen_scanners: Dictionary = {}
-	for n in perimeter:
-		if not main.placed_buildings.has(n):
-			continue
-		var n_anchor: Vector2i = main.building_origins.get(n, n)
-		if seen_scanners.has(n_anchor):
-			continue
-		seen_scanners[n_anchor] = true
-		var n_data = Registry.get_block(main.placed_buildings.get(n_anchor, &""))
-		if n_data == null or not n_data.tags.has("archive_scanner"):
-			continue
-		found_scanner = true
-		if power_sys and not power_sys.is_electrical_powered(n_anchor):
-			continue
-		scanner_powered = true
-		var rot: int = main.building_rotation.get(n_anchor, 0)
-		var front = building_sys._get_front_edge(n_anchor, n_data.grid_size, rot)
-		for cell in front:
-			if not main.placed_buildings.has(cell):
-				continue
-			var a_anchor: Vector2i = main.building_origins.get(cell, cell)
-			var a_data = Registry.get_block(main.placed_buildings.get(a_anchor, &""))
-			if a_data == null or a_data.id != &"archive":
-				continue
-			scanner_faces_archive = true
-			var aid: StringName = building_sys.archive_holdings.get(a_anchor, &"")
-			if aid != &"":
-				archive_id_set = true
-				if TechTree.is_researched(aid):
-					return "archive '%s' already decoded" % aid
-				return "ready"
-	if not found_scanner:
-		return "no adjacent scanner"
-	if not scanner_powered:
-		return "scanner has no power"
-	if not scanner_faces_archive:
-		return "scanner not facing an archive"
-	if not archive_id_set:
-		return "facing archive has no archive id set"
-	return "unknown"
 
 
 func _add_tooltip_line(text: String, color: Color) -> void:
@@ -2070,7 +2129,12 @@ func _add_tooltip_health_bar(pct: float, current: float, max_hp: float) -> void:
 ## Adds a "Fluid Storage" bar to the hover tooltip. Mirrors the
 ## health-bar layout but in blue, with a "stored/max" text label.
 ## Values are floats so partial units (e.g. 2.5/10) display cleanly.
-func _add_tooltip_fluid_bar(stored: float, max_amount: float) -> void:
+## Tooltip fluid bar. Optional `fluid_color_override` paints the fill in
+## the specific fluid's tint (used by pipes so the bar reads as the
+## actual fluid being carried instead of a generic blue). Optional
+## `label_prefix` prepends a name to the readout — e.g. "Water 7 / 10".
+func _add_tooltip_fluid_bar(stored: float, max_amount: float,
+		fluid_color_override: Variant = null, label_prefix: String = "") -> void:
 	if max_amount <= 0.0:
 		return
 	var pct: float = clampf(stored / max_amount, 0.0, 1.0)
@@ -2084,7 +2148,13 @@ func _add_tooltip_fluid_bar(stored: float, max_amount: float) -> void:
 	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	var bar_fill := ColorRect.new()
-	bar_fill.color = Color(0.3, 0.6, 1.0)
+	# Default fill is the generic blue used by the per-block fluid
+	# storage bars. Pipes pass in the fluid's own colour via override.
+	var fill_color: Color = Color(0.3, 0.6, 1.0)
+	if fluid_color_override is Color:
+		fill_color = fluid_color_override
+		fill_color.a = 1.0
+	bar_fill.color = fill_color
 	bar_fill.custom_minimum_size = Vector2(180 * pct, 10)
 	bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
@@ -2105,9 +2175,17 @@ func _add_tooltip_fluid_bar(stored: float, max_amount: float) -> void:
 	# number — so a brand-new 0.5-unit drip reads as "0.5/10" instead
 	# of rounding to 1.
 	var stored_str: String = "%.1f" % stored if absf(stored - round(stored)) > 0.05 else "%.0f" % stored
-	fl_lbl.text = "%s / %.0f" % [stored_str, max_amount]
+	if label_prefix != "":
+		fl_lbl.text = "%s %s / %.0f" % [label_prefix, stored_str, max_amount]
+	else:
+		fl_lbl.text = "%s / %.0f" % [stored_str, max_amount]
 	fl_lbl.add_theme_font_size_override("font_size", 11)
-	fl_lbl.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+	# Light tint of the fill colour so the label reads against the
+	# tooltip background without being a hard primary colour.
+	var lbl_color: Color = Color(0.7, 0.85, 1.0)
+	if fluid_color_override is Color:
+		lbl_color = (fluid_color_override as Color).lightened(0.5)
+	fl_lbl.add_theme_color_override("font_color", lbl_color)
 	fl_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar_container.add_child(fl_lbl)
 
@@ -3284,7 +3362,7 @@ func _on_misc_planet_map() -> void:
 		if sector_id != "" and sector_id != "_default":
 			SaveManager.save_sector(sector_id)
 		SaveManager.save_campaign()
-	get_tree().change_scene_to_file("res://main/PlanetSelect.tscn")
+	SaveManager.swap_scene_to_planet_select()
 
 
 # =========================
@@ -5131,6 +5209,14 @@ func _on_save_and_quit() -> void:
 	if SaveManager.active_sector_id != &"":
 		SaveManager.save_sector(SaveManager.active_sector_id)
 	SaveManager.save_campaign()
+	# Drop any cached scenes — the player committed to leaving the
+	# session. A dangling parked Main reference (from a prior
+	# sector-to-planet-map → planet-to-sector round trip) would
+	# otherwise linger across the menu transition; the parked
+	# PlanetSelect is also stale once MainMenu boots its own fresh
+	# pre-park.
+	SaveManager.discard_parked_main()
+	SaveManager.discard_parked_planet_select()
 	print("HUD: Saved sector and campaign. Returning to main menu.")
 	get_tree().paused = false
 	get_tree().change_scene_to_file("res://main/MainMenu.tscn")
@@ -5280,7 +5366,7 @@ func _on_sector_loss_ok() -> void:
 		print("HUD: Sector '%s' save reset after loss." % sector_id)
 	# Return to planet select
 	get_tree().paused = false
-	get_tree().change_scene_to_file("res://main/PlanetSelect.tscn")
+	SaveManager.swap_scene_to_planet_select()
 
 
 # =========================

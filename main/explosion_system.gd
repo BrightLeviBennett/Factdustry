@@ -21,10 +21,10 @@ class_name ExplosionSystem
 const EFFECT_LIFE := 0.8
 const RING_RADIUS_TILES := 3.5         # baseline; variation added per call
 const RING_RADIUS_VARIANCE := 0.6
-const RING_THICKNESS := 6.0
+const RING_THICKNESS := 12.0
 const LINE_MIN_COUNT := 16
 const LINE_MAX_COUNT := 24
-const LINE_THICKNESS := 4.0
+const LINE_THICKNESS := 9.0
 const LINE_MIN_LEN_TILES := 1.5
 const LINE_MAX_LEN_TILES := 4.5
 const PHASE1_FRACTION := 0.5           # split between "extend" and "shrapnel-collapse"
@@ -40,7 +40,11 @@ var _bursts: Array = []
 
 
 func _ready() -> void:
-	z_index = 4100
+	# Godot caps z_index at 4096 — values above silently fall back to 0,
+	# which would drop the explosion UNDER blocks (z 50). Pin to the max
+	# so the burst sits above blocks, units (z 4095), and the projectile
+	# overlay (z 4095).
+	z_index = 4096
 	z_as_relative = false
 	process_mode = Node.PROCESS_MODE_PAUSABLE
 
@@ -72,6 +76,12 @@ func explode(world_pos: Vector2, ring_tiles_override: float = -1.0) -> void:
 
 func _process(delta: float) -> void:
 	if _bursts.is_empty():
+		return
+	# Custom pause flag — `PROCESS_MODE_PAUSABLE` only honours the tree-
+	# level `get_tree().paused`, but the game pauses via Main.world_paused.
+	# Without this guard the ring + spokes keep animating while everything
+	# else holds still.
+	if main and "world_paused" in main and main.world_paused:
 		return
 	for i in range(_bursts.size() - 1, -1, -1):
 		_bursts[i]["age"] += delta

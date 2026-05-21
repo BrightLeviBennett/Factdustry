@@ -1,16 +1,23 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dgfjaa1rek2or"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://yuxt8dy886ge" path="res://textures/blocks/assist/Mender.png" id="1_3021b"]
 
 [resource]
 script = ExtResource("1")
 id = &"mender"
 display_name = "Mender"
 description = "Slowly repairs all buildings within its radius."
+icon = ExtResource("1_3021b")
 category = 7
+tags = PackedStringArray("support", "mender")
 color = Color(0.3, 0.9, 0.4, 1)
+top_sprite = ExtResource("1_3021b")
 max_health = 470.0
-build_cost = { "copper": 350, "silicon": 150 }
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
 build_time = 3.0
-power_consumption = 6.0
-tags = PackedStringArray("support")
+mend_radius = 10.0
+mend_amount = 20.0

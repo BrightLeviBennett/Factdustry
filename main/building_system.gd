@@ -13,12 +13,16 @@ class PopupOverlay extends Node2D:
 		# normal _draw → queue_redraw cascade isn't running.
 		if owner_sys == null:
 			return
-		if owner_sys._world_menu_open or owner_sys._storage_panel_open:
+		var ui = owner_sys._world_ui if "_world_ui" in owner_sys else null
+		if ui and (ui.world_menu_open or ui.storage_panel_open):
 			queue_redraw()
 	func _draw() -> void:
-		if owner_sys:
-			owner_sys._draw_world_menu(self)
-			owner_sys._draw_storage_panel(self)
+		if owner_sys == null:
+			return
+		var ui = owner_sys._world_ui if "_world_ui" in owner_sys else null
+		if ui:
+			ui.draw_world_menu(self)
+			ui.draw_storage_panel(self)
 
 
 var _popup_overlay: PopupOverlay = null
@@ -79,8 +83,10 @@ var archive_holdings: Dictionary = {}
 var editor_constructor_state: Dictionary = {}    # Vector2i → {selected_block: StringName}
 var editor_refabricator_state: Dictionary = {}   # Vector2i → {selected_t2: StringName}
 var editor_sorter_filters: Dictionary = {}       # Vector2i → StringName
-## Per-archive-decoder: anchor → { progress: float, archive_id: StringName, scanner: Vector2i }
-var archive_decoder_state: Dictionary = {}
+## Per-archive-decoder state (`anchor → { progress, archive_id, scanner }`)
+## now lives on the ArchiveDecoderSystem sibling node. Reads happen via
+## `_ad_state(anchor)` and the in-progress tick advances on its own
+## `_process`. Save / load and HUD tooltips query the system directly.
 
 # --- CRANE STATE ---
 var crane_states: Dictionary = {}  # Vector2i anchor → {arm_angle, arm_extension, grabber_open, held_payload, target_pos}
@@ -144,7 +150,7 @@ const _BELT_SCROLL_PIXELS_PER_SEC: float = 96.0
 var _payload_conveyor_textures := {}
 
 # --- PIPE / PUMP TEXTURES ---
-var _pipe_texture: Texture2D
+var _pipe_textures := {}
 var _pump_texture: Texture2D
 var _faction_overlay_ferox: Texture2D
 var _faction_overlay_derelict: Texture2D
@@ -312,6 +318,19 @@ var _logistics: Node2D
 var _terrain: Node2D
 var _sector_script: Node
 var _power_sys: Node
+var _schematic: Node     # SchematicSystem — schematic capture / paste / save
+# WorldUiSystem — world menu + storage panel popups. Accessed via a
+# lazy-fetch property getter (below) so the very first frame's input —
+# which can run before our `await get_tree().process_frame` resolves —
+# doesn't crash on a null reference.
+var _world_ui_cache: Node = null
+var _world_ui: Node:
+	get:
+		if _world_ui_cache == null or not is_instance_valid(_world_ui_cache):
+			_world_ui_cache = get_node_or_null("/root/Main/WorldUiSystem")
+		return _world_ui_cache
+	set(value):
+		_world_ui_cache = value
 
 
 ## Lazy accessors — populate the cache the first time the node exists.
@@ -360,47 +379,8 @@ var _crane_filter_menu_columns: int = 6
 var _crane_filter_menu_cell: float = 44.0
 var _crane_filter_menu_hovered: int = -1
 
-# --- WORLD MENU STATE (sorter filter / constructor selection) ---
-var _world_menu_open := false
-var _world_menu_pos := Vector2i.ZERO  # Grid position of the block that opened the menu
-var _world_menu_type := ""  # "sorter", "constructor", or "archive"
-var _world_menu_items: Array = []  # Array of {id: StringName, icon: Texture2D, name: String}
-var _world_menu_columns := 8
-## Cell size for in-world menus (storage / sorter / constructor pickers).
-## Tuned at 64 px grid (= 44 px); scaled in `_ready` to current GRID_SIZE.
-var _world_menu_cell_size := 44.0
-var _world_menu_hovered := -1  # Index of hovered item, -1 = none
-
-# --- Secondary "resource" panel ---
-# Opens alongside a UI world menu (sorter / constructor / refabricator /
-# archive) whenever the underlying block also has stored items. Lets the
-# player both pick a recipe / filter AND inspect/withdraw the block's
-# inventory in one click.
-var _storage_panel_open := false
-var _storage_panel_pos := Vector2i.ZERO
-var _storage_panel_items: Array = []
-var _storage_panel_hovered := -1
-
-# Launchpad world popup — small CanvasLayer-hosted panel anchored to the
-# launchpad's screen position. Owns its own input handler so clicking
-# inside it doesn't fall through to placement.
-var _launchpad_popup_layer: CanvasLayer = null
-var _launchpad_popup_panel: PanelContainer = null
-var _launchpad_popup_label: Button = null
-var _launchpad_popup_launch_btn: Button = null
-var _launchpad_popup_anchor: Vector2i = Vector2i.ZERO
-var _launchpad_popup_open: bool = false
-
-# Landing-pad filter popup. Two slot buttons, each showing the current
-# filter item / fluid (or "Empty"). Clicking a slot opens the world
-# menu in "landing_pad_slot" mode (filtered to unlocked items+fluids);
-# the menu writes back via `set_landing_pad_filter_slot(anchor, slot)`.
-var _landing_pad_popup_layer: CanvasLayer = null
-var _landing_pad_popup_panel: PanelContainer = null
-var _landing_pad_popup_slot_btns: Array = []   # Array[Button], length 2
-var _landing_pad_popup_anchor: Vector2i = Vector2i.ZERO
-var _landing_pad_popup_open: bool = false
-var _landing_pad_pick_slot: int = -1            # which slot the next pick fills
+# World menu, storage panel, and landing-pad pick state moved to
+# WorldUiSystem — access via `_world_ui.<field>`.
 
 # --- WALL RENDER CACHE ---
 ## Cached set of wall positions (rebuilt when terrain changes)
@@ -444,22 +424,9 @@ var _drag_start := Vector2i.ZERO
 ## Preview cells for the axis-locked line (computed each frame while dragging).
 var _drag_cells: Array[Vector2i] = []
 
-# --- SCHEMATIC CAPTURE STATE ---
-var _schematic_mode := false
-var _schematic_dragging := false
-var _schematic_start := Vector2i.ZERO
-var _schematic_end := Vector2i.ZERO
-var _schematic_confirmed := false  # Rect finalized, waiting for Enter
-
-# --- SCHEMATIC PLACEMENT STATE ---
-var _placing_schematic := false
-var _schematic_place_blocks: Dictionary = {}   # Vector2i (relative) -> StringName
-var _schematic_place_rotation: Dictionary = {} # Vector2i (relative) -> int
-var _schematic_place_width: int = 0
-var _schematic_place_height: int = 0
-
-# --- SCHEMATIC SAVE DIALOG ---
-var _schematic_popup: PopupPanel = null
+# Schematic state lives on the SchematicSystem sibling node — accessed
+# via the `_schematic` accessor below. Kept here as a comment so the
+# old vars are easy to grep for.
 
 # --- REBUILD MODE STATE ---
 var _rebuild_mode := false  # B key held
@@ -520,7 +487,7 @@ func _ready() -> void:
 		main.building_selected.connect(_on_main_building_selected)
 	# Scale world-menu cell size to current GRID_SIZE so storage / sorter /
 	# picker panels stay proportional to a tile.
-	_world_menu_cell_size *= main.SPRITE_SCALE_FACTOR
+	# `_world_menu_cell_size` scale now happens inside WorldUiSystem._ready.
 	_crane_filter_menu_cell *= main.SPRITE_SCALE_FACTOR
 	# Scale crane dimensions (originally tuned at the 64-px grid baseline).
 	var sf: float = main.SPRITE_SCALE_FACTOR
@@ -591,6 +558,8 @@ func _ready() -> void:
 	_terrain = get_node_or_null("/root/Main/TerrainSystem")
 	_sector_script = get_node_or_null("/root/Main/SectorScript")
 	_power_sys = get_node_or_null("/root/Main/PowerSystem")
+	_schematic = get_node_or_null("/root/Main/SchematicSystem")
+	_world_ui = get_node_or_null("/root/Main/WorldUiSystem")
 	# Connect terrain changes to invalidate wall cache
 	if _terrain:
 		_terrain.connect("walls_changed", _on_walls_changed)
@@ -613,7 +582,9 @@ func _rebuild_wall_cache() -> void:
 	_wall_floor_distance.clear()
 	_cached_eff_dist.clear()
 	_cached_corner_darkness.clear()
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
+	# Use the cached terrain reference instead of walking the scene
+	# tree every wall-cache rebuild.
+	var terrain = _terrain_ref()
 	if terrain == null:
 		return
 	for grid_pos in terrain.wall_tiles:
@@ -632,7 +603,7 @@ func _rebuild_wall_cache() -> void:
 
 	# BFS from all floor-adjacent walls to compute distance-to-floor for fade.
 	# Hidden floors don't count — walls next to hidden floors stay dark.
-	var sector_script_ref = get_node_or_null("/root/Main/SectorScript")
+	var sector_script_ref = _sector_script_ref()
 	var queue: Array[Vector2i] = []
 	for grid_pos in _cached_wall_set:
 		# Hidden walls should not seed the BFS
@@ -663,8 +634,7 @@ func _rebuild_wall_cache() -> void:
 				queue.append(nb)
 
 	# Pre-compute effective distances for all wall tiles and their neighbors
-	# (avoids repeated get_node_or_null + dictionary lookups during draw)
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	# (avoids repeated get_node_or_null + dictionary lookups during draw).
 	var relevant_positions: Dictionary = {}
 	for grid_pos in _cached_wall_set:
 		relevant_positions[grid_pos] = true
@@ -888,7 +858,14 @@ const _DRILL_HEAD_TEX_PATHS := {
 	"R1": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R1.png",
 	"R2": "res://textures/blocks/resource extractors/MechanicalDrill/DrillHeads-R2.png",
 }
-const _PIPE_TEX_PATH := "res://textures/blocks/fluid transportation/FluidConduit.png"
+const _PIPE_TEX_PATHS := {
+	"straight": "res://textures/blocks/fluid transportation/pipe/Pipe.png",
+	"jr":       "res://textures/blocks/fluid transportation/pipe/Pipe-JR.png",
+	"jl":       "res://textures/blocks/fluid transportation/pipe/Pipe-JL.png",
+	"ja":       "res://textures/blocks/fluid transportation/pipe/Pipe-JA.png",
+	"ca":       "res://textures/blocks/fluid transportation/pipe/Pipe-CA.png",
+	"cb":       "res://textures/blocks/fluid transportation/pipe/Pipe-CB.png",
+}
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
@@ -930,7 +907,8 @@ func _queue_texture_loads() -> void:
 		ResourceLoader.load_threaded_request(_DUCT_TEX_PATHS[key])
 	for key in _DRILL_HEAD_TEX_PATHS:
 		ResourceLoader.load_threaded_request(_DRILL_HEAD_TEX_PATHS[key])
-	ResourceLoader.load_threaded_request(_PIPE_TEX_PATH)
+	for key in _PIPE_TEX_PATHS:
+		ResourceLoader.load_threaded_request(_PIPE_TEX_PATHS[key])
 	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
@@ -968,7 +946,8 @@ func _ensure_textures_loaded() -> void:
 		_duct_textures[key] = ResourceLoader.load_threaded_get(_DUCT_TEX_PATHS[key])
 	for key in _DRILL_HEAD_TEX_PATHS:
 		_drill_head_textures[key] = ResourceLoader.load_threaded_get(_DRILL_HEAD_TEX_PATHS[key])
-	_pipe_texture = ResourceLoader.load_threaded_get(_PIPE_TEX_PATH)
+	for key in _PIPE_TEX_PATHS:
+		_pipe_textures[key] = ResourceLoader.load_threaded_get(_PIPE_TEX_PATHS[key])
 	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
 	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
@@ -1291,122 +1270,12 @@ func _draw_crusher_heads(grid_pos: Vector2i, rotation: int, grid_size: Vector2i,
 		draw_set_transform(Vector2.ZERO, 0.0)
 
 
-## Returns true if a placed crusher should currently be spinning — i.e. it's
-## finished construction, powered, not disabled by sector script, AND has at
-## least one output item it can still produce (storage slot available OR an
-## adjacent conveyor that can accept it). Matches the productivity checks
-## the LogisticsSystem drill loop uses.
-func _is_crusher_spinning(anchor: Vector2i, data: BlockData) -> bool:
-	if data == null:
-		return false
-	# Under-construction / deconstructing crushers don't spin.
-	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
-		return false
-	# Sector-script-disabled blocks don't spin.
-	var ss = _sector_script_ref()
-	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
-		return false
-	# No electrical power at all → no spin. Efficiency > 0 keeps the spin
-	# running (just visually implied to be slower isn't worth the extra math).
-	if data.electrical_power_use > 0:
-		var ps = _power_sys_ref()
-		if ps == null or ps.get_electrical_efficiency(anchor) <= 0.0:
-			return false
-	# Storage full on every output → stall.
-	var logistics = _logistics
-	if logistics and logistics.has_method("_is_storage_full_for"):
-		var any_room := false
-		for raw_id in data.output_items:
-			var item_id: StringName = StringName(raw_id)
-			if not logistics._is_storage_full_for(anchor, data, item_id):
-				any_room = true
-				break
-		if not any_room and not data.output_items.is_empty():
-			return false
-	return true
 
 
-## Per-frame inertial tick for every crusher head in the world. For each
-## tracked anchor, eases its two head velocities toward their target spin
-## (or 0 when idle) at CRUSHER_HEAD_ACCEL rad/s², then integrates angle.
-## Also garbage-collects state for destroyed/untagged blocks.
-func _tick_crusher_head_states(delta: float) -> void:
-	if _crusher_head_state.is_empty():
-		return
-	var to_erase: Array[Vector2i] = []
-	for anchor in _crusher_head_state:
-		if not main.placed_buildings.has(anchor):
-			to_erase.append(anchor)
-			continue
-		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
-		if data == null or (not data.tags.has("crusher_heads") and not data.tags.has("grinder_heads")):
-			to_erase.append(anchor)
-			continue
-		var active := _is_crusher_spinning(anchor, data)
-		var s: Dictionary = _crusher_head_state[anchor]
-		var step: float = CRUSHER_HEAD_ACCEL * delta
-		# Walk every head currently tracked for this anchor — supports
-		# 2-head wall_crusher and 3-head wall_grinder transparently.
-		# Targets alternate sign/speed by index so adjacent heads spin
-		# opposite directions like the original wall-crusher pair.
-		for key in s.keys():
-			if not (key as String).begins_with("angle_"):
-				continue
-			var idx: int = int(String(key).substr(6))
-			var vkey: String = "vel_%d" % idx
-			var base_target: float = CRUSHER_HEAD_SPIN_A if (idx % 2 == 0) else CRUSHER_HEAD_SPIN_B
-			# Slightly different magnitude per head for visual variety.
-			var target: float = (base_target * (1.0 + 0.05 * idx)) if active else 0.0
-			s[vkey] = move_toward(float(s.get(vkey, 0.0)), target, step)
-			s[key] = fposmod(float(s[key]) + float(s[vkey]) * delta, TAU)
-	for a in to_erase:
-		_crusher_head_state.erase(a)
 
 
-## Same shape as `_is_crusher_spinning` but generalized for any extractor:
-## active iff finished construction, not sector-disabled, has any power
-## (when it draws power), and its output buffer isn't full. Used by the
-## ground scraper's spinning drum.
-func _is_scraper_spinning(anchor: Vector2i, data: BlockData) -> bool:
-	if data == null:
-		return false
-	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
-		return false
-	var ss = _sector_script_ref()
-	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
-		return false
-	if data.electrical_power_use > 0:
-		var ps = _power_sys_ref()
-		if ps == null or ps.get_electrical_efficiency(anchor) <= 0.0:
-			return false
-	if _logistics and _logistics.has_method("_is_storage_full"):
-		if _logistics._is_storage_full(anchor, data):
-			return false
-	return true
 
 
-## Per-frame tick for scraper heads. Mirrors `_tick_crusher_head_states`
-## but with a single angle/velocity per block instead of two.
-func _tick_scraper_head_states(delta: float) -> void:
-	if _scraper_head_state.is_empty():
-		return
-	var to_erase: Array[Vector2i] = []
-	for anchor in _scraper_head_state:
-		if not main.placed_buildings.has(anchor):
-			to_erase.append(anchor)
-			continue
-		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
-		if data == null or not data.tags.has("scraper_head"):
-			to_erase.append(anchor)
-			continue
-		var active := _is_scraper_spinning(anchor, data)
-		var target: float = SCRAPER_HEAD_SPIN if active else 0.0
-		var s: Dictionary = _scraper_head_state[anchor]
-		var step: float = SCRAPER_HEAD_ACCEL * delta
-		s["vel"] = move_toward(float(s["vel"]), target, step)
-		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
-	for a in to_erase:
-		_scraper_head_state.erase(a)
 
 
 ## Draws the scraper's spinning head texture centered on the block's
@@ -1428,77 +1297,8 @@ func _draw_scraper_head(grid_pos: Vector2i, top_pos: Vector2, width: float, heig
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
-## Per-frame tick for impact-drill heads. Drives the slam / retract
-## animation from the matching drill_timer in LogisticsSystem:
-##   slam_progress = 1 - (timer / cycle)        — eased visually
-## A drop in slam_progress (timer just reset → next slam) fires a
-## one-shot particle burst under the head.
-func _tick_impact_head_states(delta: float) -> void:
-	var logistics = _logistics
-	if logistics == null:
-		return
-	var to_erase: Array[Vector2i] = []
-	# Track every active impact-drill anchor; create state lazily.
-	for cell in main.placed_buildings:
-		var anchor: Vector2i = main.building_origins.get(cell, cell)
-		if _impact_head_state.has(anchor):
-			continue
-		var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
-		if data == null or not data.tags.has("impact_head"):
-			continue
-		# Start at 0 so the first tick — which reads drill_timers ==
-		# cycle (target=0) — doesn't false-positive a slam from the
-		# default 1.0 → 0.0 drop.
-		_impact_head_state[anchor] = {"slam_progress": 0.0, "prev_progress": 0.0}
-	for anchor in _impact_head_state:
-		if not main.placed_buildings.has(anchor):
-			to_erase.append(anchor)
-			continue
-		var data2: BlockData = Registry.get_block(main.placed_buildings[anchor])
-		if data2 == null or not data2.tags.has("impact_head"):
-			to_erase.append(anchor)
-			continue
-		var s: Dictionary = _impact_head_state[anchor]
-		var cycle: float = data2.production_time if data2.production_time > 0.0 else 2.0
-		var timer: float = -1.0
-		if "drill_timers" in logistics and logistics.drill_timers.has(anchor):
-			timer = float(logistics.drill_timers[anchor])
-		var prev: float = float(s.get("slam_progress", 0.0))
-		var target: float
-		if timer < 0.0:
-			target = 0.0  # not tracked yet — pre-warmup, sit small
-		else:
-			# slam_progress: 0 right after slam (timer == cycle), 1 at
-			# end of CD (timer == 0).
-			target = clampf(1.0 - timer / maxf(cycle, 0.0001), 0.0, 1.0)
-		# Arm the slam detector only once the drill has visibly
-		# retracted near full extension — guarantees the next drop is
-		# a real slam, not the first-frame init / power-cycle
-		# transient. Disarm immediately after firing the burst.
-		var armed: bool = bool(s.get("armed", false))
-		if not armed and target >= 0.9:
-			armed = true
-		if armed and prev - target >= 0.4:
-			_spawn_impact_slam_burst(anchor, data2)
-			armed = false
-		s["armed"] = armed
-		s["prev_progress"] = prev
-		s["slam_progress"] = target
-	for a in to_erase:
-		_impact_head_state.erase(a)
 
 
-## Fires a single particle puff under the impact drill's head when it
-## slams down. Routed through ParticleOverlay's burst API so the cloud
-## reads as ejecta from the impact zone.
-func _spawn_impact_slam_burst(anchor: Vector2i, data: BlockData) -> void:
-	var overlay = get_node_or_null("/root/Main/ParticleOverlay")
-	if overlay == null or not overlay.has_method("spawn_burst"):
-		return
-	var gs: float = float(main.GRID_SIZE)
-	var center: Vector2 = main.grid_to_world(anchor) \
-		+ Vector2(data.grid_size.x * gs * 0.5, data.grid_size.y * gs * 0.5)
-	overlay.spawn_burst(center, "impact_slam")
 
 
 ## Draws the impact drill's head texture centered on the footprint at
@@ -1524,31 +1324,6 @@ func _draw_impact_head(grid_pos: Vector2i, top_pos: Vector2, width: float, heigh
 	draw_set_transform(Vector2.ZERO, 0.0)
 
 
-## Per-frame tick for vent turbines. Mirrors `_tick_scraper_head_states` —
-## each anchor's angular velocity eases toward `VENT_TURBINE_SPIN` while
-## the building is active and back to zero when inactive, with the angle
-## integrated from the velocity each frame.
-func _tick_vent_turbine_states(delta: float) -> void:
-	if _vent_turbine_state.is_empty():
-		return
-	var to_erase: Array[Vector2i] = []
-	for anchor in _vent_turbine_state:
-		if not main.placed_buildings.has(anchor):
-			to_erase.append(anchor)
-			continue
-		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
-		if data == null or data.id != &"vent_turbine":
-			to_erase.append(anchor)
-			continue
-		var active: bool = not (main.has_method("is_building_inactive") \
-			and main.is_building_inactive(anchor))
-		var target: float = VENT_TURBINE_SPIN if active else 0.0
-		var s: Dictionary = _vent_turbine_state[anchor]
-		var step: float = VENT_TURBINE_ACCEL * delta
-		s["vel"] = move_toward(float(s["vel"]), target, step)
-		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
-	for a in to_erase:
-		_vent_turbine_state.erase(a)
 
 
 ## Draws a dashed circle at `radius` around `center`. Used by the
@@ -1674,13 +1449,24 @@ func _draw_hovered_turret_range() -> void:
 	#   - turret   → attack_range (firing radius)
 	#   - crane    → crane_range  (reach of the grabber)
 	#   - mass_driver → link_range (max partner distance)
+	#   - overdrive → overdrive_radius (boost zone radius)
+	#   - mender   → mend_radius  (heal zone radius)
 	var range_tiles: float = 0.0
+	var ring_color := Color(1, 1, 1, 0.85)
+	var is_overdrive: bool = data.tags.has("overdrive") and data.overdrive_radius > 0.0
+	var is_mender: bool = data.tags.has("mender") and data.mend_radius > 0.0
 	if data.is_turret() and data.attack_range > 0.0:
 		range_tiles = data.attack_range
 	elif data.tags.has("crane") and data.crane_range > 0.0:
 		range_tiles = data.crane_range
 	elif data.tags.has("mass_driver") and data.link_range > 0.0:
 		range_tiles = data.link_range
+	elif is_overdrive:
+		range_tiles = data.overdrive_radius
+		ring_color = Color(1.0, 0.65, 0.15, 0.85)
+	elif is_mender:
+		range_tiles = data.mend_radius
+		ring_color = Color(0.4, 1.0, 0.5, 0.85)
 	if range_tiles <= 0.0:
 		return
 	var gs: float = float(main.GRID_SIZE)
@@ -1689,7 +1475,63 @@ func _draw_hovered_turret_range() -> void:
 		data.grid_size.y * gs * 0.5,
 	)
 	var range_px: float = range_tiles * gs
-	_draw_dashed_circle(center, range_px, Color(1, 1, 1, 0.85), 3.0)
+	_draw_dashed_circle(center, range_px, ring_color, 3.0)
+	# Highlight every block actually affected by this overdriver / mender
+	# with a thin outline matching the ring colour so the player can see
+	# at a glance which neighbours benefit.
+	if is_overdrive or is_mender:
+		_draw_affected_block_outlines(anchor, data, center, range_px, ring_color, is_overdrive)
+
+
+## Paints a thin outline around every friendly placed building that
+## sits inside the hovered overdriver's / mender's effect radius.
+## `is_overdrive` switches the eligibility check between the
+## overdrive-target rules in `main.get_overdrive_multiplier` and the
+## damaged-friendly-block rules used by menders (any friendly building
+## with max_health > 0).
+func _draw_affected_block_outlines(source_anchor: Vector2i, _source_data: BlockData,
+		source_center: Vector2, radius_px: float, color: Color, is_overdrive: bool) -> void:
+	var gs: float = float(main.GRID_SIZE)
+	var seen := {}
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if seen.has(anchor):
+			continue
+		seen[anchor] = true
+		if anchor == source_anchor:
+			continue
+		if main.get_building_faction(anchor) != main.Faction.LUMINA:
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if data == null:
+			continue
+		var center: Vector2 = main.grid_to_world(anchor) \
+			+ Vector2(data.grid_size.x * gs * 0.5, data.grid_size.y * gs * 0.5)
+		if source_center.distance_to(center) > radius_px:
+			continue
+		# Eligibility gate
+		if is_overdrive:
+			var eligible: bool = false
+			if data.category == BlockData.BlockCategory.EXTRACTORS:
+				eligible = true
+			elif data.category == BlockData.BlockCategory.FACTORIES:
+				eligible = true
+			elif data.tags.has("pump") or data.tags.has("condenser"):
+				eligible = true
+			if data.category == BlockData.BlockCategory.TURRETS:
+				eligible = false
+			if data.tags.has("vent_turbine") or data.tags.has("combustion_generator"):
+				eligible = false
+			if data.is_transport():
+				eligible = false
+			if not eligible:
+				continue
+		else:
+			if data.max_health <= 0.0:
+				continue
+		var world_pos: Vector2 = main.grid_to_world(anchor)
+		var rect := Rect2(world_pos, Vector2(data.grid_size.x * gs, data.grid_size.y * gs))
+		draw_rect(rect, color, false, 2.0)
 
 
 ## Crane placement preview: draws the arm + cross grabber + base pivot
@@ -1778,6 +1620,7 @@ func _draw_crane_preview(top_pos: Vector2, width: float, height: float, tint: Co
 ## the loaded texture set at the same tint the rest of the preview
 ## uses, so the ghost matches what the placed render will draw.
 func _draw_layered_spinner_preview(block_id: StringName, top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	var c: CanvasItem = _ccanvas()
 	var tex_set: Dictionary = _layered_spinner_textures.get(block_id, {})
 	if tex_set.is_empty():
 		return
@@ -1785,27 +1628,28 @@ func _draw_layered_spinner_preview(block_id: StringName, top_pos: Vector2, width
 	var rect := Rect2(top_pos, size)
 	var base_tex: Texture2D = tex_set.get("base", null)
 	if base_tex:
-		draw_texture_rect(base_tex, rect, false, tint)
+		c.draw_texture_rect(base_tex, rect, false, tint)
 	var head_tex: Texture2D = tex_set.get("head", null)
 	if head_tex:
 		# Head is drawn at angle 0 in the preview — no spin state to
 		# read for an unplaced block.
-		draw_texture_rect(head_tex, rect, false, tint)
+		c.draw_texture_rect(head_tex, rect, false, tint)
 	var top_tex: Texture2D = tex_set.get("top", null)
 	if top_tex:
-		draw_texture_rect(top_tex, rect, false, tint)
+		c.draw_texture_rect(top_tex, rect, false, tint)
 
 
 func _draw_vent_turbine_preview(top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	var c: CanvasItem = _ccanvas()
 	var size := Vector2(width, height)
 	if _vent_turbine_preview_texture:
-		draw_texture_rect(_vent_turbine_preview_texture, Rect2(top_pos, size), false, tint)
+		c.draw_texture_rect(_vent_turbine_preview_texture, Rect2(top_pos, size), false, tint)
 		return
 	if _vent_turbine_base_texture == null:
 		return
 	if _vent_turbine_inner_texture:
-		draw_texture_rect(_vent_turbine_inner_texture, Rect2(top_pos, size), false, tint)
-	draw_texture_rect(_vent_turbine_base_texture, Rect2(top_pos, size), false, tint)
+		c.draw_texture_rect(_vent_turbine_inner_texture, Rect2(top_pos, size), false, tint)
+	c.draw_texture_rect(_vent_turbine_base_texture, Rect2(top_pos, size), false, tint)
 
 
 ## Asynchronously composes the layered-spinner preview textures by
@@ -1919,7 +1763,7 @@ func _run_preview_bake(block_id: StringName, rot: int, key: String) -> void:
 ## sprites sit at +pad inside the SV so the block footprint stays
 ## centered while turret heads have room to extend outside it.
 func _populate_preview_layers(sv: SubViewport, data: BlockData, rot: int, pad: Vector2 = Vector2.ZERO) -> void:
-	var sv_size := Vector2(sv.size)
+	var _sv_size := Vector2(sv.size)
 	var gs: float = float(main.GRID_SIZE)
 	var block_size := Vector2(data.grid_size.x * gs, data.grid_size.y * gs)
 	var center := pad + block_size * 0.5
@@ -2087,45 +1931,22 @@ func _bake_spinner_preview_composite(inner_tex: Texture2D, base_tex: Texture2D) 
 	return tex
 
 
-## Per-frame tick for vent condensers. Same shape as the vent turbine
-## tick — each anchor's angular velocity eases toward `VENT_CONDENSER_SPIN`
-## while the building is active and back to zero when it isn't.
-func _tick_vent_condenser_states(delta: float) -> void:
-	if _vent_condenser_state.is_empty():
-		return
-	var to_erase: Array[Vector2i] = []
-	for anchor in _vent_condenser_state:
-		if not main.placed_buildings.has(anchor):
-			to_erase.append(anchor)
-			continue
-		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
-		if data == null or data.id != &"vent_condenser":
-			to_erase.append(anchor)
-			continue
-		var active: bool = not (main.has_method("is_building_inactive") \
-			and main.is_building_inactive(anchor))
-		var target: float = VENT_CONDENSER_SPIN if active else 0.0
-		var s: Dictionary = _vent_condenser_state[anchor]
-		var step: float = VENT_CONDENSER_ACCEL * delta
-		s["vel"] = move_toward(float(s["vel"]), target, step)
-		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
-	for a in to_erase:
-		_vent_condenser_state.erase(a)
 
 
 ## Static (frozen) vent-condenser layered preview. Mirrors the turbine
 ## preview — uses the pre-baked composite when ready, falls back to
 ## individual layers while the bake is still pending.
 func _draw_vent_condenser_preview(top_pos: Vector2, width: float, height: float, tint: Color = Color.WHITE) -> void:
+	var c: CanvasItem = _ccanvas()
 	var size := Vector2(width, height)
 	if _vent_condenser_preview_texture:
-		draw_texture_rect(_vent_condenser_preview_texture, Rect2(top_pos, size), false, tint)
+		c.draw_texture_rect(_vent_condenser_preview_texture, Rect2(top_pos, size), false, tint)
 		return
 	if _vent_condenser_base_texture == null:
 		return
 	if _vent_condenser_inner_texture:
-		draw_texture_rect(_vent_condenser_inner_texture, Rect2(top_pos, size), false, tint)
-	draw_texture_rect(_vent_condenser_base_texture, Rect2(top_pos, size), false, tint)
+		c.draw_texture_rect(_vent_condenser_inner_texture, Rect2(top_pos, size), false, tint)
+	c.draw_texture_rect(_vent_condenser_base_texture, Rect2(top_pos, size), false, tint)
 
 
 ## Vent condenser: two spinning copies of `VentCondenserInner` under a
@@ -2173,72 +1994,8 @@ func _draw_vent_turbine(grid_pos: Vector2i, top_pos: Vector2, width: float, heig
 	draw_texture_rect(_vent_turbine_base_texture, Rect2(top_pos, size), false, tint)
 
 
-## Per-frame tick for every layered-spinner block. The head spins when
-## the factory is mid-batch (phase == "processing" AND the timer
-## actually decreased since last frame — phase alone keeps reading
-## "processing" when the loop stalls on a missing input, so the timer
-## delta is what proves work is happening) and decays via inertia
-## otherwise. One tick covers brass_mixer, silicon_mixer, …
-## everything registered in `_LAYERED_SPINNERS`.
-func _tick_layered_spinner_states(delta: float) -> void:
-	var to_erase: Array[Vector2i] = []
-	# Lazy-create state for every placed layered-spinner block.
-	for cell in main.placed_buildings:
-		var anchor: Vector2i = main.building_origins.get(cell, cell)
-		if _layered_spinner_state.has(anchor):
-			continue
-		var bid: StringName = main.placed_buildings.get(anchor, &"")
-		if not _LAYERED_SPINNERS.has(bid):
-			continue
-		_layered_spinner_state[anchor] = {"angle": 0.0, "vel": 0.0, "prev_timer": -1.0}
-	for anchor in _layered_spinner_state:
-		if not main.placed_buildings.has(anchor):
-			to_erase.append(anchor)
-			continue
-		var bid2: StringName = main.placed_buildings[anchor]
-		if not _LAYERED_SPINNERS.has(bid2):
-			to_erase.append(anchor)
-			continue
-		var cfg: Dictionary = _LAYERED_SPINNERS[bid2]
-		var s: Dictionary = _layered_spinner_state[anchor]
-		var phase_active: bool = _is_layered_spinner_producing(anchor)
-		var cur_timer: float = -1.0
-		if _logistics and "factory_buffers" in _logistics and _logistics.factory_buffers.has(anchor):
-			cur_timer = float(_logistics.factory_buffers[anchor].get("timer", -1.0))
-		var prev_timer: float = float(s.get("prev_timer", -1.0))
-		var timer_advanced: bool = prev_timer > 0.0 and cur_timer >= 0.0 and cur_timer < prev_timer
-		var active: bool = phase_active and timer_advanced
-		var target: float = float(cfg["spin"]) if active else 0.0
-		var step: float = float(cfg["accel"]) * delta
-		s["vel"] = move_toward(float(s["vel"]), target, step)
-		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
-		s["prev_timer"] = cur_timer
-	for a in to_erase:
-		_layered_spinner_state.erase(a)
 
 
-## True when a layered-spinner block is in the middle of consuming
-## inputs (factory phase == "processing"). Power / input / output gates
-## have already been checked by the factory loop's collecting →
-## processing transition; the `_tick_layered_spinner_states` caller
-## additionally requires the timer to advance.
-func _is_layered_spinner_producing(anchor: Vector2i) -> bool:
-	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
-		return false
-	var ss = _sector_script_ref()
-	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
-		return false
-	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
-	if data == null:
-		return false
-	if data.electrical_power_use > 0:
-		var ps = _power_sys_ref()
-		if ps == null or ps.get_electrical_efficiency(anchor) <= 0.0:
-			return false
-	if _logistics and "factory_buffers" in _logistics and _logistics.factory_buffers.has(anchor):
-		var phase: String = String(_logistics.factory_buffers[anchor].get("phase", ""))
-		return phase == "processing"
-	return false
 
 
 ## Generic layered-spinner draw: static Base → rotating Head → static
@@ -2270,102 +2027,12 @@ func _draw_layered_spinner(grid_pos: Vector2i, block_id: StringName, top_pos: Ve
 		draw_texture_rect(top_tex, Rect2(top_pos, size), false, tint)
 
 
-# =========================
-# HEAD-SPIN STATE PORTABILITY
-# =========================
-## A picked-up block (held in a crane grabber) is removed from
-## `main.placed_buildings`, which causes every head-spin tick to
-## garbage-collect its state. Without the helpers below the head
-## would teleport to a halt the instant the grabber closed.
-##
-## `_capture_spin_state` snapshots whatever spin dicts are tracking
-## the anchor; the held-payload simulation calls `_tick_spin_state`
-## to keep easing each vel toward 0 (inertia), and on drop
-## `_restore_spin_state` re-seats the snapshot under the new anchor
-## so the placed block resumes from the decayed angle / velocity
-## the head was at when it was lifted.
-
-const _SPIN_DECEL := {
-	"crusher": CRUSHER_HEAD_ACCEL,
-	"scraper": SCRAPER_HEAD_ACCEL,
-	"vent_turbine": VENT_TURBINE_ACCEL,
-	"vent_condenser": VENT_CONDENSER_ACCEL,
-	# Layered-spinner heads (brass mixer, silicon refinery, …) all
-	# share a single decel rate driven by the table below — the per-
-	# block accel constant only matters for spool-UP. Coast-down looks
-	# the same on every drum-style head.
-	"layered_spinner": 2.0,
-}
+# Head-spin state portability (crane pickup / drop) lives on
+# SpinnerHeadSystem — see capture_spin_state / restore_spin_state /
+# tick_held_spin_state there.
 
 
-func _capture_spin_state(anchor: Vector2i) -> Dictionary:
-	var snap: Dictionary = {}
-	if _crusher_head_state.has(anchor):
-		snap["crusher"] = (_crusher_head_state[anchor] as Dictionary).duplicate(true)
-		_crusher_head_state.erase(anchor)
-	if _scraper_head_state.has(anchor):
-		snap["scraper"] = (_scraper_head_state[anchor] as Dictionary).duplicate(true)
-		_scraper_head_state.erase(anchor)
-	if _vent_turbine_state.has(anchor):
-		snap["vent_turbine"] = (_vent_turbine_state[anchor] as Dictionary).duplicate(true)
-		_vent_turbine_state.erase(anchor)
-	if _vent_condenser_state.has(anchor):
-		snap["vent_condenser"] = (_vent_condenser_state[anchor] as Dictionary).duplicate(true)
-		_vent_condenser_state.erase(anchor)
-	if _layered_spinner_state.has(anchor):
-		snap["layered_spinner"] = (_layered_spinner_state[anchor] as Dictionary).duplicate(true)
-		_layered_spinner_state.erase(anchor)
-	return snap
 
-
-func _restore_spin_state(anchor: Vector2i, snap: Dictionary) -> void:
-	if snap.is_empty():
-		return
-	if snap.has("crusher"):
-		_crusher_head_state[anchor] = (snap["crusher"] as Dictionary).duplicate(true)
-	if snap.has("scraper"):
-		_scraper_head_state[anchor] = (snap["scraper"] as Dictionary).duplicate(true)
-	if snap.has("vent_turbine"):
-		_vent_turbine_state[anchor] = (snap["vent_turbine"] as Dictionary).duplicate(true)
-	if snap.has("vent_condenser"):
-		_vent_condenser_state[anchor] = (snap["vent_condenser"] as Dictionary).duplicate(true)
-	if snap.has("layered_spinner"):
-		_layered_spinner_state[anchor] = (snap["layered_spinner"] as Dictionary).duplicate(true)
-
-
-## Called from `_tick_held_building` once per frame. Eases every
-## tracked head's velocity toward 0 (target is always 0 — the held
-## block is detached and not producing) and integrates angle. Each
-## head kind uses its own ACCEL rate so the inertial feel matches
-## what the placed-state tick uses.
-func _tick_spin_state(snap: Dictionary, delta: float) -> void:
-	if snap.is_empty() or delta <= 0.0:
-		return
-	for kind in snap.keys():
-		var sub: Dictionary = snap[kind]
-		if not (sub is Dictionary) or sub.is_empty():
-			continue
-		var decel: float = float(_SPIN_DECEL.get(kind, 5.0))
-		var step: float = decel * delta
-		# Crusher heads use indexed angle_N / vel_N keys; everything
-		# else uses plain "angle" / "vel". Detect via key suffix.
-		var keys: Array = sub.keys()
-		var has_indexed: bool = false
-		for k in keys:
-			if (k as String).begins_with("angle_"):
-				has_indexed = true
-				break
-		if has_indexed:
-			for key in keys:
-				if not (key as String).begins_with("angle_"):
-					continue
-				var idx_str: String = String(key).substr(6)
-				var vkey: String = "vel_%s" % idx_str
-				sub[vkey] = move_toward(float(sub.get(vkey, 0.0)), 0.0, step)
-				sub[key] = fposmod(float(sub[key]) + float(sub[vkey]) * delta, TAU)
-		else:
-			sub["vel"] = move_toward(float(sub.get("vel", 0.0)), 0.0, step)
-			sub["angle"] = fposmod(float(sub.get("angle", 0.0)) + float(sub["vel"]) * delta, TAU)
 
 
 ## Handles Q or R key to rotate, L key to toggle linking mode.
@@ -2375,29 +2042,25 @@ func _input(event: InputEvent) -> void:
 	# --- SCHEMATIC CAPTURE (C) → straight into copy/paste placement ---
 	# Pressing C again while in paste mode begins a fresh selection
 	# (the previous paste buffer is replaced on release).
-	if event.is_action("schematic_capture"):
-		if event.is_action_pressed("schematic_capture") and not _schematic_mode:
+	if event.is_action("schematic_capture") and _schematic:
+		if event.is_action_pressed("schematic_capture") and not _schematic.mode:
 			# A fresh C-drag overrides any active paste session.
-			if _placing_schematic:
-				_placing_schematic = false
-			# Start dragging immediately from current mouse position
+			if _schematic.placing:
+				_schematic.placing = false
 			var mw = get_global_mouse_position()
-			_schematic_mode = true
-			_schematic_confirmed = false
-			_schematic_start = main.world_to_grid(mw)
-			_schematic_end = _schematic_start
-			_schematic_dragging = true
+			_schematic.mode = true
+			_schematic.confirmed = false
+			_schematic.start = main.world_to_grid(mw)
+			_schematic.end = _schematic.start
+			_schematic.dragging = true
 			queue_redraw()
-		elif event.is_action_released("schematic_capture") and _schematic_dragging:
-			# Released — capture the rect and jump straight into paste mode.
-			# Player can left-click to drop copies, G/H to flip, V to save,
-			# Esc to exit.
+		elif event.is_action_released("schematic_capture") and _schematic.dragging:
 			var mw = get_global_mouse_position()
-			_schematic_end = main.world_to_grid(mw)
-			_schematic_dragging = false
-			_schematic_mode = false
-			_schematic_confirmed = false
-			_enter_paste_mode_from_rect(_schematic_start, _schematic_end)
+			_schematic.end = main.world_to_grid(mw)
+			_schematic.dragging = false
+			_schematic.mode = false
+			_schematic.confirmed = false
+			_schematic.enter_paste_mode_from_rect(_schematic.start, _schematic.end)
 			queue_redraw()
 	if event.is_action_pressed("ui_cancel"):
 		# Filter menu first, then crane link mode, then power-link source.
@@ -2415,51 +2078,42 @@ func _input(event: InputEvent) -> void:
 			link_source = Vector2i(-1, -1)
 			_link_just_linked = Vector2i(-1, -1)
 			queue_redraw()
-		if _world_menu_open:
-			_close_world_menu()
+		if _world_ui and _world_ui.world_menu_open:
+			_world_ui.close()
 			get_viewport().set_input_as_handled()
 			return
-		if _launchpad_popup_open:
-			_hide_launchpad_popup()
-			get_viewport().set_input_as_handled()
-			return
-		if _landing_pad_popup_open:
-			_hide_landing_pad_popup()
-			get_viewport().set_input_as_handled()
-			return
-		if _schematic_mode or _schematic_dragging:
-			_schematic_mode = false
-			_schematic_confirmed = false
-			_schematic_dragging = false
+		if _schematic and (_schematic.mode or _schematic.dragging):
+			_schematic.mode = false
+			_schematic.confirmed = false
+			_schematic.dragging = false
 			queue_redraw()
-		elif _placing_schematic:
-			_placing_schematic = false
+		elif _schematic and _schematic.placing:
+			_schematic.placing = false
 			queue_redraw()
-	if _schematic_dragging and event is InputEventMouseMotion:
+	if _schematic and _schematic.dragging and event is InputEventMouseMotion:
 		var mw = get_global_mouse_position()
-		_schematic_end = main.world_to_grid(mw)
+		_schematic.end = main.world_to_grid(mw)
 		queue_redraw()
 
 	# --- SCHEMATIC PLACEMENT: click to place repeatedly, G/H flip, V save ---
-	if _placing_schematic and event is InputEventKey and event.pressed and not event.echo:
+	if _schematic and _schematic.placing and event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_G:
-			_flip_schematic_placement_x()
+			_schematic.flip_placement_x()
 			get_viewport().set_input_as_handled()
 			return
 		elif event.keycode == KEY_H:
-			_flip_schematic_placement_y()
+			_schematic.flip_placement_y()
 			get_viewport().set_input_as_handled()
 			return
 		elif event.keycode == KEY_V:
-			_show_schematic_save_dialog_from_placement()
+			_schematic.show_save_dialog_from_placement()
 			get_viewport().set_input_as_handled()
 			return
-	if _placing_schematic and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-		# Schematics drop a whole batch of build orders — also locked
-		# while piloting a non-builder.
+	if _schematic and _schematic.placing and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if _is_controlling_non_builder():
 			return
-		_execute_schematic_placement()
+		var mouse_world: Vector2 = get_global_mouse_position()
+		_schematic.execute_placement(main.world_to_grid(mouse_world))
 		return
 
 	# Rebuild mode (hold to show destroyed ghosts, drag to select)
@@ -2516,26 +2170,17 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
-	# Legacy CanvasLayer popups for launchpad / landing pad — superseded
-	# by the world_menu integration. Force-hide on first tick after the
-	# migration in case a save left them open.
-	if _launchpad_popup_open:
-		_hide_launchpad_popup()
-	if _landing_pad_popup_open:
-		_hide_landing_pad_popup()
 	# Pause-aware crusher-head inertial tick. While the world is paused the
 	# per-block velocity/angle both freeze in place; when unpaused they ease
 	# back in or out, giving each head a real spool-up/coast-down feel.
 	if not ("world_paused" in main and main.world_paused):
-		_tick_crusher_head_states(_delta)
-		_tick_scraper_head_states(_delta)
-		_tick_impact_head_states(_delta)
-		_tick_vent_turbine_states(_delta)
-		_tick_layered_spinner_states(_delta)
-		_tick_vent_condenser_states(_delta)
+		# Spinner-head inertial ticks moved to SpinnerHeadSystem — that
+		# node's own _process drives the tick under PROCESS_MODE_PAUSABLE,
+		# so we no longer call them from here.
 		_tick_fluid_bar_display(_delta)
-		_tick_autonomous_cranes(_delta)
-		_tick_held_payload_simulation(_delta)
+		# Autonomous crane AI + held-payload simulation moved to
+		# CraneSystem — that node's own _process drives both ticks
+		# under PROCESS_MODE_PAUSABLE.
 		if belt_scroll_enabled:
 			# Advance the conveyor scroll phase. Wrap on a 1024 px window —
 			# big enough that no single belt segment hits the modulus,
@@ -2551,6 +2196,7 @@ func _process(_delta: float) -> void:
 		# toggle so the build laser still animates when the player has
 		# belt scrolling disabled.
 		_build_beam_phase = fposmod(_build_beam_phase + _delta / _BUILD_BEAM_PERIOD, 1.0)
+		_tick_menders(_delta)
 
 	# --- Unified work queue: build + deconstruct, one at a time ---
 	# Walk the queue and tick the first entry that's currently within build
@@ -2596,9 +2242,10 @@ func _process(_delta: float) -> void:
 				remaining.append(entry)
 		_paused_queue = remaining
 
-	# Tick archive decoders
+	# Archive decoder ticking lives on the ArchiveDecoderSystem sibling
+	# node now and ticks itself. Only the scan-line phase still belongs
+	# to the building draw path.
 	if not ("world_paused" in main and main.world_paused):
-		_tick_archive_decoders(_delta)
 		# Advance the scan-line phase only while the world is running so
 		# the reveal line freezes at its current position during pause.
 		_archive_scan_phase += _delta
@@ -2645,16 +2292,16 @@ func _process(_delta: float) -> void:
 			queue_redraw()
 
 	# Update world menu hover
-	if _world_menu_open:
+	if _world_ui and _world_ui.world_menu_open:
 		var mw = get_global_mouse_position()
-		var new_hovered := _world_menu_hit_test(mw)
-		if new_hovered != _world_menu_hovered:
-			_world_menu_hovered = new_hovered
+		var new_hovered: int = _world_ui.hit_test(mw)
+		if new_hovered != _world_ui.world_menu_hovered:
+			_world_ui.world_menu_hovered = new_hovered
 			queue_redraw()
-		if _storage_panel_open:
-			var sh := _storage_panel_hit_test(mw)
-			if sh != _storage_panel_hovered:
-				_storage_panel_hovered = sh
+		if _world_ui.storage_panel_open:
+			var sh: int = _world_ui.storage_hit_test(mw)
+			if sh != _world_ui.storage_panel_hovered:
+				_world_ui.storage_panel_hovered = sh
 				queue_redraw()
 
 	# When nothing is selected for placement, still tick the
@@ -3041,7 +2688,7 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	var is_platform: bool = data.tags.has("platform")
 	var is_pump: bool = data.tags.has("pump")
-	# If the new block is a member of a swap family (belt/duct/conduit/etc),
+	# If the new block is a member of a swap family (belt/duct/pipe/etc),
 	# cells already holding another same-family block count as placeable —
 	# the click handler in main.try_place_building will swap them.
 	# Walls and platforms additionally allow size-up swaps where a bigger
@@ -3250,6 +2897,11 @@ func _builders_with_facing_for(anchor: Vector2i) -> Array:
 ##                              true: stripes slide block→unit (decon).
 func _draw_active_build_beams(anchor: Vector2i, line_top: Vector2, line_bot: Vector2,
 		hue: Color = Color(1.0, 0.9, 0.2), reverse_stripe: bool = false) -> void:
+	# Hide the laser triangle while build/world is paused — the drone
+	# isn't actually working this frame, so a beam pointing at the
+	# anchor reads as a lie.
+	if _is_build_paused():
+		return
 	var builders: Array = _builders_with_facing_for(anchor)
 	if builders.is_empty():
 		return
@@ -3359,6 +3011,11 @@ func _draw_build_beam_diamond_on(canvas: CanvasItem, origin: Vector2, axis: Vect
 ## would sit at the BuildingSystem's default z and disappear behind
 ## the very sprite it's supposed to emerge from.
 func _draw_active_work_diamonds() -> void:
+	# Pulsing diamond is the "I'm actively working on this" cue — kill
+	# it whenever build/world pause halts that work, so a paused drone
+	# doesn't keep emitting the diamond at its mouth.
+	if _is_build_paused():
+		return
 	var canvas: CanvasItem = _crane_draw_canvas if _crane_draw_canvas != null else self
 	# Active build anchor — at most one ticks per frame (the work
 	# queue advances a single entry at a time).
@@ -3410,6 +3067,96 @@ func _draw_active_work_diamonds() -> void:
 			continue
 		axis = axis.normalized()
 		_draw_build_beam_diamond_on(canvas, origin, axis, hue)
+
+
+## Paints the build/decon overlays that the user expects to sit on TOP
+## of every in-world layer — the dim wash over the unbuilt / deconstructed
+## portion and the turret head preview for in-progress turrets. Invoked
+## from `crane_overlay._draw()` which parks itself in `_crane_draw_canvas`
+## first, so every `c.draw_*()` call here lands at z 4096 (above units at
+## 4095 and the projectile overlay at 4095).
+func _draw_active_build_overlays_high_z() -> void:
+	var c: CanvasItem = _ccanvas()
+	if c == null:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var has_active_work: bool = false
+	var active_work_anchor: Vector2i = Vector2i(-9999, -9999)
+	if has_method("_get_active_work_anchor"):
+		active_work_anchor = _get_active_work_anchor()
+		has_active_work = active_work_anchor != _NO_ACTIVE_WORK
+	# --- Build progress overlays ---
+	if "building_build_progress" in main and not main.building_build_progress.is_empty():
+		for grid_pos in main.building_build_progress:
+			if not main.placed_buildings.has(grid_pos):
+				continue
+			var block_id: StringName = main.placed_buildings[grid_pos]
+			var data: BlockData = Registry.get_block(block_id)
+			if data == null:
+				continue
+			var b_size: Vector2i = data.grid_size
+			var b_world: Vector2 = main.grid_to_world(grid_pos)
+			var b_offset: Vector2 = _get_top_offset(b_world) * _get_height_scale(block_id)
+			var b_width: float = gs * b_size.x
+			var b_height: float = gs * b_size.y
+			var b_top_pos: Vector2 = b_world + b_offset
+			var pct: float = main.get_build_progress_pct(grid_pos)
+			var b_rot: int = int(main.building_rotation.get(grid_pos, 0))
+			var is_queued: bool = (pct == 0.0) and not (has_active_work and active_work_anchor == grid_pos)
+			if is_queued:
+				# Queued block — paint the full faded ghost (block art +
+				# yellow outline) up here, AND the turret head preview.
+				# Skip the dim wash; the faded ghost already reads as
+				# "not yet built".
+				_draw_block_ghost_preview(grid_pos, block_id, data, b_top_pos, b_width, b_height, b_rot, false)
+				if data.is_turret():
+					_draw_turret_preview_heads(data, b_top_pos, b_width, b_height, b_rot, Color(1, 1, 1, 0.45))
+			else:
+				# Active build — dim wash on the unbuilt right portion,
+				# plus the bright head preview at 0.7 alpha.
+				var reveal_x: float = b_width * pct
+				var unbuilt_w: float = b_width - reveal_x
+				if unbuilt_w > 0.0:
+					c.draw_rect(
+						Rect2(b_top_pos.x + reveal_x, b_top_pos.y, unbuilt_w, b_height),
+						Color(0, 0, 0, 0.45), true,
+					)
+				if data.is_turret():
+					_draw_turret_preview_heads(data, b_top_pos, b_width, b_height, b_rot, Color(1, 1, 1, 0.7))
+	# --- Deconstruct overlays ---
+	if "building_deconstruct_progress" in main and not main.building_deconstruct_progress.is_empty():
+		for grid_pos in main.building_deconstruct_progress:
+			var d_entry: Dictionary = main.building_deconstruct_progress[grid_pos]
+			var d_block_id: StringName = d_entry.get("block_id", &"")
+			if d_block_id == &"":
+				continue
+			var d_data: BlockData = Registry.get_block(d_block_id)
+			if d_data == null:
+				continue
+			var d_size: Vector2i = d_data.grid_size
+			var d_world: Vector2 = main.grid_to_world(grid_pos)
+			var d_offset: Vector2 = _get_top_offset(d_world) * _get_height_scale(d_block_id)
+			var d_width: float = gs * d_size.x
+			var d_height: float = gs * d_size.y
+			var d_top_pos: Vector2 = d_world + d_offset
+			var d_bt: float = float(d_entry.get("build_time", 1.0))
+			var d_pct: float = clampf(float(d_entry.get("progress", 0.0)) / maxf(d_bt, 0.0001), 0.0, 1.0)
+			var max_pct: float = float(d_entry.get("max_build_pct", 1.0))
+			var line_pct: float = max_pct * (1.0 - d_pct)
+			var line_x: float = d_top_pos.x + d_width * line_pct
+			if line_pct < max_pct:
+				var dark_left: float = line_x
+				var dark_right: float = d_top_pos.x + d_width * max_pct
+				c.draw_rect(
+					Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height),
+					Color(0, 0, 0, 0.45), true,
+				)
+			if max_pct < 1.0:
+				var never_left: float = d_top_pos.x + d_width * max_pct
+				c.draw_rect(
+					Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height),
+					Color(0, 0, 0, 0.45), true,
+				)
 
 
 ## Returns the anchor of the work-order entry the drone should currently be
@@ -3485,11 +3232,22 @@ func _anchor_can_progress(anchor: Vector2i) -> bool:
 ## returning _NO_ACTIVE_WORK when progress should not advance this frame.
 ## Used by _process to decide whether to tick build/deconstruct progress.
 func _get_tickable_work_anchor() -> Vector2i:
-	if "world_paused" in main and main.world_paused:
-		return _NO_ACTIVE_WORK
-	if "build_paused" in main and main.build_paused:
+	if _is_build_paused():
 		return _NO_ACTIVE_WORK
 	return _get_active_work_anchor()
+
+
+## True if either the world or the build queue is paused, i.e. the
+## drone is NOT making progress this frame. The "active work" visuals
+## (laser triangle + pulsing diamond) consult this to hide themselves
+## during pause — without it they keep drawing as though the build
+## were ticking, which reads as a bug.
+func _is_build_paused() -> bool:
+	if "world_paused" in main and main.world_paused:
+		return true
+	if "build_paused" in main and main.build_paused:
+		return true
+	return false
 
 
 ## Like _can_place_at but skips the drone build-range check and uses a
@@ -3620,19 +3378,6 @@ func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 	return true
 
 
-## Returns true if the player can afford N copies of the given block.
-func _can_afford_n(block_id: StringName, count: int) -> bool:
-	var data = Registry.get_block(block_id)
-	if data == null or not ("require_resources" in main and main.require_resources):
-		return true
-	for item_id in data.build_cost:
-		var needed: int = data.build_cost[item_id] * count
-		if not main.resources.has(item_id) or main.resources[item_id] < needed:
-			return false
-	return true
-
-
-## Returns true if the building is being placed on a liquid source tile.
 func _is_on_liquid(grid_pos: Vector2i) -> bool:
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	if terrain == null:
@@ -3955,40 +3700,26 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
-				# Launchpad / landing-pad popups: any unhandled left-click
-				# (i.e. not on the popup itself — that would have been
-				# consumed by the Button) dismisses them. Closing the
-				# popup is non-blocking so the player can keep building.
-				if _launchpad_popup_open:
-					_hide_launchpad_popup()
-				if _landing_pad_popup_open and not _world_menu_open:
-					# Don't dismiss when the slot-pick world menu is open;
-					# it'd close the parent popup mid-selection.
-					_hide_landing_pad_popup()
 				if _handle_crane_link_click(event):
 					get_viewport().set_input_as_handled()
 					return
 				if main.selected_building == &"":
 					# World menu is open — check for cell click or outside click
-					if _world_menu_open:
+					if _world_ui and _world_ui.world_menu_open:
 						var mouse_world = get_global_mouse_position()
-						var hit := _world_menu_hit_test(mouse_world)
+						var hit: int = _world_ui.hit_test(mouse_world)
 						if hit >= 0:
-							_apply_world_menu_selection(hit)
-						elif _storage_panel_open:
-							# Clicking on the secondary resource panel
-							# withdraws into the drone (same behaviour as
-							# the standalone storage popup), without
-							# closing the UI menu beside it.
-							var shit := _storage_panel_hit_test(mouse_world)
+							_world_ui.apply_selection(hit)
+						elif _world_ui.storage_panel_open:
+							var shit: int = _world_ui.storage_hit_test(mouse_world)
 							if shit >= 0:
-								var sid: StringName = StringName(_storage_panel_items[shit].get("id", &""))
+								var sid: StringName = StringName(_world_ui.storage_panel_items[shit].get("id", &""))
 								if sid != &"":
-									_withdraw_block_to_drone(_storage_panel_pos, sid)
+									_withdraw_block_to_drone(_world_ui.storage_panel_pos, sid)
 							else:
-								_close_world_menu()
+								_world_ui.close()
 						else:
-							_close_world_menu()
+							_world_ui.close()
 						# Guard against a pending scene change (e.g. the
 						# launchpad's `__pick` action) — if BuildingSystem
 						# was already removed from the tree by `_apply_…`,
@@ -4036,7 +3767,7 @@ func _unhandled_input(event: InputEvent) -> void:
 								if power_sys_shift and power_sys_shift.has_method("get_links_as_destination_all"):
 									has_incoming = not (power_sys_shift.get_links_as_destination_all(click_anchor) as Array).is_empty()
 								if has_incoming:
-									_open_world_menu("duct_filter", click_anchor)
+									if _world_ui: _world_ui.open("duct_filter", click_anchor)
 									get_viewport().set_input_as_handled()
 									return
 							# Mindustry-style ad-hoc linking. The same click
@@ -4067,42 +3798,42 @@ func _unhandled_input(event: InputEvent) -> void:
 								get_viewport().set_input_as_handled()
 								return
 							if click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader"):
-								_open_world_menu("sorter", click_anchor)
+								if _world_ui: _world_ui.open("sorter", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							elif click_data.tags.has("constructor"):
-								_open_world_menu("constructor", click_anchor)
+								if _world_ui: _world_ui.open("constructor", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							elif click_data.tags.has("refabricator"):
-								_open_world_menu("refabricator", click_anchor)
+								if _world_ui: _world_ui.open("refabricator", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							elif click_data.tags.has("recipe_select") and click_data.factory_recipes != null and click_data.factory_recipes.size() > 0:
 								# Rod Shapper-style factory — clicking opens a recipe
 								# picker. Selection persists per-anchor in
 								# logistics.factory_recipe_state.
-								_open_world_menu("recipe_select", click_anchor)
+								if _world_ui: _world_ui.open("recipe_select", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							elif click_data.id == &"launchpad":
 								# Launchpad opens the standard world menu in
 								# "launchpad" mode — two clickable rows: the
 								# current destination + a Launch action.
-								_open_world_menu("launchpad", click_anchor)
+								if _world_ui: _world_ui.open("launchpad", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							elif click_data.id == &"landing_pad":
 								# Landing pad opens the standard world menu
 								# in "landing_pad" mode — two slot rows that
 								# open a sub-picker on click.
-								_open_world_menu("landing_pad", click_anchor)
+								if _world_ui: _world_ui.open("landing_pad", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							# Fallback: any block with non-empty storage shows a
 							# read-only inventory popup (Mindustry-style).
 							elif _block_has_any_stored(click_anchor):
-								_open_world_menu("storage", click_anchor)
+								if _world_ui: _world_ui.open("storage", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							# No UI to open — but if the click changed the
@@ -4147,7 +3878,7 @@ func _unhandled_input(event: InputEvent) -> void:
 								cell_block = _pathfind_bridge_cells[cell]
 							# _can_place_ignoring_range allows empty cells,
 							# same-block re-placements, AND swap-compatible
-							# cells (belt → junction, conduit → bridge, etc.)
+							# cells (belt → junction, pipe → bridge, etc.)
 							# via _can_place_terrain, so paused drag-place
 							# now queues swaps the same way the unpaused
 							# path does.
@@ -4231,12 +3962,18 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _handle_crane_link_right_click():
 					get_viewport().set_input_as_handled()
 					return
-			# Skip right-click entirely when the player is in unit mode
-			# with units selected (unit mode owns right-click for commands).
-			# Outside of unit mode, right-click goes to demolish even if
-			# units are still selected in the background.
+			# Skip right-click entirely while the player is in unit mode.
+			# Unit mode owns right-click for unit commands; deconstruct is
+			# disabled outright (even with no units currently selected)
+			# so a stray right-click can't tear down a building while the
+			# player is busy commanding units. Outside of unit mode,
+			# right-click goes to demolish as normal.
 			var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-			if unit_mgr and unit_mgr.unit_mode_active and unit_mgr.selected_units.size() > 0:
+			if unit_mgr and unit_mgr.unit_mode_active:
+				# Also clear any in-flight demolish drag so a drag that
+				# started just before unit mode was entered doesn't
+				# commit on release.
+				_demolish_dragging = false
 				return
 			# Same gate as left-click placement: deconstruct via the drone
 			# is unavailable while the player is piloting a non-builder
@@ -4721,7 +4458,7 @@ func _crane_filter_menu_hit_test(world_pos: Vector2) -> int:
 	var cols: int = mini(_crane_filter_menu_columns, _crane_filter_menu_items.size())
 	var rows: int = ceili(float(_crane_filter_menu_items.size()) / float(cols))
 	var grid_w: float = cell * cols
-	var grid_h: float = cell * rows
+	var _grid_h: float = cell * rows
 	var origin: Vector2 = _crane_filter_menu_world_pos + Vector2(-grid_w / 2.0, main.GRID_SIZE * 1.7)
 	for i in range(_crane_filter_menu_items.size()):
 		var col: int = i % cols
@@ -4753,990 +4490,32 @@ func _apply_crane_filter_selection(idx: int) -> void:
 	queue_redraw()
 
 
-## Opens the in-world selection menu for a sorter or constructor block.
-func _open_world_menu(type: String, grid_pos: Vector2i) -> void:
-	_world_menu_type = type
-	_world_menu_pos = grid_pos
-	_world_menu_items.clear()
-	_world_menu_hovered = -1
 
-	if type == "storage":
-		# Read-only inventory display. Items come from any of the places a
-		# block can stash things: LogisticsSystem.block_storage, the factory
-		# input/output buffers, and the refabricator's loose buffers. They're
-		# merged here so the popup shows everything the block currently
-		# holds, regardless of which subsystem owns the slot.
-		var merged: Dictionary = _collect_block_stored_items(grid_pos)
-		for item_id in merged:
-			var count: int = int(merged[item_id])
-			if count <= 0:
-				continue
-			var it = Registry.get_item(item_id)
-			var disp_name: String = it.display_name if it else String(item_id)
-			var it_icon: Texture2D = it.icon if it else null
-			_world_menu_items.append({
-				"id": item_id,
-				"icon": it_icon,
-				"name": disp_name,
-				"count": count,
-			})
-	elif type == "sorter" or type == "duct_filter":
-		# First entry is the "clear filter" option
-		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
-		for item in Registry.items_list:
-			if not item.conveyable:
-				continue
-			_world_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name})
-	elif type == "constructor":
-		var block_id = main.placed_buildings.get(grid_pos, &"")
-		var block_data = Registry.get_block(block_id)
-		var max_ps: int = block_data.max_payload_size if block_data else 0
-		# In the editor there is no `require_research` on Main — show all
-		# blocks regardless so a sector author can pick anything. In-game,
-		# only list blocks the player has actually researched (TechTree is
-		# an autoload — a `get_node_or_null("/root/Main/TechTree")` lookup
-		# silently returned null and skipped the gate, which is why every
-		# 3×3 block was showing up).
-		var gate_on_research: bool = "require_research" in main and main.require_research
-		for block in Registry.blocks_list:
-			if block.tags.has("core"):
-				continue
-			if block.grid_size.x > max_ps or block.grid_size.y > max_ps:
-				continue
-			if gate_on_research and not TechTree.is_researched(block.id):
-				continue
-			_world_menu_items.append({"id": block.id, "icon": block.icon, "name": block.display_name})
-	elif type == "archive":
-		# First entry clears the archive selection
-		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
-		# List every known archive id from TechTree.archive_ids (autoload)
-		for aid in TechTree.archive_ids:
-			var nd = TechTree.get_node_data(aid)
-			var aname: String = nd["name"] if nd else String(aid)
-			_world_menu_items.append({"id": aid, "icon": null, "name": aname})
-	elif type == "refabricator":
-		# First entry clears the selection (refab goes dormant).
-		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
-		# Collect only *tier-2* units — units whose tech-tree parent is
-		# itself a unit AND that parent has no unit-typed parents (i.e.
-		# the parent is tier-1). Tier-3+ units are upgrades for higher-
-		# tier refabricators and shouldn't clutter this menu.
-		# Unresearched units stay hidden regardless of the require_research
-		# placement toggle (that toggle governs block placement, not
-		# recipe discovery). TechTree.unlock_all → is_researched returns
-		# true, so sandbox mode still lists everything.
-		var is_unit_node := func(nid: StringName) -> bool:
-			return Registry.get_unit(nid) != null
-		var is_tier1_unit := func(nid: StringName) -> bool:
-			if not is_unit_node.call(nid):
-				return false
-			var pts: Array = TechTree.nodes.get(nid, {}).get("parents", [])
-			for pid in pts:
-				if is_unit_node.call(pid):
-					return false
-			return true
-		var seen := {}
-		for node_id in TechTree.nodes:
-			var unit_res = Registry.get_unit(node_id)
-			if unit_res == null:
-				continue
-			var parents: Array = TechTree.nodes[node_id].get("parents", [])
-			var has_t1_unit_parent := false
-			for parent_id in parents:
-				if is_tier1_unit.call(parent_id):
-					has_t1_unit_parent = true
-					break
-			if not has_t1_unit_parent:
-				continue
-			# Editor mode (no LogisticsSystem running) lists every tier-2
-			# unit unconditionally so authors can pick pre-researched
-			# recipes into sector saves.
-			if _logistics != null and not TechTree.is_researched(node_id):
-				continue
-			if seen.has(node_id):
-				continue
-			seen[node_id] = true
-			_world_menu_items.append({
-				"id": node_id,
-				"icon": unit_res.icon,
-				"name": unit_res.display_name,
-			})
 
-	elif type == "launchpad":
-		# Two clickable rows. ID `__pick` routes to the planet-select
-		# pick flow, `__launch` fires manual_launch. Label text is
-		# refreshed per-frame via `_refresh_launchpad_menu_labels` so
-		# the cooldown / diagnostic readout stays live.
-		_world_menu_items.append({"id": &"__pick", "icon": null, "name": "Set Sector"})
-		_world_menu_items.append({"id": &"__launch", "icon": null, "name": "Launch"})
 
-	elif type == "landing_pad":
-		# Two slot rows. IDs `__slot_0` and `__slot_1` open the
-		# sub-picker (`landing_pad_slot` menu) for the corresponding
-		# slot. Labels refreshed each frame to show the current filter.
-		_world_menu_items.append({"id": &"__slot_0", "icon": null, "name": "Slot 1"})
-		_world_menu_items.append({"id": &"__slot_1", "icon": null, "name": "Slot 2"})
 
-	elif type == "landing_pad_slot":
-		# Filter-slot picker for a Landing Pad. First row clears the slot;
-		# remaining rows are every researched item / fluid the player
-		# could plausibly route through the pad. Listing only researched
-		# entries keeps the menu from spoiling later-tier materials.
-		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
-		var gate_on_research: bool = "require_research" in main and main.require_research
-		for item in Registry.items_list:
-			if not item.conveyable:
-				continue
-			if gate_on_research and TechTree.nodes.has(item.id) \
-					and not TechTree.is_researched(item.id):
-				continue
-			_world_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name})
-		for fluid in Registry.fluids_list:
-			if gate_on_research and TechTree.nodes.has(fluid.id) \
-					and not TechTree.is_researched(fluid.id):
-				continue
-			_world_menu_items.append({"id": fluid.id, "icon": fluid.icon, "name": fluid.display_name})
 
-	elif type == "recipe_select":
-		# Generic per-factory recipe picker. Each `BlockData.factory_recipes`
-		# entry becomes a menu row; clicking one writes
-		# `LogisticsSystem.factory_recipe_state[anchor] = recipe.id` so the
-		# factory tick uses that recipe's input / output dicts.
-		var bid: StringName = main.placed_buildings.get(grid_pos, &"")
-		var bdata = Registry.get_block(bid)
-		# First entry clears the selection — factory goes idle again.
-		_world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
-		if bdata and bdata.factory_recipes != null:
-			for entry in bdata.factory_recipes:
-				if typeof(entry) != TYPE_DICTIONARY:
-					continue
-				var rid: StringName = StringName(entry.get("id", &""))
-				var rname: String = String(entry.get("display_name", String(rid)))
-				# Icon: prefer the output item's icon so the player reads
-				# the menu as "this recipe produces THIS".
-				var icon_tex: Texture2D = null
-				var out_dict: Dictionary = entry.get("output", {})
-				for out_id in out_dict:
-					var it = Registry.get_item_or_fluid(StringName(out_id))
-					if it and it.icon:
-						icon_tex = it.icon
-						break
-				_world_menu_items.append({"id": rid, "icon": icon_tex, "name": rname})
 
-	_world_menu_open = true
-	# Whenever a UI-style menu (sorter / constructor / refabricator /
-	# archive) opens for a block that also has stored items, open the
-	# secondary resource panel beside it. The standalone "storage" popup
-	# already shows that data itself, so don't double-up.
-	if type != "storage":
-		_open_storage_panel(grid_pos)
-	else:
-		_close_storage_panel()
-	queue_redraw()
-	# In the map editor BuildingSystem._process is disabled, so the
-	# per-frame `_popup_overlay.queue_redraw()` chain at the end of
-	# `_draw` doesn't run reliably between user actions. Kick the popup
-	# overlay directly so the menu paints the moment it opens.
-	if _popup_overlay:
-		_popup_overlay.queue_redraw()
 
 
-## Opens the secondary resource panel for a block. Snapshots its current
-## Builds (lazy) and shows the launchpad sector-picker popup anchored to
-## the launchpad at `anchor`. The popup is a small dark panel with one
-## clickable label whose text reflects the current selection. Clicking
-## the label opens the planet-select scene in pick mode.
-func _show_launchpad_popup(anchor: Vector2i) -> void:
-	if _launchpad_popup_layer == null:
-		_launchpad_popup_layer = CanvasLayer.new()
-		_launchpad_popup_layer.layer = 90
-		add_child(_launchpad_popup_layer)
-		_launchpad_popup_panel = PanelContainer.new()
-		var sb := StyleBoxFlat.new()
-		sb.bg_color = Color(0.06, 0.08, 0.12, 0.92)
-		sb.border_color = Color(1.0, 0.85, 0.2, 0.6)
-		sb.set_border_width_all(1)
-		sb.set_corner_radius_all(6)
-		sb.content_margin_left = 10
-		sb.content_margin_right = 10
-		sb.content_margin_top = 6
-		sb.content_margin_bottom = 6
-		_launchpad_popup_panel.add_theme_stylebox_override("panel", sb)
-		_launchpad_popup_panel.mouse_filter = Control.MOUSE_FILTER_STOP
-		_launchpad_popup_layer.add_child(_launchpad_popup_panel)
-		var col := VBoxContainer.new()
-		col.add_theme_constant_override("separation", 4)
-		_launchpad_popup_panel.add_child(col)
-		_launchpad_popup_label = Button.new()
-		_launchpad_popup_label.flat = true
-		_launchpad_popup_label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
-		_launchpad_popup_label.add_theme_color_override("font_hover_color", Color(1.0, 0.92, 0.4))
-		_launchpad_popup_label.add_theme_font_size_override("font_size", 14)
-		_launchpad_popup_label.pressed.connect(_on_launchpad_popup_clicked)
-		col.add_child(_launchpad_popup_label)
-		_launchpad_popup_launch_btn = Button.new()
-		_launchpad_popup_launch_btn.text = "Launch"
-		_launchpad_popup_launch_btn.add_theme_font_size_override("font_size", 13)
-		_launchpad_popup_launch_btn.pressed.connect(_on_launchpad_popup_launch_pressed)
-		col.add_child(_launchpad_popup_launch_btn)
-	_launchpad_popup_anchor = anchor
-	_launchpad_popup_open = true
-	# Re-show the layer in case a previous `_hide_launchpad_popup` call
-	# turned it off — without this the second open silently does nothing.
-	if _launchpad_popup_layer:
-		_launchpad_popup_layer.visible = true
-	_refresh_launchpad_popup()
 
 
-func _refresh_launchpad_popup() -> void:
-	if not _launchpad_popup_open or _launchpad_popup_panel == null:
-		return
-	var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
-	var sel: StringName = &""
-	if lp_sys:
-		sel = lp_sys.get_selected_sector(_launchpad_popup_anchor)
-	var text: String
-	if sel == &"":
-		text = "<no sector selected>"
-	else:
-		var sec = Registry.get_sector(sel)
-		var name: String = sec.display_name if sec else String(sel).capitalize()
-		text = "Launching To: %s" % name
-	_launchpad_popup_label.text = text
-	# Launch button — enabled only when can_launch passes with the
-	# manual thresholds (≥20 items + ≥10.0 fluids of extras). Otherwise
-	# the button is greyed out so the player sees why nothing happens.
-	if _launchpad_popup_launch_btn:
-		var can_manual: bool = lp_sys != null \
-			and lp_sys.has_method("can_launch") \
-			and lp_sys.can_launch(_launchpad_popup_anchor, 20, 10.0)
-		_launchpad_popup_launch_btn.disabled = not can_manual
-		# Show cooldown remaining in the button text so the player
-		# doesn't have to guess why it's disabled.
-		var cd: float = 0.0
-		if lp_sys and lp_sys.has_method("cooldown_remaining"):
-			cd = lp_sys.cooldown_remaining(_launchpad_popup_anchor)
-		if cd > 0.0:
-			_launchpad_popup_launch_btn.text = "Cooldown %.1fs" % cd
-		else:
-			_launchpad_popup_launch_btn.text = "Launch"
-	# Position the panel just below the launchpad's center in screen
-	# coordinates. Re-projects every frame so the popup tracks zoom /
-	# camera pan.
-	var cam: Camera2D = get_viewport().get_camera_2d()
-	if cam == null:
-		return
-	var data = Registry.get_block(main.placed_buildings.get(_launchpad_popup_anchor, &""))
-	var gs: float = float(main.GRID_SIZE)
-	var size_tiles: int = data.grid_size.x if data else 1
-	var world_pos: Vector2 = main.grid_to_world(_launchpad_popup_anchor) + Vector2(
-		float(size_tiles) * gs * 0.5,
-		float(size_tiles) * gs + 4.0)
-	var screen: Vector2 = (world_pos - cam.get_screen_center_position()) * cam.zoom + (get_viewport_rect().size * 0.5)
-	# Center horizontally on the block; sit just below it.
-	_launchpad_popup_panel.position = screen - Vector2(_launchpad_popup_panel.size.x * 0.5, 0)
 
 
-func _hide_launchpad_popup() -> void:
-	_launchpad_popup_open = false
-	if _launchpad_popup_layer:
-		_launchpad_popup_layer.visible = false
 
 
-func _on_launchpad_popup_launch_pressed() -> void:
-	# Manual launch path — same gate as auto-launch but with the lower
-	# 20-items / 10.0-fluids passenger threshold.
-	var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
-	if lp_sys and lp_sys.has_method("manual_launch"):
-		lp_sys.manual_launch(_launchpad_popup_anchor)
 
 
-## Builds (lazy) and shows the landing-pad filter popup. Two slot buttons
-## each open the world menu in "landing_pad_slot" mode so the player can
-## pick which item / fluid that pad accepts.
-func _show_landing_pad_popup(anchor: Vector2i) -> void:
-	if _landing_pad_popup_layer == null:
-		_landing_pad_popup_layer = CanvasLayer.new()
-		_landing_pad_popup_layer.layer = 90
-		add_child(_landing_pad_popup_layer)
-		_landing_pad_popup_panel = PanelContainer.new()
-		var sb := StyleBoxFlat.new()
-		sb.bg_color = Color(0.06, 0.08, 0.12, 0.92)
-		sb.border_color = Color(0.4, 0.85, 1.0, 0.6)
-		sb.set_border_width_all(1)
-		sb.set_corner_radius_all(6)
-		sb.content_margin_left = 10
-		sb.content_margin_right = 10
-		sb.content_margin_top = 6
-		sb.content_margin_bottom = 6
-		_landing_pad_popup_panel.add_theme_stylebox_override("panel", sb)
-		_landing_pad_popup_panel.mouse_filter = Control.MOUSE_FILTER_STOP
-		_landing_pad_popup_layer.add_child(_landing_pad_popup_panel)
-		var col := VBoxContainer.new()
-		col.add_theme_constant_override("separation", 4)
-		_landing_pad_popup_panel.add_child(col)
-		var title := Label.new()
-		title.text = "Accepts:"
-		title.add_theme_font_size_override("font_size", 13)
-		title.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
-		col.add_child(title)
-		_landing_pad_popup_slot_btns.clear()
-		for i in range(2):
-			var btn := Button.new()
-			btn.text = "Empty"
-			btn.add_theme_font_size_override("font_size", 13)
-			btn.pressed.connect(_on_landing_pad_slot_clicked.bind(i))
-			col.add_child(btn)
-			_landing_pad_popup_slot_btns.append(btn)
-	_landing_pad_popup_anchor = anchor
-	_landing_pad_popup_open = true
-	_landing_pad_popup_layer.visible = true
-	_refresh_landing_pad_popup()
 
 
-func _refresh_landing_pad_popup() -> void:
-	if not _landing_pad_popup_open or _landing_pad_popup_panel == null:
-		return
-	var filter: Array = []
-	if _logistics and _logistics.has_method("get_landing_pad_filter"):
-		filter = _logistics.get_landing_pad_filter(_landing_pad_popup_anchor)
-	for i in range(_landing_pad_popup_slot_btns.size()):
-		var btn: Button = _landing_pad_popup_slot_btns[i]
-		var sn: StringName = filter[i] if i < filter.size() else &""
-		if sn == &"":
-			btn.text = "Empty"
-		else:
-			var res = Registry.get_item_or_fluid(sn)
-			btn.text = res.display_name if res else String(sn)
-	# Reposition just below the landing pad's footprint (same math as
-	# the launchpad popup).
-	var cam: Camera2D = get_viewport().get_camera_2d()
-	if cam == null:
-		return
-	var data = Registry.get_block(main.placed_buildings.get(_landing_pad_popup_anchor, &""))
-	var gs: float = float(main.GRID_SIZE)
-	var size_tiles: int = data.grid_size.x if data else 1
-	var world_pos: Vector2 = main.grid_to_world(_landing_pad_popup_anchor) + Vector2(
-		float(size_tiles) * gs * 0.5,
-		float(size_tiles) * gs + 4.0)
-	var screen: Vector2 = (world_pos - cam.get_screen_center_position()) * cam.zoom + (get_viewport_rect().size * 0.5)
-	_landing_pad_popup_panel.position = screen - Vector2(_landing_pad_popup_panel.size.x * 0.5, 0)
 
 
-func _hide_landing_pad_popup() -> void:
-	_landing_pad_popup_open = false
-	_landing_pad_pick_slot = -1
-	if _landing_pad_popup_layer:
-		_landing_pad_popup_layer.visible = false
 
 
-func _on_landing_pad_slot_clicked(slot: int) -> void:
-	# Open the standard world menu in "landing_pad_slot" mode. The slot
-	# index is stashed in `_landing_pad_pick_slot` for the apply step.
-	_landing_pad_pick_slot = slot
-	_open_world_menu("landing_pad_slot", _landing_pad_popup_anchor)
 
 
-func _on_launchpad_popup_clicked() -> void:
-	# Set the cross-scene pick request and switch to planet_select. After
-	# the player picks a sector there, planet_select reloads the source
-	# sector and main._ready drains `pending_launchpad_pick_result`.
-	SaveManager.launchpad_pick_request = {
-		"source_sector": SaveManager.active_sector_id,
-		"anchor": _launchpad_popup_anchor,
-	}
-	# Save the source sector so progress isn't lost during the pick
-	# detour. The pick flow re-loads this save when planet_select hands
-	# control back via `pending_launchpad_pick_result`.
-	if SaveManager.active_sector_id != &"":
-		SaveManager.save_sector(SaveManager.active_sector_id)
-	get_tree().change_scene_to_file("res://main/PlanetSelect.tscn")
 
 
-## stored items; _draw_storage_panel re-pulls fresh counts each frame so
-## the display animates as the block fills/empties.
-func _open_storage_panel(grid_pos: Vector2i) -> void:
-	_storage_panel_items.clear()
-	_storage_panel_hovered = -1
-	var merged: Dictionary = _collect_block_stored_items(grid_pos)
-	for item_id in merged:
-		var count: int = int(merged[item_id])
-		if count <= 0:
-			continue
-		var it = Registry.get_item(item_id)
-		_storage_panel_items.append({
-			"id": item_id,
-			"icon": it.icon if it else null,
-			"name": it.display_name if it else String(item_id),
-			"count": count,
-		})
-	if _storage_panel_items.is_empty():
-		_storage_panel_open = false
-		return
-	_storage_panel_pos = grid_pos
-	_storage_panel_open = true
-
-
-func _close_storage_panel() -> void:
-	_storage_panel_open = false
-	_storage_panel_hovered = -1
-	_storage_panel_items.clear()
-
-
-## Closes the in-world menu.
-func _close_world_menu() -> void:
-	_world_menu_open = false
-	_world_menu_hovered = -1
-	_close_storage_panel()
-	queue_redraw()
-	# Mirrors `_open_world_menu` — needed for the editor where the
-	# popup-overlay redraw chain at the end of `_draw` doesn't run
-	# every frame.
-	if _popup_overlay:
-		_popup_overlay.queue_redraw()
-
-
-## Applies the selection from the world menu.
-func _apply_world_menu_selection(index: int) -> void:
-	if index < 0 or index >= _world_menu_items.size():
-		_close_world_menu()
-		return
-
-	var selected_id: StringName = _world_menu_items[index]["id"]
-
-	if _world_menu_type == "storage":
-		# Click-to-withdraw: move as much of the clicked item as possible
-		# (up to the drone's MAX_INVENTORY headroom) from the block into
-		# the drone. Leave the popup open so the player can take from
-		# another slot or repeat — _draw_world_menu auto-closes it the
-		# frame the block ends up empty.
-		var item_id: StringName = StringName(_world_menu_items[index].get("id", &""))
-		if item_id != &"":
-			_withdraw_block_to_drone(_world_menu_pos, item_id)
-		return
-	if _world_menu_type == "sorter":
-		if _logistics:
-			_logistics.sorter_filters[_world_menu_pos] = selected_id
-		else:
-			editor_sorter_filters[_world_menu_pos] = selected_id
-	elif _world_menu_type == "duct_filter":
-		# Duct bridge output filter — empty string clears, anything
-		# else restricts the output bridge to accepting only that item.
-		if _logistics:
-			if selected_id == &"":
-				_logistics.duct_bridge_filters.erase(_world_menu_pos)
-			else:
-				_logistics.duct_bridge_filters[_world_menu_pos] = selected_id
-	elif _world_menu_type == "constructor":
-		if _logistics:
-			if _logistics.constructor_state.has(_world_menu_pos):
-				_logistics.constructor_state[_world_menu_pos]["selected_block"] = selected_id
-				if selected_id != &"":
-					_logistics.constructor_state[_world_menu_pos]["phase"] = "collecting"
-		else:
-			editor_constructor_state[_world_menu_pos] = {"selected_block": selected_id}
-	elif _world_menu_type == "archive":
-		archive_holdings[_world_menu_pos] = selected_id
-	elif _world_menu_type == "refabricator":
-		if _logistics:
-			if not _logistics.refabricator_state.has(_world_menu_pos):
-				_logistics.refabricator_state[_world_menu_pos] = {
-					"phase": "idle",
-					"in_unit_id": &"",
-					"timer": 0.0,
-					"out_unit_id": &"",
-					"selected_t2": &"",
-				}
-			var rs: Dictionary = _logistics.refabricator_state[_world_menu_pos]
-			# Changing selection while mid-process would be confusing —
-			# clear out any work-in-progress so the new recipe starts
-			# fresh. Items already in the buffer stay (they transfer to
-			# the new recipe if keys overlap, otherwise accumulate).
-			rs["selected_t2"] = selected_id
-			rs["in_unit_id"] = &""
-			rs["out_unit_id"] = &""
-			rs["timer"] = 0.0
-			rs["phase"] = "idle"
-		else:
-			editor_refabricator_state[_world_menu_pos] = {"selected_t2": selected_id}
-	elif _world_menu_type == "recipe_select":
-		# Recipe-pick menu for `recipe_select`-tagged factories
-		# (Rod Shapper etc.). Logistics owns the per-anchor selection and
-		# the buffer-reset book-keeping.
-		if _logistics:
-			_logistics.set_factory_recipe(_world_menu_pos, selected_id)
-	elif _world_menu_type == "launchpad":
-		# Two row types: pick destination, or fire manual launch. The
-		# selection is keyed by the StringName id we stamped on the
-		# menu item (`__pick` / `__launch`).
-		var anchor: Vector2i = _world_menu_pos
-		_close_world_menu()
-		if selected_id == &"__pick":
-			# Route into the existing planet-select pick flow. The scene
-			# change is deferred so this frame's input processing
-			# completes before the tree is torn down — otherwise
-			# downstream `get_viewport().set_input_as_handled()` callers
-			# crash on a null viewport when BuildingSystem has already
-			# been ripped out of the tree mid-frame.
-			SaveManager.launchpad_pick_request = {
-				"source_sector": SaveManager.active_sector_id,
-				"anchor": anchor,
-			}
-			if SaveManager.active_sector_id != &"":
-				SaveManager.save_sector(SaveManager.active_sector_id)
-			get_tree().call_deferred("change_scene_to_file", "res://main/PlanetSelect.tscn")
-		elif selected_id == &"__launch":
-			var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
-			if lp_sys and lp_sys.has_method("manual_launch"):
-				lp_sys.manual_launch(anchor)
-		return
-
-	elif _world_menu_type == "landing_pad":
-		# Two slot rows. Clicking a slot opens the per-slot picker; the
-		# slot index is stashed in `_landing_pad_pick_slot` so the
-		# sub-menu's apply knows which slot to write back.
-		var anchor_lp: Vector2i = _world_menu_pos
-		_close_world_menu()
-		var slot: int = -1
-		if selected_id == &"__slot_0":
-			slot = 0
-		elif selected_id == &"__slot_1":
-			slot = 1
-		if slot >= 0:
-			_landing_pad_pick_slot = slot
-			_open_world_menu("landing_pad_slot", anchor_lp)
-		return
-
-	elif _world_menu_type == "landing_pad_slot":
-		# Filter-slot pick for a Landing Pad. `_landing_pad_pick_slot`
-		# was stashed when the parent landing_pad menu opened this
-		# sub-picker; write the choice back through LogisticsSystem.
-		if _logistics and _landing_pad_pick_slot >= 0:
-			_logistics.set_landing_pad_filter_slot(_world_menu_pos, _landing_pad_pick_slot, selected_id)
-		var slot_anchor: Vector2i = _world_menu_pos
-		_landing_pad_pick_slot = -1
-		_close_world_menu()
-		# Re-open the parent landing_pad menu so the player can pick the
-		# OTHER slot or close cleanly.
-		_open_world_menu("landing_pad", slot_anchor)
-		return
-
-	_close_world_menu()
-
-
-## Returns the width/height (in that order) of a single cell for the
-## current menu type. Icon-based menus use the square `_world_menu_cell_size`;
-## the archive menu has no item icons, so it drops into a vertical list
-## layout with wide cells that can fit each archive's full display name.
-func _world_menu_cell_dim() -> Vector2:
-	if _world_menu_type == "archive":
-		return Vector2(160.0, 26.0) * main.SPRITE_SCALE_FACTOR
-	if _world_menu_type == "recipe_select":
-		# Wide single-column rows so the recipe's display name reads at
-		# a glance — graphite_rod / uranium_rod etc.
-		return Vector2(140.0, 36.0) * main.SPRITE_SCALE_FACTOR
-	if _world_menu_type == "landing_pad_slot":
-		return Vector2(140.0, 32.0) * main.SPRITE_SCALE_FACTOR
-	if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
-		# Wider cells than `landing_pad_slot` — these rows carry the
-		# current selection AND its label ("Sector: Waterfront Ruins",
-		# "Slot 1: Refined Uranium"), and the launchpad's Launch row can
-		# embed the diagnostic ("Launch: Need 4 more Steel").
-		return Vector2(220.0, 32.0) * main.SPRITE_SCALE_FACTOR
-	return Vector2(_world_menu_cell_size, _world_menu_cell_size)
-
-
-## How many columns the current menu type uses. Archive = single column
-## list so each row gets the full cell width for its name.
-func _world_menu_col_count() -> int:
-	if _world_menu_type == "archive":
-		return 1
-	if _world_menu_type == "recipe_select":
-		return 1
-	if _world_menu_type == "landing_pad_slot":
-		return 1
-	if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
-		return 1
-	return _world_menu_columns
-
-
-## Returns the world-space bounding rect for a resource (storage) panel
-## anchored on the tile immediately to the right of the block's top-right
-## corner. Used both for the standalone storage popup and the secondary
-## resource panel that opens beside a UI menu.
-func _get_resource_panel_rect_for(grid_pos: Vector2i, items: Array) -> Rect2:
-	if items.is_empty():
-		return Rect2()
-	var dim: Vector2 = Vector2(_world_menu_cell_size, _world_menu_cell_size)
-	var cols: int = mini(_world_menu_columns, items.size())
-	var rows: int = ceili(float(items.size()) / float(cols))
-	var padding := 6.0
-	var menu_w: float = cols * dim.x + padding * 2.0
-	var menu_h: float = rows * dim.y + padding * 2.0
-	var data = Registry.get_block(main.placed_buildings.get(grid_pos, &""))
-	var gs: Vector2i = data.grid_size if data else Vector2i(1, 1)
-	# Top-right corner tile is at (grid_pos.x + gs.x - 1, grid_pos.y).
-	# One tile to the right of that = (grid_pos.x + gs.x, grid_pos.y).
-	var anchor_world: Vector2 = main.grid_to_world(Vector2i(grid_pos.x + gs.x, grid_pos.y))
-	return Rect2(anchor_world, Vector2(menu_w, menu_h))
-
-
-## Returns the world-space bounding rect for the secondary resource panel.
-## Anchored at the same tile-right-of-top-right column as the primary
-## world menu, but stacked underneath it so the two panels don't overlap.
-func _get_storage_panel_rect() -> Rect2:
-	if not _storage_panel_open:
-		return Rect2()
-	var rect := _get_resource_panel_rect_for(_storage_panel_pos, _storage_panel_items)
-	if _world_menu_open:
-		var top := _get_world_menu_rect()
-		if top.size != Vector2.ZERO:
-			rect.position.y = top.position.y + top.size.y + 6.0
-	return rect
-
-
-## Returns the world-space bounding rect for the world menu, or Rect2() if closed.
-func _get_world_menu_rect() -> Rect2:
-	if not _world_menu_open or _world_menu_items.is_empty():
-		return Rect2()
-	# Storage popup anchors 1 tile right of the block's top-right corner so
-	# inventory readouts don't overlap the block they belong to. Other
-	# pickers (sorter / constructor / refabricator / archive) keep the
-	# original centred-above-the-block layout.
-	if _world_menu_type == "storage":
-		return _get_resource_panel_rect_for(_world_menu_pos, _world_menu_items)
-	var dim: Vector2 = _world_menu_cell_dim()
-	var col_max: int = _world_menu_col_count()
-	var cols := mini(col_max, _world_menu_items.size())
-	var rows := ceili(float(_world_menu_items.size()) / float(cols))
-	var padding := 6.0
-	var menu_w: float = cols * dim.x + padding * 2.0
-	var menu_h: float = rows * dim.y + padding * 2.0
-	var block_id = main.placed_buildings.get(_world_menu_pos, &"")
-	var data = Registry.get_block(block_id)
-	var gs := Vector2i(1, 1)
-	if data:
-		gs = data.grid_size
-	var block_world: Vector2 = main.grid_to_world(_world_menu_pos)
-	var block_center_x: float = block_world.x + float(gs.x) * main.GRID_SIZE * 0.5
-	var block_top_y: float = block_world.y - 8.0
-	var menu_x: float = block_center_x - menu_w * 0.5
-	var menu_y: float = block_top_y - menu_h
-	return Rect2(menu_x, menu_y, menu_w, menu_h)
-
-
-## Returns the item index under the given world position, or -1.
-func _world_menu_hit_test(world_pos: Vector2) -> int:
-	var menu_rect := _get_world_menu_rect()
-	if not menu_rect.has_point(world_pos):
-		return -1
-	var padding := 6.0
-	var local_x: float = world_pos.x - menu_rect.position.x - padding
-	var local_y: float = world_pos.y - menu_rect.position.y - padding
-	if local_x < 0.0 or local_y < 0.0:
-		return -1
-	var dim: Vector2 = _world_menu_cell_dim()
-	var col := int(local_x / dim.x)
-	var row := int(local_y / dim.y)
-	var cols := mini(_world_menu_col_count(), _world_menu_items.size())
-	if col < 0 or col >= cols:
-		return -1
-	var idx := row * cols + col
-	if idx < 0 or idx >= _world_menu_items.size():
-		return -1
-	return idx
-
-
-## Returns the storage-panel item index under the given world position, or -1.
-func _storage_panel_hit_test(world_pos: Vector2) -> int:
-	if not _storage_panel_open:
-		return -1
-	var rect := _get_storage_panel_rect()
-	if not rect.has_point(world_pos):
-		return -1
-	var padding := 6.0
-	var local_x: float = world_pos.x - rect.position.x - padding
-	var local_y: float = world_pos.y - rect.position.y - padding
-	if local_x < 0.0 or local_y < 0.0:
-		return -1
-	var dim: float = _world_menu_cell_size
-	var col := int(local_x / dim)
-	var row := int(local_y / dim)
-	var cols: int = mini(_world_menu_columns, _storage_panel_items.size())
-	if col < 0 or col >= cols:
-		return -1
-	var idx := row * cols + col
-	if idx < 0 or idx >= _storage_panel_items.size():
-		return -1
-	return idx
-
-
-## Draws the secondary resource (storage) panel — same look-and-feel as the
-## standalone storage popup, but anchored 1 tile right of the parent
-## block's top-right corner.
-func _draw_storage_panel(ci: CanvasItem) -> void:
-	if not _storage_panel_open:
-		return
-	# Re-pull counts each frame so the display animates live.
-	_storage_panel_items.clear()
-	var merged: Dictionary = _collect_block_stored_items(_storage_panel_pos)
-	for item_id in merged:
-		var count: int = int(merged[item_id])
-		if count <= 0:
-			continue
-		var it = Registry.get_item(item_id)
-		_storage_panel_items.append({
-			"id": item_id,
-			"icon": it.icon if it else null,
-			"name": it.display_name if it else String(item_id),
-			"count": count,
-		})
-	if _storage_panel_items.is_empty():
-		_storage_panel_open = false
-		return
-	var rect := _get_storage_panel_rect()
-	var padding := 6.0
-	var dim: float = _world_menu_cell_size
-	var cols: int = mini(_world_menu_columns, _storage_panel_items.size())
-
-	ci.draw_rect(rect, Color(0.08, 0.08, 0.1, 0.92), true)
-	ci.draw_rect(rect, Color(0.4, 0.4, 0.5, 0.8), false, 1.5)
-
-	var origin := rect.position + Vector2(padding, padding)
-	for i in _storage_panel_items.size():
-		var col := i % cols
-		var row := i / cols
-		var cell_pos := origin + Vector2(col * dim, row * dim)
-		var cell_rect := Rect2(cell_pos, Vector2(dim, dim))
-		if i == _storage_panel_hovered:
-			ci.draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.5), true)
-		ci.draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
-		var entry: Dictionary = _storage_panel_items[i]
-		var icon_tex: Texture2D = entry.get("icon")
-		if icon_tex:
-			var icon_margin := 4.0
-			var icon_rect := Rect2(
-				cell_pos + Vector2(icon_margin, icon_margin),
-				Vector2(dim - icon_margin * 2.0, dim - icon_margin * 2.0)
-			)
-			ci.draw_texture_rect(icon_tex, icon_rect, false)
-		# Count overlay
-		var font_c := ThemeDB.fallback_font
-		var font_sz_c := 11
-		var count_str: String = str(int(entry.get("count", 0)))
-		var tsz: Vector2 = font_c.get_string_size(count_str, HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c)
-		var pad := 2.0
-		var tx := cell_pos.x + dim - tsz.x - pad
-		var ty := cell_pos.y + dim - pad
-		ci.draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color(0, 0, 0, 0.85))
-		ci.draw_string(font_c, Vector2(tx, ty), count_str,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color.WHITE)
-
-
-## Draws the in-world selection menu onto `ci` (the popup overlay).
-func _draw_world_menu(ci: CanvasItem) -> void:
-	if not _world_menu_open:
-		return
-	# For block-tied menus, keep the secondary storage panel live —
-	# if items arrived after the menu opened (or were withdrawn empty),
-	# the panel auto-opens / auto-closes to match. Skipped for "storage"
-	# which IS the inventory display itself.
-	if _world_menu_type != "storage" and not _storage_panel_open:
-		var has_stored: bool = _block_has_any_stored(_world_menu_pos)
-		if has_stored:
-			_open_storage_panel(_world_menu_pos)
-	# Launchpad: refresh both row labels every frame so the player sees
-	# the live destination + the launch-readiness diagnostic / cooldown.
-	if _world_menu_type == "launchpad":
-		var lp_sys = get_node_or_null("/root/Main/LaunchpadSystem")
-		if lp_sys and _world_menu_items.size() >= 2:
-			var sel: StringName = &""
-			if lp_sys.has_method("get_selected_sector"):
-				sel = lp_sys.get_selected_sector(_world_menu_pos)
-			if sel == &"":
-				_world_menu_items[0]["name"] = "<no sector selected>"
-			else:
-				var sec = Registry.get_sector(sel)
-				var sector_text: String = sec.display_name if sec else String(sel)
-				_world_menu_items[0]["name"] = "Launching To: %s" % sector_text
-			# Manual-launch threshold is 20 items + 10.0 fluids per the
-			# auto/manual rules in LaunchpadSystem.
-			var diag: String = ""
-			if lp_sys.has_method("diagnose_launch"):
-				diag = lp_sys.diagnose_launch(_world_menu_pos, 20, 10.0)
-			if diag == "":
-				_world_menu_items[1]["name"] = "Launch — ready"
-			else:
-				_world_menu_items[1]["name"] = "Launch — %s" % diag
-	# Landing pad: refresh slot labels each frame so the player sees the
-	# current filter without reopening the menu.
-	elif _world_menu_type == "landing_pad":
-		var logistics = _logistics if _logistics else get_node_or_null("/root/Main/LogisticsSystem")
-		var filter: Array = []
-		if logistics and logistics.has_method("get_landing_pad_filter"):
-			filter = logistics.get_landing_pad_filter(_world_menu_pos)
-		for i in range(_world_menu_items.size()):
-			var sn: StringName = filter[i] if i < filter.size() else &""
-			var label: String = "Empty"
-			if sn != &"":
-				var res = Registry.get_item_or_fluid(sn)
-				label = res.display_name if res else String(sn)
-			_world_menu_items[i]["name"] = "Slot %d: %s" % [i + 1, label]
-	# Storage popup is read-only and lives — rebuild the item list from
-	# the current buffers each frame so counts animate in real time
-	# instead of snapshotting at open-time. If the block emptied out
-	# entirely while the popup was open, close it rather than drawing
-	# a zero-item box.
-	if _world_menu_type == "storage":
-		_world_menu_items.clear()
-		var merged: Dictionary = _collect_block_stored_items(_world_menu_pos)
-		for item_id in merged:
-			var count: int = int(merged[item_id])
-			if count <= 0:
-				continue
-			var it = Registry.get_item(item_id)
-			_world_menu_items.append({
-				"id": item_id,
-				"icon": it.icon if it else null,
-				"name": it.display_name if it else String(item_id),
-				"count": count,
-			})
-		if _world_menu_items.is_empty():
-			_close_world_menu()
-			return
-	if _world_menu_items.is_empty():
-		return
-	var menu_rect := _get_world_menu_rect()
-	var padding := 6.0
-	var dim: Vector2 = _world_menu_cell_dim()
-	var cols := mini(_world_menu_col_count(), _world_menu_items.size())
-
-	# For the archive / sorter / unloader menus, resolve the currently-
-	# selected id once so we can highlight its cell. Empty id (= "Clear")
-	# matches when nothing is set.
-	var selected_archive: StringName = &""
-	if _world_menu_type == "archive":
-		selected_archive = StringName(archive_holdings.get(_world_menu_pos, &""))
-	var selected_sorter: StringName = &""
-	if _world_menu_type == "sorter" and _logistics:
-		selected_sorter = StringName(_logistics.sorter_filters.get(_world_menu_pos, &""))
-	var selected_duct_filter: StringName = &""
-	if _world_menu_type == "duct_filter" and _logistics:
-		selected_duct_filter = StringName(_logistics.duct_bridge_filters.get(_world_menu_pos, &""))
-
-	# Background — launchpad / landing-pad menus use the same dark-navy
-	# panel + yellow border the legacy custom popup used so the look
-	# matches what those blocks had before the migration to world_menu.
-	var bg_fill: Color = Color(0.08, 0.08, 0.1, 0.92)
-	var bg_border: Color = Color(0.4, 0.4, 0.5, 0.8)
-	var border_width: float = 1.5
-	if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
-		bg_fill = Color(0.06, 0.08, 0.12, 0.92)
-		bg_border = Color(1.0, 0.85, 0.2, 0.6)
-		border_width = 1.0
-	ci.draw_rect(menu_rect, bg_fill, true)
-	ci.draw_rect(menu_rect, bg_border, false, border_width)
-
-	# Draw cells
-	var origin := menu_rect.position + Vector2(padding, padding)
-	for i in _world_menu_items.size():
-		var col := i % cols
-		var row := i / cols
-		var cell_pos := origin + Vector2(col * dim.x, row * dim.y)
-		var cell_rect := Rect2(cell_pos, dim)
-
-		# Hover highlight — yellow tint for launchpad / landing-pad rows
-		# to match the panel's gold border, blue for everything else.
-		if i == _world_menu_hovered:
-			var hover_color: Color = Color(0.3, 0.5, 0.8, 0.5)
-			if _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
-				hover_color = Color(1.0, 0.85, 0.2, 0.2)
-			ci.draw_rect(cell_rect, hover_color, true)
-
-		# Cell border — thicker/brighter blue when this row is the
-		# currently-selected archive / sorter filter so the player can
-		# see what's set at a glance. Skip the "Clear" cell at index 0
-		# when nothing is selected (avoids the X cell looking active).
-		var entry_id: StringName = StringName(_world_menu_items[i].get("id", &""))
-		var is_selected: bool = false
-		if _world_menu_type == "archive":
-			is_selected = entry_id == selected_archive and entry_id != &""
-		elif _world_menu_type == "sorter":
-			is_selected = entry_id == selected_sorter and entry_id != &""
-		elif _world_menu_type == "duct_filter":
-			is_selected = entry_id == selected_duct_filter and entry_id != &""
-		if is_selected:
-			ci.draw_rect(cell_rect, Color(0.35, 0.65, 1.0, 1.0), false, 2.0)
-		elif _world_menu_type == "launchpad" or _world_menu_type == "landing_pad":
-			# Flat rows for the launchpad / landing-pad menus — the
-			# yellow panel border on the outside is the only frame,
-			# matching the old custom popup look.
-			pass
-		else:
-			ci.draw_rect(cell_rect, Color(0.25, 0.25, 0.3, 0.6), false, 1.0)
-
-		var entry: Dictionary = _world_menu_items[i]
-
-		# Clear button (first cell in sorter or archive mode)
-		if (_world_menu_type == "sorter" or _world_menu_type == "archive" or _world_menu_type == "duct_filter") and i == 0:
-			# Draw X for clear
-			var cx := cell_pos.x + dim.x * 0.5
-			var cy := cell_pos.y + dim.y * 0.5
-			var hs: float = minf(dim.x, dim.y) * 0.25
-			ci.draw_line(Vector2(cx - hs, cy - hs), Vector2(cx + hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
-			ci.draw_line(Vector2(cx + hs, cy - hs), Vector2(cx - hs, cy + hs), Color(1.0, 0.3, 0.3), 2.0)
-			continue
-
-		# Draw icon if available
-		var icon_tex: Texture2D = entry.get("icon")
-		if icon_tex:
-			var icon_margin := 4.0
-			var icon_rect := Rect2(
-				cell_pos + Vector2(icon_margin, icon_margin),
-				Vector2(dim.x - icon_margin * 2.0, dim.y - icon_margin * 2.0)
-			)
-			ci.draw_texture_rect(icon_tex, icon_rect, false)
-		else:
-			# Text-label cells (e.g. archive list) fit their full display
-			# name into the wider list-mode cell. Square icon-less cells
-			# fall back to a 4-char abbreviation as before.
-			var font := ThemeDB.fallback_font
-			var font_size := 11
-			var full_name: String = entry.get("name", "?")
-			var side_pad := 6.0
-			var avail_w: float = dim.x - side_pad * 2.0
-			if _world_menu_type == "archive":
-				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + font_size * 0.35)
-				ci.draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, font_size, Color.WHITE)
-			elif _world_menu_type == "launchpad" or _world_menu_type == "landing_pad" \
-					or _world_menu_type == "recipe_select" or _world_menu_type == "landing_pad_slot":
-				# Render the full label centered horizontally so wide
-				# single-column menus read as buttons rather than icon
-				# cells. Slightly larger font so labels like "Sector:
-				# Waterfront Ruins" are comfortable to read.
-				var lp_font_size := 13
-				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + lp_font_size * 0.35)
-				ci.draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_CENTER, avail_w, lp_font_size, Color.WHITE)
-			else:
-				var short_name: String = full_name.left(4)
-				var text_pos := cell_pos + Vector2(4.0, dim.y * 0.65)
-				ci.draw_string(font, text_pos, short_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, 10, Color.WHITE)
-
-		# Storage popup: overlay an item count in the bottom-right corner.
-		if _world_menu_type == "storage" and entry.has("count"):
-			var font_c := ThemeDB.fallback_font
-			var font_sz_c := 11
-			var count_str: String = str(entry["count"])
-			var tsz: Vector2 = font_c.get_string_size(count_str, HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c)
-			var pad := 2.0
-			var tx := cell_pos.x + dim.x - tsz.x - pad
-			var ty := cell_pos.y + dim.y - pad
-			# Drop-shadow for legibility over any icon colour.
-			ci.draw_string(font_c, Vector2(tx + 1, ty + 1), count_str,
-				HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color(0, 0, 0, 0.85))
-			ci.draw_string(font_c, Vector2(tx, ty), count_str,
-				HORIZONTAL_ALIGNMENT_LEFT, -1, font_sz_c, Color.WHITE)
 
 
 func _draw() -> void:
@@ -5772,8 +4551,11 @@ func _draw() -> void:
 ## Beyond that, they fade over WALL_FADE_RANGE tiles.
 ## Walls with no path to floor (unreachable) are fully dark.
 func _get_wall_fade_alpha(grid_pos: Vector2i) -> float:
-	# Check script-hidden tiles
-	var sector_script = get_node_or_null("/root/Main/SectorScript")
+	# Check script-hidden tiles. _sector_script_ref() caches the node
+	# reference; the previous `get_node_or_null(...)` here was walking
+	# the scene tree 220+ times per frame for a value that never
+	# changes across an entire session.
+	var sector_script = _sector_script_ref()
 	if sector_script and sector_script.is_tile_hidden(grid_pos):
 		return 0.0
 	if not _wall_floor_distance.has(grid_pos):
@@ -5793,10 +4575,6 @@ func _dist_to_darkness(eff_dist: float) -> float:
 	return clampf(fade_dist / WALL_FADE_RANGE, 0.0, 1.0)
 
 
-## Returns pre-computed per-corner darkness [tl, tr, br, bl].
-## Returns null if the wall has no darkness (fully bright). Check with has() first or use get().
-func _get_corner_darkness(grid_pos: Vector2i) -> Variant:
-	return _cached_corner_darkness.get(grid_pos)
 
 
 func _soft_cap_value(value: float) -> float:
@@ -5834,13 +4612,17 @@ func _get_top_offset(_world_pos: Vector2) -> Vector2:
 ## `directional = false` so the offset (and `rot`) are skipped, keeping
 ## the art identical to the source file.
 func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: float, rot: int = 0, tint: Color = Color.WHITE, directional: bool = true) -> void:
+	# Route through _ccanvas() so queued / in-progress block ghosts
+	# can be painted via crane_overlay at z 4096 (above units and
+	# placed blocks) when invoked from that pass.
+	var c: CanvasItem = _ccanvas()
 	var angle: float = 0.0
 	if directional:
 		angle = rot * PI / 2.0 + PI / 2.0
 	var center := top_pos + Vector2(w / 2.0, h / 2.0)
-	draw_set_transform(center, angle)
-	draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
-	draw_set_transform(Vector2.ZERO, 0.0)
+	c.draw_set_transform(center, angle)
+	c.draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
+	c.draw_set_transform(Vector2.ZERO, 0.0)
 
 
 ## Draws the refabricator: base sprite plus per-side "input" overlays that
@@ -6621,18 +5403,6 @@ func _get_side_colors(block_id: StringName) -> Array:
 	return [Color.MAGENTA.darkened(0.4), Color.MAGENTA.darkened(0.55)]
 
 
-## Returns the grid_size of a block (how many tiles it spans).
-func _get_block_grid_size(block_id: StringName) -> Vector2i:
-	var data = Registry.get_block(block_id)
-	if data:
-		return data.grid_size
-	return Vector2i(1, 1)
-
-
-## Developer overlay: outlines every placed block's tile footprint in
-## magenta when `main.show_hitboxes` is on. Only iterates anchors (the
-## origin cells of each building), so multi-tile blocks render as one
-## rect instead of one per covered cell.
 func _draw_block_hitboxes() -> void:
 	# `main` here is whatever wired this BuildingSystem up — usually the
 	# game's `Main` node, but the map editor reuses the same draw code
@@ -6663,7 +5433,22 @@ func _get_height_scale(block_id: StringName) -> float:
 
 
 ## Returns true if a block is directional (conveyors, drills).
+## Cached result of _is_directional per block_id. Block definitions don't
+## change at runtime, so this cache is permanent (lifetime of the engine
+## session) instead of per-frame. Brought call cost down from ~150
+## tag-lookups per frame to ~150 dict lookups in the hot draw path.
+static var _is_directional_cache: Dictionary = {}
+
+
 func _is_directional(block_id: StringName) -> bool:
+	if _is_directional_cache.has(block_id):
+		return _is_directional_cache[block_id]
+	var result: bool = _compute_is_directional(block_id)
+	_is_directional_cache[block_id] = result
+	return result
+
+
+func _compute_is_directional(block_id: StringName) -> bool:
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return false
@@ -6684,6 +5469,7 @@ func _is_directional(block_id: StringName) -> bool:
 		or data.tags.has("payload_unloader") or data.tags.has("freight_unloader") \
 		or data.tags.has("archive_scanner") \
 		or data.tags.has("fabricator") \
+		or data.shield_shape != "" \
 		or not data.side_inputs.is_empty() or not data.side_outputs.is_empty()
 
 
@@ -7127,12 +5913,15 @@ func _get_belt_draw_info(grid_pos: Vector2i) -> Dictionary:
 	if tex_key == "cb":
 		angle += -(PI / 2.0)
 
-	# Pick the right texture set based on the block at this cell. Belts and
-	# ducts share the corner / junction logic but have different art.
+	# Pick the right texture set based on the block at this cell. Belts,
+	# ducts, and fluid pipes share the corner / junction logic but each
+	# has its own art.
 	var textures: Dictionary = _belt_textures
 	var bid: StringName = main.placed_buildings.get(grid_pos, &"")
 	if bid == &"duct":
 		textures = _duct_textures
+	elif bid == &"fluid_pipe":
+		textures = _pipe_textures
 	return {"texture": textures.get(tex_key), "angle": angle, "key": tex_key}
 
 
@@ -7182,11 +5971,14 @@ func _get_belt_draw_info_with_preview(grid_pos: Vector2i,
 	if tex_key == "cb":
 		angle += -(PI / 2.0)
 
-	# Pick the texture set based on the previewed block id. Belts and
-	# ducts share corner / junction logic but have different art.
+	# Pick the texture set based on the previewed block id. Belts,
+	# ducts, and fluid pipes share corner / junction logic but each has
+	# its own art.
 	var textures: Dictionary = _belt_textures
 	if preview_block_id == &"duct":
 		textures = _duct_textures
+	elif preview_block_id == &"fluid_pipe":
+		textures = _pipe_textures
 	return {"texture": textures.get(tex_key), "angle": angle, "key": tex_key}
 
 
@@ -7253,7 +6045,7 @@ func _draw_placed_buildings() -> void:
 		is_wall_of.append(true)
 
 	var gs := float(main.GRID_SIZE)
-	var half_gs: float = gs * 0.5
+	var _half_gs: float = gs * 0.5
 
 	# Stable painter's-order sort by world position. The previous
 	# camera-distance sort flipped z-order whenever a block crossed from one
@@ -7492,14 +6284,18 @@ func _draw_placed_buildings() -> void:
 			var anchor_q: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 			var pct_q: float = main.get_build_progress_pct(anchor_q)
 			if pct_q == 0.0 and not (has_active_work and active_work_anchor == anchor_q):
-				# Queued ghost — translucent block sprite only. No white
-				# wash; the unbuilt portion reads as a semi-transparent
-				# silhouette of the block.
-				_draw_block_ghost_preview(grid_pos, block_id, data, top_pos, width, height,
-					main.building_rotation.get(grid_pos, 0))
+				# Queued — every visual (block ghost + turret head +
+				# yellow outline) is painted from
+				# `_draw_active_build_overlays_high_z()` via crane_overlay
+				# so the queued footprint renders above units (z 4095)
+				# and live blocks instead of being clipped under them.
+				# Skip the block-layer paint entirely.
 				continue
 
-		# Conveyor belts and ducts use auto-tiled textures based on neighbours.
+		# Conveyor belts, ducts, and fluid pipes all use auto-tiled
+		# textures based on neighbours. (The pipe branch additionally
+		# paints a fluid-fill rect under the texture; that's handled
+		# in its own `elif` below — keep the pipe out of this gate.)
 		var _is_belt_or_duct: bool = (block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
 				or (block_id == &"duct" and not _duct_textures.is_empty())
 		if _is_belt_or_duct:
@@ -7577,8 +6373,12 @@ func _draw_placed_buildings() -> void:
 			draw_texture_rect(_pump_texture, Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height)), false)
 			draw_set_transform(Vector2.ZERO, 0.0)
 
-		# Fluid pipes: colored fill rectangle UNDER the pipe texture
-		elif data and data.transports_fluid and _pipe_texture:
+		# Fluid pipes: corner / junction variant + colored fluid fill
+		# rectangle painted UNDER the pipe texture. Uses the same
+		# auto-tile classifier as belts/ducts so a pipe joining its
+		# neighbours picks the right CA / CB / JA / JL / JR / straight
+		# art.
+		elif block_id == &"fluid_pipe" and not _pipe_textures.is_empty():
 			if _logistics and _logistics.pipe_contents.has(grid_pos):
 				var pipe: Dictionary = _logistics.pipe_contents[grid_pos]
 				var fluid = Registry.get_fluid(pipe["fluid_id"])
@@ -7587,13 +6387,25 @@ func _draw_placed_buildings() -> void:
 					var fill_color: Color = Color(fluid.color)
 					fill_color.a = fill_pct * fluid.opacity
 					draw_rect(Rect2(top_pos, Vector2(width, height)), fill_color, true)
-
-			var rot: int = main.building_rotation.get(grid_pos, 0)
-			var angle: float = rot * PI / 2.0 + PI / 2.0
-			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
-			draw_set_transform(center, angle)
-			draw_texture_rect(_pipe_texture, Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height)), false)
-			draw_set_transform(Vector2.ZERO, 0.0)
+			var info: Dictionary = _get_belt_draw_info(grid_pos)
+			var texture: Texture2D = info["texture"]
+			var angle: float = info["angle"]
+			if texture:
+				var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
+				draw_set_transform(center, angle)
+				# Use draw_texture_rect_region (full-texture src window)
+				# instead of draw_texture_rect — rotated draw_texture_rect
+				# subpixel-clamps the edges and leaves visible seams at
+				# corner / junction tile boundaries (see the belt branch
+				# at line ~6280 for the same fix).
+				var dst_rect := Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height))
+				var tex_size: Vector2 = texture.get_size()
+				draw_texture_rect_region(texture, dst_rect, Rect2(Vector2.ZERO, tex_size))
+				draw_set_transform(Vector2.ZERO, 0.0)
+			else:
+				var color := _get_block_color(block_id)
+				draw_rect(Rect2(top_pos, Vector2(width, height)), color, true)
+				draw_rect(Rect2(top_pos, Vector2(width, height)), color.lightened(0.3), false, 2.0)
 
 		else:
 			var top_rect := Rect2(top_pos, Vector2(width, height))
@@ -7831,14 +6643,13 @@ func _draw_placed_buildings() -> void:
 			var is_active_build: bool = has_active_work and active_work_anchor == grid_pos
 			if build_pct > 0.0:
 				# Active build — pass 2 rendered the block at full opacity
-				# already. Dim the unbuilt portion (right of the reveal
-				# line) with a translucent black wash so it reads as a
-				# ghosted / transparent silhouette of the in-progress block.
+				# already. The dim wash over the unbuilt portion AND the
+				# in-progress turret head preview are painted in
+				# `_draw_active_build_overlays_high_z()` from crane_overlay
+				# so they sit above units (z 4095) and live turret heads.
+				# Reveal line + builder beams stay here so they remain
+				# visually anchored to the block at the building layer.
 				var reveal_x: float = b_width * build_pct
-				var unbuilt_w: float = b_width - reveal_x
-				if unbuilt_w > 0.0:
-					draw_rect(Rect2(b_top_pos.x + reveal_x, b_top_pos.y, unbuilt_w, b_height),
-						Color(0, 0, 0, 0.45), true)
 				if is_active_build:
 					var line_x: float = b_top_pos.x + reveal_x
 					var line_top := Vector2(line_x, b_top_pos.y)
@@ -7851,18 +6662,6 @@ func _draw_placed_buildings() -> void:
 					# stays the brightest element.
 					_draw_active_build_beams(grid_pos, line_top, line_bot)
 					draw_line(line_top, line_bot, Color(1.0, 0.9, 0.2, 0.9), 2.0)
-				# CombatSystem only draws heads for fully-built turrets
-				# (inactive blocks are filtered out of its targeting /
-				# state init), so a turret under construction would
-				# otherwise show only its base. Overlay the head /
-				# chassis here so the in-progress turret reads as what
-				# it'll become.
-				var b_data = Registry.get_block(b_block_id)
-				if b_data and b_data.is_turret():
-					var b_rot: int = int(main.building_rotation.get(grid_pos, 0))
-					_draw_turret_preview_heads(
-						b_data, b_top_pos, b_width, b_height, b_rot, Color(1, 1, 1, 0.7)
-					)
 			# Pending-not-active blocks are now rendered by the faded
 			# ghost preview path in PASS 2 — nothing to overlay here.
 
@@ -7888,7 +6687,8 @@ func _draw_placed_buildings() -> void:
 			var top_pos_s: Vector2 = world_pos_s + off_s
 			var tint_s := Color(1, 1, 1, 0.55)
 			if (new_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
-					or (new_id == &"duct" and not _duct_textures.is_empty()):
+					or (new_id == &"duct" and not _duct_textures.is_empty()) \
+					or (new_id == &"fluid_pipe" and not _pipe_textures.is_empty()):
 				# Use the with-preview variant so the texture set is picked
 				# from `new_id` (the swapped-in block) rather than whatever
 				# is currently placed at this cell.
@@ -7898,7 +6698,9 @@ func _draw_placed_buildings() -> void:
 				if texture_s:
 					var centre_s: Vector2 = top_pos_s + Vector2(w_s / 2.0, h_s / 2.0)
 					draw_set_transform(centre_s, angle_s)
-					draw_texture_rect(texture_s, Rect2(Vector2(-w_s / 2.0, -h_s / 2.0), Vector2(w_s, h_s)), false, tint_s)
+					var dst_s := Rect2(Vector2(-w_s / 2.0, -h_s / 2.0), Vector2(w_s, h_s))
+					var tex_size_s: Vector2 = texture_s.get_size()
+					draw_texture_rect_region(texture_s, dst_s, Rect2(Vector2.ZERO, tex_size_s), tint_s)
 					draw_set_transform(Vector2.ZERO, 0.0)
 			else:
 				# Prefer world-facing top/base sprites. data.icon is UI-only.
@@ -7939,13 +6741,9 @@ func _draw_placed_buildings() -> void:
 			var max_pct: float = float(d_entry.get("max_build_pct", 1.0))
 			var line_pct: float = max_pct * (1.0 - d_pct)
 			var line_x: float = d_top_pos.x + d_width * line_pct
-			if line_pct < max_pct:
-				var dark_left: float = line_x
-				var dark_right: float = d_top_pos.x + d_width * max_pct
-				draw_rect(Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height), Color(0, 0, 0, 0.45), true)
-			if max_pct < 1.0:
-				var never_left: float = d_top_pos.x + d_width * max_pct
-				draw_rect(Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height), Color(0, 0, 0, 0.45), true)
+			# Dim washes over the deconstructed / never-built portion are
+			# drawn from `_draw_active_build_overlays_high_z()` so they
+			# sit above units instead of being painted over by them.
 			# Moving red line only while actively deconstructing. Paused
 			# entries freeze the reveal at its current position so the
 			# player can see exactly how far decon has gotten.
@@ -8022,11 +6820,12 @@ func _draw_placed_buildings() -> void:
 		# Launch-anim reveal tint: paints over the freshly-drawn sprite
 		# while the ring sweep is running. Color.WHITE = no-op so the
 		# overlay only kicks in for blocks the ring has actually touched
-		# (or for pre-built blocks waiting their turn).
-		var la_ref = get_node_or_null("/root/Main/LaunchAnimation")
-		if la_ref and la_ref.has_method("get_block_reveal_tint"):
+		# (or for pre-built blocks waiting their turn). Reuse the
+		# `la_filter` reference fetched once at the top of this function
+		# instead of re-walking the scene tree per building.
+		if la_filter and la_filter.has_method("get_block_reveal_tint"):
 			var t_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-			var reveal_tint: Color = la_ref.get_block_reveal_tint(t_anchor)
+			var reveal_tint: Color = la_filter.get_block_reveal_tint(t_anchor)
 			if reveal_tint.a > 0.001:
 				var rev_id: StringName = main.placed_buildings[grid_pos]
 				var rev_size: Vector2i = _size_for.call(rev_id)
@@ -8121,6 +6920,10 @@ func _draw_held_turret_heads_at(data: BlockData, center: Vector2, aim_world: flo
 func _draw_turret_preview_heads(data: BlockData, top_pos: Vector2, w: float, h: float, rot: int, tint: Color) -> void:
 	if data == null or not data.is_turret() or data.turret_head_sprite == null:
 		return
+	# Route through _ccanvas() so the crane_overlay can pipe this draw onto
+	# its high-z (4096) canvas — putting in-progress turret heads above
+	# units (z 4095) and live turret heads instead of being clipped by them.
+	var c: CanvasItem = _ccanvas()
 	var center: Vector2 = top_pos + Vector2(w / 2.0, h / 2.0)
 	var aim_angle: float = float(rot) * (PI / 2.0)
 	var draw_angle: float = aim_angle + PI / 2.0
@@ -8131,11 +6934,11 @@ func _draw_turret_preview_heads(data: BlockData, top_pos: Vector2, w: float, h: 
 	var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
 	# Chassis plate (multi-barrel only).
 	if bcount > 1:
-		draw_set_transform(center, draw_angle)
+		c.draw_set_transform(center, draw_angle)
 		if data.turret_chassis_sprite:
 			var ctex: Texture2D = data.turret_chassis_sprite
 			var csize: Vector2 = ctex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
-			draw_texture_rect(
+			c.draw_texture_rect(
 				ctex,
 				Rect2(Vector2(-csize.x * 0.5, -csize.y * 0.5), csize),
 				false,
@@ -8144,41 +6947,42 @@ func _draw_turret_preview_heads(data: BlockData, top_pos: Vector2, w: float, h: 
 		else:
 			var plate_w: float = (float(bcount) - 1.0) * data.barrel_spacing + tex_size.x * 0.9
 			var plate_h: float = tex_size.y * 0.35
-			draw_rect(
+			c.draw_rect(
 				Rect2(Vector2(-plate_w * 0.5, -plate_h * 0.5), Vector2(plate_w, plate_h)),
 				Color(0.32, 0.32, 0.34, tint.a),
 			)
-		draw_set_transform(Vector2.ZERO, 0.0)
+		c.draw_set_transform(Vector2.ZERO, 0.0)
 	# Heads — one per barrel, perpendicular to the aim axis.
 	for i in range(bcount):
 		var lateral: float = 0.0
 		if bcount > 1:
 			lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * data.barrel_spacing
 		var pivot: Vector2 = center + chassis_perp * lateral
-		draw_set_transform(pivot, draw_angle)
+		c.draw_set_transform(pivot, draw_angle)
 		var rect := Rect2(
 			Vector2(-tex_size.x * 0.5, -tex_size.y + 14.0 * main.SPRITE_SCALE_FACTOR),
 			tex_size,
 		)
-		draw_texture_rect(head_tex, rect, false, tint)
-		draw_set_transform(Vector2.ZERO, 0.0)
+		c.draw_texture_rect(head_tex, rect, false, tint)
+		c.draw_set_transform(Vector2.ZERO, 0.0)
 
 
 ## Draws a direction arrow at the given center position.
 func _draw_direction_arrow(center: Vector2, rotation: int, color: Color) -> void:
+	var c: CanvasItem = _ccanvas()
 	var arrow_size := 14.0
 	var dir = Vector2(DIR_VECTORS[rotation])
 
 	# Arrow shaft
 	var start_pt = center - dir * arrow_size * 0.5
 	var end_pt = center + dir * arrow_size * 0.5
-	draw_line(start_pt, end_pt, color, 2.5)
+	c.draw_line(start_pt, end_pt, color, 2.5)
 
 	# Arrowhead (two lines forming a V)
 	var perp = Vector2(-dir.y, dir.x) * arrow_size * 0.35
 	var back = dir * arrow_size * 0.4
-	draw_line(end_pt, end_pt - back + perp, color, 2.5)
-	draw_line(end_pt, end_pt - back - perp, color, 2.5)
+	c.draw_line(end_pt, end_pt - back + perp, color, 2.5)
+	c.draw_line(end_pt, end_pt - back - perp, color, 2.5)
 
 
 ## Paints an orange arrow on the cell directly in front of a directional
@@ -8261,54 +7065,6 @@ func _tick_fluid_bar_display(delta: float) -> void:
 		_fluid_bar_display.erase(a)
 
 
-## Draws a small blue fluid-storage bar with "[stored]/[max]" text
-## above the block, just above where the health bar sits when it's
-## visible. Reads the eased value from `_fluid_bar_display` so the
-## bar slides smoothly rather than snapping per push.
-func _draw_fluid_storage_bar(world_pos: Vector2, anchor: Vector2i, max_amount: float, building_pixel_width: float = 128.0) -> void:
-	if max_amount <= 0.0:
-		return
-	var disp: float = float(_fluid_bar_display.get(anchor, 0.0))
-	if disp <= 0.001:
-		return
-	var bar_width: float = clampf(building_pixel_width * 0.8, 30.0, 150.0)
-	var bar_height: float = 5.0
-	# Sit just above the health bar (-10), 7 px higher to leave room
-	# for the label.
-	var bar_pos: Vector2 = world_pos + Vector2(
-		(building_pixel_width - bar_width) / 2.0 - building_pixel_width / 2.0 + main.GRID_SIZE / 2.0,
-		-17.0
-	)
-	# Background bed.
-	draw_rect(Rect2(bar_pos, Vector2(bar_width, bar_height)),
-		Color(0.0, 0.05, 0.15, 0.8), true)
-	# Eased blue fill.
-	var pct: float = clampf(disp / max_amount, 0.0, 1.0)
-	draw_rect(Rect2(bar_pos, Vector2(bar_width * pct, bar_height)),
-		Color(0.3, 0.6, 1.0, 0.95), true)
-	# Outline.
-	draw_rect(Rect2(bar_pos, Vector2(bar_width, bar_height)),
-		Color(0.6, 0.8, 1.0, 0.6), false, 1.0)
-	# "[stored]/[max]" label centered above the bar. Display the
-	# eased value rounded to an int so the number ticks smoothly.
-	# `get_theme_default_font` is Control-only; BuildingSystem is a
-	# Node2D, so pull the fallback font from ThemeDB instead.
-	var font: Font = ThemeDB.fallback_font
-	if font:
-		var font_size := 9
-		var text: String = "%d/%d" % [int(round(disp)), int(round(max_amount))]
-		var ts: Vector2 = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
-		var tx: float = bar_pos.x + (bar_width - ts.x) / 2.0
-		var ty: float = bar_pos.y - 2.0
-		# 1-px black drop shadow so the label reads on bright tiles.
-		draw_string(font, Vector2(tx + 1, ty + 1), text,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(0, 0, 0, 0.85))
-		draw_string(font, Vector2(tx, ty), text,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(0.9, 0.95, 1.0, 1.0))
-
-
-## Draws a health bar centered above a building.
-## bar_width_base is the pixel width of the building (scales with size).
 func _draw_building_health_bar(world_pos: Vector2, health_pct: float, building_pixel_width: float = 128.0) -> void:
 	var bar_width = clamp(building_pixel_width * 0.8, 30.0, 150.0)
 	var bar_height := 5.0
@@ -8338,25 +7094,6 @@ func _draw_building_health_bar(world_pos: Vector2, health_pct: float, building_p
 	)
 
 
-## Draws a small "no power" icon (lightning bolt with X) at the given center.
-func _draw_no_power_icon(center: Vector2) -> void:
-	var s := 10.0  # Scale factor
-	var bolt_color := Color(1.0, 0.3, 0.3, 0.9)
-	# Simple lightning bolt shape
-	var points: PackedVector2Array = [
-		center + Vector2(-2, -s),
-		center + Vector2(2, -3),
-		center + Vector2(-1, -1),
-		center + Vector2(3, -1),
-		center + Vector2(-1, s),
-		center + Vector2(0, 2),
-		center + Vector2(-4, 2),
-	]
-	for i in range(points.size() - 1):
-		draw_line(points[i], points[i + 1], bolt_color, 2.0)
-	# Draw X through it
-	draw_line(center + Vector2(-s, -s), center + Vector2(s, s), Color(1.0, 0.0, 0.0, 0.7), 2.5)
-	draw_line(center + Vector2(s, -s), center + Vector2(-s, s), Color(1.0, 0.0, 0.0, 0.7), 2.5)
 
 
 func _draw_paused_queue() -> void:
@@ -8385,7 +7122,8 @@ func _draw_paused_queue() -> void:
 
 		# Draw belt / duct texture preview or fallback ghost
 		var is_belt_q: bool = (block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
-				or (block_id == &"duct" and not _duct_textures.is_empty())
+				or (block_id == &"duct" and not _duct_textures.is_empty()) \
+				or (block_id == &"fluid_pipe" and not _pipe_textures.is_empty())
 		if is_belt_q:
 			var info: Dictionary = _get_belt_draw_info_with_preview(grid_pos, queue_set, queue_rots, block_id)
 			var texture: Texture2D = info["texture"]
@@ -8393,7 +7131,9 @@ func _draw_paused_queue() -> void:
 			if texture:
 				var center: Vector2 = top_pos + Vector2(w / 2.0, h / 2.0)
 				draw_set_transform(center, angle)
-				draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, Color(1, 1, 1, 0.45))
+				var dst_q := Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h))
+				var tex_size_q: Vector2 = texture.get_size()
+				draw_texture_rect_region(texture, dst_q, Rect2(Vector2.ZERO, tex_size_q), Color(1, 1, 1, 0.45))
 				draw_set_transform(Vector2.ZERO, 0.0)
 			else:
 				var color: Color = _get_block_color(block_id)
@@ -8471,20 +7211,28 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 		w: float, h: float, rot: int, draw_heads: bool = true) -> void:
 	if data == null:
 		return
+	# Route every draw call through _ccanvas() so the queued ghost can
+	# be painted on crane_overlay (z 4096) — above units, live blocks,
+	# and live turret heads — instead of being clipped under them at
+	# the BuildingSystem's default z (50).
+	var c: CanvasItem = _ccanvas()
 	var tint := Color(1, 1, 1, 0.45)
 	# Conveyor belts and ducts use the auto-tile texture system so the
 	# ghost orients with its neighbours instead of always pointing the
 	# same way.
 	if (block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
-			or (block_id == &"duct" and not _duct_textures.is_empty()):
+			or (block_id == &"duct" and not _duct_textures.is_empty()) \
+			or (block_id == &"fluid_pipe" and not _pipe_textures.is_empty()):
 		var info: Dictionary = _get_belt_draw_info(grid_pos)
 		var texture: Texture2D = info["texture"]
 		var angle: float = info["angle"]
 		if texture:
 			var center: Vector2 = top_pos + Vector2(w / 2.0, h / 2.0)
-			draw_set_transform(center, angle)
-			draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
-			draw_set_transform(Vector2.ZERO, 0.0)
+			c.draw_set_transform(center, angle)
+			var dst_g := Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h))
+			var tex_size_g: Vector2 = texture.get_size()
+			c.draw_texture_rect_region(texture, dst_g, Rect2(Vector2.ZERO, tex_size_g), tint)
+			c.draw_set_transform(Vector2.ZERO, 0.0)
 			return
 	var q_rot: int = rot if _is_directional(block_id) else 0
 	var q_tex: Texture2D = null
@@ -8520,23 +7268,18 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 	elif not q_drew_layered:
 		var color: Color = _get_block_color(block_id)
 		color.a = 0.35
-		draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
+		c.draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
 		if _is_directional(block_id):
 			var center := top_pos + Vector2(w / 2.0, h / 2.0)
 			_draw_direction_arrow(center, q_rot, Color(1, 1, 1, 0.5))
 	# Turret heads / chassis ghost overlay so a queued turret reads as
-	# what it'll become, not just a flat base. `draw_heads` is false
-	# when the active-build path reuses this helper to paint the
-	# fade — that path has its own brighter head overlay so we don't
-	# want to double-stamp the heads.
+	# what it'll become, not just a flat base. `draw_heads=false` is
+	# passed from the active-build fade path — that path has its own
+	# brighter head overlay so we don't want to double-stamp.
 	if draw_heads:
 		_draw_turret_preview_heads(data, top_pos, w, h, q_rot, tint)
-	# Yellow outline marks "queued, waiting for the drone". Suppressed
-	# when this helper is being used as an active-build fade overlay
-	# (no `draw_heads`); the active build already has its own visuals
-	# (reveal line + beam) and shouldn't get the queued-ghost border.
-	if draw_heads:
-		draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
+	# Yellow outline marks "queued, waiting for the drone".
+	c.draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
 
 
 func _draw_preview() -> void:
@@ -8550,9 +7293,10 @@ func _draw_preview() -> void:
 
 	# --- Drag-placing: draw a ghost at every cell in the line ---
 	if _drag_placing and not _drag_cells.is_empty():
-		var base_color = _get_block_color(main.selected_building)
-		var is_belt: bool = (main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()) \
-				or (main.selected_building == &"duct" and not _duct_textures.is_empty())
+		var _base_color = _get_block_color(main.selected_building)
+		var _is_belt: bool = (main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()) \
+				or (main.selected_building == &"duct" and not _duct_textures.is_empty()) \
+				or (main.selected_building == &"fluid_pipe" and not _pipe_textures.is_empty())
 
 		# Build preview context for accurate belt textures
 		var preview_set: Dictionary = {}
@@ -8573,7 +7317,8 @@ func _draw_preview() -> void:
 				cell_block_id = _pathfind_bridge_cells[cell]
 			var cell_data: BlockData = Registry.get_block(cell_block_id)
 			var cell_is_belt: bool = (cell_block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
-					or (cell_block_id == &"duct" and not _duct_textures.is_empty())
+					or (cell_block_id == &"duct" and not _duct_textures.is_empty()) \
+					or (cell_block_id == &"fluid_pipe" and not _pipe_textures.is_empty())
 
 			var cell_valid := _can_place_at(cell, cell_block_id)
 			var cell_ok := cell_valid  # No affordability gate — progressive consumption
@@ -8600,7 +7345,9 @@ func _draw_preview() -> void:
 					var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
 					var center: Vector2 = cell_pos + Vector2(w / 2.0, h / 2.0)
 					draw_set_transform(center, angle)
-					draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
+					var dst_dl := Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h))
+					var tex_size_dl: Vector2 = texture.get_size()
+					draw_texture_rect_region(texture, dst_dl, Rect2(Vector2.ZERO, tex_size_dl), tint)
 					draw_set_transform(Vector2.ZERO, 0.0)
 				else:
 					var cell_color: Color = _get_block_color(cell_block_id) if cell_ok else Color(1, 0, 0, 0.4)
@@ -8717,7 +7464,8 @@ func _draw_preview() -> void:
 	var hover_used_bake := false
 	# Draw belt / duct texture preview or fallback rectangle
 	var is_belt_hover: bool = (main.selected_building == &"conveyor_belt" and not _belt_textures.is_empty()) \
-			or (main.selected_building == &"duct" and not _duct_textures.is_empty())
+			or (main.selected_building == &"duct" and not _duct_textures.is_empty()) \
+			or (main.selected_building == &"fluid_pipe" and not _pipe_textures.is_empty())
 	if is_belt_hover:
 		var hover_set: Dictionary = {preview_grid_pos: true}
 		var hover_rots: Dictionary = {preview_grid_pos: main.placement_rotation}
@@ -8728,7 +7476,9 @@ func _draw_preview() -> void:
 			var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
 			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 			draw_set_transform(center, angle)
-			draw_texture_rect(texture, Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height)), false, tint)
+			var dst_h := Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height))
+			var tex_size_h: Vector2 = texture.get_size()
+			draw_texture_rect_region(texture, dst_h, Rect2(Vector2.ZERO, tex_size_h), tint)
 			draw_set_transform(Vector2.ZERO, 0.0)
 		else:
 			if cell_ok:
@@ -9294,11 +8044,9 @@ func _on_building_placed(_block_id: StringName, _grid_pos: Vector2i) -> void:
 	if data and data.id == &"archive":
 		archive_holdings[_grid_pos] = &""
 	if data and data.tags.has("archive_decoder"):
-		archive_decoder_state[_grid_pos] = {
-			"progress": 0.0,
-			"archive_id": &"",
-			"scanner": Vector2i(-9999, -9999),
-		}
+		var ad_sys = get_node_or_null("/root/Main/ArchiveDecoderSystem")
+		if ad_sys and ad_sys.has_method("register"):
+			ad_sys.register(_grid_pos)
 	queue_redraw()
 
 
@@ -9326,7 +8074,9 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 		_crane_link_anchor = Vector2i(-1, -1)
 		_crane_link_next_kind = "input"
 	archive_holdings.erase(_grid_pos)
-	archive_decoder_state.erase(_grid_pos)
+	var ad_sys_d = get_node_or_null("/root/Main/ArchiveDecoderSystem")
+	if ad_sys_d and ad_sys_d.has_method("unregister"):
+		ad_sys_d.unregister(_grid_pos)
 	# Clean up links involving this building
 	var power_sys = get_node_or_null("/root/Main/PowerSystem")
 	if power_sys and "linked_pairs" in power_sys:
@@ -9801,12 +8551,12 @@ func _draw_dashed_line(from: Vector2, to: Vector2, color: Color, width: float, d
 # =========================
 
 func _draw_schematic_rect() -> void:
-	if not _schematic_dragging:
+	if _schematic == null or not _schematic.dragging:
 		return
-	var min_x: int = mini(_schematic_start.x, _schematic_end.x)
-	var min_y: int = mini(_schematic_start.y, _schematic_end.y)
-	var max_x: int = maxi(_schematic_start.x, _schematic_end.x)
-	var max_y: int = maxi(_schematic_start.y, _schematic_end.y)
+	var min_x: int = mini(_schematic.start.x, _schematic.end.x)
+	var min_y: int = mini(_schematic.start.y, _schematic.end.y)
+	var max_x: int = maxi(_schematic.start.x, _schematic.end.x)
+	var max_y: int = maxi(_schematic.start.y, _schematic.end.y)
 	var top_left: Vector2 = main.grid_to_world(Vector2i(min_x, min_y))
 	var w: float = float((max_x - min_x + 1) * main.GRID_SIZE)
 	var h: float = float((max_y - min_y + 1) * main.GRID_SIZE)
@@ -9814,36 +8564,6 @@ func _draw_schematic_rect() -> void:
 	var rect_pos: Vector2 = top_left + offset
 	draw_rect(Rect2(rect_pos, Vector2(w, h)), Color(1, 0.9, 0, 0.2), true)
 	draw_rect(Rect2(rect_pos, Vector2(w, h)), Color(1, 0.9, 0, 0.6), false, 2.0)
-
-
-func _capture_schematic_rect(from: Vector2i, to: Vector2i) -> Dictionary:
-	var min_pos := Vector2i(mini(from.x, to.x), mini(from.y, to.y))
-	var max_pos := Vector2i(maxi(from.x, to.x), maxi(from.y, to.y))
-	var blocks: Dictionary = {}
-	var rotation: Dictionary = {}
-	var anchors_seen: Dictionary = {}
-	for x in range(min_pos.x, max_pos.x + 1):
-		for y in range(min_pos.y, max_pos.y + 1):
-			var pos := Vector2i(x, y)
-			if not main.placed_buildings.has(pos):
-				continue
-			var anchor: Vector2i = main.building_origins.get(pos, pos)
-			if anchors_seen.has(anchor):
-				continue
-			anchors_seen[anchor] = true
-			# Skip if anchor is outside the rect
-			if anchor.x < min_pos.x or anchor.x > max_pos.x or anchor.y < min_pos.y or anchor.y > max_pos.y:
-				continue
-			var block_id: StringName = main.placed_buildings[anchor]
-			var rot: int = main.building_rotation.get(anchor, 0)
-			var rel: Vector2i = anchor - min_pos
-			var key: String = "%d,%d" % [rel.x, rel.y]
-			blocks[key] = String(block_id)
-			if rot != 0:
-				rotation[key] = rot
-	var w: int = max_pos.x - min_pos.x + 1
-	var h: int = max_pos.y - min_pos.y + 1
-	return {"blocks": blocks, "rotation": rotation, "width": w, "height": h}
 
 
 ## Records that the block at `anchor` was just flipped from DERELICT
@@ -9936,289 +8656,22 @@ func inject_unit_as_payload(anchor: Vector2i, payload: Dictionary) -> bool:
 
 
 func _on_main_building_selected(block_id: StringName) -> void:
-	if block_id != &"" and _placing_schematic:
-		_placing_schematic = false
-		queue_redraw()
+	if _schematic:
+		_schematic.on_building_selected(block_id)
 
 
-func _enter_paste_mode_from_rect(from: Vector2i, to: Vector2i) -> void:
-	var captured: Dictionary = _capture_schematic_rect(from, to)
-	if captured["blocks"].is_empty():
-		return
-	start_schematic_placement(captured)
-
-
-func _flip_rot_x(rot: int) -> int:
-	match rot:
-		1: return 3
-		3: return 1
-		_: return rot
-
-
-func _flip_rot_y(rot: int) -> int:
-	match rot:
-		0: return 2
-		2: return 0
-		_: return rot
-
-
-func _block_effective_size(block_id: StringName, rot: int) -> Vector2i:
-	var data = Registry.get_block(block_id)
-	if data == null:
-		return Vector2i(1, 1)
-	var gw: int = int(data.grid_size.x)
-	var gh: int = int(data.grid_size.y)
-	if rot == 1 or rot == 3:
-		return Vector2i(gh, gw)
-	return Vector2i(gw, gh)
-
-
-func _flip_schematic_placement_x() -> void:
-	if not _placing_schematic or _schematic_place_blocks.is_empty():
-		return
-	var new_blocks: Dictionary = {}
-	var new_rot: Dictionary = {}
-	var W: int = _schematic_place_width
-	for rel_pos in _schematic_place_blocks:
-		var bid: StringName = _schematic_place_blocks[rel_pos]
-		var rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
-		var eff: Vector2i = _block_effective_size(bid, rot)
-		var new_pos := Vector2i(W - rel_pos.x - eff.x, rel_pos.y)
-		var new_r := _flip_rot_x(rot)
-		new_blocks[new_pos] = bid
-		if new_r != 0:
-			new_rot[new_pos] = new_r
-	_schematic_place_blocks = new_blocks
-	_schematic_place_rotation = new_rot
-	queue_redraw()
-
-
-func _flip_schematic_placement_y() -> void:
-	if not _placing_schematic or _schematic_place_blocks.is_empty():
-		return
-	var new_blocks: Dictionary = {}
-	var new_rot: Dictionary = {}
-	var H: int = _schematic_place_height
-	for rel_pos in _schematic_place_blocks:
-		var bid: StringName = _schematic_place_blocks[rel_pos]
-		var rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
-		var eff: Vector2i = _block_effective_size(bid, rot)
-		var new_pos := Vector2i(rel_pos.x, H - rel_pos.y - eff.y)
-		var new_r := _flip_rot_y(rot)
-		new_blocks[new_pos] = bid
-		if new_r != 0:
-			new_rot[new_pos] = new_r
-	_schematic_place_blocks = new_blocks
-	_schematic_place_rotation = new_rot
-	queue_redraw()
-
-
-func _capture_from_placement_buffer() -> Dictionary:
-	var blocks: Dictionary = {}
-	var rotation: Dictionary = {}
-	for rel_pos in _schematic_place_blocks:
-		var bid: StringName = _schematic_place_blocks[rel_pos]
-		var key: String = "%d,%d" % [rel_pos.x, rel_pos.y]
-		blocks[key] = String(bid)
-		var rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
-		if rot != 0:
-			rotation[key] = rot
-	return {"blocks": blocks, "rotation": rotation, "width": _schematic_place_width, "height": _schematic_place_height}
-
-
-func _show_schematic_save_dialog_from_placement() -> void:
-	if not _placing_schematic or _schematic_place_blocks.is_empty():
-		return
-	var captured: Dictionary = _capture_from_placement_buffer()
-	_show_schematic_save_dialog(captured)
-
-
-func _show_schematic_save_dialog(captured_override = null) -> void:
-	if _schematic_popup and is_instance_valid(_schematic_popup):
-		_schematic_popup.queue_free()
-
-	var captured: Dictionary
-	if captured_override != null:
-		captured = captured_override
-	else:
-		captured = _capture_schematic_rect(_schematic_start, _schematic_end)
-	if captured["blocks"].is_empty():
-		_schematic_mode = false
-		_schematic_confirmed = false
-		return
-
-	_schematic_popup = PopupPanel.new()
-	_schematic_popup.size = Vector2(320, 400)
-	add_child(_schematic_popup)
-
-	var vbox = VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 6)
-	_schematic_popup.add_child(vbox)
-
-	var title = Label.new()
-	title.text = "Save Schematic"
-	title.add_theme_font_size_override("font_size", 16)
-	title.add_theme_color_override("font_color", Color(1, 0.9, 0.3))
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(title)
-
-	vbox.add_child(HSeparator.new())
-
-	# Block summary
-	var block_counts: Dictionary = {}
-	for key in captured["blocks"]:
-		var bid: String = captured["blocks"][key]
-		block_counts[bid] = block_counts.get(bid, 0) + 1
-
-	var summary_label = Label.new()
-	summary_label.text = "Blocks:"
-	summary_label.add_theme_font_size_override("font_size", 12)
-	vbox.add_child(summary_label)
-
-	var summary_scroll = ScrollContainer.new()
-	summary_scroll.custom_minimum_size.y = 100
-	vbox.add_child(summary_scroll)
-	var summary_vbox = VBoxContainer.new()
-	summary_scroll.add_child(summary_vbox)
-
-	for bid in block_counts:
-		var data = Registry.get_block(StringName(bid))
-		var display_name: String = data.display_name if data else bid
-		var lbl = Label.new()
-		lbl.text = "  %dx %s" % [block_counts[bid], display_name]
-		lbl.add_theme_font_size_override("font_size", 11)
-		summary_vbox.add_child(lbl)
-
-	vbox.add_child(HSeparator.new())
-
-	# Total cost
-	var cost_label = Label.new()
-	cost_label.text = "Total Cost:"
-	cost_label.add_theme_font_size_override("font_size", 12)
-	vbox.add_child(cost_label)
-
-	var total_cost: Dictionary = {}
-	for key in captured["blocks"]:
-		var bid: StringName = StringName(captured["blocks"][key])
-		var data = Registry.get_block(bid)
-		if data:
-			for item_id in data.build_cost:
-				total_cost[item_id] = total_cost.get(item_id, 0) + data.build_cost[item_id]
-
-	for item_id in total_cost:
-		var item_data = Registry.get_item(item_id)
-		var hbox = HBoxContainer.new()
-		hbox.add_theme_constant_override("separation", 4)
-		if item_data and item_data.icon:
-			var tex = TextureRect.new()
-			tex.texture = item_data.icon
-			tex.custom_minimum_size = Vector2(14, 14)
-			tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			hbox.add_child(tex)
-		var clbl = Label.new()
-		var dn: String = item_data.display_name if item_data else String(item_id)
-		clbl.text = "%s: %d" % [dn, total_cost[item_id]]
-		clbl.add_theme_font_size_override("font_size", 11)
-		hbox.add_child(clbl)
-		vbox.add_child(hbox)
-
-	vbox.add_child(HSeparator.new())
-
-	# Name input
-	var name_label = Label.new()
-	name_label.text = "Name:"
-	name_label.add_theme_font_size_override("font_size", 12)
-	vbox.add_child(name_label)
-
-	var name_input = LineEdit.new()
-	name_input.placeholder_text = "Schematic name..."
-	vbox.add_child(name_input)
-
-	# Buttons
-	var btn_row = HBoxContainer.new()
-	btn_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(btn_row)
-
-	var cancel_btn = Button.new()
-	cancel_btn.text = "Cancel"
-	cancel_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cancel_btn.pressed.connect(func():
-		_schematic_popup.queue_free()
-		_schematic_mode = false
-		_schematic_confirmed = false
-		queue_redraw()
-	)
-	btn_row.add_child(cancel_btn)
-
-	var save_btn = Button.new()
-	save_btn.text = "Save"
-	save_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var cap_ref: Dictionary = captured
-	save_btn.pressed.connect(func():
-		var sname: String = name_input.text.strip_edges()
-		if sname == "":
-			sname = "Unnamed"
-		SaveManager.save_schematic(sname, cap_ref["blocks"], cap_ref["rotation"], cap_ref["width"], cap_ref["height"])
-		_schematic_popup.queue_free()
-		_schematic_mode = false
-		_schematic_confirmed = false
-		queue_redraw()
-	)
-	btn_row.add_child(save_btn)
-
-	_schematic_popup.popup_centered()
-
-
-## Called by HUD to enter schematic placement mode.
-func start_schematic_placement(data: Dictionary) -> void:
-	_schematic_place_blocks.clear()
-	_schematic_place_rotation.clear()
-	var blocks_data: Dictionary = data.get("blocks", {})
-	var rot_data: Dictionary = data.get("rotation", {})
-
-	# Re-anchor on the actual topmost-leftmost block. Captures stored
-	# rels relative to the user's drag-rect corner, so empty rows/cols
-	# above or to the left of the schematic's content would shift the
-	# cursor off the block and silently break the top-left placement.
-	var raw: Array[Vector2i] = []
-	for key in blocks_data:
-		var parts: PackedStringArray = key.split(",")
-		if parts.size() >= 2:
-			raw.append(Vector2i(int(parts[0]), int(parts[1])))
-	var min_x: int = 0
-	var min_y: int = 0
-	if not raw.is_empty():
-		min_x = raw[0].x
-		min_y = raw[0].y
-		for p in raw:
-			if p.x < min_x: min_x = p.x
-			if p.y < min_y: min_y = p.y
-
-	for key in blocks_data:
-		var parts2: PackedStringArray = key.split(",")
-		if parts2.size() >= 2:
-			var pos := Vector2i(int(parts2[0]) - min_x, int(parts2[1]) - min_y)
-			_schematic_place_blocks[pos] = StringName(blocks_data[key])
-			if rot_data.has(key):
-				_schematic_place_rotation[pos] = int(rot_data[key])
-	_schematic_place_width = int(data.get("width", 1))
-	_schematic_place_height = int(data.get("height", 1))
-	_placing_schematic = true
-	main.select_building(&"")  # Exit build mode
-	queue_redraw()
+# (Schematic functions extracted to schematic_system.gd)
 
 
 func _draw_schematic_placement() -> void:
-	if not _placing_schematic:
+	if _schematic == null or not _schematic.placing:
 		return
 	var mouse_world: Vector2 = get_global_mouse_position()
 	var base_grid: Vector2i = main.world_to_grid(mouse_world)
 	var gs: float = float(main.GRID_SIZE)
-
-	for rel_pos in _schematic_place_blocks:
+	for rel_pos in _schematic.place_blocks:
 		var grid_pos: Vector2i = base_grid + rel_pos
-		var block_id: StringName = _schematic_place_blocks[rel_pos]
+		var block_id: StringName = _schematic.place_blocks[rel_pos]
 		var data = Registry.get_block(block_id)
 		if data == null:
 			continue
@@ -10227,18 +8680,14 @@ func _draw_schematic_placement() -> void:
 		var w: float = gs * data.grid_size.x
 		var h: float = gs * data.grid_size.y
 		var top_pos: Vector2 = world_pos + offset
-
-		# Check if placeable (local var; don't shadow the class-level `can_place`).
 		var slot_ok: bool = true
-		var terrain = get_node_or_null("/root/Main/TerrainSystem")
 		for dx in range(data.grid_size.x):
 			for dy in range(data.grid_size.y):
 				var cp: Vector2i = grid_pos + Vector2i(dx, dy)
 				if not main.is_within_bounds(cp) or not main.is_cell_empty(cp):
 					slot_ok = false
-				elif terrain and terrain.has_wall(cp):
+				elif _terrain and _terrain.has_wall(cp):
 					slot_ok = false
-
 		var color: Color = _get_block_color(block_id)
 		var slot_tint: Color
 		if slot_ok:
@@ -10251,27 +8700,18 @@ func _draw_schematic_placement() -> void:
 			draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
 			draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.3, 0.3, 0.6), false, 1.5)
 			slot_tint = Color(1, 0.3, 0.3, 0.5)
-		# Turret heads / chassis ghost so a schematic with turrets visibly
-		# previews barrels in the right direction before the player commits.
 		if data.is_turret():
-			var t_rot: int = int(_schematic_place_rotation.get(rel_pos, 0))
+			var t_rot: int = int(_schematic.place_rotation.get(rel_pos, 0))
 			_draw_turret_preview_heads(data, top_pos, w, h, t_rot, slot_tint)
 
 
-func _execute_schematic_placement() -> void:
-	var mouse_world: Vector2 = get_global_mouse_position()
-	var base_grid: Vector2i = main.world_to_grid(mouse_world)
-	var placed := 0
-	for rel_pos in _schematic_place_blocks:
-		var grid_pos: Vector2i = base_grid + rel_pos
-		var block_id: StringName = _schematic_place_blocks[rel_pos]
-		var rot: int = _schematic_place_rotation.get(rel_pos, 0)
-		if main.place_building_for_schematic(grid_pos, block_id, rot):
-			placed += 1
-	print("BuildingSystem: Placed %d/%d schematic blocks." % [placed, _schematic_place_blocks.size()])
-	# Keep _placing_schematic true so the player can drop more copies
-	# (cmd-c / cmd-v style). Esc exits the paste mode.
-	queue_redraw()
+## Wrapper retained so HUD's start_schematic_placement(data) call site keeps
+## resolving. Forwards into SchematicSystem.start_placement.
+func start_schematic_placement(data: Dictionary) -> void:
+	if _schematic:
+		_schematic.start_placement(data)
+
+
 
 
 # =========================
@@ -10416,23 +8856,6 @@ func held_entity_world(crane_anchor: Vector2i) -> Vector2:
 	return pos
 
 
-## AI-time target position for `spec` from the perspective of `my_anchor`.
-## Crane → crane links return the midpoint between the two cranes' centers
-## (so both cranes converging on this same point cause their heads to meet).
-## Everything else falls back to the diamond's visual center.
-func _crane_ai_target_pos(my_anchor: Vector2i, spec: Dictionary) -> Vector2:
-	if spec.get("kind", "") == "block":
-		var p: Vector2i = spec.get("pos", Vector2i.ZERO)
-		if main.placed_buildings.has(p) and main.placed_buildings.has(my_anchor):
-			var bdata = Registry.get_block(main.placed_buildings[p])
-			if bdata and bdata.tags.has("crane"):
-				var my_data = Registry.get_block(main.placed_buildings[my_anchor])
-				if my_data:
-					var gs: float = main.GRID_SIZE
-					var my_center: Vector2 = main.grid_to_world(my_anchor) + Vector2(my_data.grid_size.x * gs / 2.0, my_data.grid_size.y * gs / 2.0)
-					var other_center: Vector2 = main.grid_to_world(p) + Vector2(bdata.grid_size.x * gs / 2.0, bdata.grid_size.y * gs / 2.0)
-					return (my_center + other_center) / 2.0
-	return _crane_diamond_world_pos(spec)
 
 
 ## Per-frame autonomous AI for cranes that have configured links and aren't
@@ -10480,608 +8903,92 @@ func damage_held_entity(crane_anchor: Vector2i, amount: float, depth: int = 0) -
 ## Walks every crane state with a held building payload and ticks the
 ## payload's internal battery + factory_state. Held blocks keep running
 ## off their 10B reservoir while detached from any electrical network;
-## when the battery is drained, production stalls. Output items merge
-## back into the payload's `stored_items` so the dropped block lands
-## with whatever it produced en-route.
-func _tick_held_payload_simulation(delta: float) -> void:
+## Heals every friendly placed building within each placed mender's
+## `mend_radius` by `mend_amount` HP/sec. Skips fully-healed targets,
+## the menders' own selves are healed too. Inactive / unpowered menders
+## (matching the overdrive eligibility rules) are skipped.
+func _tick_menders(delta: float) -> void:
 	if delta <= 0.0:
 		return
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
-	for anchor in crane_states:
-		var state: Dictionary = crane_states[anchor]
-		var payload: Variant = state.get("held_payload", null)
-		if payload == null or not (payload is Dictionary):
+	var gs: float = float(main.GRID_SIZE)
+	var menders: Array = []
+	for anchor in main.placed_buildings:
+		if main.building_origins.get(anchor, anchor) != anchor:
 			continue
-		var pdict: Dictionary = payload
-		if pdict.get("type", "") != "building":
+		var data: BlockData = Registry.get_block(main.placed_buildings[anchor])
+		if data == null or not data.tags.has("mender"):
 			continue
-		_tick_held_building(pdict, delta, power_sys)
-
-
-## Held-payload tick for a single building. Shared by the autonomous
-## crane sim above (so a held block keeps working in transit) and any
-## other path that wants to advance a detached factory snapshot.
-##
-## Drains the payload's `internal_battery_charge` at the block's
-## `electrical_power_use` rate. When the battery has charge, factory
-## state advances at full speed; when empty, production stalls.
-func _tick_held_building(pdict: Dictionary, delta: float, power_sys) -> void:
-	var data := Registry.get_block(StringName(pdict.get("block_id", "")))
-	if data == null:
-		return
-
-	# Head-spin inertia. Eases every captured head's velocity toward 0
-	# (the held block isn't producing) so the spin-down continues in
-	# transit rather than freezing instantly at pickup.
-	var spin_snap: Dictionary = pdict.get("head_spin_state", {})
-	if not spin_snap.is_empty():
-		_tick_spin_state(spin_snap, delta)
-
-	# Battery drain. Power-only blocks (no consumption) skip the
-	# drain entirely; they just sit there happily.
-	var power_eff: float = 1.0
-	if data.electrical_power_use > 0.0:
-		var cap: float = 0.0
-		if power_sys and power_sys.has_method("resolve_block_battery_capacity"):
-			cap = power_sys.resolve_block_battery_capacity(data)
-		var charge: float = float(pdict.get("internal_battery_charge", 0.0))
-		var needed: float = data.electrical_power_use * delta
-		if charge >= needed:
-			pdict["internal_battery_charge"] = clampf(charge - needed, 0.0, cap)
-		elif charge > 0.0:
-			power_eff = charge / maxf(needed, 0.0001)
-			pdict["internal_battery_charge"] = 0.0
-		else:
-			# Battery empty — no production this tick. Inner held cargo
-			# (if this is a crane carrying something) still ticks; its
-			# own battery is independent.
-			power_eff = 0.0
-
-	# Factory advance.
-	if power_eff > 0.0 and data.production_time > 0.0 and (not data.input_items.is_empty() or not data.output_items.is_empty()):
-		_held_factory_advance(pdict, data, delta * power_eff)
-
-	# Recurse into nested held cargo: a held crane keeps its own
-	# `crane_state.held_payload` snapshot. Without this, only the
-	# outermost crane's cargo simulates — the second level down would
-	# freeze the moment its outer crane was picked up.
-	if data.tags.has("crane"):
-		var inner_state: Dictionary = pdict.get("crane_state", {})
-		if not inner_state.is_empty():
-			var inner_payload = inner_state.get("held_payload", null)
-			if inner_payload is Dictionary:
-				var ipd: Dictionary = inner_payload
-				match String(ipd.get("type", "")):
-					"building":
-						_tick_held_building(ipd, delta, power_sys)
-
-
-## Minimal off-grid factory advance. Operates on the merged
-## `stored_items` buffer the payload carries (factory inputs were folded
-## into stored_items at pickup, see main.gd:1709). Outputs land back in
-## stored_items so place_payload_building drops them into block_storage.
-func _held_factory_advance(pdict: Dictionary, data: BlockData, delta: float) -> void:
-	if delta <= 0.0:
-		return
-	var state: Dictionary = pdict.get("factory_state", {})
-	if state.is_empty():
-		state = {"phase": "collecting", "timer": 0.0}
-		pdict["factory_state"] = state
-	var stored: Dictionary = pdict.get("stored_items", {})
-	if stored.is_empty() and not data.input_items.is_empty():
-		# Nothing to consume.
-		return
-
-	var phase: String = String(state.get("phase", "collecting"))
-	if phase == "collecting":
-		# Held factories don't take new inputs (no conveyors). They run
-		# only off whatever was buffered at pickup. If inputs cover one
-		# full recipe, kick off processing.
-		if _held_factory_has_inputs(stored, data):
-			state["phase"] = "processing"
-			state["timer"] = data.production_time
-			state["timer_total"] = data.production_time
-		return
-
-	if phase == "processing":
-		var t: float = float(state.get("timer", data.production_time)) - delta
-		state["timer"] = t
-		if t <= 0.0:
-			# Consume one recipe's inputs.
-			for item_id in data.input_items:
-				var key := String(item_id)
-				var have: int = int(stored.get(key, 0))
-				stored[key] = maxi(0, have - int(data.input_items[item_id]))
-			# Produce outputs.
-			for out_id in data.output_items:
-				var okey := String(out_id)
-				stored[okey] = int(stored.get(okey, 0)) + int(data.output_items[out_id])
-			state["phase"] = "collecting"
-			state["timer"] = 0.0
-		pdict["stored_items"] = stored
-
-
-func _held_factory_has_inputs(stored: Dictionary, data: BlockData) -> bool:
-	for item_id in data.input_items:
-		var have: int = int(stored.get(String(item_id), 0))
-		if have < int(data.input_items[item_id]):
-			return false
-	return true
-
-
-func _tick_autonomous_cranes(delta: float) -> void:
-	if crane_states.is_empty():
-		return
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-	var gs: float = main.GRID_SIZE
-	var arrive_radius: float = gs * 0.5
-
-	for anchor in crane_states.keys():
-		# Skip if not a real placed crane any more.
-		if not main.placed_buildings.has(anchor):
+		if data.mend_radius <= 0.0 or data.mend_amount <= 0.0:
 			continue
-		# Drain water booster first so the power calc below sees the
-		# right "is boost active" answer for the bump-up.
-		_drain_crane_water_boost(anchor, delta)
-		# Update dynamic power BEFORE the player-controlled gate so even
-		# manually-piloted cranes draw the right power per frame (their
-		# arm/grabber motion still costs real watts).
-		_update_crane_dynamic_power(anchor)
-		# Player-controlled cranes are driven by UnitManager exclusively.
-		if unit_mgr and unit_mgr.controlled_type == "crane" and unit_mgr.controlled_entity == anchor:
+		if main.get_building_faction(anchor) != main.Faction.LUMINA:
 			continue
-		# Even cranes without their own link plan still passively respond
-		# to other cranes that have THEM as an output target — the sender's
-		# drop logic needs both heads to meet.
-		var entry: Dictionary = crane_links.get(anchor, {"inputs": [], "outputs": []})
-		var inputs: Array = entry.get("inputs", [])
-		var outputs: Array = entry.get("outputs", [])
-
-		var state: Dictionary = crane_states[anchor]
-		var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
-		if data == null:
+		if main.is_building_inactive(anchor):
 			continue
-		var base: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
-		var max_reach: float = data.crane_range * gs
-
-		var head_pos: Vector2 = crane_head_world(anchor)
-
-		if state.get("held_payload", null) == null:
-			# --- Seeking input ---
-			var picked := false
-			for spec in inputs:
-				var available: bool = _crane_input_has_payload(spec)
-				if not available:
-					continue
-				var t_pos: Vector2 = _crane_ai_target_pos(anchor, spec)
-				var t_clamped: Vector2 = _clamp_to_reach(base, t_pos, max_reach)
-				state["target_pos"] = t_clamped
-				update_crane_telescope(anchor, t_clamped, delta)
-				if (head_pos - t_pos).length() <= arrive_radius:
-					_crane_autonomous_pickup(anchor, state, head_pos, spec)
-				picked = true
-				break
-			if not picked:
-				# No input has a payload yet. Before parking on a ground
-				# input, check if any OTHER crane has us configured as an
-				# output AND is currently holding — passively rendezvous so
-				# the sender's drop logic can fire when both heads meet.
-				var sender_anchor: Vector2i = _crane_find_incoming_sender(anchor)
-				if sender_anchor != Vector2i(-1, -1):
-					var meet: Vector2 = _crane_midpoint(anchor, sender_anchor)
-					var meet_clamped: Vector2 = _clamp_to_reach(base, meet, max_reach)
-					state["target_pos"] = meet_clamped
-					update_crane_telescope(anchor, meet_clamped, delta)
-				else:
-					# Otherwise park near first ground input (if any), so the
-					# head hovers in place waiting for a unit to arrive.
-					for spec in inputs:
-						if spec.get("kind", "") == "ground":
-							var t_pos2: Vector2 = _crane_ai_target_pos(anchor, spec)
-							var t_clamped2: Vector2 = _clamp_to_reach(base, t_pos2, max_reach)
-							state["target_pos"] = t_clamped2
-							update_crane_telescope(anchor, t_clamped2, delta)
-							break
-		else:
-			# --- Seeking output for currently held payload ---
-			var payload: Dictionary = state["held_payload"]
-			# Prefer the first output that's actually ready to accept right
-			# now. If none are ready, fall back to the first filter-matching
-			# output and park there (head-over-target, waiting).
-			var chosen_spec: Dictionary = {}
-			for spec in outputs:
-				if not _crane_payload_matches_filter(payload, spec):
-					continue
-				if _crane_output_ready(spec):
-					chosen_spec = spec
-					break
-			if chosen_spec.is_empty():
-				for spec in outputs:
-					if _crane_payload_matches_filter(payload, spec):
-						chosen_spec = spec
-						break
-			if not chosen_spec.is_empty():
-				var t_pos3: Vector2 = _crane_ai_target_pos(anchor, chosen_spec)
-				var t_clamped3: Vector2 = _clamp_to_reach(base, t_pos3, max_reach)
-				state["target_pos"] = t_clamped3
-				update_crane_telescope(anchor, t_clamped3, delta)
-				if (head_pos - t_pos3).length() <= arrive_radius:
-					_crane_autonomous_drop(anchor, state, head_pos, chosen_spec)
-
-
-## Returns the midpoint of two cranes' centers (in world space).
-func _crane_midpoint(a_anchor: Vector2i, b_anchor: Vector2i) -> Vector2:
-	var gs: float = main.GRID_SIZE
-	var a_data = Registry.get_block(main.placed_buildings.get(a_anchor, &""))
-	var b_data = Registry.get_block(main.placed_buildings.get(b_anchor, &""))
-	if a_data == null or b_data == null:
-		return Vector2.ZERO
-	var a_c: Vector2 = main.grid_to_world(a_anchor) + Vector2(a_data.grid_size.x * gs / 2.0, a_data.grid_size.y * gs / 2.0)
-	var b_c: Vector2 = main.grid_to_world(b_anchor) + Vector2(b_data.grid_size.x * gs / 2.0, b_data.grid_size.y * gs / 2.0)
-	return (a_c + b_c) / 2.0
-
-
-## Finds another crane whose output points at `me` and is currently holding
-## a payload (so it's ready to deliver). Returns its anchor or (-1, -1).
-func _crane_find_incoming_sender(me: Vector2i) -> Vector2i:
-	for other_anchor in crane_states.keys():
-		if other_anchor == me:
+		var center: Vector2 = main.grid_to_world(anchor) \
+			+ Vector2(data.grid_size.x * gs * 0.5, data.grid_size.y * gs * 0.5)
+		menders.append({
+			"center": center,
+			"radius_px": data.mend_radius * gs,
+			"amount": data.mend_amount,
+		})
+	if menders.is_empty():
+		return
+	# For each friendly placed building, find the strongest mender in
+	# range and apply its heal. (Multiple menders covering the same
+	# target don't stack — taking the max keeps the math predictable
+	# and matches how overdrive picks the best zone.)
+	for t_anchor in main.placed_buildings:
+		if main.building_origins.get(t_anchor, t_anchor) != t_anchor:
 			continue
-		if not crane_links.has(other_anchor):
+		if main.get_building_faction(t_anchor) != main.Faction.LUMINA:
 			continue
-		var ostate: Dictionary = crane_states[other_anchor]
-		if ostate.get("held_payload", null) == null:
+		var t_data: BlockData = Registry.get_block(main.placed_buildings[t_anchor])
+		if t_data == null or t_data.max_health <= 0.0:
 			continue
-		var olinks: Dictionary = crane_links[other_anchor]
-		for spec in olinks.get("outputs", []):
-			if spec.get("kind", "") != "block":
-				continue
-			if Vector2i(spec.get("pos", Vector2i.ZERO)) == me:
-				return other_anchor
-	return Vector2i(-1, -1)
+		var current: float = float(main.building_health.get(t_anchor, 0.0))
+		if current <= 0.0 or current >= t_data.max_health:
+			continue
+		var t_center: Vector2 = main.grid_to_world(t_anchor) \
+			+ Vector2(t_data.grid_size.x * gs * 0.5, t_data.grid_size.y * gs * 0.5)
+		var best_rate: float = 0.0
+		for m in menders:
+			if t_center.distance_to(m["center"]) <= m["radius_px"]:
+				best_rate = maxf(best_rate, float(m["amount"]))
+		if best_rate <= 0.0:
+			continue
+		var new_hp: float = minf(current + best_rate * delta, t_data.max_health)
+		main.building_health[t_anchor] = new_hp
 
 
-func _clamp_to_reach(base: Vector2, target: Vector2, max_reach: float) -> Vector2:
-	var d: Vector2 = target - base
-	var L: float = d.length()
-	if L <= max_reach:
-		return target
-	if L < 0.01:
-		return base + Vector2(max_reach, 0)
-	return base + d / L * max_reach
 
 
-## True iff this crane-link spec currently has a payload available to pick up.
-func _crane_input_has_payload(spec: Dictionary) -> bool:
-	var kind: String = spec.get("kind", "")
-	if kind == "ground":
-		# A player unit standing within the diamond is the "available payload".
-		var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-		if unit_mgr == null:
-			return false
-		var c: Vector2 = _crane_diamond_world_pos(spec)
-		var r: float = main.GRID_SIZE * 1.5
-		for u in unit_mgr.player_units:
-			if u == null or not is_instance_valid(u):
-				continue
-			if (u.position - c).length() <= r:
-				if _crane_payload_matches_filter({"type": "unit", "unit_id": str(u.data.id) if u.data else ""}, spec):
-					return true
-		return false
-	# kind == "block"
-	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
-	if not main.placed_buildings.has(p):
-		return false
-	var bdata = Registry.get_block(main.placed_buildings[p])
-	if bdata == null:
-		return false
-	# Other crane: payload is available when that crane is holding something
-	# AND its head is reachable / "meeting" ours.
-	if bdata.tags.has("crane"):
-		var other_state: Dictionary = crane_states.get(p, {})
-		return other_state.get("held_payload", null) != null
-	# Mass driver / payload conveyor / router / constructor: rely on
-	# logistics_system's payload_items map (the cell holds a stalled payload).
-	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
-	if logistics and "payload_items" in logistics:
-		if logistics.payload_items.has(p):
-			return true
-	return false
 
 
-## True iff dropping a payload at this output spec right now would succeed.
-## Used to skip blocked outputs (full conveyor, busy crane, …) so the holding
-## crane moves on to the next configured output instead of stalling.
-func _crane_output_ready(spec: Dictionary) -> bool:
-	var kind: String = spec.get("kind", "")
-	if kind == "ground":
-		return true
-	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
-	if not main.placed_buildings.has(p):
-		return false
-	var bdata = Registry.get_block(main.placed_buildings[p])
-	if bdata == null:
-		return false
-	if bdata.tags.has("crane"):
-		# Receiver crane must be empty (transfer fires when heads meet).
-		return crane_states.get(p, {}).get("held_payload", null) == null
-	# Conveyor / router / mass driver / constructor: ready iff the cell
-	# has no stalled payload sitting on it.
-	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
-	if logistics and "payload_items" in logistics:
-		return not logistics.payload_items.has(p)
-	return true
 
 
-## True iff the held payload is allowed by the spec's filter (empty = any).
-func _crane_payload_matches_filter(payload: Dictionary, spec: Dictionary) -> bool:
-	var filter: Array = spec.get("filter", [])
-	if filter.is_empty():
-		return true
-	var t: String = payload.get("type", "")
-	var pid: StringName = &""
-	if t == "unit":
-		pid = StringName(payload.get("unit_id", ""))
-	elif t == "building":
-		pid = StringName(payload.get("block_id", ""))
-	return filter.has(pid)
 
 
-func _crane_autonomous_pickup(anchor: Vector2i, state: Dictionary, head_pos: Vector2, spec: Dictionary) -> void:
-	# Unpowered cranes can't actuate the grabber — same gate as the
-	# arm motion. Without this, a head already parked on the target
-	# would still pick up the moment the player builds a powered link.
-	if _crane_speed_multiplier(anchor) <= 0.0:
-		return
-	var kind: String = spec.get("kind", "")
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
-	if kind == "ground":
-		if unit_mgr == null:
-			return
-		var c: Vector2 = _crane_diamond_world_pos(spec)
-		var r: float = main.GRID_SIZE * 1.5
-		for u in unit_mgr.player_units.duplicate():
-			if u == null or not is_instance_valid(u):
-				continue
-			if (u.position - c).length() > r:
-				continue
-			if not _crane_payload_matches_filter({"type": "unit", "unit_id": str(u.data.id) if u.data else ""}, spec):
-				continue
-			var unit_payload := {
-				"type": "unit",
-				"unit_id": str(u.data.id) if u.data else "",
-				"health": u.health,
-				"team": u.team if "team" in u else 0,
-				# Snapshot the unit's pose so the held draw shows the head
-				# pointing where the unit was aiming, and respawning it
-				# from the payload restores the same facing.
-				"aim_angle": float(u.aim_angle) if "aim_angle" in u else 0.0,
-				"facing_angle": float(u.facing_angle) if "facing_angle" in u else 0.0,
-			}
-			unit_mgr.player_units.erase(u)
-			u.queue_free()
-			state["held_payload"] = unit_payload
-			state["grabber_open"] = false
-			return
-		return
-	# kind == "block"
-	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
-	if not main.placed_buildings.has(p):
-		return
-	var bdata = Registry.get_block(main.placed_buildings[p])
-	if bdata == null:
-		return
-	if bdata.tags.has("crane"):
-		# Crane-to-crane handoff: only when both heads are coincident.
-		var other_state: Dictionary = crane_states.get(p, {})
-		if other_state.get("held_payload", null) == null:
-			return
-		var other_head: Vector2 = crane_head_world(p)
-		if (head_pos - other_head).length() > main.GRID_SIZE * 0.6:
-			return
-		var p2: Dictionary = other_state["held_payload"]
-		if not _crane_payload_matches_filter(p2, spec):
-			return
-		state["held_payload"] = p2
-		other_state["held_payload"] = null
-		other_state["grabber_open"] = true
-		state["grabber_open"] = false
-		return
-	# Conveyor / router / mass-driver / constructor with stalled payload
-	if logistics and "payload_items" in logistics and logistics.payload_items.has(p):
-		var pdata: Dictionary = logistics.payload_items[p].get("payload_data", {})
-		if not _crane_payload_matches_filter(pdata, spec):
-			return
-		state["held_payload"] = pdata.duplicate(true)
-		logistics.payload_items.erase(p)
-		state["grabber_open"] = false
-
-func _crane_autonomous_drop(anchor: Vector2i, state: Dictionary, head_pos: Vector2, spec: Dictionary) -> void:
-	# Same power gate as the pickup helper.
-	if _crane_speed_multiplier(anchor) <= 0.0:
-		return
-	var kind: String = spec.get("kind", "")
-	var payload: Dictionary = state["held_payload"]
-	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
-	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
-	if kind == "ground":
-		var c: Vector2 = _crane_diamond_world_pos(spec)
-		if payload.get("type", "") == "unit":
-			# Drop unit at center; spawn via UnitManager.
-			if unit_mgr == null:
-				return
-			var unit_id := StringName(payload.get("unit_id", ""))
-			if unit_id != &"":
-				unit_mgr.spawn_player_unit(c, unit_id)
-				if not unit_mgr.player_units.is_empty():
-					var spawned = unit_mgr.player_units[-1]
-					if is_instance_valid(spawned):
-						spawned.health = float(payload.get("health", spawned.health))
-						# Restore the saved pose so the dropped unit
-						# resumes facing/aiming the same way it was
-						# when picked up, instead of snapping to a
-						# default forward.
-						if "facing_angle" in spawned and payload.has("facing_angle"):
-							spawned.facing_angle = float(payload["facing_angle"])
-						if "aim_angle" in spawned and payload.has("aim_angle"):
-							spawned.aim_angle = float(payload["aim_angle"])
-				state["held_payload"] = null
-				state["grabber_open"] = true
-		elif payload.get("type", "") == "building":
-			# Try to place onto the ground tile (centered on the diamond).
-			var grid_target: Vector2i = main.world_to_grid(c)
-			var gsx: int = int(payload.get("grid_size_x", 1))
-			var gsy: int = int(payload.get("grid_size_y", 1))
-			var center_pos := Vector2i(grid_target.x - gsx / 2, grid_target.y - gsy / 2)
-			if main.has_method("place_payload_building") and main.place_payload_building(payload, center_pos):
-				state["held_payload"] = null
-				state["grabber_open"] = true
-		return
-	# kind == "block"
-	var p: Vector2i = spec.get("pos", Vector2i.ZERO)
-	if not main.placed_buildings.has(p):
-		return
-	var bdata = Registry.get_block(main.placed_buildings[p])
-	if bdata == null:
-		return
-	if bdata.tags.has("crane"):
-		# Crane-to-crane: hold until receiving crane's head meets ours.
-		var other_state: Dictionary = crane_states.get(p, {})
-		if other_state.get("held_payload", null) != null:
-			return  # they're full, hold
-		var other_head: Vector2 = crane_head_world(p)
-		if (head_pos - other_head).length() > main.GRID_SIZE * 0.6:
-			return
-		other_state["held_payload"] = state["held_payload"]
-		state["held_payload"] = null
-		state["grabber_open"] = true
-		other_state["grabber_open"] = false
-		return
-	# Conveyor / router / mass-driver / constructor: push via logistics.
-	if logistics and logistics.has_method("_is_payload_cell") and logistics._is_payload_cell(p):
-		if logistics.has_method("_try_push_payload") and logistics._try_push_payload(p, payload):
-			state["held_payload"] = null
-			state["grabber_open"] = true
 
 
-## Updates crane arm angle and extension toward target at constant speed.
-# Per-payload-crane dynamic power model. The base 10 W chassis idle is
-# always pinned, with extra draws layered on for whatever the crane is
-# actively doing this frame:
-#   +15 W rotating the arm  (arm_angle changed)
-#   +10 W extending/retracting (arm_extension changed)
-#   + 5 W rotating the grabber (grabber_angle changed)
-# Pickup and drop are EVENTS, not frame states — so on the frame a
-# pickup completes we stash a short burst whose magnitude equals
-# `_mass_driver_power_for_payload` (same weight formula MDs use). The
-# drop burst is a flat +10 W for the same window. The bursts taper to 0
-# over CRANE_POWER_BURST_FRAMES so they're visible in the power graph.
-const CRANE_POWER_BURST_FRAMES := 30   # ~0.5 s at 60 fps
-func _update_crane_dynamic_power(anchor: Vector2i) -> void:
-	var ps = _power_sys_ref()
-	if ps == null:
-		return
-	if not crane_states.has(anchor):
-		return
-	var state: Dictionary = crane_states[anchor]
-	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
-	if data == null:
-		return
-	# Inactive cranes (under construction / decon / hidden) draw nothing
-	# and we clear any leftover dynamic override so the chassis baseline
-	# doesn't keep haunting the network.
-	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
-		if ps.has_method("clear_dynamic_power_use"):
-			ps.clear_dynamic_power_use(anchor)
-		return
-
-	var draw: float = 10.0  # Idle baseline.
-
-	# Arm rotation: 15 W while the arm angle is changing this frame.
-	var cur_arm_angle: float = float(state.get("arm_angle", 0.0))
-	var prev_arm_angle: float = float(state.get("_pwr_prev_arm_angle", cur_arm_angle))
-	if not is_equal_approx(cur_arm_angle, prev_arm_angle):
-		draw += 15.0
-	state["_pwr_prev_arm_angle"] = cur_arm_angle
-
-	# Arm extension/retraction: 10 W while the extension is moving.
-	var cur_ext: float = float(state.get("arm_extension", 0.0))
-	var prev_ext: float = float(state.get("_pwr_prev_arm_extension", cur_ext))
-	if not is_equal_approx(cur_ext, prev_ext):
-		draw += 10.0
-	state["_pwr_prev_arm_extension"] = cur_ext
-
-	# Grabber rotation: 5 W while grabber_angle is moving.
-	var cur_g_angle: float = float(state.get("grabber_angle", 0.0))
-	var prev_g_angle: float = float(state.get("_pwr_prev_grabber_angle", cur_g_angle))
-	if not is_equal_approx(cur_g_angle, prev_g_angle):
-		draw += 5.0
-	state["_pwr_prev_grabber_angle"] = cur_g_angle
-
-	# Pickup / drop event detection. held_payload transitioning null →
-	# non-null is a pickup; non-null → null is a drop. We don't peek
-	# into the pickup/drop helper sites — the transition tells us
-	# everything we need, AND it covers manual / autonomous / unit-mgr
-	# paths uniformly.
-	var had_payload: bool = bool(state.get("_pwr_prev_held", false))
-	var has_payload_now: bool = state.get("held_payload", null) != null
-	if has_payload_now and not had_payload:
-		# Pickup just happened. Snapshot weight-based burst from the
-		# payload the crane is now holding.
-		var p_burst: int = _payload_pickup_power(state.get("held_payload"))
-		state["_pwr_pickup_burst"] = p_burst
-		state["_pwr_pickup_burst_remain"] = CRANE_POWER_BURST_FRAMES
-	elif had_payload and not has_payload_now:
-		state["_pwr_drop_burst_remain"] = CRANE_POWER_BURST_FRAMES
-	state["_pwr_prev_held"] = has_payload_now
-
-	# Drain active bursts each frame.
-	var pickup_remain: int = int(state.get("_pwr_pickup_burst_remain", 0))
-	if pickup_remain > 0:
-		draw += float(state.get("_pwr_pickup_burst", 0))
-		state["_pwr_pickup_burst_remain"] = pickup_remain - 1
-	var drop_remain: int = int(state.get("_pwr_drop_burst_remain", 0))
-	if drop_remain > 0:
-		draw += 10.0
-		state["_pwr_drop_burst_remain"] = drop_remain - 1
-
-	# Water booster: same +50 % multiplier the speed gets, applied to
-	# the total draw so a boosted crane costs 1.5× watts for 1.5× speed.
-	if _crane_water_boost_active(anchor):
-		draw *= WATER_BOOST_MULT
-	if ps.has_method("set_dynamic_power_use"):
-		ps.set_dynamic_power_use(anchor, draw)
 
 
-## Mirrors `LogisticsSystem._mass_driver_power_for_payload` — weight-
-## based pickup cost. Kept local to BuildingSystem so the cranes don't
-## couple to LogisticsSystem just for this one read.
-##   tile weight  = 8 per tile (or 8 for a unit)
-##   item weight  = 0.5 per stored item
-##   fluid weight = 1.0 per stored fluid unit
-##   power = floor(weight / 2)
-func _payload_pickup_power(payload: Variant) -> int:
-	if payload == null or not (payload is Dictionary):
-		return 0
-	var p: Dictionary = payload
-	var weight: float = 0.0
-	var ptype: String = String(p.get("type", ""))
-	if ptype == "building":
-		var sx: int = int(p.get("grid_size_x", 1))
-		var sy: int = int(p.get("grid_size_y", 1))
-		weight += 8.0 * float(sx) * float(sy)
-	elif ptype == "unit":
-		weight += 8.0
-	var stored_items: Dictionary = p.get("stored_items", {})
-	for it_id in stored_items:
-		weight += 0.5 * float(int(stored_items[it_id]))
-	var stored_fluids: Dictionary = p.get("stored_fluids", {})
-	for fl_id in stored_fluids:
-		weight += float(stored_fluids[fl_id])
-	return int(floor(weight / 2.0))
 
 
+
+
+
+
+
+
+
+
+
+
+
+## Updates crane arm angle and extension toward target at constant
+## speed. Pinned to BuildingSystem because the ARM length constants
+## here are also referenced by the draw stack. The motion multiplier
+## (power × water boost) is delegated to CraneSystem.
 func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> void:
 	if not crane_states.has(anchor):
 		return
@@ -11092,8 +8999,10 @@ func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> 
 	# Cranes can't operate without power. A starved network freezes
 	# arm motion entirely; a brownout (efficiency in (0, 1)) slows the
 	# motion proportionally — same gating model the drill / factory
-	# loops use.
-	var speed_mult: float = _crane_speed_multiplier(anchor)
+	# loops use. The multiplier (power × water-boost) lives on
+	# CraneSystem now; query through it.
+	var crane_sys = get_node_or_null("/root/Main/CraneSystem")
+	var speed_mult: float = crane_sys.crane_speed_multiplier(anchor) if crane_sys else 1.0
 	if speed_mult <= 0.0:
 		return
 	var gs: float = main.GRID_SIZE
@@ -11123,70 +9032,9 @@ func update_crane_telescope(anchor: Vector2i, target: Vector2, delta: float) -> 
 		state["arm_extension"] += signf(ext_diff) * max_extend
 
 
-## Combined motion multiplier for a crane this frame:
-##   power_eff  — 0 when starved, 1 at full network supply, fractional
-##                during a brownout. Scales every motion (and the
-##                AI's pickup/drop arrive check via the slower arm).
-##   water boost — when the crane has water in its block_storage, a
-##                 +50 % speed multiplier kicks in AND the water is
-##                 drained at WATER_BOOST_DRAIN_PER_SEC. Power draw
-##                 is bumped by the same +50 % factor in
-##                 `_update_crane_dynamic_power`, so a fully-fed
-##                 booster costs 1.5× watts for 1.5× speed.
-const WATER_BOOST_MULT := 1.5
-const WATER_BOOST_DRAIN_PER_SEC := 0.5
-func _crane_speed_multiplier(anchor: Vector2i) -> float:
-	var ps = _power_sys_ref()
-	var eff: float = 1.0
-	if ps and ps.has_method("get_electrical_efficiency"):
-		eff = clampf(float(ps.get_electrical_efficiency(anchor)), 0.0, 1.0)
-	if eff <= 0.0:
-		return 0.0
-	var mult: float = eff
-	if _crane_water_boost_active(anchor):
-		mult *= WATER_BOOST_MULT
-	return mult
+# Crane motion multiplier (power × water boost), dynamic power model,
+# and water-boost drain all live on CraneSystem now.
 
-
-## True iff this crane currently has water in its storage. Reading
-## stays cheap (single dict lookup); actual drainage happens in
-## `_drain_crane_water_boost` once per frame.
-func _crane_water_boost_active(anchor: Vector2i) -> bool:
-	if _logistics == null or not "block_storage" in _logistics:
-		return false
-	var storage: Dictionary = _logistics.block_storage.get(anchor, {})
-	var fluids: Dictionary = storage.get("fluids", {})
-	return float(fluids.get(&"mat_water", 0.0)) > 0.0
-
-
-## Drains the crane's water buffer at WATER_BOOST_DRAIN_PER_SEC while
-## the boost is active. Called from `_tick_autonomous_cranes` once per
-## crane per frame so the consumption rate is delta-accurate.
-func _drain_crane_water_boost(anchor: Vector2i, delta: float) -> void:
-	if _logistics == null or not "block_storage" in _logistics:
-		return
-	if not _logistics.block_storage.has(anchor):
-		return
-	var storage: Dictionary = _logistics.block_storage[anchor]
-	var fluids: Dictionary = storage.get("fluids", {})
-	var avail: float = float(fluids.get(&"mat_water", 0.0))
-	if avail <= 0.0:
-		return
-	# Only drain when motion actually consumed boost this frame — i.e.
-	# the network has any power at all. A fully-starved crane keeps
-	# its water (nothing to boost while frozen).
-	var ps = _power_sys_ref()
-	if ps and ps.has_method("get_electrical_efficiency") \
-			and float(ps.get_electrical_efficiency(anchor)) <= 0.0:
-		return
-	var consumed: float = WATER_BOOST_DRAIN_PER_SEC * delta
-	var remaining: float = maxf(avail - consumed, 0.0)
-	if remaining <= 0.0:
-		fluids.erase(&"mat_water")
-	else:
-		fluids[&"mat_water"] = remaining
-	storage["fluids"] = fluids
-	_logistics.block_storage[anchor] = storage
 
 
 ## Draws all crane telescoping arms and cross grabbers.
@@ -11220,7 +9068,7 @@ func _ccanvas() -> CanvasItem:
 ## with the outer grabber). Shared by `_draw_cranes` (placed cranes) and
 ## `_draw_crane_payload` (cranes held as payloads), so the picked-up
 ## visual is identical to the live one.
-func _draw_crane_pose(state: Dictionary, data: BlockData, base: Vector2, gs: float, angle_offset: float) -> void:
+func _draw_crane_pose(state: Dictionary, _data: BlockData, base: Vector2, gs: float, angle_offset: float) -> void:
 	var angle: float = float(state.get("arm_angle", 0.0)) + angle_offset
 	var ext: float = float(state.get("arm_extension", CRANE_ARM_MIN_TOTAL))
 	var arm_dir: Vector2 = Vector2(cos(angle), sin(angle))
@@ -11429,104 +9277,3 @@ func _draw_crane_filter_menu() -> void:
 		if tex:
 			var pad: float = cell * 0.1
 			draw_texture_rect(tex, Rect2(r.position + Vector2(pad, pad), Vector2(cell - pad * 2, cell - pad * 2)), false, Color(1, 1, 1, 1))
-
-
-# =========================
-# ARCHIVE DECODING
-# =========================
-
-## Ticks every active archive decoder. A decoder is active when:
-##   - it has electrical power
-##   - an archive scanner is in one of its 4 cardinal neighbors (and powered)
-##   - that scanner's front edge faces an archive block (and powered if applicable)
-##   - the archive's archive_id is set (non-empty)
-## When progress reaches the decoder's production_time, fires
-## Main.archive_decoded(archive_id) and resets state.
-func _tick_archive_decoders(delta: float) -> void:
-	if archive_decoder_state.is_empty():
-		return
-	var power_sys = get_node_or_null("/root/Main/PowerSystem")
-
-	for anchor in archive_decoder_state.keys():
-		if not main.placed_buildings.has(anchor):
-			archive_decoder_state.erase(anchor)
-			continue
-		var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
-		if data == null or not data.tags.has("archive_decoder"):
-			continue
-		var state: Dictionary = archive_decoder_state[anchor]
-
-		# 1. Decoder must be powered electrically
-		if power_sys and not power_sys.is_electrical_powered(anchor):
-			state["progress"] = 0.0
-			state["archive_id"] = &""
-			continue
-
-		# 2. Find a touching, powered archive scanner whose front faces an
-		# archive. Multi-tile decoders need to scan their entire footprint
-		# perimeter — the old 4-DIR-from-anchor scan only saw cells next
-		# to the top-left tile, so a scanner adjacent to any other tile of
-		# a 3x3 decoder went unrecognised.
-		var scanner_pos: Vector2i = Vector2i(-9999, -9999)
-		var archive_id: StringName = &""
-		var found := false
-		var seen_scanners: Dictionary = {}
-		var perimeter: Array[Vector2i] = _get_block_perimeter_cells(anchor, data.grid_size)
-		for n in perimeter:
-			if not main.placed_buildings.has(n):
-				continue
-			var n_anchor: Vector2i = main.building_origins.get(n, n)
-			if seen_scanners.has(n_anchor):
-				continue
-			seen_scanners[n_anchor] = true
-			var n_data = Registry.get_block(main.placed_buildings.get(n_anchor, &""))
-			if n_data == null or not n_data.tags.has("archive_scanner"):
-				continue
-			# Scanner must also be electrically powered
-			if power_sys and not power_sys.is_electrical_powered(n_anchor):
-				continue
-			# Find the archive that scanner is facing
-			var rot: int = main.building_rotation.get(n_anchor, 0)
-			var front_cells = _get_front_edge(n_anchor, n_data.grid_size, rot)
-			for cell in front_cells:
-				if not main.placed_buildings.has(cell):
-					continue
-				var a_anchor: Vector2i = main.building_origins.get(cell, cell)
-				var a_data = Registry.get_block(main.placed_buildings.get(a_anchor, &""))
-				if a_data == null or a_data.id != &"archive":
-					continue
-				var aid: StringName = archive_holdings.get(a_anchor, &"")
-				if aid == &"":
-					continue
-				# Skip already-decoded archives
-				if TechTree.is_researched(aid):
-					continue
-				scanner_pos = n_anchor
-				archive_id = aid
-				found = true
-				break
-			if found:
-				break
-
-		if not found:
-			state["progress"] = 0.0
-			state["archive_id"] = &""
-			continue
-
-		# 3. Track which archive we're decoding (reset progress if it changed)
-		if state.get("archive_id", &"") != archive_id:
-			state["archive_id"] = archive_id
-			state["progress"] = 0.0
-			state["scanner"] = scanner_pos
-		state["scanner"] = scanner_pos
-
-		# 4. Tick progress
-		var cycle: float = data.production_time if data.production_time > 0 else 8.0
-		state["progress"] += delta
-		if state["progress"] >= cycle:
-			state["progress"] = 0.0
-			state["archive_id"] = &""
-			# Fire the decoded signal — TechTree's archive_decoded rule will research
-			# any -D-archive_id markers and the dependent nodes.
-			if main.has_signal("archive_decoded"):
-				main.archive_decoded.emit(archive_id)

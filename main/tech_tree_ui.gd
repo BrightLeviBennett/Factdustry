@@ -474,14 +474,14 @@ func _on_tree_draw() -> void:
 func _draw_node(nid: StringName, _node: Dictionary, z: float, nw: float, nh: float) -> void:
 	var pos = node_positions[nid] * z
 	var state = TechTree.get_state(nid)
-	var oc: Color; var fc: Color; var lc: Color
+	var oc: Color; var fc: Color; var _lc: Color
 	match state:
 		TechTree.NodeState.LOCKED:
-			oc = locked_outline; fc = locked_fill; lc = Color(0.5, 0.3, 0.3)
+			oc = locked_outline; fc = locked_fill; _lc = Color(0.5, 0.3, 0.3)
 		TechTree.NodeState.UNLOCKED:
-			oc = unlocked_outline; fc = unlocked_fill; lc = text_color
+			oc = unlocked_outline; fc = unlocked_fill; _lc = text_color
 		TechTree.NodeState.RESEARCHED:
-			oc = researched_outline; fc = researched_fill; lc = researched_outline
+			oc = researched_outline; fc = researched_fill; _lc = researched_outline
 
 	var rect = Rect2(pos.x - nw / 2.0, pos.y - nh / 2.0, nw, nh)
 	var box = StyleBoxFlat.new()

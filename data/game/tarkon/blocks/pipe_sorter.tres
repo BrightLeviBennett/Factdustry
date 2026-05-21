@@ -4,14 +4,14 @@
 
 [resource]
 script = ExtResource("1")
-id = &"underflow_conduit"
-display_name = "Underflow Conduit"
-description = "Routes fluid only when destination has capacity."
+id = &"pipe_sorter"
+display_name = "Pipe Sorter"
+description = "Filters specific fluids to designated outputs."
 category = 9
 color = Color(0.3, 0.6, 0.9, 1)
-max_health = 280.0
-build_cost = { "copper": 200, "silicon": 80 }
+max_health = 200.0
+build_cost = { "copper": 100, "silicon": 30 }
 build_time = 0.5
-transport_speed = 6.0
+transport_speed = 5.0
 transports_fluid = true
 tags = PackedStringArray("fluid", "transport")

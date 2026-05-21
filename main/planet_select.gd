@@ -161,6 +161,46 @@ var tech_tree_ui: CanvasLayer
 ## instead of starting a full sector launch.
 var _launchpad_pick_mode: bool = false
 
+## Re-runs the per-visit setup that normally runs on `_ready` so a
+## PARKED PlanetSelect can be re-attached and look fresh: re-reads
+## the launchpad pick-mode flag, clears any selection / hover, closes
+## the launch overlay if it was left open, and updates the info panel
+## visibility. Called by transition sites when they unpark instead of
+## instantiating a new PlanetSelect.
+func refresh_for_reentry() -> void:
+	_launchpad_pick_mode = "launchpad_pick_request" in SaveManager \
+		and not SaveManager.launchpad_pick_request.is_empty()
+	# Drop any stale selection / hover so the cards aren't highlighted
+	# from the previous visit.
+	selected_sector = null
+	hovered_sector = null
+	hovered_planet = null
+	_selected_cell = -1
+	_hovered_cell = -1
+	_prev_hovered_cell = -1
+	# Make sure any half-open launch overlay from a previous launch
+	# attempt isn't still hanging on the screen.
+	if launch_overlay and launch_overlay.visible:
+		_close_launch_overlay()
+	# Info panel hides until something is selected — same as fresh
+	# instantiation behaviour.
+	if info_panel != null:
+		info_panel.visible = false
+	# Sector cards / launch button visibility refresh themselves the
+	# moment the user selects something. The launchpad pick-mode flag
+	# was already updated above so any planet-tab visibility changes
+	# pick up the new state on the next `_update_planet_tab_highlight`.
+	if launch_btn != null:
+		launch_btn.visible = false
+	# Back button label depends on the entry path (return_to_game vs
+	# return_to_menu). A parked instance was built with the boot-time
+	# values; reapply the current ones now.
+	if back_btn != null:
+		var show_back: bool = SaveManager.return_to_game or SaveManager.return_to_menu
+		back_btn.text = "← Back to Map" if SaveManager.return_to_game else "← Back to Menu"
+		back_btn.visible = show_back
+
+
 func _ready() -> void:
 	_launchpad_pick_mode = "launchpad_pick_request" in SaveManager \
 		and not SaveManager.launchpad_pick_request.is_empty()
@@ -169,15 +209,43 @@ func _ready() -> void:
 	# If planets are already loaded (sync), build immediately
 	if Registry.planets_list.size() > 0:
 		_build_3d_scene()
+		# Frame the camera on the default planet (Tarkon) *before* the
+		# first render. Previously this was deferred via call_deferred,
+		# which let one frame slip through with `camera_focus =
+		# Vector3.ZERO` — i.e. the camera staring at the sun — before
+		# `_zoom_to_planet` ran on the next frame and snapped to Tarkon.
+		# Setting the focus + visibility synchronously here kills that
+		# 1-frame flash. The heavy geodesic-grid build still goes via
+		# call_deferred so the menu paints before doing CPU-heavy work.
+		_frame_default_planet_for_first_render()
 		_update_camera()
 		_update_info_panel()
-		# Defer sector building to next frame so the scene renders immediately
 		call_deferred("_deferred_zoom_to_planet")
 	else:
 		# Planets are loading in background — wait for them
 		_update_camera()
 		_update_info_panel()
 		Registry.all_resources_loaded.connect(_on_registry_loaded, CONNECT_ONE_SHOT)
+
+
+## Pre-positions the camera on the default planet WITHOUT building the
+## geodesic grid (that's the slow part — deferred). Anything the first
+## render needs to look right goes here.
+func _frame_default_planet_for_first_render() -> void:
+	var target = _default_planet()
+	if target == null:
+		return
+	current_planet = target
+	camera_focus = target.get_orbit_position()
+	camera_pitch = target.camera_pitch
+	camera_distance = target.camera_distance
+	camera_yaw = 0.0
+	# Sector container exists already (created by _build_planet); make
+	# it visible so the placeholder shows up on the first frame too.
+	# The actual cell meshes inside are built lazily by
+	# _deferred_zoom_to_planet on the next frame.
+	if sector_containers.has(target.id):
+		sector_containers[target.id].visible = true
 
 
 ## Launchpad pick-mode handler. Writes the selected sector id back into
@@ -205,7 +273,9 @@ func _on_launchpad_pick_pressed() -> void:
 			# moments ago) — fall back to the registered sector map.
 			var sd = Registry.get_sector(src)
 			SaveManager.pending_map_path = sd.map_path if sd else ""
-	get_tree().change_scene_to_file("res://main/Main.tscn")
+	# Same-frame swap so PlanetSelect gets parked instead of freed —
+	# revisiting it on the next launchpad / planet-map open is instant.
+	SaveManager.swap_scene_to_main()
 
 
 func _deferred_zoom_to_planet() -> void:
@@ -502,12 +572,23 @@ func _draw_orbit_rings() -> void:
 # MATERIALS
 # =========================
 
+## Shared shader resources — compiled once and re-used across every
+## planet / atmosphere instance. Previously `_make_planet_material`
+## and `_make_atmosphere_material` called `Shader.new()` per planet,
+## paying the shader-compile cost N times whenever the menu opened.
+const _PLANET_SHADER_CODE := "shader_type spatial;\nuniform sampler2D surface_tex : source_color, filter_linear, repeat_enable;\nuniform vec4 grid_color : source_color = vec4(0.2, 0.5, 0.3, 1.0);\nuniform float grid_density = 14.0;\nuniform float grid_opacity = 0.4;\nuniform vec4 tint_color : source_color = vec4(1.0);\nvarying vec3 local_pos;\nvoid vertex() { local_pos = VERTEX; }\nvoid fragment() {\n\tvec3 tex_col = texture(surface_tex, UV).rgb * tint_color.rgb;\n\tvec3 n = normalize(local_pos);\n\tfloat lat = asin(n.y);\n\tfloat lon = atan(n.x, n.z);\n\tfloat lat_l = abs(fract(lat * grid_density / 3.14159) - 0.5) * 2.0;\n\tfloat lon_l = abs(fract(lon * grid_density / 6.28318) - 0.5) * 2.0;\n\tfloat line = smoothstep(0.02, 0.06, min(lat_l, lon_l));\n\tALBEDO = mix(grid_color.rgb, tex_col, line);\n\tEMISSION = grid_color.rgb * (1.0 - line) * grid_opacity;\n}\n"
+const _ATMO_SHADER_CODE := "shader_type spatial;\nrender_mode unshaded, blend_add, cull_front;\nuniform vec4 atmo_color : source_color = vec4(0.3, 0.7, 1.0, 0.3);\nvoid fragment() {\n\tfloat f = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0);\n\tALBEDO = atmo_color.rgb;\n\tALPHA = f * atmo_color.a;\n}\n"
+static var _planet_shader: Shader = null
+static var _atmo_shader: Shader = null
+
+
 func _make_planet_material(planet: PlanetData) -> ShaderMaterial:
-	var shader = Shader.new()
-	shader.code = "shader_type spatial;\nuniform sampler2D surface_tex : source_color, filter_linear, repeat_enable;\nuniform vec4 grid_color : source_color = vec4(0.2, 0.5, 0.3, 1.0);\nuniform float grid_density = 14.0;\nuniform float grid_opacity = 0.4;\nuniform vec4 tint_color : source_color = vec4(1.0);\nvarying vec3 local_pos;\nvoid vertex() { local_pos = VERTEX; }\nvoid fragment() {\n\tvec3 tex_col = texture(surface_tex, UV).rgb * tint_color.rgb;\n\tvec3 n = normalize(local_pos);\n\tfloat lat = asin(n.y);\n\tfloat lon = atan(n.x, n.z);\n\tfloat lat_l = abs(fract(lat * grid_density / 3.14159) - 0.5) * 2.0;\n\tfloat lon_l = abs(fract(lon * grid_density / 6.28318) - 0.5) * 2.0;\n\tfloat line = smoothstep(0.02, 0.06, min(lat_l, lon_l));\n\tALBEDO = mix(grid_color.rgb, tex_col, line);\n\tEMISSION = grid_color.rgb * (1.0 - line) * grid_opacity;\n}\n"
+	if _planet_shader == null:
+		_planet_shader = Shader.new()
+		_planet_shader.code = _PLANET_SHADER_CODE
 
 	var mat = ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = _planet_shader
 
 	var tex: Texture2D = planet.surface_texture if planet.surface_texture else _gen_texture(planet)
 	mat.set_shader_parameter("surface_tex", tex)
@@ -546,39 +627,17 @@ func _gen_texture(planet: PlanetData) -> NoiseTexture2D:
 
 
 func _make_atmosphere_material(planet: PlanetData) -> ShaderMaterial:
-	var shader = Shader.new()
-	shader.code = "shader_type spatial;\nrender_mode unshaded, blend_add, cull_front;\nuniform vec4 atmo_color : source_color = vec4(0.3, 0.7, 1.0, 0.3);\nvoid fragment() {\n\tfloat f = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0);\n\tALBEDO = atmo_color.rgb;\n\tALPHA = f * atmo_color.a;\n}\n"
+	if _atmo_shader == null:
+		_atmo_shader = Shader.new()
+		_atmo_shader.code = _ATMO_SHADER_CODE
 	var mat = ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = _atmo_shader
 	mat.set_shader_parameter("atmo_color", planet.atmosphere_color)
 	return mat
 
 
-func _make_outline_mat(color: Color) -> StandardMaterial3D:
-	var mat = StandardMaterial3D.new()
-	mat.albedo_color = color
-	mat.emission_enabled = true
-	mat.emission = color
-	mat.emission_energy_multiplier = 0.8
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	return mat
 
 
-func _surface_transform(pos: Vector3) -> Transform3D:
-	var n = pos.normalized()
-	var ref = Vector3.FORWARD if abs(n.y) > 0.99 else Vector3.UP
-	var x = n.cross(ref).normalized()
-	var z = x.cross(n).normalized()
-	return Transform3D(Basis(x, n, z), pos)
-
-
-# =========================
-# GEODESIC GRID
-# =========================
-
-## Builds the geodesic dual-mesh grid for a planet, replacing the old hex markers.
 func _build_geodesic_grid(planet: PlanetData, container: Node3D) -> void:
 	var r: float = planet.mesh_radius * MARKER_LIFT
 
@@ -846,62 +905,6 @@ func _build_hover_outline(planet_id: StringName, cell_idx: int) -> void:
 		hover_inst.material_override = mat
 
 
-## Draws arc lines between prerequisite sectors on a planet using cell centers.
-func _draw_planet_connections(planet: PlanetData, container: Node3D) -> void:
-	var sec_map: Dictionary = _sector_to_cell.get(planet.id, {})
-	var dual = _dual_mesh_cache.get(planet.id)
-	if not dual:
-		return
-
-	var im = ImmediateMesh.new()
-	var conn_node = MeshInstance3D.new()
-	conn_node.mesh = im
-	conn_node.name = "Connections"
-
-	var line_mat = StandardMaterial3D.new()
-	line_mat.albedo_color = planet.grid_color.lightened(0.3)
-	line_mat.emission_enabled = true
-	line_mat.emission = planet.grid_color
-	line_mat.emission_energy_multiplier = 0.6
-	line_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	conn_node.material_override = line_mat
-
-	var sectors = _get_planet_sectors(planet.id)
-	var sd: Dictionary = {}
-	for s in sectors:
-		sd[s.id] = s
-
-	var r: float = planet.mesh_radius * MARKER_LIFT
-
-	for sector in sectors:
-		if not sec_map.has(sector.id):
-			continue
-		var to_cell: int = sec_map[sector.id]
-		var to_pos: Vector3 = dual.cell_centers[to_cell]
-
-		for req_id in sector.required_sectors:
-			if not sd.has(req_id):
-				continue
-			if not sec_map.has(req_id):
-				continue
-			var from_cell: int = sec_map[req_id]
-			var from_pos: Vector3 = dual.cell_centers[from_cell]
-
-			im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP)
-			for i in range(21):
-				var t: float = float(i) / 20.0
-				var point: Vector3 = from_pos.slerp(to_pos, t).normalized() * r
-				im.surface_add_vertex(point)
-			im.surface_end()
-
-	container.add_child(conn_node)
-
-
-# =========================
-# VIEW MODE SWITCHING
-# =========================
-
-## Zooms to view a specific planet.
 func _zoom_to_planet(planet: PlanetData) -> void:
 	# Hide old planet's sectors
 	if current_planet and sector_containers.has(current_planet.id):
@@ -1157,18 +1160,6 @@ func _handle_click() -> void:
 		_update_info_panel()
 
 
-## Refreshes sector cell colors based on current tech tree state.
-## Called when returning from a sector to update captures/unlocks without rebuilding.
-func _update_sector_highlights() -> void:
-	if not current_planet:
-		return
-	_rebuild_outline_mesh(current_planet.id)
-	_update_info_panel()
-
-
-# =========================
-# HUD
-# =========================
 
 func _build_hud() -> void:
 	hud = CanvasLayer.new()
@@ -1406,7 +1397,8 @@ func _on_back_pressed() -> void:
 			else:
 				var sd = Registry.get_sector(src)
 				SaveManager.pending_map_path = sd.map_path if sd else ""
-		get_tree().change_scene_to_file("res://main/Main.tscn")
+		# Same-frame swap parks PlanetSelect for instant revisit.
+		SaveManager.swap_scene_to_main()
 		return
 	if SaveManager.return_to_game:
 		SaveManager.return_to_game = false
@@ -1678,16 +1670,6 @@ func _launch_seed_amount(mat: StringName) -> int:
 	return int(slider.value)
 
 
-## Returns the runtime amount of `mat` available in the source sector
-## (the one the player is launching from). Used to set per-slider max
-## values so the player can never spec more than they actually have.
-func _source_amount(mat: StringName) -> int:
-	var src: Dictionary = _get_source_resources()
-	return int(src.get(mat, 0))
-
-
-## Returns the per-sector resource storage we should charge for a launch.
-## Keyed by the "mat_*" runtime id the rest of the game uses.
 func _get_source_resources() -> Dictionary:
 	var src_id: StringName = SaveManager.active_sector_id
 	if src_id == &"" or src_id == &"_default":

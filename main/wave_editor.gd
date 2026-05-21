@@ -967,7 +967,7 @@ func _draw_graph() -> void:
 	)
 
 	# Gridlines (every wave along X, every integer count along Y up to max)
-	var gx := inner_origin.x
+	var _gx := inner_origin.x
 	for w_i in range(waves.size() + 1):
 		var x := inner_origin.x + float(w_i) * GRAPH_CELL_W
 		_graph.draw_line(Vector2(x, inner_origin.y),

@@ -144,24 +144,6 @@ func get_network_history(grid_pos: Vector2i) -> Array:
 	return _network_history.get(rep, [])
 
 
-## Public: returns the average power consumption for the network the
-## given cell belongs to over the last `seconds` seconds. Returns 0.0
-## if the network has no recorded samples.
-func get_network_avg_use(grid_pos: Vector2i, seconds: float) -> float:
-	var samples: Array = get_network_history(grid_pos)
-	if samples.is_empty():
-		return 0.0
-	var now: float = Time.get_ticks_msec() / 1000.0
-	var cutoff: float = now - seconds
-	var sum: float = 0.0
-	var n: int = 0
-	for s in samples:
-		if float(s["t"]) >= cutoff:
-			sum += float(s["use"])
-			n += 1
-	if n == 0:
-		return 0.0
-	return sum / float(n)
 
 
 func _sample_network_history(delta: float) -> void:
@@ -357,47 +339,6 @@ func _sum_internal_battery_units(net: Dictionary) -> float:
 	return total_ps / BATTERY_UNIT_PS
 
 
-## Burst spend across the entire network this cell belongs to. `amount_power`
-## is the burst size in raw power (not B). Drains from every internal
-## battery on the network proportionally to its remaining charge until the
-## demand is satisfied or all batteries are empty. Returns the actual
-## amount drained (may be less than `amount_power` if the network can't
-## cover the full draw). Use this for one-shot burst draws like a launchpad
-## launch — it gives the player a meaningful "needs a charged battery"
-## constraint without forcing every consumer to model burst behaviour.
-func try_burst_spend(grid_pos: Vector2i, amount_power: float) -> float:
-	if amount_power <= 0.0:
-		return 0.0
-	if not elec_cell_to_net.has(grid_pos):
-		return 0.0
-	var net_idx: int = elec_cell_to_net[grid_pos]
-	if net_idx < 0 or net_idx >= elec_networks.size():
-		return 0.0
-	var net: Dictionary = elec_networks[net_idx]
-	# Collect every unique anchor in the network that has a battery.
-	var anchors: Array = []
-	var charges: Dictionary = {}
-	var total: float = 0.0
-	for cell in net.get("cells", []):
-		var anchor: Vector2i = main.building_origins.get(cell, cell)
-		if charges.has(anchor):
-			continue
-		var c: float = float(_block_internal_battery.get(anchor, 0.0))
-		if c <= 0.0:
-			continue
-		anchors.append(anchor)
-		charges[anchor] = c
-		total += c
-	# Demand in power-seconds (we drain 1 second's worth of `amount_power`).
-	var demand: float = amount_power
-	if demand <= 0.0 or total <= 0.0:
-		return 0.0
-	var drained: float = minf(demand, total)
-	var ratio: float = drained / total
-	for anchor in anchors:
-		var c: float = float(charges[anchor])
-		_block_internal_battery[anchor] = c - c * ratio
-	return drained
 
 
 ## Public accessor — total stored B in the network the cell belongs to,
@@ -449,10 +390,6 @@ func block_internal_battery_charge(grid_pos: Vector2i) -> float:
 	return float(_block_internal_battery.get(grid_pos, 0.0))
 
 
-## Internal battery capacity (in power-seconds) for a placed block.
-func block_internal_battery_capacity(grid_pos: Vector2i) -> float:
-	var d: BlockData = Registry.get_block(main.placed_buildings.get(grid_pos, &""))
-	return resolve_block_battery_capacity(d)
 
 
 ## True if the block at `grid_pos` is powered, either by its electrical
@@ -463,16 +400,6 @@ func is_powered_or_battery(grid_pos: Vector2i) -> bool:
 	return block_internal_battery_charge(grid_pos) > 0.0
 
 
-## Drains `amount_ps` power-seconds from the block's internal battery
-## (clamped at 0). Returns the amount actually drained.
-func drain_block_internal_battery(grid_pos: Vector2i, amount_ps: float) -> float:
-	if amount_ps <= 0.0:
-		return 0.0
-	var cur: float = float(_block_internal_battery.get(grid_pos, 0.0))
-	var taken: float = minf(cur, amount_ps)
-	if taken > 0.0:
-		_block_internal_battery[grid_pos] = cur - taken
-	return taken
 
 
 func is_electrical_powered(grid_pos: Vector2i) -> bool:
@@ -557,26 +484,8 @@ func get_linked_partner(grid_pos: Vector2i) -> Variant:
 	return null
 
 
-## Returns the position this bridge SENDS to (it's the source/input end
-## of a link, pair[0]). null if not linked outward. Bridges support up
-## to two roles per cell — one outgoing + one incoming — so callers
-## that care about direction should use these instead of the generic
-## `get_linked_partner`.
-func get_link_as_source(grid_pos: Vector2i) -> Variant:
-	for pair in linked_pairs:
-		if pair[0] == grid_pos:
-			return pair[1]
-	return null
 
 
-## Returns the position this bridge RECEIVES from (it's the
-## destination/output end of a link, pair[1]). null if not linked
-## inward.
-func get_link_as_destination(grid_pos: Vector2i) -> Variant:
-	for pair in linked_pairs:
-		if pair[1] == grid_pos:
-			return pair[0]
-	return null
 
 
 ## All destinations this position sends to (every pair where it's
@@ -762,21 +671,6 @@ func _rebuild_electrical_networks() -> void:
 			elec_cell_to_net[cell] = net_idx
 
 
-## Network efficiency in [0, 1]. When gen ≥ use the network runs at 100%;
-## when demand exceeds supply every consumer is time-dilated uniformly to
-## gen/use. Networks with no consumers return 1.0 so a standalone generator
-## doesn't report 0% efficiency.
-func _compute_efficiency(gen: float, use: float) -> float:
-	if use <= 0.0:
-		return 1.0
-	return clampf(gen / use, 0.0, 1.0)
-
-
-## Storage-aware variant: while batteries hold any charge, the network
-## reports 100% efficiency — the battery covers the deficit. Once the
-## reserve is drained, falls back to the gen/use ratio. Capacity is
-## passed in so a network with batteries that all happen to be empty
-## still treats this tick as a deficit (no infinite buffer).
 func _compute_efficiency_with_storage(gen: float, use: float, stored: float, capacity: float) -> float:
 	if use <= 0.0:
 		return 1.0

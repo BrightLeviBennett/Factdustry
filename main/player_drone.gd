@@ -73,6 +73,12 @@ var _used_respawn_cores: Array[Vector2i] = []
 # priority loop: assist with builds → shoot enemies → heal damaged
 # blocks → return to their spawn core when idle.
 var ai_controlled: bool = false
+## True when this shardling belongs to a FEROX core. Flips every
+## faction-sensitive lookup in the AI tick: heal targets become FEROX
+## buildings, enemy targets become LUMINA/PLAYER units, the rebuild
+## queue is consulted instead of the player's build work_order. Only
+## meaningful when `ai_controlled` is also true.
+var ferox_controlled: bool = false
 var spawn_core_anchor: Vector2i = Vector2i(-1, -1)
 # Per-AI-drone fire cooldown. Mirrors combat_system.drone_attack_speed
 # for the primary drone; tracked here so each AI shardling has its
@@ -82,6 +88,14 @@ const _AI_BUILD_REACH_TILES := 8
 const _AI_FIRE_REACH_TILES := 10
 const _AI_HEAL_REACH_TILES := HEAL_RANGE_TILES
 const _AI_IDLE_REACH_TILES := 0
+
+# --- FEROX SHARDLING REBUILD TIMER ---
+# When a FEROX shardling is in build_range of its current rebuild
+# target, it spends FEROX_REBUILD_TIME seconds before the building
+# actually pops into existence — same pacing the rebuilder unit uses.
+var _ferox_rebuild_target: Variant = null   # Dictionary from main.ferox_rebuild_queue
+var _ferox_rebuild_timer: float = 0.0
+const FEROX_REBUILD_TIME: float = 1.5
 
 # --- DATA ---
 # The UnitData resource loaded from player_drone.tres
@@ -230,6 +244,11 @@ func _ready() -> void:
 		health_regen = 5.0
 		drone_color = Color(0.3, 0.9, 1.0)
 
+	# FEROX shardlings get a red-tinted modulation so the player can
+	# tell them apart from friendly shardlings at a glance.
+	if ferox_controlled:
+		drone_color = Color(1.0, 0.45, 0.35)
+		modulate = Color(1.0, 0.55, 0.5)
 	range_color = Color(drone_color.r, drone_color.g, drone_color.b, 0.08)
 	range_border_color = Color(drone_color.r, drone_color.g, drone_color.b, 0.2)
 
@@ -1028,10 +1047,22 @@ func _park_on_spawn_core() -> void:
 	# Place the drone at the centre of its assigned home core. Falls
 	# back to the legacy `main.core_position` if the anchor is missing
 	# or its block has been destroyed since the AI was spawned.
+	# FEROX shardlings fall back to the nearest remaining FEROX core
+	# instead of the LUMINA primary so a deferred respawn never lands
+	# inside the player's base.
 	var core_pos: Vector2i = spawn_core_anchor
 	var data_core: BlockData = null
 	if core_pos != Vector2i(-1, -1) and main.placed_buildings.has(core_pos):
 		data_core = Registry.get_block(main.placed_buildings[core_pos])
+	elif ferox_controlled:
+		var ferox_anchors: Array = main.get_ferox_core_anchors()
+		if not ferox_anchors.is_empty():
+			core_pos = ferox_anchors[0]
+			data_core = Registry.get_block(main.placed_buildings[core_pos])
+		else:
+			# No FEROX cores left — silently free the shardling.
+			queue_free()
+			return
 	else:
 		core_pos = main.core_position
 		data_core = Registry.get_block(&"core")
@@ -1045,6 +1076,28 @@ func _park_on_spawn_core() -> void:
 
 
 func _ai_movement_tick(delta: float) -> void:
+	# FEROX shardlings run a different priority loop: rebuild first
+	# (the user's directive), then heal damaged FEROX buildings, and
+	# only as a fallback drift toward their home core. They are NOT
+	# combat-focused — fire still happens via _ai_fire_tick if a
+	# LUMINA unit wanders into range, but pursuit isn't a priority.
+	if ferox_controlled:
+		var rebuild_anchor: Vector2i = _ferox_step_rebuild(delta)
+		if rebuild_anchor != Vector2i(-1, -1):
+			return
+		var heal_anchor_f: Vector2i = _ai_find_heal_anchor()
+		if heal_anchor_f != Vector2i(-1, -1):
+			_ai_step_toward_grid(heal_anchor_f, _AI_HEAL_REACH_TILES, delta)
+			return
+		# Idle on home FEROX core, falling back to any remaining one.
+		if spawn_core_anchor != Vector2i(-1, -1) and main.placed_buildings.has(spawn_core_anchor):
+			_ai_step_toward_grid(spawn_core_anchor, _AI_IDLE_REACH_TILES, delta)
+			return
+		var ferox_anchors: Array = main.get_ferox_core_anchors()
+		if not ferox_anchors.is_empty():
+			spawn_core_anchor = ferox_anchors[0]
+		return
+
 	# Priority 1: in-flight builds.
 	var build_anchor: Vector2i = _ai_find_build_target()
 	if build_anchor != Vector2i(-1, -1):
@@ -1070,6 +1123,96 @@ func _ai_movement_tick(delta: float) -> void:
 		spawn_core_anchor = anchors[0]
 
 
+# =========================
+# FEROX SHARDLING REBUILD
+# =========================
+# Step the FEROX shardling toward an active rebuild target, picking one
+# from `main.ferox_rebuild_queue` if it doesn't have one yet. Returns
+# the grid anchor it's heading toward, or (-1,-1) when there's nothing
+# to rebuild this tick.
+
+func _ferox_step_rebuild(delta: float) -> Vector2i:
+	# Drop a stale target that another rebuilder already finished.
+	if _ferox_rebuild_target != null:
+		var gp: Vector2i = _ferox_rebuild_target["grid_pos"]
+		if main.placed_buildings.has(gp):
+			_ferox_rebuild_target = null
+			_ferox_rebuild_timer = 0.0
+	# Acquire a new target if we don't have one.
+	if _ferox_rebuild_target == null:
+		if main.ferox_rebuild_queue.is_empty():
+			return Vector2i(-1, -1)
+		_ferox_rebuild_target = main.ferox_rebuild_queue.pop_front()
+		_ferox_rebuild_timer = 0.0
+	var target_gp: Vector2i = _ferox_rebuild_target["grid_pos"]
+	var target_world: Vector2 = main.grid_to_world(target_gp) + Vector2(
+		main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+	var dist: float = position.distance_to(target_world)
+	var build_range_px: float = float(main.GRID_SIZE) * 2.5
+	if dist > build_range_px:
+		_ai_step_toward_world(target_world, 2, delta)
+		_ferox_rebuild_timer = 0.0
+		return target_gp
+	# In range — start (or continue) the build timer.
+	_ferox_rebuild_timer += delta
+	if _ferox_rebuild_timer >= FEROX_REBUILD_TIME:
+		_ferox_finish_rebuild()
+	return target_gp
+
+
+func _ferox_finish_rebuild() -> void:
+	if _ferox_rebuild_target == null:
+		return
+	var block_id: StringName = _ferox_rebuild_target["block_id"]
+	var grid_pos: Vector2i = _ferox_rebuild_target["grid_pos"]
+	var rot: int = _ferox_rebuild_target["rotation"]
+	var bdata = Registry.get_block(block_id)
+	if bdata == null:
+		_ferox_rebuild_target = null
+		_ferox_rebuild_timer = 0.0
+		return
+	# Affordability check against the FEROX resource pool.
+	var can_build: bool = true
+	for item_id in bdata.build_cost:
+		var needed: int = bdata.build_cost[item_id]
+		if main.ferox_resources.get(item_id, 0) < needed:
+			can_build = false
+			break
+	if not can_build:
+		# Re-queue and try again later.
+		main.ferox_rebuild_queue.append(_ferox_rebuild_target)
+		_ferox_rebuild_target = null
+		_ferox_rebuild_timer = 0.0
+		return
+	# Space-clear check.
+	for x in range(bdata.grid_size.x):
+		for y in range(bdata.grid_size.y):
+			var tile_pos: Vector2i = grid_pos + Vector2i(x, y)
+			if main.placed_buildings.has(tile_pos):
+				_ferox_rebuild_target = null
+				_ferox_rebuild_timer = 0.0
+				return
+	# Spend resources.
+	for item_id in bdata.build_cost:
+		main.ferox_resources[item_id] -= bdata.build_cost[item_id]
+	if "ferox_resources_changed" in main:
+		main.ferox_resources_changed.emit(main.ferox_resources)
+	# Mirror enemy_unit._finish_rebuild's direct placement so the new
+	# block goes in with the correct faction tags and the building_placed
+	# signal fires for downstream bookkeeping (logistics, tech tree, etc).
+	for x in range(bdata.grid_size.x):
+		for y in range(bdata.grid_size.y):
+			var tile_pos: Vector2i = grid_pos + Vector2i(x, y)
+			main.placed_buildings[tile_pos] = block_id
+			main.building_health[tile_pos] = bdata.max_health
+			main.building_rotation[tile_pos] = rot
+			main.building_origins[tile_pos] = grid_pos
+			main.building_factions[tile_pos] = main.Faction.FEROX
+	main.building_placed.emit(block_id, grid_pos)
+	_ferox_rebuild_target = null
+	_ferox_rebuild_timer = 0.0
+
+
 func _ai_find_build_target() -> Vector2i:
 	if not ("work_order" in main) or main.work_order.is_empty():
 		return Vector2i(-1, -1)
@@ -1089,10 +1232,27 @@ func _ai_find_build_target() -> Vector2i:
 
 func _ai_find_enemy_in_world() -> Node2D:
 	var unit_mgr = _unit_mgr_ref()
-	if unit_mgr == null or not ("enemies" in unit_mgr):
+	if unit_mgr == null:
 		return null
 	var best: Node2D = null
 	var best_d2: float = INF
+	if ferox_controlled:
+		# FEROX shardling: PLAYER-team units are hostile. They live in
+		# unit_mgr.player_units (mirroring how the player's primary
+		# drone enumerates `enemies`).
+		var pool = unit_mgr.player_units if "player_units" in unit_mgr else []
+		for e in pool:
+			if e == null or not is_instance_valid(e):
+				continue
+			if "is_dead" in e and e.is_dead:
+				continue
+			var d2: float = position.distance_squared_to(e.position)
+			if d2 < best_d2:
+				best_d2 = d2
+				best = e
+		return best
+	if not ("enemies" in unit_mgr):
+		return null
 	for e in unit_mgr.enemies:
 		if e == null or not is_instance_valid(e):
 			continue
@@ -1321,24 +1481,6 @@ func _draw() -> void:
 		draw_arc(Vector2.ZERO, hb_radius, 0, TAU, 32, Color(1.0, 0.2, 0.9, 0.9), 1.5)
 
 
-func _draw_range_circle() -> void:
-	var range_size = build_range * 2 + 1
-	var range_pixels = range_size * main.GRID_SIZE
-	var drone_grid = main.world_to_grid(position)
-	var top_left = main.grid_to_world(drone_grid - Vector2i(build_range, build_range))
-	var local_top_left = top_left - position
-
-	draw_rect(
-		Rect2(local_top_left, Vector2(range_pixels, range_pixels)),
-		range_color,
-		true
-	)
-	draw_rect(
-		Rect2(local_top_left, Vector2(range_pixels, range_pixels)),
-		range_border_color,
-		false,
-		1.5
-	)
 
 
 func _draw_drone() -> void:
@@ -1773,7 +1915,14 @@ func _resolve_heal_snap(aim_dir: Vector2, range_px: float):
 func _find_ai_heal_target(range_px: float):
 	if main == null:
 		return null
-	var lumina: int = main.Faction.LUMINA if "Faction" in main and "LUMINA" in main.Faction else 0
+	# FEROX shardlings heal the enemy faction's buildings; everything
+	# else heals LUMINA. Branch the faction filter on the per-instance
+	# `ferox_controlled` flag.
+	var home_faction: int = 0
+	if ferox_controlled and "Faction" in main and "FEROX" in main.Faction:
+		home_faction = main.Faction.FEROX
+	elif "Faction" in main and "LUMINA" in main.Faction:
+		home_faction = main.Faction.LUMINA
 	var best_anchor: Variant = null
 	var best_pct: float = 1.0
 	var seen: Dictionary = {}
@@ -1782,7 +1931,7 @@ func _find_ai_heal_target(range_px: float):
 		if seen.has(anchor):
 			continue
 		seen[anchor] = true
-		if main.get_building_faction(anchor) != lumina:
+		if main.get_building_faction(anchor) != home_faction:
 			continue
 		# Stale building_origins entry — anchor may no longer be in
 		# placed_buildings (e.g. transient state during a destroy). Skip

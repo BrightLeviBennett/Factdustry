@@ -84,6 +84,41 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var armor: float = 0.0
 
 
+@export_group("Shield")
+## Shape of the protective shield projected around the block. Empty
+## string = no shield. Supported: "rect" or "circle".
+@export var shield_shape: String = ""
+## Shield dimensions (in tiles). For "rect": (width, height). For
+## "circle": x = radius (y ignored).
+@export var shield_size: Vector2 = Vector2.ZERO
+## World-space offset of the shield centre from the block's footprint
+## centre, in tiles. Lets a shield project asymmetrically (e.g. only
+## in front of a building).
+@export var shield_offset: Vector2 = Vector2.ZERO
+## What the shield intercepts at its boundary. "bullets" — only
+## stops incoming opposing-faction projectiles (units pass freely).
+## "units" — stops both bullets AND opposing-faction units. Friendly
+## bullets / units always pass through, both directions.
+@export var shield_blocks: String = "bullets"
+## Shield hit-points. Each opposing bullet that strikes the boundary
+## subtracts its damage from this pool. At 0 the shield breaks and
+## enters cooldown.
+@export var shield_health: float = 100.0
+## Seconds the shield is offline after breaking. Cooldown only ticks
+## down while the block is fully powered (see `shield_recharge_power`).
+@export var shield_cooldown: float = 10.0
+## Constant electrical draw while the shield is up.
+@export var shield_idle_power: float = 15.0
+## ADDITIONAL draw on top of `shield_idle_power` while the shield is
+## broken and recharging its cooldown. Total recharge cost is
+## `shield_idle_power + shield_recharge_power` (15 + 20 = 35 by default).
+@export var shield_recharge_power: float = 20.0
+## When the shield's home block has water in its `block_storage`, the
+## cooldown ticks down this much faster (1.5 = 150 %). Water drains at
+## the same rate as the cooldown progresses.
+@export var shield_water_boost_mult: float = 1.5
+
+
 @export_group("Cost")
 ## item_id -> amount needed to build.
 @export var build_cost: Dictionary = {}
@@ -257,6 +292,12 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## are explicitly excluded by tag in main.gd's check.
 @export var overdrive_multiplier: float = 1.0
 @export var overdrive_radius: float = 0.0
+
+## Mender: blocks tagged "mender" passively heal every friendly
+## building within `mend_radius` tiles by `mend_amount` HP per second.
+## Driven from main.gd's mender tick.
+@export var mend_radius: float = 0.0
+@export var mend_amount: float = 0.0
 
 
 # =========================

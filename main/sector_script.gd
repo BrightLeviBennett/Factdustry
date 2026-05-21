@@ -58,11 +58,49 @@ var _disabled_buildings: Dictionary = {}  # Vector2i -> true
 ## Can hide both wall and floor tiles.
 var _hidden_tiles: Dictionary = {}  # Vector2i -> true
 
-# --- SCRIPT STEP RUNNER ---
+# --- SCRIPT STEP RUNNER (DAG mode) ---
+# Steps form a directed acyclic graph. Each step may declare:
+#   "dependencies":   Array[int] — step indices that must be completed.
+#                     Missing/empty defaults to LINEAR back-compat:
+#                     step i depends on step i-1.
+#   "flags_required": Array[String] — global flags that must be set for
+#                     the step to be considered eligible to start.
+#   "flags_set":      Array[String] — flags set on completion (in
+#                     addition to anything `set_flag` actions did).
+#   "markers":        Array[Dictionary] — visual annotations spawned on
+#                     _enter_step and cleaned automatically on _exit_step.
+# Old linear scripts (no dependencies field on any step) still work via
+# the back-compat conversion in `load_script_steps`.
 var _script_steps: Array = []
-var _current_step: int = -1  # -1 = not running
-var _step_wait_timer: float = 0.0
+## Per-step "wait" timers, keyed by step index. Previously a single
+## global timer (only the active step could "wait"); now multiple steps
+## can be active simultaneously so each gets its own.
+var _step_wait_timers: Dictionary = {}     # int (step idx) -> float
+## Set of step indices currently active (eligible & not yet completed).
+var _active_steps: Dictionary = {}         # int -> true
+## Set of step indices already completed (conditions met + exit fired).
+var _completed_steps: Dictionary = {}      # int -> true
 var _script_running := false
+
+# --- NAMED FLAGS ---
+# Cross-step boolean state for the DAG. Set via `set_flag` action /
+# `flags_set` step field, cleared via `clear_flag`. Steps can gate
+# eligibility on `flags_required` and conditions can check `flag`.
+var _flags: Dictionary = {}                # String -> bool
+
+# Reverse-edge cache for the DAG. step_idx -> Array[int] of dependents
+# (steps that have this one as a dependency). Built lazily by
+# `_get_dependents` and invalidated by `load_script_steps`.
+var _dependents_cache: Dictionary = {}
+
+# Legacy single-step pointer. Now derived from the highest-index active
+# or completed step so old HUD bindings that read `_current_step`
+# directly still get a sensible answer.
+var _current_step: int = -1
+# Legacy single-step wait timer. Mirrors _step_wait_timers[_current_step]
+# during back-compat reads so save files written by the old runtime
+# round-trip cleanly.
+var _step_wait_timer: float = 0.0
 
 # --- HINTS ---
 ## Authored hint definitions, see HINT FORMAT comment below.
@@ -136,28 +174,38 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_hint_clock += delta
 	_tick_hints()
-	if not _script_running or _current_step < 0 or _current_step >= _script_steps.size():
+	if not _script_running or _script_steps.is_empty():
 		return
 
-	var step: Dictionary = _script_steps[_current_step]
+	# DAG tick: every active step is checked independently. A step
+	# completes when ALL its conditions are met (AND). Completing a step
+	# may unblock other steps via dependencies / flags_set.
+	var newly_completed: Array[int] = []
+	for idx in _active_steps.keys():
+		if _completed_steps.has(idx):
+			continue
+		var step: Dictionary = _script_steps[idx]
+		var conditions: Array = _get_step_conditions(step)
+		var advance := true
+		for cond in conditions:
+			if not _check_condition_for_step(cond, delta, idx):
+				advance = false
+		if advance:
+			newly_completed.append(idx)
 
-	# Support both old "condition" (single dict) and new "conditions" (array) format
-	var conditions: Array = _get_step_conditions(step)
+	# Resolve completions: fire exit actions, set step-level flags, then
+	# scan the script for any new steps whose deps/flags are satisfied.
+	for idx in newly_completed:
+		_complete_step(idx)
+	if not newly_completed.is_empty():
+		_activate_eligible_steps()
+		_recompute_current_step()
 
-	# ALL conditions must be met (AND logic)
-	var advance := true
-	for cond in conditions:
-		if not _check_condition(cond, delta):
-			advance = false
-
-	if advance:
-		_exit_step(_current_step)
-		_current_step += 1
-		if _current_step < _script_steps.size():
-			_enter_step(_current_step)
-		else:
-			_script_running = false
-			print("SectorScript: All steps complete.")
+	# Script ends when every step is completed (no more work possible).
+	if _active_steps.is_empty():
+		_script_running = false
+		_current_step = -1
+		print("SectorScript: All steps complete.")
 
 
 ## Get the conditions array from a step, handling both old and new formats.
@@ -169,6 +217,25 @@ func _get_step_conditions(step: Dictionary) -> Array:
 	return [{"type": "always"}]
 
 
+## Per-step condition check. The DAG runtime ticks several steps in
+## parallel so each step's "wait" timer lives in `_step_wait_timers`
+## keyed by step index, rather than the singleton it used to be.
+func _check_condition_for_step(cond: Dictionary, delta: float, step_idx: int) -> bool:
+	var cond_type: String = cond.get("type", "always")
+	if cond_type == "wait":
+		var t: float = float(_step_wait_timers.get(step_idx, 0.0)) - delta
+		_step_wait_timers[step_idx] = t
+		# Mirror to the legacy single-timer so save/load round-trip stays
+		# meaningful for old consumers.
+		if step_idx == _current_step:
+			_step_wait_timer = t
+		return t <= 0.0
+	# Everything else is timer-independent and just defers to the
+	# legacy single-condition checker (which now treats "wait" as a
+	# no-op fallback).
+	return _check_condition(cond, delta)
+
+
 ## Check whether a single condition is met. Returns true if satisfied.
 func _check_condition(cond: Dictionary, delta: float) -> bool:
 	var cond_type: String = cond.get("type", "always")
@@ -178,6 +245,25 @@ func _check_condition(cond: Dictionary, delta: float) -> bool:
 		"wait":
 			_step_wait_timer -= delta
 			return _step_wait_timer <= 0.0
+		"flag":
+			# New flag-based condition. Defaults to checking truthiness of
+			# the named flag, but `value: false` lets you require ABSENCE
+			# of a flag for OR-style "branch on outcome" graphs.
+			var fname: String = String(cond.get("name", ""))
+			var want: bool = bool(cond.get("value", true))
+			return bool(_flags.get(fname, false)) == want
+		"descendants_done":
+			# Used by marker-only steps emitted by the node-graph editor.
+			# The step lingers (markers stay visible) until every step that
+			# transitively depends on it has completed. `step_idx` is
+			# stamped onto the condition at build-time so we know which
+			# step we're checking.
+			var step_idx: int = int(cond.get("step_idx", -1))
+			if step_idx < 0:
+				# Without a step_idx we can't compute descendants — fall
+				# back to "immediately done" so the step doesn't hang.
+				return true
+			return _all_descendants_completed(step_idx)
 		"mined":
 			return has_mined(StringName(cond.get("item_id", "")), int(cond.get("amount", 1)))
 		"deposited":
@@ -810,6 +896,15 @@ func is_building_disabled(grid_pos: Vector2i) -> bool:
 ## immediately after and explicitly overwrite the fields they care about.
 func load_script_steps(steps: Array) -> void:
 	_script_steps = steps.duplicate(true)
+	# Stamp `step_idx` onto every descendants_done condition so the
+	# runtime knows which step to check dependents for. Authors don't
+	# have to set this themselves.
+	for i in range(_script_steps.size()):
+		var step: Dictionary = _script_steps[i]
+		for cond in step.get("conditions", []):
+			if String(cond.get("type", "")) == "descendants_done":
+				cond["step_idx"] = i
+	_dependents_cache.clear()
 	reset_runtime_state()
 
 
@@ -822,6 +917,10 @@ func reset_runtime_state() -> void:
 	_current_step = -1
 	_script_running = false
 	_step_wait_timer = 0.0
+	_step_wait_timers.clear()
+	_active_steps.clear()
+	_completed_steps.clear()
+	_flags.clear()
 	_mined_counts.clear()
 	_core_counts.clear()
 	_produced_counts.clear()
@@ -852,13 +951,20 @@ func reset_runtime_state() -> void:
 	queue_redraw()
 
 
-## Start executing the script from step 0.
+## Start executing the script. In DAG mode, every step whose
+## dependencies are empty (or transitively satisfied) AND whose
+## `flags_required` is empty is activated immediately. Old linear
+## scripts only have step 0 eligible at start because each subsequent
+## step depends on the previous via the back-compat rule.
 func start_script() -> void:
 	if _script_steps.is_empty():
 		return
-	_current_step = 0
 	_script_running = true
-	_enter_step(0)
+	_active_steps.clear()
+	_completed_steps.clear()
+	_step_wait_timers.clear()
+	_activate_eligible_steps()
+	_recompute_current_step()
 
 
 ## Returns the script runtime state as a serializable dictionary.
@@ -869,10 +975,28 @@ func get_runtime_state() -> Dictionary:
 	var disabled_arr: Array = []
 	for pos in _disabled_buildings:
 		disabled_arr.append("%d,%d" % [pos.x, pos.y])
+	# Serialize DAG state — active set, completed set, per-step wait
+	# timers, and the global flag dictionary.
+	var active_arr: Array = []
+	for k in _active_steps.keys():
+		active_arr.append(int(k))
+	var completed_arr: Array = []
+	for k in _completed_steps.keys():
+		completed_arr.append(int(k))
+	var wait_timers_dict: Dictionary = {}
+	for k in _step_wait_timers.keys():
+		wait_timers_dict[str(k)] = float(_step_wait_timers[k])
+	var flags_dict: Dictionary = {}
+	for k in _flags.keys():
+		flags_dict[String(k)] = bool(_flags[k])
 	return {
 		"current_step": _current_step,
 		"script_running": _script_running,
 		"step_wait_timer": _step_wait_timer,
+		"active_steps": active_arr,
+		"completed_steps": completed_arr,
+		"step_wait_timers": wait_timers_dict,
+		"flags": flags_dict,
 		"mined_counts": _dict_sname_to_str(_mined_counts),
 		"core_counts": _dict_sname_to_str(_core_counts),
 		"produced_counts": _dict_sname_to_str(_produced_counts),
@@ -894,6 +1018,30 @@ func load_runtime_state(state: Dictionary) -> void:
 	_current_step = int(state.get("current_step", -1))
 	_script_running = bool(state.get("script_running", false))
 	_step_wait_timer = float(state.get("step_wait_timer", 0.0))
+	# DAG state. Old saves don't have these — fall back to "rebuild
+	# from current_step + linear deps".
+	_active_steps.clear()
+	for k in state.get("active_steps", []):
+		_active_steps[int(k)] = true
+	_completed_steps.clear()
+	for k in state.get("completed_steps", []):
+		_completed_steps[int(k)] = true
+	_step_wait_timers.clear()
+	var wt_dict: Dictionary = state.get("step_wait_timers", {})
+	for k in wt_dict:
+		_step_wait_timers[int(k)] = float(wt_dict[k])
+	_flags.clear()
+	var f_dict: Dictionary = state.get("flags", {})
+	for k in f_dict:
+		_flags[String(k)] = bool(f_dict[k])
+	# Legacy rebuild: if active/completed weren't in the save but
+	# `current_step` was, treat steps [0 .. current_step-1] as
+	# completed and `current_step` as active.
+	if _active_steps.is_empty() and _script_running and _current_step >= 0 \
+			and _current_step < _script_steps.size():
+		for i in range(_current_step):
+			_completed_steps[i] = true
+		_active_steps[_current_step] = true
 	_mined_counts = _dict_str_to_sname(state.get("mined_counts", {}))
 	_core_counts = _dict_str_to_sname(state.get("core_counts", {}))
 	_produced_counts = _dict_str_to_sname(state.get("produced_counts", {}))
@@ -916,20 +1064,25 @@ func load_runtime_state(state: Dictionary) -> void:
 	# Restore baselines directly (not re-computed)
 	_step_deposited_baselines = _dict_str_to_sname(state.get("deposited_baselines", {}))
 	_step_placed_baselines = _dict_str_to_sname(state.get("placed_baselines", {}))
-	# Replay on_enter actions for current step to restore visual state (draw_box, draw_text, pause, etc.)
-	# Side-effect actions like start_waves/stop_waves must NOT be replayed
-	# here — the WaveManager runtime has already been restored from the
-	# save by this point, and re-running start_waves calls `wm.start()`
-	# which resets _idx, _timer, and _expanded_waves. Same logic for
-	# stop_waves: it'd halt a wave run that the save said was running.
-	if _script_running and _current_step >= 0 and _current_step < _script_steps.size():
-		var step: Dictionary = _script_steps[_current_step]
-		var actions: Array = step.get("actions", [])
-		for action in actions:
-			var atype: String = String(action.get("type", ""))
-			if atype == "start_waves" or atype == "stop_waves":
+	# Replay on_enter actions + markers for every currently-active step
+	# to restore visual state (draw_box, draw_text, pause, etc.). Side-
+	# effect actions like start_waves / stop_waves must NOT be replayed
+	# — WaveManager runtime has already been restored by this point,
+	# and re-running start_waves would clobber its state.
+	if _script_running:
+		for idx in _active_steps.keys():
+			if int(idx) < 0 or int(idx) >= _script_steps.size():
 				continue
-			_execute_action(action)
+			var step: Dictionary = _script_steps[int(idx)]
+			var actions: Array = step.get("actions", [])
+			for action in actions:
+				var atype: String = String(action.get("type", ""))
+				if atype == "start_waves" or atype == "stop_waves":
+					continue
+				_execute_action(action)
+			# Markers attached to the step replay too — they're
+			# considered visual state, not side effects.
+			_spawn_step_markers(int(idx))
 	# Invalidate rendering caches for hidden tiles
 	_invalidate_caches()
 	print("SectorScript: Restored runtime state at step %d, running=%s" % [_current_step, _script_running])
@@ -959,12 +1112,14 @@ func _rescue_wave_manager_after_load() -> void:
 		return
 	# Sectors that haven't reached the start_waves step yet should keep
 	# waves dormant — only retroactively start once we're past it.
+	# DAG-aware: walk every COMPLETED step rather than a linear prefix
+	# so a converted DAG with branching still finds the trigger.
 	var trigger_passed := false
 	var stop_after_trigger := false
-	var upper: int = _current_step
-	if upper > _script_steps.size():
-		upper = _script_steps.size()
-	for i in range(0, upper):
+	for idx in _completed_steps.keys():
+		var i: int = int(idx)
+		if i < 0 or i >= _script_steps.size():
+			continue
 		var step: Dictionary = _script_steps[i]
 		for action in step.get("actions", []):
 			match String(action.get("type", "")):
@@ -998,15 +1153,25 @@ static func _dict_str_to_sname(d: Dictionary) -> Dictionary:
 ## Each dict: {"text": String, "current": int, "target": int, "done": bool}
 ## Returns empty array if no script is running or step has no trackable conditions.
 func get_current_objectives() -> Array:
-	if not _script_running or _current_step < 0 or _current_step >= _script_steps.size():
+	if not _script_running:
 		return []
-	var step: Dictionary = _script_steps[_current_step]
-	var conditions: Array = _get_step_conditions(step)
 	var objectives: Array = []
-	for cond in conditions:
-		var obj: Dictionary = _get_objective_for_condition(cond)
-		if not obj.is_empty():
-			objectives.append(obj)
+	# Gather objectives from every active step (DAG-aware). When the
+	# script is fully linear there's at most one active step, so this
+	# stays equivalent to the old behaviour. With a DAG it surfaces
+	# every parallel sub-goal the player is currently chasing.
+	var indices: Array = _active_steps.keys()
+	indices.sort()  # stable rendering order
+	for k in indices:
+		var idx: int = int(k)
+		if idx < 0 or idx >= _script_steps.size():
+			continue
+		var step: Dictionary = _script_steps[idx]
+		var conditions: Array = _get_step_conditions(step)
+		for cond in conditions:
+			var obj: Dictionary = _get_objective_for_condition(cond)
+			if not obj.is_empty():
+				objectives.append(obj)
 	return objectives
 
 
@@ -1122,12 +1287,16 @@ func _enter_step(idx: int) -> void:
 
 	# Set up per-condition state
 	var conditions: Array = _get_step_conditions(step)
-	_step_deposited_baselines.clear()
-	_step_placed_baselines.clear()
+	# `deposited` / `placed` baselines are global (item_id keyed) because
+	# multiple parallel steps requesting the same item should each see
+	# their own delta. We snapshot per-step into _step_deposited_baselines
+	# keyed by (step_idx, item_id) string to avoid clobbering.
 	for cond in conditions:
 		match cond.get("type", ""):
 			"wait":
-				_step_wait_timer = float(cond.get("seconds", 3.0))
+				_step_wait_timers[idx] = float(cond.get("seconds", 3.0))
+				if idx == _current_step:
+					_step_wait_timer = _step_wait_timers[idx]
 			"deposited":
 				# Snapshot current inventory so we measure relative increase
 				var item_id := StringName(cond.get("item_id", ""))
@@ -1136,6 +1305,11 @@ func _enter_step(idx: int) -> void:
 				# Snapshot current placed count so we measure relative increase
 				var block_id := StringName(cond.get("block_id", ""))
 				_step_placed_baselines[block_id] = _placed_counts.get(block_id, 0)
+
+	# Spawn declarative markers attached to this step. IDs are derived
+	# from the step index + marker index so `_exit_step` can find and
+	# remove them without the author having to maintain matched pairs.
+	_spawn_step_markers(idx)
 
 	print("SectorScript: Entered step %d: %s" % [idx, step.get("name", "?")])
 
@@ -1146,12 +1320,212 @@ func _exit_step(idx: int) -> void:
 	var exit_actions: Array = step.get("on_exit", [])
 	for action in exit_actions:
 		_execute_action(action)
+	# Tear down anything this step spawned via its `markers` array.
+	_despawn_step_markers(idx)
+
+
+# =========================
+# DAG MACHINERY
+# =========================
+
+## Returns the list of dependency step indices for a step, with
+## linear-script back-compat: a step missing `dependencies` is treated
+## as depending on step (idx-1). Step 0 has no implicit dep.
+func _step_dependencies(idx: int) -> Array:
+	var step: Dictionary = _script_steps[idx]
+	if step.has("dependencies"):
+		var raw: Array = step["dependencies"]
+		# Normalize to ints.
+		var out: Array = []
+		for d in raw:
+			out.append(int(d))
+		return out
+	# Implicit linear chain.
+	if idx == 0:
+		return []
+	return [idx - 1]
+
+
+## Returns the flags-required gate for a step, normalized to Array[String].
+func _step_flags_required(idx: int) -> Array:
+	var step: Dictionary = _script_steps[idx]
+	var raw: Array = step.get("flags_required", [])
+	var out: Array = []
+	for f in raw:
+		out.append(String(f))
+	return out
+
+
+## Returns the flags this step sets on completion (in addition to any
+## `set_flag` actions in its action list).
+func _step_flags_set(idx: int) -> Array:
+	var step: Dictionary = _script_steps[idx]
+	var raw: Array = step.get("flags_set", [])
+	var out: Array = []
+	for f in raw:
+		out.append(String(f))
+	return out
+
+
+## True when all deps are complete AND all flags_required are set.
+func _step_eligible(idx: int) -> bool:
+	if _completed_steps.has(idx):
+		return false
+	if _active_steps.has(idx):
+		return false
+	for dep in _step_dependencies(idx):
+		if not _completed_steps.has(int(dep)):
+			return false
+	for fname in _step_flags_required(idx):
+		if not bool(_flags.get(String(fname), false)):
+			return false
+	return true
+
+
+## Scan every step; activate any newly-eligible ones. Called on
+## `start_script` and after each step completion.
+func _activate_eligible_steps() -> void:
+	for i in range(_script_steps.size()):
+		if _step_eligible(i):
+			_active_steps[i] = true
+			_enter_step(i)
+
+
+## Mark a step complete, fire its exit actions, and set its `flags_set`.
+func _complete_step(idx: int) -> void:
+	_exit_step(idx)
+	_active_steps.erase(idx)
+	_completed_steps[idx] = true
+	for fname in _step_flags_set(idx):
+		_flags[String(fname)] = true
+	print("SectorScript: Completed step %d" % idx)
+
+
+## Re-derive the legacy `_current_step` pointer from the active set.
+## Picks the highest-index active step so HUD code that reads it gets
+## a stable "most recent" answer. Falls back to -1 when nothing is active.
+func _recompute_current_step() -> void:
+	var hi: int = -1
+	for k in _active_steps.keys():
+		if int(k) > hi:
+			hi = int(k)
+	_current_step = hi
+	if hi >= 0:
+		_step_wait_timer = float(_step_wait_timers.get(hi, 0.0))
+	else:
+		_step_wait_timer = 0.0
+
+
+# =========================
+# MARKERS
+# =========================
+
+## Spawn every marker declared on this step's `markers` array. Each
+## marker becomes a draw_box / draw_text / etc with an auto-generated
+## ID so cleanup at exit is automatic.
+##
+## Supported marker types:
+##   {type: "box", from: "x,y", to: "x,y", color: "yellow"}
+##   {type: "text", from: "x,y", to: "x,y", text: "..."}
+##
+## Markers are additive sugar over the existing draw_box/draw_text
+## actions — old scripts using explicit draw/remove actions still work.
+func _spawn_step_markers(idx: int) -> void:
+	var step: Dictionary = _script_steps[idx]
+	var markers: Array = step.get("markers", [])
+	for i in range(markers.size()):
+		var m: Dictionary = markers[i]
+		var mtype: String = String(m.get("type", ""))
+		var mid: String = _marker_id(idx, i)
+		match mtype:
+			"box":
+				var from_pos: Vector2i = _parse_vec2i_arg(m.get("from", "0,0"))
+				var to_pos: Vector2i = _parse_vec2i_arg(m.get("to", "0,0"))
+				var color_name: String = String(m.get("color", "yellow"))
+				var color: Color = NAMED_COLORS.get(color_name, Color.YELLOW)
+				draw_box(mid, from_pos, to_pos, color)
+			"text":
+				var from_pos: Vector2i = _parse_vec2i_arg(m.get("from", "0,0"))
+				var to_pos: Vector2i = _parse_vec2i_arg(m.get("to", "0,0"))
+				var text: String = String(m.get("text", ""))
+				draw_text_overlay(mid, from_pos, to_pos, text)
+
+
+## Tear down every marker that `_spawn_step_markers(idx)` may have
+## created. Safe to call even when the step has no markers — the
+## helpers no-op on missing IDs.
+func _despawn_step_markers(idx: int) -> void:
+	var step: Dictionary = _script_steps[idx]
+	var markers: Array = step.get("markers", [])
+	for i in range(markers.size()):
+		var m: Dictionary = markers[i]
+		var mtype: String = String(m.get("type", ""))
+		var mid: String = _marker_id(idx, i)
+		match mtype:
+			"box":
+				remove_box(mid)
+			"text":
+				remove_text_overlay(mid)
+
+
+## Stable per-step marker id. Tags the step + ordinal so two steps
+## using identical marker definitions don't collide.
+func _marker_id(step_idx: int, marker_idx: int) -> String:
+	return "step_%d_marker_%d" % [step_idx, marker_idx]
+
+
+## Returns (cached) the list of step indices that directly depend on
+## `step_idx`. Cache is invalidated whenever `load_script_steps` swaps
+## the steps array.
+func _get_dependents(step_idx: int) -> Array:
+	if _dependents_cache.has(step_idx):
+		return _dependents_cache[step_idx]
+	var out: Array = []
+	for i in range(_script_steps.size()):
+		if i == step_idx:
+			continue
+		for dep in _step_dependencies(i):
+			if int(dep) == step_idx:
+				out.append(i)
+				break
+	_dependents_cache[step_idx] = out
+	return out
+
+
+## True when every transitive dependent of `step_idx` is in the
+## completed set. Used by the `descendants_done` condition so a
+## marker-bearing step keeps its markers alive until the downstream
+## chain finishes.
+func _all_descendants_completed(step_idx: int) -> bool:
+	var queue: Array = _get_dependents(step_idx).duplicate()
+	var seen: Dictionary = {}
+	while not queue.is_empty():
+		var n: int = int(queue.pop_back())
+		if seen.has(n):
+			continue
+		seen[n] = true
+		if not _completed_steps.has(n):
+			return false
+		for d in _get_dependents(n):
+			if not seen.has(int(d)):
+				queue.append(int(d))
+	return true
 
 
 ## Execute a single action dictionary.
 func _execute_action(action: Dictionary) -> void:
 	var action_type: String = action.get("type", "")
 	match action_type:
+		"set_flag":
+			# Set a named flag. Steps gated on `flags_required` containing
+			# this name will become eligible once their other deps clear.
+			var fname: String = String(action.get("name", ""))
+			if fname != "":
+				_flags[fname] = bool(action.get("value", true))
+		"clear_flag":
+			var fname: String = String(action.get("name", ""))
+			if fname != "":
+				_flags.erase(fname)
 		"pause":
 			pause_world()
 		"unpause":

@@ -24,6 +24,9 @@ var unit_size: float
 var health: float
 var path: PackedVector2Array = PackedVector2Array()
 var path_index := 0
+# Cell currently held in `unit_manager._water_platform_reservation`, so
+# we can release it the moment we step off / die / get repathed.
+var _reserved_platform_cell: Vector2i = Vector2i(-32768, -32768)
 var attack_timer := 0.0
 var target_building: Variant = null
 var is_dead := false
@@ -63,6 +66,14 @@ var hold_fire: bool = false
 ## the unit has been ingested. The player can re-toggle it off before
 ## ingestion to abort.
 var enter_payload_when_able: bool = false
+## When the player right-clicks a payload-accepting block (typically a
+## deconstructor) with `enter_payload_when_able` enabled, this anchor
+## is latched so the unit will path adjacent to that specific block
+## and hand itself off as soon as it's touching the footprint — even
+## if the unit is too large to physically stand on the block. Cleared
+## on successful ingestion, on death, on a new move/attack order, or
+## when the building disappears.
+var payload_target_anchor: Vector2i = Vector2i(-9999, -9999)
 ## Toggle: while true, the unit pulls from main.work_order — paths to
 ## the nearest in-flight build plan and stays in range so the build
 ## tick can keep progressing. Only meaningful for units whose data.id
@@ -81,6 +92,23 @@ var mined_inventory_cap: int = 30
 var _mine_timer: float = 0.0
 var _mine_target_cell: Vector2i = Vector2i(-9999, -9999)
 var _mine_deliver_cell: Vector2i = Vector2i(-9999, -9999)
+
+# --- BOTTLENECK YIELD / OSCILLATION BREAK ---
+# Set by `_compute_separation_force` when this unit loses a same-direction
+# overlap race against another unit closer to the shared goal. While > 0
+# the unit skips its movement step entirely (path stays, just doesn't
+# advance), letting the leader clear the chokepoint.
+var _yield_timer: float = 0.0
+# Counts same-direction overlap events in a sliding window so a unit that
+# keeps losing the yield contest can escalate to a hard wait + repath.
+var _pushback_count: int = 0
+var _pushback_window: float = 0.0   # seconds remaining in the count's window
+const _PUSHBACK_WINDOW_SEC := 1.5
+const _PUSHBACK_HARD_THRESH := 6     # events in window before hard-yield kicks in
+const _PUSHBACK_HARD_YIELD := 2.0    # seconds to freeze + repath
+# Set true after a hard-yield fires so the next `_process` tick requests
+# a fresh path (we can't call into UnitManager from the separator pass).
+var _needs_hard_repath: bool = false
 
 # --- RUNTIME TEAM ---
 # Set by UnitManager at spawn time (overrides team which defaults to PLAYER in .tres)
@@ -167,29 +195,6 @@ func _combat_sys_ref() -> Node:
 	return _combat_sys
 
 
-## Returns true when the building at `grid_pos` belongs to the same
-## faction as this unit's team — i.e. attacking it would be friendly
-## fire. PLAYER units treat LUMINA as own-side; ENEMY units treat FEROX
-## as own-side. DERELICT is considered "no-one's side" so units keep
-## attacking derelict targets when explicitly ordered, but auto-target
-## validators use this check to drop converted targets.
-func _is_same_faction_as_target(grid_pos: Vector2i) -> bool:
-	if main == null or not main.placed_buildings.has(grid_pos):
-		return false
-	var bfaction: int = main.get_building_faction(grid_pos)
-	match team:
-		UnitData.Team.PLAYER:
-			return bfaction == main.Faction.LUMINA
-		UnitData.Team.ENEMY:
-			return bfaction == main.Faction.FEROX
-	return false
-
-
-## True only when `grid_pos` houses a building whose faction is the
-## *opposing* side for this unit. DERELICT is neither side, so it's never
-## a valid attack target — units shouldn't maul abandoned blocks, and a
-## live target that converts to DERELICT (or to our own faction) should
-## drop out of the attack queue immediately.
 func _is_valid_attack_target(grid_pos: Vector2i) -> bool:
 	if main == null or not main.placed_buildings.has(grid_pos):
 		return false
@@ -562,7 +567,18 @@ func _tick_water(delta: float) -> void:
 	if depth <= 0:
 		_water_time = 0.0
 		return
-	# Submerged.
+	# Standing on a platform tile — we're on dry boards, not actually in
+	# the water. Drowning timer pauses and resets.
+	if unit_manager and unit_manager._is_platform_cell(grid_pos):
+		_water_time = 0.0
+		return
+	# Shallow water (depth=1) is the "sand visible through the surface"
+	# tier — wading depth, not enough to drown a ground unit. Treat it
+	# like dry land for the drowning timer.
+	if depth <= 1:
+		_water_time = 0.0
+		return
+	# Submerged in medium/deep water.
 	_water_time += delta
 	if _water_time >= WATER_DROWN_TIME:
 		take_damage(max_health)  # Fatal — drowned.
@@ -736,6 +752,24 @@ func _opportunistic_fire() -> void:
 
 
 func _follow_path(delta: float) -> void:
+	# Bottleneck yield: this unit lost a same-direction overlap race
+	# against another unit closer to the shared goal. Skip the movement
+	# step entirely so the leader can clear the chokepoint. Hard-yield
+	# requests a fresh path on its first tick so the unit re-plans around
+	# the bottleneck instead of just waiting.
+	if _yield_timer > 0.0:
+		_yield_timer = maxf(0.0, _yield_timer - delta)
+		if _needs_hard_repath:
+			_needs_hard_repath = false
+			if unit_manager:
+				unit_manager.request_new_path(self)
+		return
+	# Decay the sliding-window pushback counter so old contests don't
+	# escalate later peaceful traffic into a hard freeze.
+	if _pushback_window > 0.0:
+		_pushback_window = maxf(0.0, _pushback_window - delta)
+		if _pushback_window == 0.0:
+			_pushback_count = 0
 	var target_pos = path[path_index]
 	var direction = (target_pos - position).normalized()
 	var distance = position.distance_to(target_pos)
@@ -770,14 +804,63 @@ func _follow_path(delta: float) -> void:
 		move_target = null
 		return
 
-	# Ground/crawler units in water move at half speed (ignored by hover/flying).
+	# Ground/crawler units in water move at half speed (ignored by hover/
+	# flying). Exemptions:
+	#   - Standing on a platform tile: we're on dry boards, not in the
+	#     water. Full speed.
+	#   - Shallow water (depth=1, sand visible through the surface):
+	#     wading depth; speed unaffected.
 	var speed_mult: float = 1.0
 	if data:
 		var ml_f: int = data.movement_layer
 		if ml_f == UnitData.MovementLayer.GROUND or ml_f == UnitData.MovementLayer.CRAWLER:
 			var terrain_f = _terrain_ref()
-			if terrain_f and terrain_f.get_water_depth_at(main.world_to_grid(position)) > 0:
-				speed_mult = 0.5
+			if terrain_f:
+				var unit_grid: Vector2i = main.world_to_grid(position)
+				var d_f: int = terrain_f.get_water_depth_at(unit_grid)
+				var on_platform: bool = unit_manager != null and unit_manager._is_platform_cell(unit_grid)
+				if d_f > 1 and not on_platform:
+					speed_mult = 0.5
+
+	# Water-platform gate: a ground/crawler unit may only step onto a
+	# water-platform cell that nobody else is currently traversing. We
+	# reserve the next cell we're about to step onto (or our current
+	# cell, if it's already a platform). If the next cell is held by
+	# somebody else, freeze in place this frame instead of marching
+	# onto an occupied plank. Air / hover units skip the check entirely
+	# (they fly over).
+	const _NO_PLATFORM := Vector2i(-32768, -32768)
+	if data and unit_manager:
+		var ml_p: int = data.movement_layer
+		if ml_p == UnitData.MovementLayer.GROUND or ml_p == UnitData.MovementLayer.CRAWLER:
+			var cur_cell: Vector2i = main.world_to_grid(position)
+			var tgt_cell: Vector2i = main.world_to_grid(target_pos)
+			# Decide which cell we WANT to be holding this frame.
+			var desired_cell: Vector2i = _NO_PLATFORM
+			if tgt_cell != cur_cell and unit_manager._is_water_platform_cell(tgt_cell):
+				desired_cell = tgt_cell
+			elif unit_manager._is_water_platform_cell(cur_cell):
+				desired_cell = cur_cell
+			if desired_cell == _NO_PLATFORM:
+				# Out of platform territory entirely — release anything we
+				# might have been holding.
+				if _reserved_platform_cell != _NO_PLATFORM:
+					unit_manager.release_platform(self, _reserved_platform_cell)
+					_reserved_platform_cell = _NO_PLATFORM
+			elif desired_cell == _reserved_platform_cell:
+				# Already holding the cell we want — nothing to do.
+				pass
+			elif unit_manager.try_reserve_platform(self, desired_cell):
+				# Got the new cell. Hand the old one back so the unit
+				# behind us can shuffle forward.
+				if _reserved_platform_cell != _NO_PLATFORM \
+						and _reserved_platform_cell != desired_cell:
+					unit_manager.release_platform(self, _reserved_platform_cell)
+				_reserved_platform_cell = desired_cell
+			elif desired_cell == tgt_cell:
+				# Next plank is occupied — stall. Keep our current
+				# reservation (if any) so we don't lose our footing.
+				return
 	# Stack any active speed modifier from status effects (Wet → 0.7×,
 	# Freezing → 0.2×, etc.). The `boost` field amplifies effects that
 	# have an affinity active alongside them; a 1.0 boost = vanilla.
@@ -817,26 +900,54 @@ func _follow_path(delta: float) -> void:
 		path_index += 1
 	else:
 		var candidate: Vector2 = position + move_dir * step
+		# Pass `team` so hostile unit-blocking shields count as walls
+		# for this unit. Friendly shields (and bullets-only shields)
+		# pass through unchanged.
 		if move_dir == direction or unit_manager == null \
-				or unit_manager.is_world_pos_walkable(candidate, data.movement_layer if data else 0):
-			position = candidate
+				or unit_manager.is_world_pos_walkable(candidate, data.movement_layer if data else 0, team):
+			# Reject the straight-direction step too when it lands
+			# inside a hostile shield, otherwise the unit would just
+			# slide past the boundary along the path tangent.
+			if unit_manager != null \
+					and not unit_manager.is_world_pos_walkable(candidate, data.movement_layer if data else 0, team):
+				# Don't move this frame — let the bottleneck-yield /
+				# repath system catch us and route around.
+				pass
+			else:
+				position = candidate
 		else:
 			# Separation-modified step would land on a wall — fall back
-			# to the unmodified path step. A wall-overlap check will
-			# still rescue us if even that ends up solid.
-			position += direction * step
+			# to the unmodified path step, gated on the same team-
+			# aware walkability so hostile shields still block.
+			var fallback: Vector2 = position + direction * step
+			if unit_manager == null \
+					or unit_manager.is_world_pos_walkable(fallback, data.movement_layer if data else 0, team):
+				position = fallback
 
 
 ## Sums a soft repulsion vector from every same-layer unit within
 ## `unit_size * 2`. Falloff is quadratic so neighbours right on top
 ## push hard while distant ones barely register.
 ##
-## When a neighbour is *overlapping* (within `unit_size`), this also
-## directly shoves the other unit outward — the soft per-frame force
-## alone struggles when the path gradient pulls every member of a
-## clump toward the same destination, so we need an active push to
-## break the symmetry. Each pair only shoves once (lower instance id
-## drives the shove) so the work doesn't double up.
+## When a neighbour is *overlapping* (within `unit_size`), the
+## behaviour splits three ways depending on who's heading where:
+##
+##   • Same-direction race (both moving with parallel intent_dirs):
+##     instead of pushing, the unit FARTHER from the shared goal
+##     yields — sets a short `_yield_timer` so it skips this frame's
+##     movement step. Breaks the oscillation at 1-tile chokepoints
+##     where a radial push just bounces both units back into the line.
+##     Repeated yields escalate to a hard 2-second freeze + repath
+##     so a unit that keeps losing the contest gets pushed onto a
+##     different route.
+##
+##   • Push-through (we're moving, they're roughly in front along our
+##     intent axis): bulldoze them along our travel direction.
+##
+##   • Otherwise: symmetric pair shove. The soft force returned here
+##     is projected onto the path-perpendicular axis (when we have an
+##     intent_dir) so it never fights the path tangent — that was
+##     the source of the "push apart then re-clump" oscillation.
 func _compute_separation_force() -> Vector2:
 	if data == null or unit_manager == null:
 		return Vector2.ZERO
@@ -847,27 +958,27 @@ func _compute_separation_force() -> Vector2:
 	var force: Vector2 = Vector2.ZERO
 	var overlap_thresh: float = unit_size
 	var my_id: int = get_instance_id()
-	# A moving unit's "intent" — direction toward the next path waypoint.
-	# When set, an overlap with someone in front of us bulldozes them
-	# forward along this axis instead of doing the symmetric pair shove,
-	# so a unit can push through a wall of stationary blockers.
+	# Our direction of intent — straight toward the next path waypoint.
 	var intent_dir: Vector2 = Vector2.ZERO
 	if path.size() > 0 and path_index < path.size():
 		var to_wp: Vector2 = path[path_index] - position
 		if to_wp.length_squared() > 0.01:
 			intent_dir = to_wp.normalized()
+	# Distance to our own final goal — used to break ties when two units
+	# in a same-direction race need to decide who yields.
+	var my_goal_dist: float = _goal_distance()
 	var all_units: Array = unit_manager.enemies + unit_manager.player_units
 	for other in all_units:
 		if other == self or not is_instance_valid(other) or other.is_dead:
 			continue
 		if other.data == null or other.data.movement_layer != ml:
 			continue
+		# Don't try to yield to a stationary / controlled / yielding unit —
+		# they aren't competing for our cell.
 		var to_other: Vector2 = other.position - position
 		var d: float = to_other.length()
 		if d > sep_radius:
 			continue
-		# Co-located: pick a random direction so we still get a force
-		# (and the active shove below has something to act on).
 		var dir: Vector2
 		if d < 0.001:
 			var ang: float = randf() * TAU
@@ -880,10 +991,30 @@ func _compute_separation_force() -> Vector2:
 		force -= dir * weight
 		# Active shove on overlap.
 		if d < overlap_thresh:
-			# Push-through: if we're moving and `other` sits between us
-			# and our next waypoint, shove them along our travel direction
-			# without taking a counter-push ourselves. Lets a unit force
-			# its way through a wall of stationary blockers.
+			# ---- (1) YIELD-TO-LEADER ----
+			# Both units moving with roughly parallel intent → break the
+			# oscillation by having the farther-from-goal unit yield
+			# instead of getting pushed sideways.
+			var other_intent: Vector2 = other._intent_dir_for_yield() if other.has_method("_intent_dir_for_yield") else Vector2.ZERO
+			if intent_dir != Vector2.ZERO and other_intent != Vector2.ZERO \
+					and intent_dir.dot(other_intent) > 0.5:
+				var other_goal_dist: float = other._goal_distance() if other.has_method("_goal_distance") else 0.0
+				if my_goal_dist > other_goal_dist:
+					# We're trailing → yield to the leader.
+					_register_pushback()
+					# Skip the symmetric shove this frame; the soft force
+					# stays in `force` so we still drift sideways slightly
+					# (projected to path-perpendicular below).
+					continue
+				elif my_goal_dist < other_goal_dist:
+					# We're the leader → make THEM yield. Mirror what we'd
+					# do to ourselves in the trailing branch.
+					if other.has_method("_register_pushback"):
+						other._register_pushback()
+					continue
+				# Exact tie — fall through to the push-through / symmetric
+				# branches so SOMEONE moves; otherwise both freeze.
+			# ---- Push-through ----
 			if intent_dir != Vector2.ZERO and dir.dot(intent_dir) > 0.3:
 				var shove_amt: float = overlap_thresh - d
 				var other_target: Vector2 = other.position + intent_dir * shove_amt
@@ -892,8 +1023,7 @@ func _compute_separation_force() -> Vector2:
 						and other.unit_manager.is_world_pos_walkable(other_target, other_ml):
 					other.position = other_target
 				continue
-			# Otherwise fall through to the symmetric pair shove. Lower
-			# instance id drives both halves so the work doesn't double.
+			# ---- Symmetric pair shove ----
 			if my_id < other.get_instance_id():
 				var shove_amt: float = (overlap_thresh - d) * 0.5
 				var other_target: Vector2 = other.position + dir * shove_amt
@@ -904,7 +1034,76 @@ func _compute_separation_force() -> Vector2:
 				var my_target: Vector2 = position - dir * shove_amt
 				if unit_manager.is_world_pos_walkable(my_target, ml):
 					position = my_target
+	# ---- (2) PATH-TANGENT SEPARATION ----
+	# Project the soft repulsion onto the path-perpendicular axis so
+	# separation never fights forward progress. Without this, every
+	# push along the path direction gets immediately undone by the
+	# pathfinder pulling the unit back onto the optimal line — and
+	# adjacent units oscillate forever between push and re-pull.
+	if intent_dir != Vector2.ZERO and force.length_squared() > 0.0001:
+		var parallel: float = force.dot(intent_dir)
+		# Discard the parallel component entirely; keep only perpendicular.
+		force -= intent_dir * parallel
 	return force
+
+
+## Distance from this unit to its effective "goal" — used to decide who
+## yields at a same-direction bottleneck. Order of preference:
+##   1. Length of remaining path (sum of segments) when path-following.
+##   2. Distance to move_target when it's a Vector2.
+##   3. Distance to manual or auto target_building / target_unit.
+##   4. 0.0 (no goal known → never yield).
+func _goal_distance() -> float:
+	if path.size() > 0 and path_index < path.size():
+		var total: float = position.distance_to(path[path_index])
+		for i in range(path_index + 1, path.size()):
+			total += path[i - 1].distance_to(path[i])
+		return total
+	if move_target != null and move_target is Vector2:
+		return position.distance_to(move_target)
+	if target_unit != null and is_instance_valid(target_unit):
+		return position.distance_to(target_unit.position)
+	if target_building != null and main != null \
+			and main.placed_buildings.has(target_building):
+		var bw: Vector2 = main.grid_to_world(target_building) \
+			+ Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		return position.distance_to(bw)
+	return 0.0
+
+
+## Public read of the intent direction this unit is using right now —
+## same source as the local `intent_dir` in `_compute_separation_force`.
+## Pulled into a method so peers can ask without recomputing.
+func _intent_dir_for_yield() -> Vector2:
+	if path.size() > 0 and path_index < path.size():
+		var to_wp: Vector2 = path[path_index] - position
+		if to_wp.length_squared() > 0.01:
+			return to_wp.normalized()
+	return Vector2.ZERO
+
+
+## Records that we lost a same-direction overlap race this frame. Sets
+## a short yield_timer (skipping the next movement step) and counts the
+## event for the escalation window. When too many events land inside
+## the window, escalates to a hard 2-second freeze + path replan so the
+## unit gets a chance to route around the bottleneck.
+func _register_pushback() -> void:
+	# Short soft yield — one frame of skipped movement is usually enough
+	# for the leader to clear the cell.
+	if _yield_timer < 0.12:
+		_yield_timer = 0.12
+	if _pushback_window <= 0.0:
+		_pushback_count = 0
+	_pushback_window = _PUSHBACK_WINDOW_SEC
+	_pushback_count += 1
+	if _pushback_count >= _PUSHBACK_HARD_THRESH:
+		# Hard escalation: freeze for 2 s and replan from current
+		# position. Reset the counter so we don't immediately escalate
+		# again on the very next overlap after the wait ends.
+		_yield_timer = _PUSHBACK_HARD_YIELD
+		_needs_hard_repath = true
+		_pushback_count = 0
+		_pushback_window = 0.0
 
 
 func _try_attack(delta: float) -> void:
@@ -1388,12 +1587,48 @@ func _check_wall_overlap(delta: float) -> void:
 	if unit_manager.is_world_pos_walkable(position, data.movement_layer):
 		return
 	# Unit ended up on a wall / void / building cell that its movement
-	# layer can't legally occupy. Kill it outright — the previous spiral-
-	# outward rescue could mask underlying bugs (units phasing through
-	# walls, spawning on void) and let stuck units cheat infinite attack
-	# range from inside terrain. A clean kill makes the "how did this
-	# happen" question loud and obvious.
-	take_damage(max_health + 1.0)
+	# layer can't legally occupy — usually because they nicked the
+	# corner of a newly-placed block while moving past it, NOT because
+	# something malicious happened. Outright killing every unit in that
+	# situation made grazing a building catastrophic, so instead we
+	# spiral outward looking for the nearest legal cell and teleport
+	# the unit there. Only fall back to the kill if literally no
+	# walkable spot exists within ~8 tiles (the unit is sealed inside
+	# a wall — at that point there really is no rescue and the safest
+	# thing is to remove it before it cheats from inside terrain).
+	var ml_w: int = data.movement_layer
+	var rescue: Vector2 = _find_nearest_walkable(position, ml_w)
+	if rescue == Vector2.INF:
+		take_damage(max_health + 1.0)
+		return
+	position = rescue
+	# Path from before the rescue points away from where we are now —
+	# kick a repath so the unit doesn't immediately walk back into the
+	# same wall corner. Suppressed under manual control (player owns
+	# the path).
+	if not _skip_repath_on_unstick:
+		_request_repath()
+
+
+## Spirals out from `from` looking for the nearest cell that's walkable
+## for movement layer `ml`. Returns Vector2.INF if nothing legal is
+## found within `_RESCUE_MAX_TILES` rings. Used by the wall-overlap
+## rescue path so a unit clipping the corner of a block teleports off
+## instead of exploding.
+const _RESCUE_MAX_TILES := 8
+const _RESCUE_ANGLE_STEPS := 12
+func _find_nearest_walkable(from: Vector2, ml: int) -> Vector2:
+	if unit_manager == null:
+		return Vector2.INF
+	var gs: float = float(main.GRID_SIZE)
+	for r in range(1, _RESCUE_MAX_TILES + 1):
+		var step: float = float(r) * gs * 0.75
+		for i in range(_RESCUE_ANGLE_STEPS):
+			var ang: float = float(i) * TAU / float(_RESCUE_ANGLE_STEPS)
+			var c: Vector2 = from + Vector2(cos(ang), sin(ang)) * step
+			if unit_manager.is_world_pos_walkable(c, ml):
+				return c
+	return Vector2.INF
 
 
 func _disperse_from_nearby_units() -> void:
@@ -1477,6 +1712,11 @@ func take_damage(amount: float) -> void:
 
 
 func _on_death() -> void:
+	# Free up any water-platform reservation so the next unit in line
+	# doesn't stall forever waiting on a corpse.
+	if unit_manager and _reserved_platform_cell != Vector2i(-32768, -32768):
+		unit_manager.release_platform(self, _reserved_platform_cell)
+		_reserved_platform_cell = Vector2i(-32768, -32768)
 	# Drop items based on .tres data
 	if data and data.drops.size() > 0 and randf() <= data.drop_chance:
 		for item_id in data.drops:
@@ -1556,8 +1796,24 @@ func _payload_block_at(cell: Vector2i) -> Vector2i:
 ## Returns true when the unit was successfully consumed by a payload
 ## block (it's been queue_freed and should not tick further).
 func _try_enter_payload_block() -> bool:
+	var anchor: Vector2i = Vector2i(-9999, -9999)
+	# 1. Standing directly on a payload block? (Original behaviour — most
+	#    units small enough to step onto a deconstructor go through here.)
 	var ug: Vector2i = main.world_to_grid(position)
-	var anchor: Vector2i = _payload_block_at(ug)
+	anchor = _payload_block_at(ug)
+	# 2. Otherwise, if we've been directed at a specific payload block
+	#    via right-click and we're now touching its footprint, hand off
+	#    from the adjacent tile. This is what lets large units that
+	#    can't physically stand on a 1×1 deconstructor still feed
+	#    themselves into it.
+	if anchor == Vector2i(-9999, -9999) and payload_target_anchor != Vector2i(-9999, -9999):
+		if _is_touching_payload_target():
+			anchor = payload_target_anchor
+		else:
+			# Building destroyed or replaced? Drop the latch.
+			if not main.placed_buildings.has(payload_target_anchor):
+				payload_target_anchor = Vector2i(-9999, -9999)
+			return false
 	if anchor == Vector2i(-9999, -9999):
 		return false
 	var bs = main.get_node_or_null("BuildingSystem")
@@ -1586,6 +1842,26 @@ func _try_enter_payload_block() -> bool:
 		queue_free()
 		return true
 	return false
+
+
+## True when the unit is on a tile bordering (Chebyshev distance ≤ 1)
+## any cell of `payload_target_anchor`'s footprint — close enough to
+## reach across and feed itself in as a payload.
+func _is_touching_payload_target() -> bool:
+	if payload_target_anchor == Vector2i(-9999, -9999):
+		return false
+	if not main.placed_buildings.has(payload_target_anchor):
+		return false
+	var bdata = Registry.get_block(main.placed_buildings[payload_target_anchor])
+	if bdata == null:
+		return false
+	var ug: Vector2i = main.world_to_grid(position)
+	# Footprint bounds — accept any cell within 1 tile of the rectangle.
+	var x0: int = payload_target_anchor.x - 1
+	var y0: int = payload_target_anchor.y - 1
+	var x1: int = payload_target_anchor.x + bdata.grid_size.x
+	var y1: int = payload_target_anchor.y + bdata.grid_size.y
+	return ug.x >= x0 and ug.x <= x1 and ug.y >= y0 and ug.y <= y1
 
 
 # --- MINING ---
@@ -1753,7 +2029,6 @@ func _tick_assist_build(delta: float) -> bool:
 
 
 # --- DRAWING ---
-var _flash_until: float = 0.0  # Set by FeedbackSystem.kick_unit_flash()
 
 
 func _draw() -> void:

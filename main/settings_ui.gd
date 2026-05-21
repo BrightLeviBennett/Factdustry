@@ -319,16 +319,6 @@ func _build_graphics_tab() -> void:
 				building_sys.belt_scroll_enabled = bool(v)
 	)
 
-func _get_window_mode_index() -> int:
-	match DisplayServer.window_get_mode():
-		DisplayServer.WINDOW_MODE_FULLSCREEN: return 1
-		DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN: return 2
-		_: return 0
-
-
-# =========================
-# SOUND TAB
-# =========================
 
 func _build_sound_tab() -> void:
 	_add_section("Volume")
@@ -345,11 +335,6 @@ func _build_sound_tab() -> void:
 		_set_bus_volume("SFX", v)
 	)
 
-func _get_bus_volume(bus_name: String) -> float:
-	var idx = AudioServer.get_bus_index(bus_name)
-	if idx < 0:
-		return 1.0
-	return db_to_linear(AudioServer.get_bus_volume_db(idx))
 
 func _set_bus_volume(bus_name: String, linear: float) -> void:
 	var idx = AudioServer.get_bus_index(bus_name)
@@ -771,9 +756,9 @@ func _build_developer_tab() -> void:
 				TechTree.nodes[aid]["amount_spent"] = {}
 				TechTree.node_state_changed.emit(aid, TechTree.get_state(aid))
 		# Clear in-world decoder progress so the player has to decode again.
-		var building_sys = get_node_or_null("/root/Main/BuildingSystem")
-		if building_sys and "archive_decoder_state" in building_sys:
-			building_sys.archive_decoder_state.clear()
+		var ad_sys_reset = get_node_or_null("/root/Main/ArchiveDecoderSystem")
+		if ad_sys_reset and "states" in ad_sys_reset:
+			ad_sys_reset.states.clear()
 		# Refresh any open UI that depends on archive state.
 		for nid in TechTree.nodes:
 			TechTree.node_state_changed.emit(nid, TechTree.get_state(nid))

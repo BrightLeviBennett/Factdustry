@@ -171,22 +171,3 @@ func get_trail_color() -> Color:
 	if trail_color == Color.BLACK:
 		return projectile_color
 	return trail_color
-
-
-## Returns the effective reload time given a turret's base attack_speed.
-func get_effective_reload(base_reload: float) -> float:
-	return base_reload * reload_multiplier
-
-
-## Returns the effective range given a turret's base attack_range.
-func get_effective_range(base_range: float) -> float:
-	return base_range + range_bonus
-
-
-## Returns the damage dealt to a target, factoring in the building/unit multipliers.
-func get_damage_vs_building() -> float:
-	return damage * building_damage_mult
-
-
-func get_damage_vs_unit() -> float:
-	return damage * unit_damage_mult

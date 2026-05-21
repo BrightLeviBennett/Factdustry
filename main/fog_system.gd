@@ -467,16 +467,8 @@ func _rebuild_fog_mesh() -> void:
 
 # ----- Public API -----
 
-func is_visible_cell(cell: Vector2i) -> bool:
-	if _grid_w <= 0 or cell.x < 0 or cell.y < 0 or cell.x >= _grid_w or cell.y >= _grid_h:
-		return false
-	return _visible[cell.y * _grid_w + cell.x] > 0.0
 
 
-func is_explored_cell(cell: Vector2i) -> bool:
-	if _grid_w <= 0 or cell.x < 0 or cell.y < 0 or cell.x >= _grid_w or cell.y >= _grid_h:
-		return false
-	return _explored_bytes[cell.y * _grid_w + cell.x] != 0
 
 
 ## Reveal a region permanently. Used by SaveManager on sector load and

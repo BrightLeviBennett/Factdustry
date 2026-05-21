@@ -1,16 +1,21 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cndcxkex63323"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://egt11h1wujrw" path="res://textures/blocks/assist/MendingField.png" id="1_mvgdh"]
 
 [resource]
 script = ExtResource("1")
 id = &"mending_field"
 display_name = "Mending Field"
 description = "Largest repair field. Heals everything in a huge radius."
+icon = ExtResource("1_mvgdh")
 category = 7
-color = Color(0.1, 0.7, 0.2, 1)
-max_health = 630.0
-build_cost = { "copper": 700, "silicon": 400 }
-build_time = 6.0
-power_consumption = 8.0
 tags = PackedStringArray("support")
+color = Color(0.1, 0.7, 0.2, 1)
+top_sprite = ExtResource("1_mvgdh")
+max_health = 630.0
+build_cost = {
+"copper": 700,
+"silicon": 400
+}
+build_time = 6.0

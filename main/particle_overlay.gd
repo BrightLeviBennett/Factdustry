@@ -93,7 +93,7 @@ const _BURST_PROFILES := {
 
 # --- Ruin decals ---
 # Each entry: { "pos": Vector2, "size": Vector2, "tex": Texture2D,
-#               "born": float (seconds), "lifetime": float }
+#               "age": float (seconds), "lifetime": float }
 var _ruins: Array = []
 const _UNIT_RUIN_LIFETIME: float = 4.0
 const _BLOCK_RUIN_LIFETIME: float = 6.0
@@ -118,8 +118,9 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# Ruin decals tick independent of `main` / `building_sys` so they
 	# keep ticking even if some sub-system is missing. Pruning + redraw
-	# both happen inside `_process_ruins`.
-	_process_ruins()
+	# both happen inside `_process_ruins`. The delta is passed through so
+	# ruin ages pause with `main.world_paused`.
+	_process_ruins(_delta)
 	if main == null or building_sys == null:
 		return
 	# Pass 1 — for every placed anchor, ensure an emitter exists if the
@@ -267,7 +268,7 @@ func spawn_unit_ruins(world_pos: Vector2, visual_size: float = 16.0) -> void:
 		"pos": world_pos,
 		"size": Vector2(w, w),
 		"tex": _unit_ruin_tex,
-		"born": Time.get_ticks_msec() / 1000.0,
+		"age": 0.0,
 		"lifetime": _UNIT_RUIN_LIFETIME,
 	})
 
@@ -287,7 +288,7 @@ func spawn_block_ruins(anchor: Vector2i, grid_size: Vector2i) -> void:
 		"pos": top_left + size_px * 0.5,
 		"size": size_px,
 		"tex": _block_ruin_tex,
-		"born": Time.get_ticks_msec() / 1000.0,
+		"age": 0.0,
 		"lifetime": _BLOCK_RUIN_LIFETIME,
 	})
 
@@ -296,14 +297,24 @@ func spawn_block_ruins(anchor: Vector2i, grid_size: Vector2i) -> void:
 # Ruins draw via the overlay's own _draw, on its z 51 canvas. They sit
 # above terrain but below buildings and units, so a freshly-destroyed
 # block leaves a flat smear that the player can walk over.
-func _process_ruins() -> void:
+#
+# Ages are accumulated in `_process_ruins(delta)` rather than derived
+# from a wallclock — that way the fade freezes the moment
+# `main.world_paused` flips on, matching the rest of the world. (Wall-
+# clock would keep ticking through the pause and the ruin would jump
+# straight to its fade-out tail when unpaused.)
+func _process_ruins(delta: float) -> void:
 	if _ruins.is_empty():
 		return
-	var now: float = Time.get_ticks_msec() / 1000.0
+	# Custom pause flag — don't advance age while the world is frozen.
+	if main and "world_paused" in main and main.world_paused:
+		queue_redraw()
+		return
 	var i: int = _ruins.size() - 1
 	while i >= 0:
 		var entry: Dictionary = _ruins[i]
-		if now - float(entry["born"]) >= float(entry["lifetime"]):
+		entry["age"] = float(entry.get("age", 0.0)) + delta
+		if entry["age"] >= float(entry["lifetime"]):
 			_ruins.remove_at(i)
 		i -= 1
 	queue_redraw()
@@ -312,10 +323,9 @@ func _process_ruins() -> void:
 func _draw() -> void:
 	if _ruins.is_empty():
 		return
-	var now: float = Time.get_ticks_msec() / 1000.0
 	for entry in _ruins:
 		var lifetime: float = float(entry["lifetime"])
-		var age: float = now - float(entry["born"])
+		var age: float = float(entry.get("age", 0.0))
 		var t: float = clampf(age / lifetime, 0.0, 1.0)
 		# Hold full opacity for ~30 % of the lifetime, then fade linearly
 		# to 0. Reads as "this is debris that's slowly getting kicked

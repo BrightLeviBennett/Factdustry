@@ -31,4 +31,10 @@ func _draw() -> void:
 	# being clipped by it at the building_system's default z.
 	if building_sys.has_method("_draw_active_work_diamonds"):
 		building_sys._draw_active_work_diamonds()
+	# In-progress turret head preview + dim wash over unbuilt /
+	# deconstructed portions also render up here so they sit above
+	# units (z 4095) and live turret heads instead of being clipped
+	# by them at the BuildingSystem's default z (50).
+	if building_sys.has_method("_draw_active_build_overlays_high_z"):
+		building_sys._draw_active_build_overlays_high_z()
 	building_sys._crane_draw_canvas = null

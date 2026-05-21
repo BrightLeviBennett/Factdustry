@@ -1068,7 +1068,7 @@ func _capture_transform_region() -> void:
 	var max_pos := _transform_rect_max()
 
 	# Track which multi-tile origins we've already captured
-	var captured_multi_origins := {}
+	var _captured_multi_origins := {}
 
 	for x in range(min_pos.x, max_pos.x + 1):
 		for y in range(min_pos.y, max_pos.y + 1):

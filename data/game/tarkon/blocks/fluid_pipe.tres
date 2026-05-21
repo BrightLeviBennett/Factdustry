@@ -1,12 +1,12 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dqthqgsfeniw"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://b46ht66inla1j" path="res://textures/blocks/fluid transportation/FluidConduit.png" id="1_phwqv"]
+[ext_resource type="Texture2D" uid="uid://b46ht66inla1j" path="res://textures/blocks/fluid transportation/pipe/Pipe.png" id="1_phwqv"]
 
 [resource]
 script = ExtResource("1")
-id = &"fluid_conduit"
-display_name = "Fluid Conduit"
+id = &"fluid_pipe"
+display_name = "Fluid Pipe"
 description = "Basic pipe for transporting liquids and gases."
 icon = ExtResource("1_phwqv")
 category = 9

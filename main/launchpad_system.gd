@@ -423,11 +423,6 @@ func _anchor_to_key(a: Vector2i) -> String:
 	return "%d,%d" % [a.x, a.y]
 
 
-func _key_to_anchor(k: String) -> Vector2i:
-	var parts: PackedStringArray = String(k).split(",")
-	if parts.size() != 2:
-		return Vector2i.ZERO
-	return Vector2i(int(parts[0]), int(parts[1]))
 
 
 func _ids_to_strings(arr: Array) -> Array:

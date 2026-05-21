@@ -1,9 +1,9 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://k56o1hb3us5e"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cbacyyyjmoa4" path="res://textures/blocks/units/HoverFabricator/HoverFabricatorComplete.png" id="2"]
-[ext_resource type="Texture2D" uid="uid://2qaygrvdoa8d" path="res://textures/blocks/units/HoverFabricator/HoverFabricatorBase.png" id="3"]
-[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4"]
+[ext_resource type="Texture2D" uid="uid://4cikq8fsolkf" path="res://textures/blocks/units/HoverFabricator/HoverFabricatorComplete.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://d1hwsrxufchsc" path="res://textures/blocks/units/HoverFabricator/HoverFabricatorBase.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://uhhvwyue44gg" path="res://textures/blocks/units/FabricatorTop.png" id="4"]
 
 [resource]
 script = ExtResource("1")
@@ -23,10 +23,6 @@ build_cost = {
 "silicon": 30
 }
 build_time = 4.0
-input_items = {
-"mat_copper": 25
-}
-power_consumption = 5.0
 electrical_power_use = 25.0
 side_inputs = {
 0: &"mat_copper",

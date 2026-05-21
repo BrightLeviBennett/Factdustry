@@ -1,13 +1,13 @@
 [gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://cy18gvq3gjtbn"]
 
 [ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://dt0rrxw6bwacb" path="res://textures/resources/copper.png" id="1_l7yhq"]
+[ext_resource type="Texture2D" uid="uid://bu8ucx1d8ui4a" path="res://textures/resources/copper.png" id="1_2gsqr"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_copper"
 display_name = "Copper"
 description = "Versatile base metal. Used in wiring, pipes, and construction."
-icon = ExtResource("1_l7yhq")
+icon = ExtResource("1_2gsqr")
 max_stack = 200
 color = Color(0.85, 0.55, 0.3, 1)

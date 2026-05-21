@@ -1,5 +1,21 @@
 extends Node2D
 
+
+# Sibling overlay that paints fluid puddles at z 49 — UNDER buildings
+# (z 50) but above the world terrain. The puddles dict lives on the
+# parent LogisticsSystem; this child just reads it and draws. Pause
+# is honoured by virtue of LogisticsSystem only ticking the puddle
+# state while unpaused — the draw itself doesn't move on its own.
+class PuddleOverlay extends Node2D:
+	var owner_sys: Node = null
+	func _process(_delta: float) -> void:
+		if owner_sys and not owner_sys.puddles.is_empty():
+			queue_redraw()
+	func _draw() -> void:
+		if owner_sys and owner_sys.has_method("_draw_puddles"):
+			owner_sys._draw_puddles(self)
+
+
 # ============================================================
 # LOGISTICS_SYSTEM.GD - Item Movement & Production
 # ============================================================
@@ -64,6 +80,41 @@ var conveyor_items := {}
 #   "fluid_id": StringName — which fluid is in this pipe
 #   "amount": float — 0.0 to units_per_segment (from FluidData)
 var pipe_contents := {}
+
+# --- PUDDLE STATE ---
+# Spawned by the pipe-leak tick: a pipe whose facing-front cell has no
+# building (or a wall) leaks 0.5 fluid/sec into the front cell, forming
+# a puddle in the colour of the carried fluid. Puddles dry up over time
+# when no longer fed.
+#
+# Key = Vector2i (grid position of the puddle — the empty cell in front
+#                 of the leaking pipe)
+# Value = Dictionary:
+#   "fluid_id":   StringName — which fluid is pooling
+#   "color":      Color      — pre-cached from the fluid's display colour
+#   "amount":     float      — current level [0, PUDDLE_MAX_AMOUNT]
+#   "shape":      PackedVector2Array — pre-randomised polygon vertices
+#                                      in local cell space [0, GRID_SIZE]
+#   "fed":        bool       — set true each frame a pipe leaks into it,
+#                              read by the dry-up pass and then cleared
+var puddles: Dictionary = {}
+const PUDDLE_LEAK_RATE := 0.5    # fluid units / second drained from pipe
+# A fully-fed puddle reaches PUDDLE_MAX_AMOUNT after ~30 seconds of
+# continuous dripping (15 / 0.5). At that point the polygon is at
+# full size — roughly 2.5 tiles across the longest axis.
+const PUDDLE_MAX_AMOUNT := 15.0
+const PUDDLE_DRY_RATE := 0.25    # units / second drained from puddle when not fed
+# Max circles in a fully-fed puddle. The pre-generated template
+# stores this many; how many are actually drawn each frame is gated
+# by each circle's own `threshold` against the puddle's current fill.
+const _PUDDLE_MAX_CIRCLES := 12
+# Max radius (in tiles, from the cluster centre to its farthest
+# circle's outer edge). 1.25 tiles → 2.5-tile diameter when every
+# circle is active.
+const _PUDDLE_MAX_RADIUS_TILES := 1.25
+# Vertex count when approximating each circle for `merge_polygons`.
+const _PUDDLE_CIRCLE_VERTS := 16
+var _puddle_overlay: Node2D = null
 
 # --- DRILL STATE ---
 # Key = Vector2i (grid position of a drill)
@@ -212,13 +263,6 @@ var unloader_state := {}
 #   "payload": Dictionary or null — payload waiting to be launched
 #   "charge": float — charge progress (0.0 to 1.0)
 var mass_driver_state := {}
-# Per-origin last-print timestamp (ms) for the throttled MD diagnostic
-# logger added during the "MDs not accepting payloads" investigation.
-# Each line keys on origin so two MDs can both log without one starving
-# the other; the throttle window keeps the console readable.
-var _md_dbg_last: Dictionary = {}
-const _MD_DBG_THROTTLE_MS: int = 1000
-
 # --- BELT UNLOADER STATE ---
 # Key = Vector2i (unloader origin)
 # Value = Dictionary:
@@ -286,6 +330,15 @@ func _ready() -> void:
 	# behind every block they crossed.
 	z_index = 51
 	z_as_relative = false
+	# Puddle overlay: a child Node2D pinned at z 49 (under the building
+	# layer at 50) so leaked puddles paint UNDER the blocks that sit on
+	# top of them. Same pattern BuildingSystem uses for its popup /
+	# cable / crane companion overlays.
+	_puddle_overlay = PuddleOverlay.new()
+	_puddle_overlay.owner_sys = self
+	_puddle_overlay.z_index = 49
+	_puddle_overlay.z_as_relative = false
+	add_child(_puddle_overlay)
 	await get_tree().process_frame
 	_terrain = get_node_or_null("/root/Main/TerrainSystem")
 	_power_sys = get_node_or_null("/root/Main/PowerSystem")
@@ -1004,6 +1057,15 @@ func _update_pumps(delta: float) -> void:
 		if power_sys and power_sys.has_method("get_electrical_efficiency"):
 			net_eff = clampf(float(power_sys.get_electrical_efficiency(anchor)), 0.0, 1.0)
 
+		# Drain any previously-accumulated stored fluid into adjacent
+		# pipes BEFORE the storage-full short-circuit below. Without
+		# this, fluid that fell into the pump's own buffer (because no
+		# pipe was downstream at the time) gets stranded forever: the
+		# storage-full check skips the entire push branch and the
+		# stored fluid never moves. Symptom: pump → pipe → destroy
+		# pipe → place new pipe → new pipe never receives water.
+		_drain_pump_storage_to_pipes(anchor, data, delta)
+
 		# Don't waste production into a full storage.
 		if _is_storage_full(anchor, data):
 			continue
@@ -1038,6 +1100,62 @@ func _update_pumps(delta: float) -> void:
 		# fluid storage so the production doesn't just evaporate.
 		if not pushed_any:
 			_add_to_storage(anchor, fluid_id, data)
+
+
+## Empties whatever fluid is already in a pump's block_storage into
+## adjacent pipes, one fluid at a time. Called at the top of each pump
+## tick so a pump that filled up its own buffer when no pipe was
+## downstream will re-feed the network the moment a pipe is placed.
+##
+## The drain rate is the pump's base rate (×2 so a backlog drains a
+## little faster than it filled) per delta — same order of magnitude
+## as the production push, so the network sees continuous flow rather
+## than a one-shot dump.
+func _drain_pump_storage_to_pipes(anchor: Vector2i, data: BlockData, delta: float) -> void:
+	if not block_storage.has(anchor):
+		return
+	var storage: Dictionary = block_storage[anchor]
+	var fluids: Dictionary = storage.get("fluids", {})
+	if fluids.is_empty():
+		return
+	var max_drain: float = PUMP_BASE_RATE_PER_SEC * delta * 2.0
+	if max_drain <= 0.0:
+		return
+	var dirty := false
+	for fluid_id in fluids.keys():
+		var available: float = float(fluids[fluid_id])
+		if available <= 0.0:
+			continue
+		var to_drain: float = minf(max_drain, available)
+		var pushed := false
+		for x in range(data.grid_size.x):
+			if pushed:
+				break
+			for y in range(data.grid_size.y):
+				if pushed:
+					break
+				var tile: Vector2i = anchor + Vector2i(x, y)
+				for dir in range(4):
+					var neighbor: Vector2i = tile + DIR_VECTORS[dir]
+					# Skip cells inside the pump's own footprint.
+					if main.building_origins.get(neighbor, neighbor) == anchor:
+						continue
+					if _is_cross_faction(tile, neighbor):
+						continue
+					if not _is_pipe_cell(neighbor):
+						continue
+					if _add_fluid_to_pipe(neighbor, fluid_id, to_drain):
+						available = maxf(0.0, available - to_drain)
+						pushed = true
+						dirty = true
+						break
+		if available <= 0.0:
+			fluids.erase(fluid_id)
+		else:
+			fluids[fluid_id] = available
+	if dirty:
+		storage["fluids"] = fluids
+		block_storage[anchor] = storage
 
 
 ## Attempts to place an item or fluid onto a cell.
@@ -1429,29 +1547,30 @@ func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 	if not router_output_index.has(grid_pos):
 		router_output_index[grid_pos] = 0
 
-	# Honour the cached exit_dir the picker pass committed to for the
-	# animation. Without this, the actual transfer can pop the item out
-	# of a side different from the one the player just watched it slide
-	# toward — the picker chose A based on the round-robin, then the
-	# RR advanced for the next item, and by the time progress hit 1.0
-	# we'd resume scanning from A+1 and possibly land on B.
+	# Honour the cached exit_dir the picker pass committed to. If it's
+	# set, we ONLY try that direction — falling back to a round-robin
+	# scan when the cached side is blocked would silently ship the
+	# item out a different side than the one the animation has been
+	# showing. If the cached side is blocked, return false and let
+	# the item stall; the next picker pass will re-commit `exit_dir`
+	# to whichever side is accepting now.
 	var cached_exit: int = item.get("exit_dir", -1)
 	if cached_exit >= 0 and cached_exit != exclude_dir \
 			and not _is_cross_faction(grid_pos, grid_pos + DIR_VECTORS[cached_exit]):
 		var cached_pos: Vector2i = grid_pos + DIR_VECTORS[cached_exit]
 		var cached_entry: int = (cached_exit + 2) % 4
 		if _try_transfer_item(cached_pos, item["item_id"], cached_entry):
-			# Advance the round-robin past this exit so the NEXT item
-			# tries a different output first, matching the historical
-			# rotation behaviour.
 			var ci: int = outputs.find(cached_exit)
 			if ci >= 0:
 				router_output_index[grid_pos] = (ci + 1) % outputs.size()
 			return true
+		return false
 
 	var rr_start: int = router_output_index[grid_pos] % outputs.size()
 
-	# Try each output direction starting from the round-robin index
+	# No cached exit (fresh arrival picker hasn't reached yet) — round-
+	# robin scan. Stamp the winning direction onto `item.exit_dir` so the
+	# animation matches even on this first frame.
 	for attempt in range(outputs.size()):
 		var idx: int = (rr_start + attempt) % outputs.size()
 		var out_dir: int = outputs[idx]
@@ -1463,7 +1582,7 @@ func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 			continue
 
 		if _try_transfer_item(next_pos, item["item_id"], entry_dir):
-			# Advance round-robin so the NEXT item tries a different output first
+			item["exit_dir"] = out_dir
 			router_output_index[grid_pos] = (idx + 1) % outputs.size()
 			return true
 
@@ -1592,11 +1711,45 @@ func _router_exit_accepts(grid_pos: Vector2i, dir: int, item_id: StringName) -> 
 	if _is_cross_faction(grid_pos, next_pos):
 		return false
 	if _is_conveyor_cell(next_pos):
+		# Cell currently holding an item is not accepting.
+		if conveyor_items.has(next_pos):
+			return false
+		# Dead-end check: a straight conveyor whose own downstream is
+		# bare terrain will trap any item we ship to it. Without this
+		# the picker happily commits to a stub conveyor (the user's
+		# "items go down half the time" complaint) — items would
+		# pile up there even though the side technically reads as
+		# "empty" right now. Special belts (router/sorter/junction/
+		# bridge/overflow/underflow) have non-trivial routing of their
+		# own and are always treated as accepting.
+		if _is_simple_conveyor(next_pos):
+			var next_rot: int = main.building_rotation.get(next_pos, 0)
+			var beyond: Vector2i = next_pos + DIR_VECTORS[next_rot]
+			if not main.placed_buildings.has(beyond):
+				return false
 		return true
-	if main.placed_buildings.has(next_pos) and not _is_conveyor_cell(next_pos):
+	if main.placed_buildings.has(next_pos):
 		var entry_dir: int = (dir + 2) % 4
 		return _could_block_accept_item(next_pos, item_id, entry_dir)
 	return false
+
+
+## True for plain straight belts — anything whose forward output is the
+## single cell in front of it. False for routers/junctions/sorters/etc
+## which split items in non-forward directions, so the simple lookahead
+## above doesn't apply.
+func _is_simple_conveyor(grid_pos: Vector2i) -> bool:
+	if not _is_conveyor_cell(grid_pos):
+		return false
+	if _is_router_cell(grid_pos) or _is_junction_cell(grid_pos):
+		return false
+	if _is_sorter_cell(grid_pos) or _is_inverted_sorter_cell(grid_pos):
+		return false
+	if _is_overflow_cell(grid_pos) or _is_underflow_cell(grid_pos):
+		return false
+	if _is_bridge_cell(grid_pos):
+		return false
+	return true
 
 
 func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
@@ -1616,7 +1769,10 @@ func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
 
 	# First pass: look for an empty downstream we can commit AND advance to
 	# this frame. Only advance round-robin when we actually commit so that
-	# a fully-blocked router doesn't churn the index every frame.
+	# a fully-blocked router doesn't churn the index every frame. Routes
+	# through `_router_exit_accepts` so dead-end stubs (straight belt
+	# pointing at bare terrain) are skipped instead of becoming silent
+	# black holes for round-robin'd items.
 	for attempt in range(outputs.size()):
 		var idx: int = (rr_start + attempt) % outputs.size()
 		var out_dir: int = outputs[idx]
@@ -1626,8 +1782,8 @@ func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
 		if _is_cross_faction(grid_pos, next_pos):
 			continue
 
-		# Empty conveyor ahead = perfect output.
-		if _is_conveyor_cell(next_pos) and not conveyor_items.has(next_pos):
+		# Empty (and non-dead-end) conveyor ahead = perfect output.
+		if _is_conveyor_cell(next_pos) and _router_exit_accepts(grid_pos, out_dir, item["item_id"]):
 			router_output_index[grid_pos] = (idx + 1) % outputs.size()
 			return out_dir
 		# Non-conveyor building (factory, turret, constructor, etc.) —
@@ -1640,28 +1796,39 @@ func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
 				router_output_index[grid_pos] = (idx + 1) % outputs.size()
 				return out_dir
 
-	# Second pass: nothing accepting RIGHT NOW, but pick a direction that at
-	# least has a real downstream (conveyor or building) and wait on it. This
-	# is the key fix for the "animates the wrong way" problem: previously the
-	# fallback would happily return `outputs[rr_start]` even when that side
-	# was bare terrain, so an item would slide toward an empty cell while
-	# the actual transfer eventually happened on a different (configured)
-	# side. Don't advance round-robin yet — we haven't actually transferred.
+	# Second pass: no side is currently accepting, but pick a side that
+	# at least has a real downstream chain so the animation points
+	# somewhere plausible while we wait. A "real downstream" means:
+	#   - a conveyor whose own forward cell isn't bare terrain (or a
+	#     special belt like a router/junction/sorter), OR
+	#   - a non-conveyor building that could accept this item from the
+	#     entry side.
+	# Walls, bare terrain, and incompatible buildings are all filtered
+	# out — so the item never animates toward "nothing" (the user's
+	# "going down into nothing" complaint). Don't advance round-robin:
+	# we haven't actually transferred yet.
 	for attempt in range(outputs.size()):
 		var idx2: int = (rr_start + attempt) % outputs.size()
 		var out_dir2: int = outputs[idx2]
 		var next_pos2: Vector2i = grid_pos + DIR_VECTORS[out_dir2]
+		var entry_dir2: int = (out_dir2 + 2) % 4
 		if _is_cross_faction(grid_pos, next_pos2):
 			continue
 		if _is_conveyor_cell(next_pos2):
+			if _is_simple_conveyor(next_pos2):
+				var beyond_rot: int = main.building_rotation.get(next_pos2, 0)
+				var beyond2: Vector2i = next_pos2 + DIR_VECTORS[beyond_rot]
+				if not main.placed_buildings.has(beyond2):
+					continue
 			return out_dir2
 		if main.placed_buildings.has(next_pos2):
-			return out_dir2
+			if _could_block_accept_item(next_pos2, item["item_id"], entry_dir2):
+				return out_dir2
 
-	# Truly nothing on any side — no downstream at all. Fall back to the
-	# round-robin slot just to return a valid value; the item won't transfer
-	# anyway since every side fails the transfer check.
-	return outputs[rr_start] if outputs.size() > 0 else -1
+	# Truly nothing usable on any side. Leave `exit_dir` as the caller
+	# had it (the calling code skips the overwrite on -1 → -1, so a
+	# fresh item just stays uncommitted).
+	return -1
 
 
 # =========================
@@ -2470,6 +2637,425 @@ func _update_pipes(delta: float) -> void:
 		if pipe_contents.has(pos) and pipe_contents[pos]["amount"] <= 0:
 			pipe_contents.erase(pos)
 
+	# --- Phase D: Front-leak (open-end pipes drip into a puddle) ---
+	# A pipe whose facing-front cell has no building (and isn't a wall)
+	# drips 0.5 fluid/sec into the front cell. Existing puddle in that
+	# cell grows (capped at PUDDLE_MAX_AMOUNT); a fresh one is spawned
+	# with a random polygon shape.
+	for grid_pos in pipe_contents:
+		var pipe2 = pipe_contents[grid_pos]
+		if pipe2["amount"] <= 0:
+			continue
+		if not _is_pipe_cell(grid_pos):
+			continue
+		var rot: int = main.building_rotation.get(grid_pos, 0)
+		var front_cell: Vector2i = grid_pos + DIR_VECTORS[rot]
+		# Only leak when the front cell is genuinely open ground —
+		# another building (pipe, factory, pump, anything) means the
+		# pipe is "connected" out the front and shouldn't dribble.
+		# Walls block the spill too (water can't pool inside rock).
+		if main.placed_buildings.has(front_cell):
+			continue
+		if _terrain and _terrain.has_method("has_wall") and _terrain.has_wall(front_cell):
+			continue
+		if not main.is_within_bounds(front_cell):
+			continue
+		# Target drain: 0.5 fluid units / second per leaking pipe.
+		# Capped by:
+		#   - the pipe's own remaining content (can't drain what's
+		#     not there)
+		#   - the puddle's remaining capacity (a full puddle stops
+		#     accepting drips, so the pipe stops bleeding too —
+		#     fluid doesn't silently disappear into a full puddle)
+		var attempted: float = PUDDLE_LEAK_RATE * delta
+		var drip: float = minf(attempted, pipe2["amount"])
+		if drip <= 0.0:
+			continue
+		# Refuse to drain past the puddle's headroom so the pipe's
+		# fluid-loss rate matches what the puddle actually receives.
+		var existing_puddle: Dictionary = puddles.get(front_cell, {})
+		var fluid_id: StringName = pipe2["fluid_id"]
+		if not existing_puddle.is_empty() \
+				and existing_puddle.get("fluid_id", &"") == fluid_id:
+			var room: float = PUDDLE_MAX_AMOUNT - float(existing_puddle.get("amount", 0.0))
+			drip = minf(drip, maxf(0.0, room))
+		if drip <= 0.0:
+			continue
+		pipe2["amount"] -= drip
+		# Direction from the puddle cell BACK to the leaking pipe —
+		# used by `_make_puddle_shape` to pool the puddle against the
+		# pipe-facing edge of the cell instead of the centre.
+		var back_dir: Vector2i = -DIR_VECTORS[rot]
+		_feed_puddle(front_cell, fluid_id, drip, back_dir)
+
+	# --- Phase F: Wet status on units inside puddles ---
+	# Cheap radius test (unit centre within scaled puddle radius) rather
+	# than a full point-in-polygon — saves the hot-loop polygon walk
+	# and the result is visually equivalent for blob-shaped puddles.
+	if not puddles.is_empty() and _unit_mgr:
+		_apply_puddle_wet_status()
+
+	# --- Phase E: Puddle dry-up ---
+	# Any puddle that wasn't topped up this tick loses PUDDLE_DRY_RATE
+	# units/sec. Empties get erased so we don't carry stale entries.
+	var puddle_to_erase: Array = []
+	for pp in puddles:
+		var pd: Dictionary = puddles[pp]
+		if pd.get("fed", false):
+			pd["fed"] = false
+		else:
+			pd["amount"] = maxf(0.0, float(pd["amount"]) - PUDDLE_DRY_RATE * delta)
+			if pd["amount"] <= 0.0:
+				puddle_to_erase.append(pp)
+	for pp in puddle_to_erase:
+		puddles.erase(pp)
+
+
+## Adds `amount` units of `fluid_id` to the puddle at `cell`, creating
+## it (with a fresh random polygon shape) if it didn't exist. Resets
+## the puddle's fluid when a different fluid drips into an existing
+## puddle — first one in wins, then loses if the source changes.
+## `pipe_back_dir` points from the puddle cell back to the leaking
+## pipe, so the puddle pools against that edge of the cell.
+func _feed_puddle(cell: Vector2i, fluid_id: StringName, amount: float,
+		pipe_back_dir: Vector2i = Vector2i.ZERO) -> void:
+	if amount <= 0.0:
+		return
+	var existing: Dictionary = puddles.get(cell, {})
+	if existing.is_empty() or existing.get("fluid_id", &"") != fluid_id:
+		var fluid = Registry.get_fluid(fluid_id)
+		var col: Color = fluid.color if fluid else Color(0.4, 0.6, 0.95, 1.0)
+		var shape_data: Dictionary = _make_puddle_shape(cell, pipe_back_dir)
+		existing = {
+			"fluid_id": fluid_id,
+			"color": col,
+			"amount": 0.0,
+			# Pre-generated 12-circle template: every entry stores its
+			# local pos / radius / activation threshold / reach. The
+			# active circles are the ones whose `threshold <= amount`.
+			"template": shape_data["template"],
+			# Cached union polygons for the CURRENT active circle set.
+			# Recomputed only when `active_count` changes — so the
+			# expensive `Geometry2D.merge_polygons` walk runs once
+			# every ~`PUDDLE_MAX_AMOUNT / N` units of accumulated
+			# fluid, not every frame.
+			"polygons": [] as Array,
+			"active_count": 0,
+			# Outer reach of the CURRENT active set (pixels). Refreshed
+			# alongside `polygons`. Used by the wet-status pass.
+			"active_max_radius_px": 0.0,
+			"shape_centre": shape_data["centre"],
+			"max_radius_px": shape_data["max_radius_px"],
+			"fed": false,
+		}
+	existing["amount"] = minf(PUDDLE_MAX_AMOUNT, float(existing["amount"]) + amount)
+	existing["fed"] = true
+	puddles[cell] = existing
+
+
+## Walks every ground / crawler-layer unit and applies the "wet"
+## status to any whose centre is inside a puddle's current visible
+## extent. The "extent" is the puddle's max polygon radius × the
+## same `scale_t` the draw code uses, so a small puddle (still
+## filling) only catches units directly on top of it while a
+## fully-fed 2.5-tile puddle wets anything walking through it.
+##
+## Status effects auto-refresh on reapply (see wet.tres), so a unit
+## standing in a puddle stays wet as long as it's there + ~5 s
+## after stepping out (the effect's natural duration).
+func _apply_puddle_wet_status() -> void:
+	if _unit_mgr == null:
+		return
+	var wet_effect: StatusEffectData = Registry.get_status_effect(&"wet") \
+		if Registry.has_method("get_status_effect") else null
+	if wet_effect == null:
+		return
+	# Pre-compute world-space centre + active reach once per puddle.
+	# Skip empty puddles (amount <= 0) — they're about to be erased.
+	# `active_max_radius_px` already tracks the current active set
+	# (refreshed lazily by the draw path); fall back to `max_radius_px`
+	# for puddles that haven't been drawn yet this frame.
+	var hits: Array = []   # Array of [Vector2 centre, float radius_sq]
+	for cell in puddles:
+		var pd: Dictionary = puddles[cell]
+		var amt: float = float(pd.get("amount", 0.0))
+		if amt <= 0.0:
+			continue
+		var radius: float = float(pd.get("active_max_radius_px", 0.0))
+		if radius <= 0.0:
+			radius = float(pd.get("max_radius_px", float(main.GRID_SIZE) * 0.5))
+		if radius <= 0.0:
+			continue
+		var shape_centre: Vector2 = pd.get("shape_centre",
+			Vector2(float(main.GRID_SIZE) * 0.5, float(main.GRID_SIZE) * 0.5))
+		var origin: Vector2 = main.grid_to_world(cell)
+		hits.append([origin + shape_centre, radius * radius])
+	if hits.is_empty():
+		return
+	# Apply wet to every ground / crawler unit inside any puddle.
+	var all_units: Array = []
+	if _unit_mgr.has_method("get") and "enemies" in _unit_mgr:
+		all_units.append_array(_unit_mgr.enemies)
+	if _unit_mgr.has_method("get") and "player_units" in _unit_mgr:
+		all_units.append_array(_unit_mgr.player_units)
+	for u in all_units:
+		if u == null or not is_instance_valid(u) or u.is_dead:
+			continue
+		if u.data == null:
+			continue
+		# Hover / flying units skim above water — no wet.
+		var ml: int = u.data.movement_layer
+		if ml != UnitData.MovementLayer.GROUND and ml != UnitData.MovementLayer.CRAWLER:
+			continue
+		var pos: Vector2 = u.position
+		for entry in hits:
+			var centre: Vector2 = entry[0]
+			var r2: float = entry[1]
+			if pos.distance_squared_to(centre) <= r2:
+				u.apply_status_effect(wet_effect)
+				break
+
+
+## Generates the cluster of overlapping circles that make up a puddle.
+## Mindustry-style "blob" look: 8 circles fanned around the centre
+## with varied sizes, no outline — the union of the circles reads as
+## a soft organic puddle. Each circle is stored in local cell space
+## (offset relative to `centre`); the draw code applies the per-frame
+## shrink and translates into world space.
+##
+## `pipe_back_dir` points from the puddle cell back to the leaking
+## pipe so the centre is offset toward that edge (puddle pools at
+## the pipe mouth, not the geometric middle of the cell).
+##
+## Seeded by (cell, back_dir) — same leak source always regenerates
+## the same cluster, so save/load doesn't need to persist the shape.
+## Builds the per-puddle CIRCLE TEMPLATE — every entry stores its
+## local position, radius, and a `threshold` fluid level. As the
+## puddle accumulates more fluid, additional circles cross their
+## threshold and join the visible union; as it dries, circles drop
+## off in reverse order. The puddle visibly grows / shrinks by
+## adding / removing circles rather than uniformly scaling one
+## fixed cluster.
+##
+## Circles are seeded deterministically (cell + back_dir) so save /
+## load doesn't need to persist the template.
+##
+## Circle 0 sits at the centre and has threshold 0 — a single drip
+## already shows a tiny puddle. Subsequent circles spread outward
+## (distance from centre grows with index) so the puddle expands
+## roughly radially as fluid accumulates.
+func _make_puddle_shape(cell: Vector2i, pipe_back_dir: Vector2i = Vector2i.ZERO) -> Dictionary:
+	var gs: float = float(main.GRID_SIZE)
+	# Offset centre toward the pipe edge of the cell.
+	const _PUDDLE_EDGE_OFFSET := 0.32
+	var centre: Vector2 = Vector2(gs * 0.5, gs * 0.5) \
+		+ Vector2(pipe_back_dir.x, pipe_back_dir.y) * (gs * _PUDDLE_EDGE_OFFSET)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = (int(cell.x) * 73856093) ^ (int(cell.y) * 19349663) \
+		^ (int(pipe_back_dir.x) * 83492791) ^ (int(pipe_back_dir.y) * 49979687)
+	var max_r_px: float = _PUDDLE_MAX_RADIUS_TILES * gs
+	# `template_circles[i]` = {pos, radius, threshold, reach}.
+	#   pos:       Vector2 local position relative to the cluster centre
+	#   radius:    float in pixels
+	#   threshold: fluid level (units of `amount`) at which this circle
+	#              becomes active. Sorted ascending across the template.
+	#   reach:     |pos| + radius — distance from cluster centre to this
+	#              circle's farthest edge; used for the wet-status
+	#              radius check (max across active circles).
+	var template: Array = []
+	# Circle 0: tiny core at the cluster centre. Threshold 0 → visible
+	# from the first drip.
+	var core_r: float = max_r_px * rng.randf_range(0.20, 0.28)
+	template.append({
+		"pos": Vector2.ZERO,
+		"radius": core_r,
+		"threshold": 0.0,
+		"reach": core_r,
+	})
+	# Remaining circles fan outward. `t` lerps 0 → 1 across the indices
+	# so later circles sit progressively farther from the centre, giving
+	# the puddle a radial growth feel.
+	var n_outer: int = _PUDDLE_MAX_CIRCLES - 1
+	for i in range(1, _PUDDLE_MAX_CIRCLES):
+		var t: float = float(i - 1) / float(maxi(1, n_outer - 1))
+		var dist_frac: float = lerpf(0.18, 0.78, t) + rng.randf_range(-0.06, 0.06)
+		dist_frac = clampf(dist_frac, 0.0, 0.85)
+		# Golden-angle-ish spread keeps satellites from clustering in
+		# one quadrant as the puddle grows.
+		var ang: float = float(i) * 2.39996 + rng.randf_range(-0.45, 0.45)
+		var radius_frac: float = rng.randf_range(0.22, 0.38)
+		# Clamp so reach (dist + radius) never exceeds 1.0 — keeps a
+		# fully-fed puddle inside the 2.5-tile diameter envelope.
+		if dist_frac + radius_frac > 1.0:
+			radius_frac = maxf(0.16, 1.0 - dist_frac)
+		var local_pos: Vector2 = Vector2(cos(ang), sin(ang)) * (dist_frac * max_r_px)
+		var radius: float = radius_frac * max_r_px
+		# Linear thresholds across [0, PUDDLE_MAX_AMOUNT] — each new
+		# circle joins after roughly `PUDDLE_MAX_AMOUNT / N` more fluid.
+		var threshold: float = float(i) / float(_PUDDLE_MAX_CIRCLES) * PUDDLE_MAX_AMOUNT
+		template.append({
+			"pos": local_pos,
+			"radius": radius,
+			"threshold": threshold,
+			"reach": local_pos.length() + radius,
+		})
+	return {
+		"template": template,
+		"centre": centre,
+		# `max_radius_px` is the FULLY-FED extent — used only as a
+		# fallback for legacy puddles or for the very first frame
+		# before the active set is built.
+		"max_radius_px": max_r_px,
+	}
+
+
+## Approximates a circle as a regular n-gon (`segments` vertices). Used
+## to feed `Geometry2D.merge_polygons` so the cluster's circles can be
+## unioned into one outline.
+func _circle_polygon(c: Vector2, radius: float, segments: int) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	out.resize(segments)
+	for i in range(segments):
+		var ang: float = (float(i) / float(segments)) * TAU
+		out[i] = c + Vector2(cos(ang), sin(ang)) * radius
+	return out
+
+
+## Sequentially merges an array of (overlapping) polygons into the
+## union outline(s). Each merge returns an Array[PackedVector2Array]
+## — usually one polygon for our overlapping circle clusters, but the
+## code carries forward all returned pieces in case the cluster ever
+## ends up disconnected.
+func _union_polygons(polys: Array) -> Array:
+	if polys.is_empty():
+		return []
+	var accum: Array = [polys[0]]
+	for i in range(1, polys.size()):
+		var next_poly: PackedVector2Array = polys[i]
+		var new_accum: Array = []
+		var merged := false
+		for existing in accum:
+			if merged:
+				new_accum.append(existing)
+				continue
+			var union: Array = Geometry2D.merge_polygons(existing, next_poly)
+			if union.size() == 1:
+				# Single combined outline — replace `existing` with
+				# the merged result and continue.
+				next_poly = union[0]
+				merged = true
+			elif union.size() > 1:
+				# Disjoint pieces returned — keep the existing and try
+				# the next iteration with the same `next_poly`.
+				new_accum.append(existing)
+			else:
+				# merge_polygons returned nothing (shouldn't happen
+				# with valid input). Keep existing and skip the merge.
+				new_accum.append(existing)
+		new_accum.append(next_poly)
+		accum = new_accum
+	return accum
+
+
+## Paints every active puddle on the supplied canvas (the PuddleOverlay
+## child). Polygons are filled with the fluid's colour at a constant
+## near-opaque alpha; the SHAPE itself shrinks toward the cell centre
+## as the puddle dries, so a fading puddle visibly contracts rather
+## than fading away in place.
+func _draw_puddles(canvas: CanvasItem) -> void:
+	if puddles.is_empty():
+		return
+	var gs: float = float(main.GRID_SIZE)
+	for cell in puddles:
+		var pd: Dictionary = puddles[cell]
+		var amt: float = float(pd.get("amount", 0.0))
+		if amt <= 0.0:
+			continue
+		var template: Array = pd.get("template", [])
+		if template.is_empty():
+			continue
+		# Refresh the cached union when the active circle count
+		# changes — adding fluid pushes the count up, drying drops it
+		# down. The expensive `Geometry2D.merge_polygons` walk only
+		# fires across these threshold crossings.
+		_refresh_puddle_active_set(pd)
+		var polygons: Array = pd.get("polygons", [])
+		if polygons.is_empty():
+			continue
+		var shape_centre: Vector2 = pd.get("shape_centre", Vector2(gs * 0.5, gs * 0.5))
+		var col: Color = pd.get("color", Color(0.4, 0.6, 0.95, 1.0))
+		# Tail-fade: when the puddle is down to just the core circle
+		# and `amount` is approaching 0, fade alpha so the last spot
+		# doesn't pop out. Above that, draw at full opacity.
+		var alpha_t: float = 1.0
+		var active_count: int = int(pd.get("active_count", 0))
+		if active_count <= 1:
+			var first_next_threshold: float = float(template[1].get("threshold", PUDDLE_MAX_AMOUNT)) \
+				if template.size() >= 2 else PUDDLE_MAX_AMOUNT
+			# Fade across the bottom slice of the first threshold band
+			# (the "still only one circle" zone, drying).
+			var fade_window: float = first_next_threshold * 0.4
+			if fade_window > 0.0 and amt < fade_window:
+				alpha_t = clampf(amt / fade_window, 0.0, 1.0)
+		var fill_color: Color = Color(col.r, col.g, col.b, alpha_t)
+		var origin: Vector2 = main.grid_to_world(cell)
+		for poly in polygons:
+			var p: PackedVector2Array = poly
+			if p.size() < 3:
+				continue
+			var translated := PackedVector2Array()
+			translated.resize(p.size())
+			for i in p.size():
+				# Polygon vertices are stored relative to Vector2.ZERO.
+				# Translate into world space relative to `shape_centre`.
+				translated[i] = origin + shape_centre + p[i]
+			canvas.draw_colored_polygon(translated, fill_color)
+
+
+## Recomputes `pd.polygons` + `pd.active_count` + `pd.active_max_radius_px`
+## when `amount` has crossed a circle's threshold since the last call.
+## A no-op when the active count is unchanged, so this is cheap on the
+## hot path — the heavy `Geometry2D.merge_polygons` walk runs only on
+## the rare frames where a circle joins or drops out of the cluster.
+func _refresh_puddle_active_set(pd: Dictionary) -> void:
+	var template: Array = pd.get("template", [])
+	if template.is_empty():
+		pd["polygons"] = [] as Array
+		pd["active_count"] = 0
+		pd["active_max_radius_px"] = 0.0
+		return
+	var amt: float = float(pd.get("amount", 0.0))
+	var target_count: int = 0
+	# Templates are sorted by threshold ascending, so we can short-
+	# circuit the moment we hit a threshold above the current amount.
+	for c in template:
+		if float(c.get("threshold", 0.0)) <= amt:
+			target_count += 1
+		else:
+			break
+	# Always keep at least the core visible while the puddle has any
+	# fluid at all (the tail-fade in the draw handles disappearance).
+	if amt > 0.0 and target_count <= 0:
+		target_count = 1
+	var current_count: int = int(pd.get("active_count", -1))
+	if target_count == current_count:
+		return
+	# Rebuild the union polygon for the new active set.
+	var circle_polys: Array = []
+	var active_reach: float = 0.0
+	for i in range(target_count):
+		var c: Dictionary = template[i]
+		var pos: Vector2 = c.get("pos", Vector2.ZERO)
+		var radius: float = float(c.get("radius", 0.0))
+		circle_polys.append(_circle_polygon(pos, radius, _PUDDLE_CIRCLE_VERTS))
+		var reach: float = float(c.get("reach", radius))
+		if reach > active_reach:
+			active_reach = reach
+	var union: Array = _union_polygons(circle_polys)
+	pd["polygons"] = union
+	pd["active_count"] = target_count
+	pd["active_max_radius_px"] = active_reach
+
 
 ## Flood-fills from a pipe cell to find all connected pipe cells.
 ## Pipes connect omnidirectionally (any adjacent pipe is connected).
@@ -3022,7 +3608,7 @@ func _conveyor_feeds_into(conv_pos: Vector2i, toward_pos: Vector2i) -> bool:
 	return conv_pos + forward == toward_pos
 
 
-## Returns true if the cell has a fluid transport (pipe/conduit, NOT pumps).
+## Returns true if the cell has a fluid transport (pipe, NOT pumps).
 func _is_pipe_cell(grid_pos: Vector2i) -> bool:
 	if not main.placed_buildings.has(grid_pos):
 		return false
@@ -3082,15 +3668,6 @@ func _is_payload_cell(grid_pos: Vector2i) -> bool:
 		return false
 	return (data.tags.has("payload") or data.tags.has("freight")) and data.transport_speed > 0
 
-
-## Returns true if the cell is a payload/freight loader.
-func _is_payload_loader(grid_pos: Vector2i) -> bool:
-	return _has_block_tag(grid_pos, "payload_loader") or _has_block_tag(grid_pos, "freight_loader")
-
-
-## Returns true if the cell is a payload/freight unloader.
-func _is_payload_unloader(grid_pos: Vector2i) -> bool:
-	return _has_block_tag(grid_pos, "payload_unloader") or _has_block_tag(grid_pos, "freight_unloader")
 
 
 func _is_core_cell(grid_pos: Vector2i) -> bool:
@@ -3611,24 +4188,26 @@ func _update_deconstructors(delta: float) -> void:
 						state["phase"] = "idle"
 						continue
 
-					# Units: find the fabricator that produces this unit and output its input_items
+					# Units: refund the unit's own build_cost, mirroring how
+					# building deconstruction refunds the block's build_cost
+					# below. (Previously the deconstructor cribbed the
+					# fabricator's `input_items`, which sometimes paid out a
+					# different set of items than the unit was actually
+					# crafted from.)
 					if payload_data.get("type", "") == "unit":
 						var unit_id := StringName(payload_data.get("unit_id", ""))
-						var fab_data: BlockData = null
-						# Search all blocks for the fabricator that produces this unit
-						for block in Registry.blocks_list:
-							if block.produced_unit == unit_id:
-								fab_data = block
-								break
-						if fab_data != null and not fab_data.input_items.is_empty():
+						var unit_data: UnitData = Registry.get_unit(unit_id)
+						if unit_data != null and not unit_data.build_cost.is_empty():
 							var pending := {}
-							for raw_id in fab_data.input_items:
+							for raw_id in unit_data.build_cost:
+								# Build-cost keys use short names ("copper"); item
+								# IDs are prefixed ("mat_copper") in the Registry.
 								var item_key := StringName(raw_id)
 								if not Registry.get_item(item_key):
 									var prefixed := StringName("mat_" + str(raw_id))
 									if Registry.get_item(prefixed):
 										item_key = prefixed
-								pending[item_key] = int(fab_data.input_items[raw_id])
+								pending[item_key] = int(unit_data.build_cost[raw_id])
 							state["pending_items"] = pending
 							state["phase"] = "outputting"
 						else:
@@ -4144,21 +4723,8 @@ func _try_feed_refabricator_direct(anchor: Vector2i, data: BlockData, unit_id: S
 	return true
 
 
-## Returns true if the refabricator's factory_buffers inputs cover every
-## item in data.input_items. Handles "copper" → "mat_copper" normalisation.
-func _refab_has_all_inputs(data: BlockData, buf: Dictionary) -> bool:
-	return _refab_has_all_inputs_dict(_refab_effective_recipe(data, &""), buf)
 
 
-## Subtracts data.input_items from the buffer (call only when
-## _refab_has_all_inputs returned true).
-func _refab_consume_inputs(data: BlockData, buf: Dictionary) -> void:
-	_refab_consume_inputs_dict(_refab_effective_recipe(data, &""), buf)
-
-
-## Dict-based variants used by the refab state machine once it resolves
-## the per-tier-2 recipe. Accept any dict keyed either by short ids
-## ("copper") or full runtime ids ("mat_copper").
 func _refab_has_all_inputs_dict(recipe: Dictionary, buf: Dictionary) -> bool:
 	for raw_id in recipe:
 		var need: int = int(recipe[raw_id])
@@ -5050,8 +5616,28 @@ func _draw_items() -> void:
 
 		# Figure out which direction this conveyor faces
 		var rotation = main.building_rotation.get(grid_pos, 0)
-		# Routers use their pre-decided exit_dir instead of cell rotation
+		# Routers use their pre-decided exit_dir instead of cell rotation.
+		# Until the picker commits one, hold the item at cell center
+		# instead of animating it toward the cell's `rotation` — which on
+		# a router points at the back (input) side and would otherwise
+		# slide the item visibly toward whatever's behind the router
+		# (often bare terrain).
 		var exit_dir: int = entry.get("exit_dir", -1)
+		var is_router: bool = _is_router_cell(grid_pos)
+		if is_router and exit_dir < 0:
+			var cw: Vector2 = main.grid_to_world(grid_pos) \
+				+ Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+			var off: Vector2 = Vector2.ZERO
+			if building_sys:
+				off = building_sys._get_top_offset(main.grid_to_world(grid_pos))
+			var ip: Vector2 = cw + off
+			if item.icon != null:
+				var ts := Vector2(ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR, ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR)
+				draw_texture_rect(item.icon, Rect2(ip - ts / 2.0, ts), false)
+			else:
+				draw_circle(ip, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
+				draw_arc(ip, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
+			continue
 		var effective_dir: int = exit_dir if exit_dir >= 0 else rotation
 		var dir_vec = Vector2(DIR_VECTORS[effective_dir])
 
@@ -6006,16 +6592,6 @@ func _try_deliver_to_payload_target(cell: Vector2i, payload_data: Dictionary, un
 	return false
 
 
-## Spawns the unit produced by this fabricator at the front of its footprint.
-## Wrapper kept for the base unit-fabricator path; reads produced_unit off
-## the BlockData.
-func _spawn_fabricated_unit(origin: Vector2i, data: BlockData) -> void:
-	_spawn_unit_at_building_front(origin, data, data.produced_unit)
-
-
-## Spawns `unit_id` at the front edge of the building at `origin`. Shared
-## by unit fabricators (produced_unit) and refabricators (tier-2 unit
-## derived from the input payload).
 func _spawn_unit_at_building_front(origin: Vector2i, data: BlockData, unit_id: StringName) -> void:
 	if unit_id == &"":
 		return

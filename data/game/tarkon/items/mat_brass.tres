@@ -1,14 +1,15 @@
-[gd_resource type="Resource" script_class="ItemData" format=3]
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://dvvukax2sxawy"]
 
-[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://d3toxtry830cu" path="res://textures/resources/Brass.png" id="1_t5ydb"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_brass"
 display_name = "Brass"
 description = "Copper-zinc alloy. Resistant to corrosion."
+icon = ExtResource("1_t5ydb")
 max_stack = 200
 category = 1
 color = Color(0.85, 0.75, 0.3, 1)
 base_value = 4.0
-conveyable = true

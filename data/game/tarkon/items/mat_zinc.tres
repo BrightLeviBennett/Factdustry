@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://daf2f0q33mlpm"]
 
 [ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cdmqb4ue5e0ht" path="res://textures/resources/zinc.png" id="1_uih52"]
+[ext_resource type="Texture2D" uid="uid://c3at7qyqlfbui" path="res://textures/resources/zinc.png" id="1_uih52"]
 
 [resource]
 script = ExtResource("1")

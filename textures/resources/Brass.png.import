@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://b46ht66inla1j"
-path="res://.godot/imported/FluidConduit.png-ec2df454f7a5eddc587da7673774d559.ctex"
+uid="uid://d3toxtry830cu"
+path="res://.godot/imported/Brass.png-c8af752ce87b29c7a78c9f45652e0d4e.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/fluid transportation/FluidConduit.png"
-dest_files=["res://.godot/imported/FluidConduit.png-ec2df454f7a5eddc587da7673774d559.ctex"]
+source_file="res://textures/resources/Brass.png"
+dest_files=["res://.godot/imported/Brass.png-c8af752ce87b29c7a78c9f45652e0d4e.ctex"]
 
 [params]
 

@@ -4,9 +4,9 @@
 
 [resource]
 script = ExtResource("1")
-id = &"conduit_bridge"
-display_name = "Conduit Bridge"
-description = "Bridges fluid pipes over other infrastructure."
+id = &"pipe_junction"
+display_name = "Pipe Junction"
+description = "Merges three fluid inputs into one output pipe."
 category = 9
 color = Color(0.3, 0.6, 0.9, 1)
 max_health = 200.0
@@ -14,4 +14,4 @@ build_cost = { "copper": 100, "silicon": 30 }
 build_time = 0.5
 transport_speed = 5.0
 transports_fluid = true
-tags = PackedStringArray("fluid", "transport")
+tags = PackedStringArray("fluid", "transport", "junction")

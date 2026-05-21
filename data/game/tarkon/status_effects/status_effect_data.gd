@@ -109,9 +109,6 @@ enum EffectType {
 # HELPER METHODS
 # =========================
 
-## Returns true if this is a harmful effect.
-func is_negative() -> bool:
-	return effect_type in [EffectType.DEBUFF, EffectType.DOT, EffectType.CROWD_CONTROL]
 
 ## Returns true if this effect deals damage over time.
 func has_dot() -> bool:

@@ -12,10 +12,7 @@
 [ext_resource type="Script" uid="uid://ciieomyusxniu" path="res://main/database_ui.gd" id="9_03owx"]
 [ext_resource type="Script" uid="uid://b4ev5tjtijbjk" path="res://main/tech_tree_ui.gd" id="12_c6i3y"]
 [ext_resource type="Script" uid="uid://b2bm4of0uhihr" path="res://main/explosion_system.gd" id="expl_sys"]
-[ext_resource type="Script" uid="uid://r4fpo7ldg1qm" path="res://main/launchpad_system.gd" id="lp_sys"]
-[ext_resource type="Script" uid="uid://r1djial37m46" path="res://main/nuclear_reactor_system.gd" id="nuc_sys"]
 [ext_resource type="Script" uid="uid://cesfkxlpfgvhe" path="res://main/power_system.gd" id="power_sys"]
-[ext_resource type="Script" uid="uid://bfuimgkmetkxa" path="res://main/watchtower_system.gd" id="wt_sys"]
 
 [node name="Main" type="Node2D" unique_id=1007502201]
 script = ExtResource("1_fos0i")
@@ -30,17 +27,8 @@ max_depth = 16.0
 [node name="PowerSystem" type="Node2D" parent="." unique_id=640376565]
 script = ExtResource("power_sys")
 
-[node name="NuclearReactorSystem" type="Node" parent="." unique_id=1149438132]
-script = ExtResource("nuc_sys")
-
 [node name="ExplosionSystem" type="Node2D" parent="." unique_id=1035367968]
 script = ExtResource("expl_sys")
-
-[node name="WatchtowerSystem" type="Node" parent="." unique_id=810552126]
-script = ExtResource("wt_sys")
-
-[node name="LaunchpadSystem" type="Node" parent="." unique_id=1532489482]
-script = ExtResource("lp_sys")
 
 [node name="LogisticsSystem" type="Node2D" parent="." unique_id=2061746658]
 script = ExtResource("5_wkp8b")

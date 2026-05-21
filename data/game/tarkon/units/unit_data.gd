@@ -126,11 +126,3 @@ enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 ## Calculates actual damage dealt after armor.
 func calc_damage_taken(raw_damage: float) -> float:
 	return max(raw_damage - armor, 1.0)
-
-## Returns true if this unit skips AStar pathfinding (direct movement).
-func ignores_pathfinding() -> bool:
-	return movement_layer >= MovementLayer.HOVER
-
-## Returns true if this unit uses the crawler AStar grid.
-func uses_crawler_pathfinding() -> bool:
-	return movement_layer == MovementLayer.CRAWLER

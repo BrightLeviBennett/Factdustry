@@ -4,14 +4,14 @@
 
 [resource]
 script = ExtResource("1")
-id = &"overflow_conduit"
-display_name = "Overflow Conduit"
-description = "Redirects excess fluid when pipes are full."
+id = &"underflow_pipe"
+display_name = "Underflow Pipe"
+description = "Routes fluid only when destination has capacity."
 category = 9
 color = Color(0.3, 0.6, 0.9, 1)
-max_health = 200.0
-build_cost = { "copper": 100, "silicon": 30 }
+max_health = 280.0
+build_cost = { "copper": 200, "silicon": 80 }
 build_time = 0.5
-transport_speed = 5.0
+transport_speed = 6.0
 transports_fluid = true
 tags = PackedStringArray("fluid", "transport")

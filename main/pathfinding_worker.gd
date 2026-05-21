@@ -35,7 +35,8 @@ var _rebuild_data: Dictionary = {}
 
 func start(grid_width: int, grid_height: int, grid_size: float,
 		ground_solids: Array[Vector2i], crawler_solids: Array[Vector2i],
-		hover_solids: Array[Vector2i] = []) -> void:
+		hover_solids: Array[Vector2i] = [],
+		ground_weights: Array = [], crawler_weights: Array = []) -> void:
 	_grid_width = grid_width
 	_grid_height = grid_height
 	_grid_size = grid_size
@@ -68,6 +69,11 @@ func start(grid_width: int, grid_height: int, grid_size: float,
 		_astar_crawler.set_point_solid(pos, true)
 	for pos in hover_solids:
 		_astar_hover.set_point_solid(pos, true)
+	# Per-cell weight scales (water bias). Each entry: [Vector2i, float].
+	for w in ground_weights:
+		_astar.set_point_weight_scale(w[0], float(w[1]))
+	for w in crawler_weights:
+		_astar_crawler.set_point_weight_scale(w[0], float(w[1]))
 
 	_thread = Thread.new()
 	_thread.start(_worker_loop)
@@ -100,6 +106,15 @@ func request_path(unit_id: int, start: Vector2i, end: Vector2i,
 func queue_set_solid(pos: Vector2i, solid: bool, grid_name: String = "ground") -> void:
 	_mutex.lock()
 	_mutations.append({"type": "point", "pos": pos, "solid": solid, "grid": grid_name})
+	_mutex.unlock()
+
+
+## Queue a per-cell weight scale change. Used by the water-bias system
+## to make A* prefer longer dry routes over wading straight through a
+## lake while still allowing the crossing when no dry route exists.
+func queue_set_weight(pos: Vector2i, weight: float, grid_name: String = "ground") -> void:
+	_mutex.lock()
+	_mutations.append({"type": "weight", "pos": pos, "weight": weight, "grid": grid_name})
 	_mutex.unlock()
 
 
@@ -158,7 +173,11 @@ func _worker_loop() -> void:
 						grid = _astar_hover
 					_:
 						grid = _astar
-				grid.set_point_solid(m["pos"], m["solid"])
+				match m.get("type", "point"):
+					"weight":
+						grid.set_point_weight_scale(m["pos"], float(m["weight"]))
+					_:
+						grid.set_point_solid(m["pos"], m["solid"])
 
 		# Process path requests
 		var batch_results: Array[Dictionary] = []
@@ -184,6 +203,17 @@ func _do_rebuild(rb_data: Dictionary) -> void:
 		_astar_crawler.set_point_solid(pos, true)
 	for pos in rb_data.get("hover", []):
 		_astar_hover.set_point_solid(pos, true)
+
+	# Water bias: per-cell weight overrides so A* prefers dry routes
+	# but still treats water as crossable. Keyed by grid → array of
+	# [pos, weight] pairs. Hover doesn't participate (water is free
+	# for hover).
+	var ground_weights: Array = rb_data.get("ground_weights", [])
+	for w in ground_weights:
+		_astar.set_point_weight_scale(w[0], float(w[1]))
+	var crawler_weights: Array = rb_data.get("crawler_weights", [])
+	for w in crawler_weights:
+		_astar_crawler.set_point_weight_scale(w[0], float(w[1]))
 
 
 func _compute_path(req: Dictionary) -> Dictionary:

@@ -6,9 +6,9 @@
 script = ExtResource("1")
 id = &"unit_upgrader"
 display_name = "Unit Upgrader"
-description = "Upgrades existing units to higher tiers."
+description = "Applies researched unit upgrades (e.g. Overrun, Plunge) to compatible units."
 category = 6
-color = Color(0.7, 0.5, 0.8, 1)
+color = Color(0.5, 0.7, 0.9, 1)
 max_health = 360.0
 grid_size = Vector2i(3, 3)
 build_cost = { "copper": 200, "silicon": 80 }

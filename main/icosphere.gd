@@ -192,36 +192,3 @@ static func _get_midpoint(cache: Dictionary, verts: PackedVector3Array, i1: int,
 	verts.append(mid)
 	cache[key] = idx
 	return idx
-
-
-## Compute the appropriate subdivision level for a planet.
-static func compute_subdivision_level(mesh_radius: float, marker_radius: float) -> int:
-	var target_spacing: float = marker_radius * 2.0
-	var surface_area: float = 4.0 * PI * mesh_radius * mesh_radius
-	for n in range(10):
-		var vertex_count: float = 10.0 * pow(4, n) + 2.0
-		var avg_spacing: float = sqrt(surface_area / vertex_count)
-		if avg_spacing <= target_spacing:
-			return n
-	return 5
-
-
-## Compute the average nearest-neighbor distance for icosphere vertices.
-static func compute_hex_radius(verts: PackedVector3Array) -> float:
-	if verts.size() < 2:
-		return 0.25
-	var total_min_dist := 0.0
-	var count := 0
-	var step: int = maxi(1, verts.size() / 50)
-	for i in range(0, verts.size(), step):
-		var min_dist := 999999.0
-		for j in range(verts.size()):
-			if i == j:
-				continue
-			var d: float = verts[i].distance_to(verts[j])
-			if d < min_dist:
-				min_dist = d
-		total_min_dist += min_dist
-		count += 1
-	var avg_spacing: float = total_min_dist / float(count)
-	return avg_spacing

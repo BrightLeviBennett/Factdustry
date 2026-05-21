@@ -60,10 +60,6 @@ func play(sound_id: String, world_pos: Vector2 = Vector2.ZERO, volume_db: float 
 	p.play()
 
 
-## Variant that ignores world position — useful for UI / non-spatial
-## events (mode toggle clicks, schematic capture chime, etc.).
-func play_ui(sound_id: String, volume_db: float = 0.0) -> void:
-	play(sound_id, Vector2.ZERO, volume_db, 1.0, 0.0)
 
 
 func _resolve(sound_id: String):

@@ -124,7 +124,52 @@ func _finish_loading() -> void:
 func _prebuild_planet_select() -> void:
 	# Pre-load the scene resource so it's cached (faster instantiation later)
 	_planet_select_scene = load("res://main/PlanetSelect.tscn") as PackedScene
+	# Pre-warm the PlanetSelect shader cache. PlanetSelect reuses two
+	# ShaderMaterials (planet surface + atmosphere) across every planet;
+	# compiling them here on the menu screen means the first transition
+	# into the planet view doesn't pay the shader-compile cost mid-
+	# transition. Cheap to spin up; idempotent on later opens because
+	# the shaders live on static class vars.
+	var planet_select_script = load("res://main/planet_select.gd")
+	if planet_select_script and "_PLANET_SHADER_CODE" in planet_select_script:
+		if planet_select_script._planet_shader == null:
+			var ps_shader := Shader.new()
+			ps_shader.code = planet_select_script._PLANET_SHADER_CODE
+			planet_select_script._planet_shader = ps_shader
+		if planet_select_script._atmo_shader == null:
+			var atmo_shader := Shader.new()
+			atmo_shader.code = planet_select_script._ATMO_SHADER_CODE
+			planet_select_script._atmo_shader = atmo_shader
+	# Pre-instantiate AND park the PlanetSelect scene so the FIRST
+	# navigation into it is also instant. Loading the PackedScene only
+	# parses the .tscn file; the slow part — running _ready on every
+	# node, building the 3D planet grid, creating sector cards — only
+	# fires when `instantiate()` is called.
+	#
+	# Deferred to the next idle frame so the main menu paints first;
+	# the user sees the menu immediately while PlanetSelect builds
+	# itself in the background.
+	call_deferred("_instantiate_and_park_planet_select")
 	print("MainMenu: PlanetSelect pre-built (hidden)")
+
+
+func _instantiate_and_park_planet_select() -> void:
+	# Wait one more frame so the menu's first frame finishes rendering
+	# before we hit the heavy node-tree build.
+	await get_tree().process_frame
+	if _planet_select_scene == null:
+		return
+	if SaveManager.has_parked_planet_select():
+		return
+	# Instantiate runs _ready on every node — that's the slow part.
+	# `park_planet_select` reparents under SaveManager, hides the 3D
+	# subtree + CanvasLayer HUD, and pauses processing — so the
+	# parked instance costs nothing per frame.
+	var ps: Node = _planet_select_scene.instantiate()
+	if not SaveManager.park_planet_select(ps):
+		ps.queue_free()
+		return
+	print("MainMenu: PlanetSelect pre-instantiated + parked")
 
 
 func _preload_sector_maps() -> void:
@@ -352,14 +397,11 @@ func _on_button_pressed(label: String) -> void:
 	match label:
 		"Campaign":
 			SaveManager.return_to_menu = true
-			if _planet_select_scene:
-				# Use cached scene resource for faster instantiation
-				var instance = _planet_select_scene.instantiate()
-				get_tree().root.add_child(instance)
-				get_tree().current_scene.queue_free()
-				get_tree().current_scene = instance
-			else:
-				get_tree().change_scene_to_file("res://main/PlanetSelect.tscn")
+			# Uses the parked PlanetSelect instance if one exists
+			# (instant), else instantiates from the cached PackedScene
+			# resource. Same synchronous-swap pattern as the rest of
+			# the in-game transitions.
+			SaveManager.swap_scene_to_planet_select()
 		"Core Database":
 			if database_ui:
 				database_ui._show_ui()
