@@ -1,20 +1,10 @@
 {
-	"archive_decoder_state": {
-
-	},
-	"archive_holdings": {
-
-	},
-	"belt_unloader_state": {
-
-	},
-	"block_storage": {
-
-	},
+	"archive_decoder_state": {},
+	"archive_holdings": {},
+	"belt_unloader_state": {},
+	"block_storage": {},
 	"build_order": [],
-	"build_progress": {
-
-	},
+	"build_progress": {},
 	"building_factions": {
 		"12,65": 0.0,
 		"12,66": 0.0,
@@ -885,12 +875,8 @@
 		"69,42": 280.0,
 		"69,43": 280.0
 	},
-	"building_resources_consumed": {
-
-	},
-	"building_resources_refunded": {
-
-	},
+	"building_resources_consumed": {},
+	"building_resources_refunded": {},
 	"building_rotation": {
 		"12,65": 2.0,
 		"12,66": 2.0,
@@ -1761,22 +1747,12 @@
 		"69,42": "large_copper_wall",
 		"69,43": "large_copper_wall"
 	},
-	"constructor_state": {
-
-	},
-	"conveyor_items": {
-
-	},
+	"constructor_state": {},
+	"conveyor_items": {},
 	"core_position": "26,72",
-	"crane_links": {
-
-	},
-	"crane_states": {
-
-	},
-	"deconstructor_state": {
-
-	},
+	"crane_links": {},
+	"crane_states": {},
+	"deconstructor_state": {},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
@@ -1784,9 +1760,7 @@
 		"timestamp": 1778612879.94061
 	},
 	"drone_position": "",
-	"factory_buffers": {
-
-	},
+	"factory_buffers": {},
 	"floor_tiles": {
 		"0,17": "grassy_floor",
 		"0,18": "grassy_floor",
@@ -8719,22 +8693,16 @@
 	"grid_height": 100.0,
 	"grid_width": 100.0,
 	"hints": [],
-	"junction_items": {
-
-	},
+	"junction_items": {},
 	"linked_pairs": [
 		[
 			"58,32",
 			"54,32"
 		]
 	],
-	"loader_state": {
-
-	},
+	"loader_state": {},
 	"mass_driver_projectiles": [],
-	"mass_driver_state": {
-
-	},
+	"mass_driver_state": {},
 	"ore_tiles": {
 		"10,63": "graphite_ore",
 		"10,64": "graphite_ore",
@@ -8765,16 +8733,10 @@
 		"65,37": "graphite_ore",
 		"66,38": "graphite_ore"
 	},
-	"payload_items": {
-
-	},
-	"pipe_contents": {
-
-	},
+	"payload_items": {},
+	"pipe_contents": {},
 	"player_units": [],
-	"refabricator_state": {
-
-	},
+	"refabricator_state": {},
 	"resources": {
 		"mat_copper": 993.0,
 		"mat_graphite": 574.0,
@@ -8783,79 +8745,50 @@
 	},
 	"script_steps": [
 		{
-			"_editor_pos": "120,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+			"actions": [
 				{
 					"from": "22,69",
 					"text": "(-white)Your and the enemy's base are seperated by a river.\n(-white)You'll need to research and produce hover units to attack the enemy",
 					"to": "30,69",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Explain (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,80",
-			"actions": [],
 			"conditions": [
 				{
 					"seconds": 8.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				0
-			],
-			"name": "Explain (wait wait)",
-			"on_exit": []
+			"name": "Explain",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				1
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "22,63",
 					"text": "(-white)Research and place the [res://textures/blocks/units/HoverFabricator/HoverFabricatorComplete.png](-purple)Hover Fabricator(-white), and supply it with the required resources.",
 					"to": "27,63",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Place Unit block (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,230",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "hover_fabricator",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				2
-			],
-			"name": "Place Unit block (wait placed)",
-			"on_exit": []
+			"name": "Place Unit block",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,380",
 			"actions": [],
 			"conditions": [
 				{
@@ -8863,50 +8796,27 @@
 					"unit_id": "hoverboard"
 				}
 			],
-			"dependencies": [
-				3
-			],
-			"name": "Produce units (wait units_produced)",
+			"name": "Produce units",
 			"on_exit": []
 		},
 		{
-			"_editor_pos": "120,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				4
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "22,63",
 					"text": "(-white)Now command your units to destroy the enemy.",
 					"to": "27,63",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Destroy enemy (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,530",
-			"actions": [],
 			"conditions": [
 				{
 					"type": "always"
 				}
 			],
-			"dependencies": [
-				5
-			],
-			"name": "Destroy enemy (wait always)",
+			"name": "Destroy enemy",
 			"on_exit": []
 		},
 		{
-			"_editor_pos": "120,680",
 			"actions": [],
 			"conditions": [
 				{
@@ -8914,35 +8824,19 @@
 					"type": "ferox_blocks_destroyed"
 				}
 			],
-			"dependencies": [
-				6
-			],
-			"name": "Capture (wait ferox_blocks_destroyed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,680",
-			"actions": [
+			"name": "Capture",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
 				{
 					"type": "capture_sector"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				7
-			],
-			"name": "Capture (exit capture_sector)",
-			"on_exit": []
+			]
 		}
 	],
 	"sector_name": "CR",
-	"sorter_filters": {
-
-	},
+	"sorter_filters": {},
 	"stats_blocks_placed": 0.0,
 	"stats_blocks_removed": 0.0,
 	"stats_enemy_blocks_destroyed": 0.0,
@@ -8951,9 +8845,7 @@
 	"stats_units_destroyed": 0.0,
 	"stats_units_produced": 0.0,
 	"type": "sector",
-	"unloader_state": {
-
-	},
+	"unloader_state": {},
 	"version": 3.0,
 	"wall_tiles": {
 		"0,14": "grassy_wall",

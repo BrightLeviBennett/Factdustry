@@ -1,15 +1,12 @@
 [gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://c5n641eksnvpc"]
 
 [ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://crsycnqx1546a" path="res://textures/terrain/Water.png" id="1_uf7ph"]
+[ext_resource type="Texture2D" uid="uid://drb5f3pin7p5l" path="res://textures/terrain/Water.png" id="1_uf7ph"]
 
 [resource]
 script = ExtResource("1")
 id = &"water"
 icon = ExtResource("1_uf7ph")
-color = null
-draw_border = null
-border_color = null
 speed_modifier = 0.5
 tags = PackedStringArray("liquid", "water")
 is_liquid = true

@@ -1023,6 +1023,56 @@ func _update_barrel_toe_in(grid_pos: Vector2i, data, turret_world: Vector2, targ
 # PLAYER DRONE COMBAT
 # =========================
 
+## True when the player is doing something that should NOT also fire
+## the drone's manual shoot / heal beam — even though LMB is held.
+## Covers the cases the spec lists:
+##   1. Unit-select mode (UnitManager.unit_mode_active)
+##   2. Drag-to-deposit from the drone's own inventory (drone._dragging_inventory)
+##   3. A pending block link (BuildingSystem.link_source set)
+##   3b. Crane link (BuildingSystem._crane_link_anchor set)
+##   4. A world menu / storage panel open (WorldUISystem flags)
+##   5. Cursor over a DERELICT block (single-click capture)
+func _player_action_blocks_drone(drone: Node) -> bool:
+	# (2) inventory drag held on the drone itself.
+	if drone and "_dragging_inventory" in drone and bool(drone._dragging_inventory):
+		return true
+	# (1) Unit mode.
+	var unit_mgr = _unit_mgr_ref()
+	if unit_mgr and "unit_mode_active" in unit_mgr and bool(unit_mgr.unit_mode_active):
+		return true
+	var bs = _building_sys_ref()
+	if bs != null:
+		# (3) Block link pending.
+		if "link_source" in bs and bs.link_source != Vector2i(-1, -1):
+			return true
+		# (3b) Crane link pending.
+		if "_crane_link_anchor" in bs and bs._crane_link_anchor != Vector2i(-1, -1):
+			return true
+		# (4) Crane-filter / sorter / etc. world menus that the
+		# BuildingSystem caches a flag for.
+		if "_crane_filter_menu_open" in bs and bool(bs._crane_filter_menu_open):
+			return true
+	# (4) World menu / specialised block menu open.
+	var world_ui = get_node_or_null("/root/Main/WorldUISystem")
+	if world_ui != null:
+		if "world_menu_open" in world_ui and bool(world_ui.world_menu_open):
+			return true
+		if "storage_panel_open" in world_ui and bool(world_ui.storage_panel_open):
+			return true
+	# (5) Hovering a derelict block — a single click captures it, and
+	# we don't want the same click to also kick off a tracer at the
+	# block / past it.
+	if main != null and drone != null:
+		var mouse_world: Vector2 = drone.get_global_mouse_position()
+		var grid_pos: Vector2i = main.world_to_grid(mouse_world)
+		if main.placed_buildings.has(grid_pos):
+			var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+			if main.has_method("get_building_faction") \
+					and main.get_building_faction(anchor) == main.Faction.DERELICT:
+				return true
+	return false
+
+
 func _update_drone_combat(delta: float) -> void:
 	drone_cooldown -= delta
 
@@ -1060,6 +1110,8 @@ func _update_drone_combat(delta: float) -> void:
 		if main.selected_building != &"":
 			lmb = false
 		if get_viewport().gui_get_hovered_control() != null:
+			lmb = false
+		if _player_action_blocks_drone(drone):
 			lmb = false
 		manual_shoot_active = lmb
 	drone_is_shooting = manual_shoot_active
@@ -1239,6 +1291,13 @@ func enemy_attack_unit(enemy: Node2D, target_unit: Node2D, damage: float, proj_s
 func enemy_ranged_attack(enemy: Node2D, target_grid_pos: Vector2i, damage: float, proj_speed: float, proj_color: Color) -> bool:
 	var target_world = main.grid_to_world(target_grid_pos) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 
+	# IMPORTANT: pass source_faction = FEROX. Without this the spawn
+	# defaults to LUMINA, which makes every other FEROX unit along
+	# the bullet's flight path an "opposing-team" target — so the
+	# shooter chips its own squad — and the bullet would even hit
+	# FEROX walls on the way out. The bullet must be tagged as
+	# enemy-sourced for the in-path collision + wall friendly-fire
+	# guard to skip same-faction stuff.
 	_spawn_projectile(
 		enemy.position,
 		target_grid_pos,         # target ref is the grid position
@@ -1250,6 +1309,7 @@ func enemy_ranged_attack(enemy: Node2D, target_grid_pos: Vector2i, damage: float
 		"enemy",
 		false,
 		0.0,
+		main.Faction.FEROX,
 	)
 	return true
 
@@ -1580,14 +1640,59 @@ func _can_hit_unit(proj: Dictionary, unit: Node2D) -> bool:
 	return true
 
 
-## Applies knockback to a unit by nudging its world position away from origin.
+## Applies knockback to a unit by nudging its world position away from
+## origin. Raycasts the displacement against the unit's pathing grid so
+## the unit can't be yeeted across the map (when many diffuse pellets
+## hit at once) or land inside a wall. Also caps the per-call distance
+## to a sane fraction of a tile so even a degenerate `amount` stays
+## reasonable.
 func _apply_knockback(unit: Node2D, origin: Vector2, amount: float) -> void:
-	if amount <= 0.0:
+	if amount <= 0.0 or unit == null:
 		return
 	var dir: Vector2 = (unit.position - origin)
 	if dir.length_squared() < 0.01:
 		return
-	unit.position += dir.normalized() * amount
+	dir = dir.normalized()
+	# Hard cap per call — 6 tiles is already a strong shove and stops
+	# pathological pile-ups (e.g. 15 diffuse pellets hitting in one
+	# frame) from teleporting the unit halfway across the map.
+	var gs: float = float(main.GRID_SIZE) if main else 32.0
+	var travel: float = clampf(amount, 0.0, gs * 6.0)
+	# Pick the astar grid for the unit's movement layer so wall checks
+	# match how the unit actually pathfinds. Flying units skip the
+	# raycast entirely (no obstacles).
+	var unit_mgr = _unit_mgr_ref()
+	var astar: AStarGrid2D = null
+	var ml: int = 0
+	if unit and "data" in unit and unit.data:
+		ml = unit.data.movement_layer
+	if unit_mgr:
+		match ml:
+			0: astar = unit_mgr.astar if "astar" in unit_mgr else null
+			1: astar = unit_mgr.astar_crawler if "astar_crawler" in unit_mgr else null
+			2: astar = unit_mgr.astar_hover if "astar_hover" in unit_mgr else null
+			_: astar = null  # FLYING
+	if astar == null or main == null:
+		unit.position += dir * travel
+		return
+	# Step the displacement in cell-sized chunks. Stop just before
+	# entering a solid cell so the unit can't end up clipped inside.
+	var step: float = gs * 0.5
+	var travelled: float = 0.0
+	var cur: Vector2 = unit.position
+	while travelled < travel:
+		var next_dist: float = minf(step, travel - travelled)
+		var next_pos: Vector2 = cur + dir * next_dist
+		var next_cell: Vector2i = main.world_to_grid(next_pos)
+		# Out-of-bounds → treat as solid (clamp to map edge).
+		if next_cell.x < 0 or next_cell.y < 0 \
+				or next_cell.x >= main.GRID_WIDTH or next_cell.y >= main.GRID_HEIGHT:
+			break
+		if astar.is_point_solid(next_cell):
+			break
+		cur = next_pos
+		travelled += next_dist
+	unit.position = cur
 
 
 ## Applies a status effect to a unit. Currently a no-op stub — units don't have
@@ -2028,15 +2133,18 @@ func _draw_turret_heads() -> void:
 	var building_sys = _building_sys_ref()
 
 	var _ss_turret = _sector_script_ref()
-	for grid_pos in turret_angles:
-		if not main.placed_buildings.has(grid_pos):
-			continue
+	# Walk all placed turret anchors so derelict / under-construction
+	# turrets still draw their heads. `turret_angles` only gets
+	# populated for active LUMINA turrets in `_update_turrets`, so
+	# iterating it alone would skip every dead/derelict turret on the
+	# map.
+	for grid_pos in main.placed_buildings:
 		if _ss_turret and _ss_turret.is_tile_hidden(grid_pos):
 			continue
 
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
-		if data == null:
+		if data == null or not data.is_turret():
 			continue
 
 		var world_pos = main.grid_to_world(grid_pos)
@@ -2048,7 +2156,12 @@ func _draw_turret_heads() -> void:
 			offset = building_sys._get_top_offset(world_pos)
 		center += offset
 
-		var angle = turret_angles[grid_pos]
+		# Default static angle = placement rotation, so inactive
+		# turrets read as facing whichever direction they were placed.
+		var angle: float = float(turret_angles.get(
+			grid_pos,
+			float(main.building_rotation.get(grid_pos, 0)) * (PI / 2.0),
+		))
 
 		# If the block defines a turret_head_sprite, draw that rotated to the
 		# aim angle at its native pixel size (like cable wires), instead of

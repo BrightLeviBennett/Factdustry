@@ -7,7 +7,8 @@
 script = ExtResource("1")
 id = &"nightfall_depths"
 display_name = "Nightfall Depths"
-description = "Because very few asteroids landed on this side of the planet, there aren't many vents; so you'll need to find other sources of energy. Aquire coal, and research the 'Combustion Generator' to utilize the large deposits of coal on this sector."
+description = "Because there is significantly less seismic activity on this side of tarkon, there are less vents and the few vents that are here are less powerfull and therefore generate less power.
+Aquire coal and research the 'Combustion Generator' to utilize the large deposits of coal on this sector to make power."
 icon = ExtResource("1_rw7fy")
 planet_id = &"Tarkon"
 hex_q = -22

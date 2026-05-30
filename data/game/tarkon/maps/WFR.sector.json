@@ -16,16 +16,10 @@
 		"68,12": "",
 		"9,78": ""
 	},
-	"belt_unloader_state": {
-
-	},
-	"block_storage": {
-
-	},
+	"belt_unloader_state": {},
+	"block_storage": {},
 	"build_order": [],
-	"build_progress": {
-
-	},
+	"build_progress": {},
 	"building_factions": {
 		"10,40": 2.0,
 		"10,51": 2.0,
@@ -1302,12 +1296,8 @@
 		"9,74": 140.0,
 		"9,85": 120.0
 	},
-	"building_resources_consumed": {
-
-	},
-	"building_resources_refunded": {
-
-	},
+	"building_resources_consumed": {},
+	"building_resources_refunded": {},
 	"building_rotation": {
 		"10,40": 0.0,
 		"10,51": 0.0,
@@ -2584,22 +2574,12 @@
 		"9,74": "copper_wall",
 		"9,85": "conveyor_belt"
 	},
-	"constructor_state": {
-
-	},
-	"conveyor_items": {
-
-	},
+	"constructor_state": {},
+	"conveyor_items": {},
 	"core_position": "175,79",
-	"crane_links": {
-
-	},
-	"crane_states": {
-
-	},
-	"deconstructor_state": {
-
-	},
+	"crane_links": {},
+	"crane_states": {},
+	"deconstructor_state": {},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
@@ -2607,9 +2587,7 @@
 		"timestamp": 1778612896.15765
 	},
 	"drone_position": "",
-	"factory_buffers": {
-
-	},
+	"factory_buffers": {},
 	"floor_tiles": {
 		"0,0": "blackstone_floor",
 		"0,1": "blackstone_floor",
@@ -22617,17 +22595,11 @@
 	"grid_height": 100.0,
 	"grid_width": 200.0,
 	"hints": [],
-	"junction_items": {
-
-	},
+	"junction_items": {},
 	"linked_pairs": [],
-	"loader_state": {
-
-	},
+	"loader_state": {},
 	"mass_driver_projectiles": [],
-	"mass_driver_state": {
-
-	},
+	"mass_driver_state": {},
 	"ore_tiles": {
 		"10,95": "graphite_ore",
 		"11,95": "graphite_ore",
@@ -22705,16 +22677,10 @@
 		"4,41": "copper_ore",
 		"4,42": "copper_ore"
 	},
-	"payload_items": {
-
-	},
-	"pipe_contents": {
-
-	},
+	"payload_items": {},
+	"pipe_contents": {},
 	"player_units": [],
-	"refabricator_state": {
-
-	},
+	"refabricator_state": {},
 	"resources": {
 		"mat_copper": 15.0,
 		"mat_graphite": 9.0,
@@ -22723,242 +22689,99 @@
 	},
 	"script_steps": [
 		{
-			"_editor_pos": "120,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+			"actions": [
 				{
 					"from": "175,77",
-					"text": "(-white)↑ Head up for objectives. ",
+					"id": "PST1",
+					"text": "(-white)\u2191 Head up for objectives. ",
 					"to": "177,77",
-					"type": "text"
-				}
-			],
-			"name": "Place Scan (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"from": "166,18",
+					"id": "PST2",
 					"text": "(-white)Research and place a [res://textures/blocks/cores/ArchiveScanner.png]Archive Scanner facing a archive to scan it.",
 					"to": "172,18",
-					"type": "text"
-				}
-			],
-			"name": "Place Scan (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"color": "white",
 					"from": "169,16",
+					"id": "PSB",
 					"to": "170,17",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Place Scan (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,80",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "archive_scanner",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				0,
-				1,
-				2
-			],
-			"name": "Place Scan (wait placed)",
-			"on_exit": []
+			"name": "Place Scan",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "168,18",
+					"id": "PDB1",
 					"to": "170,20",
-					"type": "box"
-				}
-			],
-			"name": "Place Decode (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "166,21",
+					"id": "PDT",
 					"text": "(-white)Research and place a [res://textures/blocks/cores/ArchiveDecoder.png]Archive Decoder next to a archive scanner to decode an archive. You will need to power it. ",
 					"to": "172,21",
-					"type": "text"
-				}
-			],
-			"name": "Place Decode (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,230",
-			"actions": [],
-			"conditions": [
+					"type": "draw_text"
+				},
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "160,14",
+					"id": "PDB2",
 					"to": "162,16",
-					"type": "box"
-				}
-			],
-			"name": "Place Decode (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,230",
-			"actions": [],
-			"conditions": [
+					"type": "draw_box"
+				},
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "162,20",
+					"id": "PDB3",
 					"to": "162,20",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Place Decode (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,230",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "archive_decoder",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				4,
-				5,
-				6,
-				7
-			],
-			"name": "Place Decode (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1520,230",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"block_id": "vent_turbine",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				4,
-				5,
-				6,
-				7
-			],
-			"name": "Place Decode (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1800,230",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"block_id": "cable_node",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				4,
-				5,
-				6,
-				7
-			],
-			"name": "Place Decode (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "2080,230",
-			"actions": [],
-			"conditions": [
+			"name": "Place Decode",
+			"on_exit": [
 				{
-					"type": "always"
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
 				}
-			],
-			"dependencies": [
-				8,
-				9,
-				10
-			],
-			"name": "Place Decode (sink)",
-			"on_exit": []
+			]
 		},
 		{
-			"_editor_pos": "120,380",
 			"actions": [],
 			"conditions": [
 				{
@@ -22966,133 +22789,53 @@
 					"type": "decoded_archive"
 				}
 			],
-			"dependencies": [
-				11
-			],
-			"name": "Decode (wait decoded_archive)",
+			"name": "Decode",
 			"on_exit": []
 		},
 		{
-			"_editor_pos": "120,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				12
-			],
-			"markers": [
-				{
-					"from": "166,21",
-					"text": "(-white)Repeat this process again for the other archives.\n(-white)Enemies Incoming, Prepare to defend.",
-					"to": "173,21",
-					"type": "text"
-				}
-			],
-			"name": "Waves (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,530",
 			"actions": [
 				{
 					"type": "start_waves"
-				}
-			],
-			"conditions": [
+				},
 				{
-					"type": "always"
+					"from": "166,21",
+					"id": "WT",
+					"text": "(-white)Repeat this process again for the other archives.\n(-white)Enemies Incoming, Prepare to defend.",
+					"to": "173,21",
+					"type": "draw_text"
 				}
 			],
-			"dependencies": [
-				13
-			],
-			"name": "Waves (start_waves)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,530",
-			"actions": [],
 			"conditions": [
 				{
 					"seconds": 10.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				14
-			],
-			"name": "Waves (wait wait)",
-			"on_exit": []
+			"name": "Waves",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,680",
-			"actions": [],
-			"conditions": [
+			"actions": [
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				15
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "91,0",
+					"id": "EWB",
 					"to": "99,8",
-					"type": "box"
-				}
-			],
-			"name": "Explain waves (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				15
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "91,9",
+					"id": "EWT",
 					"text": "(-white)This is the enemy drop zone, blocks placed inside it will be detroyed upon the next wave start.",
 					"to": "99,9",
-					"type": "text"
-				}
-			],
-			"name": "Explain waves (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,680",
-			"actions": [
+					"type": "draw_text"
+				},
 				{
 					"type": "pause"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				16,
-				17
-			],
-			"name": "Explain waves (pause)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,680",
-			"actions": [
+				},
 				{
 					"pos": "95,4",
 					"type": "focus_camera"
@@ -23100,121 +22843,43 @@
 			],
 			"conditions": [
 				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				18
-			],
-			"name": "Explain waves (focus_camera)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,680",
-			"actions": [],
-			"conditions": [
-				{
 					"seconds": 10.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				19
-			],
-			"name": "Explain waves (wait wait)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1520,680",
-			"actions": [
+			"name": "Explain waves",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
 				{
 					"type": "unpause"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"name": "Explain waves (exit unpause)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1800,680",
-			"actions": [
+				},
 				{
 					"type": "release_camera"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				21
-			],
-			"name": "Explain waves (exit release_camera)",
-			"on_exit": []
+			]
 		},
 		{
-			"_editor_pos": "120,830",
 			"actions": [],
 			"conditions": [
 				{
 					"type": "waves_defeated"
 				}
 			],
-			"dependencies": [
-				22
-			],
-			"name": "End (wait waves_defeated)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,830",
-			"actions": [
+			"name": "End",
+			"on_exit": [
 				{
 					"type": "capture_sector"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				23
-			],
-			"name": "End (exit capture_sector)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,830",
-			"actions": [
+				},
 				{
 					"type": "stop_waves"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				24
-			],
-			"name": "End (exit stop_waves)",
-			"on_exit": []
+			]
 		}
 	],
 	"sector_name": "WFR",
-	"sorter_filters": {
-
-	},
+	"sorter_filters": {},
 	"stats_blocks_placed": 0.0,
 	"stats_blocks_removed": 0.0,
 	"stats_enemy_blocks_destroyed": 0.0,
@@ -23223,9 +22888,7 @@
 	"stats_units_destroyed": 0.0,
 	"stats_units_produced": 0.0,
 	"type": "sector",
-	"unloader_state": {
-
-	},
+	"unloader_state": {},
 	"version": 3.0,
 	"wall_tiles": {
 		"0,0": "blackstone_wall",

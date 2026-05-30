@@ -12,7 +12,10 @@
 [ext_resource type="Script" uid="uid://ciieomyusxniu" path="res://main/database_ui.gd" id="9_03owx"]
 [ext_resource type="Script" uid="uid://b4ev5tjtijbjk" path="res://main/tech_tree_ui.gd" id="12_c6i3y"]
 [ext_resource type="Script" uid="uid://b2bm4of0uhihr" path="res://main/explosion_system.gd" id="expl_sys"]
+[ext_resource type="Script" uid="uid://b6awffxw3p0ys" path="res://main/logistic_control_system.gd" id="logistic_ctrl"]
 [ext_resource type="Script" uid="uid://cesfkxlpfgvhe" path="res://main/power_system.gd" id="power_sys"]
+[ext_resource type="Script" uid="uid://nsvul8rhcsks" path="res://main/schematic_system.gd" id="schematic_sys"]
+[ext_resource type="Script" uid="uid://doj8h5v75r0py" path="res://main/wall_darkness.gd" id="wall_darkness"]
 
 [node name="Main" type="Node2D" unique_id=1007502201]
 script = ExtResource("1_fos0i")
@@ -32,6 +35,15 @@ script = ExtResource("expl_sys")
 
 [node name="LogisticsSystem" type="Node2D" parent="." unique_id=2061746658]
 script = ExtResource("5_wkp8b")
+
+[node name="SchematicSystem" type="Node" parent="." unique_id=1854293701]
+script = ExtResource("schematic_sys")
+
+[node name="LogisticControlSystem" type="Node2D" parent="." unique_id=199151678]
+script = ExtResource("logistic_ctrl")
+
+[node name="WallDarkness" type="Node2D" parent="." unique_id=432086408]
+script = ExtResource("wall_darkness")
 
 [node name="UnitManager" type="Node2D" parent="." unique_id=1217671179]
 script = ExtResource("5_trn2v")

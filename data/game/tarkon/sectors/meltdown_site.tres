@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="SectorData" format=3]
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://b08ceo57cjcji"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
 
@@ -6,7 +6,9 @@
 script = ExtResource("1")
 id = &"meltdown_site"
 display_name = "Meltdown Site"
-description = "An ancient reactor breach. Radiation-soaked terrain hides uranium veins beneath the slag."
+description = "<Optional Sector>
+The remmanants of what was once ferox's largest nuclear power production facility, now decimated by a coolant leak.
+Research the various technology scattered through this sector and repair the facility."
 planet_id = &"Tarkon"
 hex_q = 2
 hex_r = -4
@@ -14,5 +16,4 @@ available_resources = PackedStringArray("mat_copper", "mat_uranium")
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray()
 required_sectors = PackedStringArray("zinc_deposits")
-map_path = ""
 tags = PackedStringArray("campaign", "sector")

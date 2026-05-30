@@ -1,17 +1,23 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bh3puyg540a4k"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cva2n4wkkvq26" path="res://textures/blocks/fluid transportation/PipeRouter.png" id="1_hk01f"]
 
 [resource]
 script = ExtResource("1")
 id = &"pipe_router"
 display_name = "Pipe Router"
 description = "Splits fluid flow into three output directions."
+icon = ExtResource("1_hk01f")
 category = 9
+tags = PackedStringArray("fluid", "transport", "router")
 color = Color(0.3, 0.6, 0.9, 1)
+top_sprite = ExtResource("1_hk01f")
 max_health = 200.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 0.5
 transport_speed = 5.0
 transports_fluid = true
-tags = PackedStringArray("fluid", "transport")

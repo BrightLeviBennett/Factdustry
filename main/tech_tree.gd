@@ -509,11 +509,16 @@ func _register_cores() -> void:
 	_add(&"core_pantheon",     "Core: Pantheon",     [&"core_crucible"],  [], {&"mat_copper": 10000, &"mat_graphite": 9000, &"mat_silicon": 4500, &"mat_steel": 3000, &"mat_brass": 700}, Vector2(0, 6))
 	_add(&"core_aegis",        "Core: Aegis",        [&"core_pantheon"],  [], {&"mat_copper": 13500, &"mat_graphite": 12000, &"mat_silicon": 6000, &"mat_steel": 4500, &"mat_aluminum": 1000}, Vector2(0, 7))
 	_add(&"core_singularity",  "Core: Singularity",  [&"core_aegis"],     [], {&"mat_copper": 18000, &"mat_graphite": 16000, &"mat_silicon": 8500, &"mat_steel": 6500, &"mat_aluminum": 2000}, Vector2(0, 8))
-	# Archive line — shifted right by 1 so the core line sits directly above
-	# core_shard with no overlap.
-	_add(&"archive_scanner",   "Archive Scanner",    [&"core_shard"],     [&"-L-waterfront_ruins"], {&"mat_copper": 80}, Vector2(-1, 1))
-	_add(&"data_cable",        "Data Cable",         [&"archive_scanner"],[], {&"mat_copper": 40}, Vector2(-2, 1))
-	_add(&"archive_decoder",   "Archive Decoder",    [&"archive_scanner"],[], {&"mat_copper": 140}, Vector2(-1, 2))
+	# Archive / logistic line — laid out per the rearranged factory image:
+	#   row 1 (bottom, under cores): archive_scanner / logistical_requestor
+	#   row 2 (factory row):         archive_decoder / data_cable / logistical_dispatcher
+	# Data Cable sits BETWEEN Logistical Dispatcher and Archive Decoder
+	# so the dispatcher → cable → decoder chain reads left-to-right.
+	_add(&"archive_scanner",       "Archive Scanner",       [&"core_shard"],            [&"-L-waterfront_ruins"], {&"mat_copper": 80}, Vector2(-4, 1))
+	_add(&"archive_decoder",       "Archive Decoder",       [&"archive_scanner"],       [], {&"mat_copper": 140}, Vector2(-4, 2))
+	_add(&"data_cable",            "Data Cable",            [&"logistical_requestor"],       [], {&"mat_copper": 40}, Vector2(-5, 2))
+	_add(&"logistical_requestor",  "Logistical Requestor",  [&"core_shard"],            [], {&"mat_copper": 100, &"mat_silicon": 30}, Vector2(-6, 1))
+	_add(&"logistical_dispatcher", "Logistical Dispatcher", [&"logistical_requestor"],  [], {&"mat_copper": 120, &"mat_silicon": 40}, Vector2(-6, 2))
 
 func _register_campaign() -> void:
 	_add(&"starting_grounds",    "Starting Grounds",    [&"core_shard"],          [], {}, Vector2(2, 1), true)
@@ -659,21 +664,30 @@ func _register_materials() -> void:
 			nodes[id]["hidden"] = true
 
 func _register_production() -> void:
-	# Factory tree — per the rearranged layout: Silicon Refinery at the
-	# bottom; Steel Furnace stacks above it; Brass Mixer / Aluminum Foundry
-	# are Steel's same-row siblings (left & right); Petroleum Refinery
-	# sits one row above Steel as Steel's third child; Rod Shapper caps
-	# the Brass Mixer line.
-	_add(&"silicon_mixer",               "Silicon Refinery",            [&"core_shard"],                       [&"mat_graphite"], {&"mat_copper": 100, &"mat_graphite": 20}, Vector2(-6, 1))
-	_add(&"steel_furnace",               "Steel Furnace",               [&"silicon_mixer"],                    [&"mat_iron"], {&"mat_copper": 180, &"mat_silicon": 60, &"mat_graphite": 40}, Vector2(-6, 2))
-	_add(&"brass_mixer",                 "Brass Mixer",                 [&"steel_furnace"],                    [&"mat_zinc"], {&"mat_copper": 180, &"mat_silicon": 60, &"mat_steel": 30}, Vector2(-7, 2))
-	_add(&"aluminum_foundry",            "Aluminum Foundry",            [&"steel_furnace"],                    [&"mat_bauxite"], {&"mat_copper": 220, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(-5, 2))
-	_add(&"petroleum_refinery",          "Petroleum Refinery",          [&"steel_furnace"],                    [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 110, &"mat_silicon": 60}, Vector2(-6, 3))
+	# Factory tree — per the rearranged image layout. The factory row
+	# sits IMMEDIATELY left of the core column at row 2 (same row as
+	# Core: Remanent), running left from Aluminum Foundry → Steel →
+	# Brass → Archive Decoder → Data Cable → Logistical Dispatcher.
+	# Refineries sit on row 1 (below their row-2 parents); the
+	# Petroleum / Uranium / Rod Shapper tower stacks upward from
+	# Steel Furnace and Brass Mixer respectively.
+	#
+	# Visual layout:
+	#   row 4:                                                  Rod Shapper(-3)
+	#   row 3:                Petroleum(-2)   Uranium(-3)
+	#   row 2: …Logistic Dispatcher(-6) Data Cable(-5) Archive Decoder(-4) Brass(-3) Steel(-2) Aluminum(-1) | Remanent(0)
+	#   row 1:    Logistic Requestor(-6)                Archive Scanner(-4)          Silicon(-2)           | Fragment(0)
+	#   row 0:                                                                                             | Shard(0)
+	_add(&"silicon_mixer",               "Silicon Refinery",            [&"core_shard"],                       [&"mat_graphite"], {&"mat_copper": 100, &"mat_graphite": 20}, Vector2(-2, 1))
+	_add(&"steel_furnace",               "Steel Furnace",               [&"silicon_mixer"],                    [&"mat_iron"], {&"mat_copper": 180, &"mat_silicon": 60, &"mat_graphite": 40}, Vector2(-2, 2))
+	_add(&"brass_mixer",                 "Brass Mixer",                 [&"steel_furnace"],                    [&"mat_zinc"], {&"mat_copper": 180, &"mat_silicon": 60, &"mat_steel": 30}, Vector2(-3, 2))
+	_add(&"aluminum_foundry",            "Aluminum Foundry",            [&"steel_furnace"],                    [&"mat_bauxite"], {&"mat_copper": 220, &"mat_silicon": 80, &"mat_steel": 40}, Vector2(-1, 2))
+	_add(&"petroleum_refinery",          "Petroleum Refinery",          [&"steel_furnace"],                    [&"Not unlockable in campaign"], {&"mat_copper": 250, &"mat_steel": 110, &"mat_silicon": 60}, Vector2(-2, 3))
 	# Uranium Refinery sits between Brass Mixer and Rod Shapper per the
 	# updated factory layout — image shows Brass Mixer → Uranium Refinery →
-	# Rod Shapper running up the left column.
-	_add(&"uranium_refinery",            "Uranium Refinery",            [&"brass_mixer"],                      [&"mat_uranium"], {&"mat_copper": 260, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-7, 3))
-	_add(&"rod_shapper",                 "Rod Shapper",                 [&"uranium_refinery"],                 [&"mat_graphite"], {&"mat_copper": 220, &"mat_steel": 80, &"mat_brass": 30}, Vector2(-7, 4))
+	# Rod Shapper running up the same column.
+	_add(&"uranium_refinery",            "Uranium Refinery",            [&"brass_mixer"],                      [&"mat_uranium"], {&"mat_copper": 260, &"mat_steel": 100, &"mat_silicon": 60}, Vector2(-3, 3))
+	_add(&"rod_shapper",                 "Rod Shapper",                 [&"uranium_refinery"],                 [&"mat_graphite"], {&"mat_copper": 220, &"mat_steel": 80, &"mat_brass": 30}, Vector2(-3, 4))
 
 	# Hidden production nodes — kept in the data model so existing content
 	# (event-only unlocks, recipes) keeps working, but the tech-tree UI

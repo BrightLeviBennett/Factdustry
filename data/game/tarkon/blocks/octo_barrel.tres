@@ -1,20 +1,43 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://xnno0yjkcm3p"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cnr74cpaunr6q" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="1_c5u8e"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_w8fkj"]
+[ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="3_mcwrb"]
+
+[sub_resource type="Resource" id="Resource_ammo_octo"]
+script = ExtResource("1_w8fkj")
+item_id = &"mat_copper"
+projectile_color = Color(0.7273866, 0.29406038, 0, 1)
+metadata/_custom_type_script = "uid://mlvivi0chx0p"
 
 [resource]
 script = ExtResource("1")
 id = &"octo_barrel"
 display_name = "Octo Barrel"
 description = "Eight synchronized barrels for overwhelming firepower."
+icon = ExtResource("1_c5u8e")
 category = 4
-color = Color(0.9, 0.3, 0.3, 1)
-max_health = 420.0
-build_cost = { "copper": 350, "silicon": 150 }
-build_time = 4.0
-power_consumption = 5.0
-attack_damage = 60.0
-attack_speed = 2.0
-attack_range = 7.0
 tags = PackedStringArray("turret", "defense")
-boosters = [{"item_id": &"mat_water", "per_sec": 0.1, "stat": "Fire Rate", "multiplier": 2.5}]
+color = Color(0.9, 0.3, 0.3, 1)
+grid_size = Vector2i(2, 2)
+base_sprite = ExtResource("1_c5u8e")
+turret_head_sprite = ExtResource("3_mcwrb")
+barrel_count = 8
+barrel_spacing = 80.0
+max_health = 420.0
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
+build_time = 4.0
+attack_speed = 0.1
+attack_range = 7.0
+ammo_types = Array[Resource]([SubResource("Resource_ammo_octo")])
+boosters = [{
+"item_id": &"mat_water",
+"multiplier": 2.5,
+"per_sec": 0.1,
+"stat": "Fire Rate"
+}]
+max_stored_items = 40

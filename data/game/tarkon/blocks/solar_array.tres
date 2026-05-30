@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"solar_array"
 display_name = "Solar Array"
-description = "Large solar collector array. Generates significant electrical power without needing a vent."
+description = "A huge solar array that generates a huge amount of electrical power from sunlight. Doesn't work on the dark side of the planet."
 category = 3
 tags = PackedStringArray("power", "solar")
 color = Color(0.25, 0.45, 0.85, 1)
@@ -17,4 +17,4 @@ build_cost = {
 "silicon": 60
 }
 build_time = 3.0
-electrical_power_gen = 30.0
+electrical_power_gen = 170.0

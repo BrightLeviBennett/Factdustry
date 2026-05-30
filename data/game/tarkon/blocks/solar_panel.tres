@@ -1,16 +1,19 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://t0vdyo51ngv6"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bi2wr1ncfkbrg" path="res://textures/blocks/power/SolarPanel.png" id="1_00ob2"]
 
 [resource]
 script = ExtResource("1")
 id = &"solar_panel"
 display_name = "Solar Panel"
-description = "Generates a small amount of electrical power from sunlight. Works anywhere — no vent required."
+description = "Generates a small amount of electrical power from sunlight. Doesn't work on the dark side of the planet."
+icon = ExtResource("1_00ob2")
 category = 3
 tags = PackedStringArray("power", "solar")
 color = Color(0.3, 0.5, 0.9, 1)
 grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("1_00ob2")
 max_health = 120.0
 build_cost = {
 "copper": 50,
@@ -18,4 +21,4 @@ build_cost = {
 "steel": 10
 }
 build_time = 2.0
-electrical_power_gen = 30.0
+electrical_power_gen = 40.0

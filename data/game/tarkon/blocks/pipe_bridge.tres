@@ -1,17 +1,23 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://blpb2fo88qlbe"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://baxc7107r3ho6" path="res://textures/blocks/fluid transportation/PipeBridge.png" id="1_l2ukh"]
 
 [resource]
 script = ExtResource("1")
 id = &"pipe_bridge"
 display_name = "Pipe Bridge"
 description = "Bridges fluid pipes over other infrastructure."
+icon = ExtResource("1_l2ukh")
 category = 9
+tags = PackedStringArray("fluid", "transport", "bridge", "linkable")
 color = Color(0.3, 0.6, 0.9, 1)
+top_sprite = ExtResource("1_l2ukh")
 max_health = 200.0
-build_cost = { "copper": 100, "silicon": 30 }
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
 build_time = 0.5
 transport_speed = 5.0
 transports_fluid = true
-tags = PackedStringArray("fluid", "transport")

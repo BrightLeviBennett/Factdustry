@@ -318,6 +318,18 @@ func _build_graphics_tab() -> void:
 			if building_sys and "belt_scroll_enabled" in building_sys:
 				building_sys.belt_scroll_enabled = bool(v)
 	)
+	# Shield Animation — Mindustry-style idle wave pattern across shield
+	# fills. When off, shields render as the flat translucent poly + rim
+	# (cheaper, easier to read in heavy battles). Matches Mindustry's
+	# `animateShields` graphics setting.
+	_add_toggle("Shield Animation",
+		bool(_get_setting("shield_animation")),
+		func(v):
+			_set_setting("shield_animation", bool(v))
+			var shield_sys = get_node_or_null("/root/Main/ShieldSystem")
+			if shield_sys and "animate_shields" in shield_sys:
+				shield_sys.animate_shields = bool(v)
+	)
 
 
 func _build_sound_tab() -> void:
@@ -481,6 +493,7 @@ const _DEFAULTS := {
 	"unlock_all_tech": false,
 	"parallax_enabled": false,
 	"belt_scroll_enabled": false,
+	"shield_animation": true,
 	"pan_rotate_threshold": 1.5,
 	"autosave_interval": 60.0,
 	"tech_tree_wasd": false,
@@ -596,6 +609,9 @@ static func apply_pending_settings() -> void:
 		building_sys.parallax_enabled = bool(_get_setting("parallax_enabled"))
 	if building_sys and "belt_scroll_enabled" in building_sys:
 		building_sys.belt_scroll_enabled = bool(_get_setting("belt_scroll_enabled"))
+	var shield_sys = main_node.get_node_or_null("ShieldSystem") if main_node else null
+	if shield_sys and "animate_shields" in shield_sys:
+		shield_sys.animate_shields = bool(_get_setting("shield_animation"))
 	var cam = main_node.get_node_or_null("Camera2D") if main_node else null
 	if cam and "pan_rotate_threshold" in cam:
 		cam.pan_rotate_threshold = float(_get_setting("pan_rotate_threshold"))

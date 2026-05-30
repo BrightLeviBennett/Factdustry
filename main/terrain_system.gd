@@ -109,6 +109,53 @@ var _fade_darkness: Dictionary = {}  # Vector2i -> [tl, tr, br, bl]
 ## a single draw_mesh call instead of one draw_polygon per faded tile.
 var _fade_mesh: ArrayMesh = null
 
+## Batched FLOOR-tile meshes, grouped by tile texture. One draw call
+## per distinct floor texture in view. Rebuilt only when terrain
+## changes; per-frame cost is N draw_mesh calls (N ~ unique floor
+## textures), not 6000+ per-cell dict lookups + draw_texture_rect.
+##
+## Water tiles are NOT included here — they go through `_water_meshes`
+## with the gradient-corner shading. Hidden tiles are skipped at bake
+## time and re-baked when the hidden set changes.
+##
+## Each entry: { "texture": Texture2D, "mesh": ArrayMesh }
+var _floor_meshes: Array = []
+## Same shape, for floor-ore overlays (e.g. surface coal). Drawn on
+## top of the base floor pass.
+var _floor_ore_meshes: Array = []
+## Single ArrayMesh covering every floor tile that has no icon — drawn
+## with no texture, using vertex colors from the tile's `data.color`
+## (modulated by `data.opacity`). Rare in shipped content but kept for
+## authoring fallback.
+var _floor_color_mesh: ArrayMesh = null
+
+## Dedicated child CanvasItem that hosts the water-mesh draws so a
+## ShaderMaterial can scroll the water surface without affecting the
+## rest of the floor pass. The shader pulls TIME each frame so we
+## don't have to `queue_redraw` per-frame — the canvas item keeps its
+## (static) draw list and the GPU re-samples per frame.
+var _water_canvas: Node2D = null
+var _water_material: ShaderMaterial = null
+## Pausable clock fed into the water shader. Advances by delta each
+## frame in _process unless the game is paused — keeps the wobble +
+## drift frozen during pause alongside everything else.
+var _water_anim_time: float = 0.0
+## 1×1 white texture used as a stand-in when calling `draw_mesh` with
+## a vertex-coloured mesh and no real texture. In Godot 4 the canvas
+## item path doesn't always blend vertex colours correctly when
+## texture is `null` — passing this opaque-white pixel makes the
+## colour modulation behave as expected, which is what fixed the
+## missing sector-edge fade and the untextured-floor colour pass.
+var _white_pixel_tex: Texture2D = null
+
+
+func _ensure_white_pixel_tex() -> Texture2D:
+	if _white_pixel_tex == null:
+		var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+		img.set_pixel(0, 0, Color(1, 1, 1, 1))
+		_white_pixel_tex = ImageTexture.create_from_image(img)
+	return _white_pixel_tex
+
 # --- WATER RENDERING ---
 ## Sand texture drawn under water at shallow/medium depths.
 var _sand_texture: Texture2D = null
@@ -192,6 +239,31 @@ func _ready() -> void:
 		overlay.z_index = 52
 		overlay.z_as_relative = false
 		add_child(overlay)
+	# Water-animation child. Hosts the per-shader scrolling water
+	# surface so the same TerrainSystem canvas can also draw plain
+	# floor / sand / ore tiles with no shader. Sits between sand (drawn
+	# from TerrainSystem at z=0) and floor-ore (drawn just after via
+	# `_floor_ore_meshes`), so visually it occupies the same slot it
+	# used to inside `_draw_floor_tiles`.
+	_water_canvas = Node2D.new()
+	_water_canvas.name = "WaterCanvas"
+	# Repeat the water texture so the shader's world-position UVs wrap
+	# cleanly across the map — otherwise each tile's sample stops at
+	# its 0..1 boundary and the seams become visible as soon as the
+	# scroll offset crosses a cell edge.
+	_water_canvas.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	var water_shader: Shader = load("res://shaders/water_animated.gdshader") if ResourceLoader.exists("res://shaders/water_animated.gdshader") else null
+	if water_shader:
+		_water_material = ShaderMaterial.new()
+		_water_material.shader = water_shader
+		# Match the shader's world-tile size to GRID_SIZE so one full
+		# water-texture tile spans one cell footprint.
+		_water_material.set_shader_parameter("world_tile_size", float(main.GRID_SIZE))
+		_water_canvas.material = _water_material
+	_water_canvas.z_as_relative = false
+	_water_canvas.z_index = 1   # above terrain (0), below building/logistics layers
+	_water_canvas.draw.connect(_draw_water_layer)
+	add_child(_water_canvas)
 	await get_tree().process_frame
 	_sector_script = get_node_or_null("/root/Main/SectorScript")
 	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
@@ -207,6 +279,14 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	# Always redraw so wall parallax updates with camera movement
 	_tick_vent_particles(delta)
+	# Advance the water-shader clock, but only while the game is
+	# running. The shader uses `anim_time` (not Godot's built-in TIME)
+	# so this freezes the wobble / drift alongside everything else
+	# during pause.
+	var w_paused: bool = "world_paused" in main and bool(main.world_paused)
+	if not w_paused and _water_material != null:
+		_water_anim_time += delta
+		_water_material.set_shader_parameter("anim_time", _water_anim_time)
 	queue_redraw()
 
 
@@ -478,6 +558,10 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 			if not wall_tiles.has(grid_pos):
 				return
 		ore_tiles[grid_pos] = tile_id
+		# Floor-ore overlay layer participates in the batched floor
+		# mesh — re-bake on any ore add so surface coal etc. shows.
+		if data.tags.has("floor_ore"):
+			_floor_edge_dirty = true
 	elif data.is_wall():
 		wall_tiles[grid_pos] = tile_id
 		if data.destructible:
@@ -512,6 +596,8 @@ func remove_tile(grid_pos: Vector2i) -> void:
 	# Remove top layer first: ore → wall → floor
 	if ore_tiles.has(grid_pos):
 		ore_tiles.erase(grid_pos)
+		# Drop the cell from the floor-ore overlay mesh if it was there.
+		_floor_edge_dirty = true
 	elif wall_tiles.has(grid_pos):
 		var old_data = Registry.get_tile(wall_tiles[grid_pos])
 		wall_tiles.erase(grid_pos)
@@ -857,6 +943,17 @@ func _rebuild_water_depth() -> void:
 ## off-screen tiles automatically. Rebuilt alongside `_water_depth_t`,
 ## and whenever `_water_depth_dirty` flips back on (terrain edits,
 ## sector_script hide/reveal).
+## Renders every batched water mesh onto the dedicated `_water_canvas`.
+## Hooked up via `draw.connect` in `_ready`; called automatically by
+## the engine whenever the canvas is invalidated (terrain changes →
+## `queue_redraw`).
+func _draw_water_layer() -> void:
+	if _water_canvas == null:
+		return
+	for bucket in _water_meshes:
+		_water_canvas.draw_mesh(bucket["mesh"], bucket["texture"])
+
+
 func _rebuild_water_meshes() -> void:
 	_water_meshes.clear()
 	_sand_mesh = null
@@ -895,6 +992,11 @@ func _rebuild_water_meshes() -> void:
 		var mesh: ArrayMesh = _build_water_quad_mesh(cells)
 		if mesh != null:
 			_water_meshes.append({"texture": tex, "mesh": mesh})
+	# Tell the dedicated water canvas to repaint with the new mesh set.
+	# The shader animates via TIME so we DON'T have to keep redrawing —
+	# this only fires on terrain change.
+	if _water_canvas != null:
+		_water_canvas.queue_redraw()
 
 
 ## Builds a batched textured quad mesh with uniform white vertex color
@@ -1098,6 +1200,118 @@ func _rebuild_floor_edge_cache() -> void:
 
 	# Rebuild the batched fade mesh so each frame only costs one draw call.
 	_rebuild_fade_mesh()
+	# Same for the base floor-tile meshes — replaces a 6000-iteration
+	# per-frame loop with N draw_mesh calls (N = unique floor textures).
+	_rebuild_floor_meshes()
+
+
+## Builds one ArrayMesh per distinct floor texture, covering every
+## visible non-water non-hidden floor tile. Drawn once per texture per
+## frame instead of iterating the visible bounds per cell.
+##
+## Also builds a parallel set of meshes for floor-ore overlays (e.g.
+## surface coal), which previously took a separate `_draw_tile_texture`
+## call per cell. Wall-embedded ores keep their existing path through
+## BuildingSystem.
+func _rebuild_floor_meshes() -> void:
+	_floor_meshes.clear()
+	_floor_ore_meshes.clear()
+	_floor_color_mesh = null
+	if floor_tiles.is_empty():
+		return
+	var ss := _sector_script_ref()
+	# Group floor cells by texture. Skip:
+	#   • water tiles (they're in `_water_meshes` with corner shading)
+	#   • multi-tile origins (they paint themselves separately)
+	#   • hidden tiles (sector script override)
+	#   • wall tiles (those are owned by the building/wall pass)
+	var by_tex: Dictionary = {}        # Texture2D -> Array of [pos, opacity]
+	var ore_by_tex: Dictionary = {}    # Texture2D -> Array of [pos, opacity]
+	var colored_cells: Array = []      # Array of [pos, color, opacity]
+	for grid_pos in floor_tiles:
+		if ss and ss.is_tile_hidden(grid_pos):
+			continue
+		if _water_depth_t.has(grid_pos):
+			continue
+		if multi_tile_origins.has(grid_pos) and multi_tile_origins[grid_pos] == grid_pos:
+			continue
+		var data = Registry.get_tile(floor_tiles[grid_pos])
+		if data == null:
+			continue
+		if data.is_wall():
+			continue
+		if data.icon != null:
+			if not by_tex.has(data.icon):
+				by_tex[data.icon] = []
+			by_tex[data.icon].append([grid_pos, data.opacity])
+		else:
+			colored_cells.append([grid_pos, data.color, data.opacity])
+		# Floor-ore overlay layer.
+		if ore_tiles.has(grid_pos):
+			var ore_data: TerrainTileData = Registry.get_tile(ore_tiles[grid_pos])
+			if ore_data and ore_data.icon != null and ore_data.tags.has("floor_ore"):
+				if not ore_by_tex.has(ore_data.icon):
+					ore_by_tex[ore_data.icon] = []
+				ore_by_tex[ore_data.icon].append([grid_pos, ore_data.opacity])
+	for tex in by_tex:
+		var mesh: ArrayMesh = _build_flat_quad_mesh(by_tex[tex])
+		if mesh != null:
+			_floor_meshes.append({"texture": tex, "mesh": mesh})
+	for tex in ore_by_tex:
+		var mesh: ArrayMesh = _build_flat_quad_mesh(ore_by_tex[tex])
+		if mesh != null:
+			_floor_ore_meshes.append({"texture": tex, "mesh": mesh})
+	if not colored_cells.is_empty():
+		_floor_color_mesh = _build_colored_quad_mesh(colored_cells)
+
+
+## Like `_build_flat_quad_mesh` but takes a per-cell color so untextured
+## tiles render with their authored `data.color`. Drawn without a
+## texture so the vertex color is the final pixel colour.
+func _build_colored_quad_mesh(cells: Array) -> ArrayMesh:
+	var n: int = cells.size()
+	if n == 0:
+		return null
+	var gs: float = float(main.GRID_SIZE)
+	var verts: PackedVector3Array = PackedVector3Array()
+	verts.resize(n * 4)
+	var cols: PackedColorArray = PackedColorArray()
+	cols.resize(n * 4)
+	var idxs: PackedInt32Array = PackedInt32Array()
+	idxs.resize(n * 6)
+	var vi: int = 0
+	var ii: int = 0
+	for entry in cells:
+		var pos: Vector2i = entry[0]
+		var col: Color = entry[1]
+		var opac: float = float(entry[2])
+		col.a = opac
+		var wx: float = float(pos.x) * gs
+		var wy: float = float(pos.y) * gs
+		verts[vi + 0] = Vector3(wx, wy, 0.0)
+		verts[vi + 1] = Vector3(wx + gs, wy, 0.0)
+		verts[vi + 2] = Vector3(wx + gs, wy + gs, 0.0)
+		verts[vi + 3] = Vector3(wx, wy + gs, 0.0)
+		cols[vi + 0] = col
+		cols[vi + 1] = col
+		cols[vi + 2] = col
+		cols[vi + 3] = col
+		idxs[ii + 0] = vi + 0
+		idxs[ii + 1] = vi + 1
+		idxs[ii + 2] = vi + 2
+		idxs[ii + 3] = vi + 0
+		idxs[ii + 4] = vi + 2
+		idxs[ii + 5] = vi + 3
+		vi += 4
+		ii += 6
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_INDEX] = idxs
+	var m: ArrayMesh = ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return m
 
 
 ## Builds a single ArrayMesh that covers every faded floor tile with a
@@ -1300,70 +1514,36 @@ func _get_visible_bounds() -> Rect2i:
 
 ## Draws all regular (1x1) floor tiles.
 func _draw_floor_tiles() -> void:
-	var sector_script = _sector_script_ref()
-	var bounds: Rect2i = _get_visible_bounds()
 	var fade_off: bool = "fade_enabled" in main and not main.fade_enabled
-	var size = float(main.GRID_SIZE)
 
+	# Batched floor pass: one draw_mesh per distinct tile texture.
+	# Replaces the 6000-iteration visible-bounds loop that used to do a
+	# per-cell `draw_texture_rect`. GPU culls off-screen triangles for
+	# free, so the full-map mesh isn't a problem.
+	if _floor_color_mesh != null:
+		draw_mesh(_floor_color_mesh, _ensure_white_pixel_tex())
+	for bucket in _floor_meshes:
+		draw_mesh(bucket["mesh"], bucket["texture"])
 
-	# Iterate only the visible rectangle instead of the entire floor dict.
-	# On huge maps this is O(visible) rather than O(all_floor_tiles).
-	var bx0: int = bounds.position.x
-	var by0: int = bounds.position.y
-	var bx1: int = bx0 + bounds.size.x
-	var by1: int = by0 + bounds.size.y
-	for y in range(by0, by1):
-		for x in range(bx0, bx1):
-			var grid_pos: Vector2i = Vector2i(x, y)
-			if not floor_tiles.has(grid_pos):
-				continue
-
-			var tile_id = floor_tiles[grid_pos]
-			var data = Registry.get_tile(tile_id)
-			if data == null:
-				continue
-			if multi_tile_origins.has(grid_pos) and multi_tile_origins[grid_pos] == grid_pos:
-				continue
-			if data.is_wall():
-				continue
-			var is_hidden: bool = sector_script and sector_script.is_tile_hidden(grid_pos)
-			if is_hidden:
-				continue
-
-			var world_pos = main.grid_to_world(grid_pos)
-
-			# Water tiles are drawn in one pass via the batched sand/water
-			# meshes below (_sand_mesh + _water_meshes), so skip them
-			# here. Non-water floors take the normal flat-tile path.
-			if _water_depth_t.has(grid_pos):
-				continue
-			_draw_tile_texture(data, world_pos, size, data.opacity)
-
-			# Floor-ore overlay (e.g. surface coal). Wall-embedded ores are
-			# drawn by BuildingSystem alongside their wall in the wall pass,
-			# but floor ores have no wall to piggy-back on — draw them here
-			# directly over the floor tile so they're visible at all.
-			if ore_tiles.has(grid_pos):
-				var ore_data: TerrainTileData = Registry.get_tile(ore_tiles[grid_pos])
-				if ore_data and ore_data.tags.has("floor_ore"):
-					_draw_tile_texture(ore_data, world_pos, size, ore_data.opacity)
-
-			# Fade overlay is now rendered in one batched draw_mesh after the
-			# loop (see below). No per-tile fade work here.
-
-	# Batched water underlay + water layer. Rebuilt only when terrain
-	# changes; the GPU interpolates the per-corner vertex colors to
-	# produce the shore→deep gradient, and off-screen triangles cull
-	# for free so the full-map mesh isn't an issue.
+	# Sand underlay stays on the terrain canvas (no shader). Water
+	# meshes have moved to `_water_canvas`, which paints them with
+	# the scrolling-UV shader (`_draw_water_layer`).
 	if _sand_mesh != null and _sand_texture != null:
 		draw_mesh(_sand_mesh, _sand_texture)
-	for bucket in _water_meshes:
+
+	# Floor ores layered over the base floor (surface coal etc.) —
+	# wall-embedded ores keep their own path through BuildingSystem.
+	for bucket in _floor_ore_meshes:
 		draw_mesh(bucket["mesh"], bucket["texture"])
 
 	# Single draw call for all faded floor tiles, using a mesh rebuilt only
 	# when _floor_edge_dirty flips. GPU culls off-screen triangles for free.
+	# `_ensure_white_pixel_tex()` instead of null: Godot 4's canvas item
+	# path drops the per-vertex Color modulation when no texture is
+	# supplied, so the dark gradient quads end up rendering as
+	# completely transparent → no visible sector-edge fade at all.
 	if _fade_mesh and not fade_off:
-		draw_mesh(_fade_mesh, null)
+		draw_mesh(_fade_mesh, _ensure_white_pixel_tex())
 
 
 

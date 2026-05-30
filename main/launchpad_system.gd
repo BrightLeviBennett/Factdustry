@@ -34,6 +34,12 @@ const COOLDOWN := 17.5
 # "built" and the launchpad is ready to ship cargo. After a successful
 # launch, the timer resets and the cooldown (pause-aware) starts.
 const BUILD_TIME := 10.0
+# Seconds the pod is "in transit" before it can land. Matches the
+# combined launch + land animation life (POD_LIFE 2.0 + POD_LANDING_LIFE
+# 2.5) so the player watches the full sequence — pod climbs out of the
+# launch pad, then descends onto the landing pad. Cross-sector launches
+# bypass this since the player wasn't there to see the takeoff.
+const POD_TRAVEL_TIME := 4.5
 const PASSENGER_ITEM_CAP := 80
 const PASSENGER_FLUID_CAP := 50.0
 # Auto-launch thresholds: fires when EITHER the passenger item cap or
@@ -84,21 +90,39 @@ func _process(delta: float) -> void:
 		var cd: float = float(st.get("cooldown_remaining", 0.0))
 		if cd > 0.0:
 			st["cooldown_remaining"] = maxf(0.0, cd - delta)
-		# Pod build: ticks up while powered, capped at BUILD_TIME.
+		# Pod build: ticks up while powered AND the launchpad itself is
+		# fully constructed. A half-built pad shouldn't be fabricating
+		# a pod — main.building_build_progress holds the entry only
+		# while the block is still under construction (the dict entry
+		# is erased on completion).
 		var bt: float = float(st.get("build_timer", 0.0))
-		if bt < BUILD_TIME:
+		var pad_fully_built: bool = true
+		if "building_build_progress" in main and main.building_build_progress.has(anchor):
+			pad_fully_built = false
+		if bt < BUILD_TIME and pad_fully_built:
 			var eff: float = 1.0
 			if power_sys and power_sys.has_method("get_electrical_efficiency"):
 				eff = clampf(power_sys.get_electrical_efficiency(anchor), 0.0, 1.0)
-			# Build progresses proportionally to power efficiency, so a
-			# brownout half-power network builds the pod at half speed.
-			st["build_timer"] = minf(BUILD_TIME, bt + delta * eff)
+			# Only advance with usable power. Zero efficiency (no power
+			# at all) leaves the pod stalled rather than crawling at 0×.
+			if eff > 0.0:
+				# Build progresses proportionally to power efficiency, so
+				# a brownout half-power network builds the pod at half speed.
+				st["build_timer"] = minf(BUILD_TIME, bt + delta * eff)
 		launchpad_state[anchor] = st
 		# Auto-launch the moment cargo + power gates AND the auto-launch
 		# threshold are met. Manual launches still go through the popup
 		# button at the lower thresholds.
 		if can_launch(anchor, AUTO_LAUNCH_ITEM_THRESHOLD, AUTO_LAUNCH_FLUID_THRESHOLD):
 			start_launch(anchor)
+	# Poll the pending-pod queue every tick so same-sector pods (whose
+	# `arrival_at` was stamped a few seconds into the future) get drained
+	# automatically once their travel time elapses. Cross-sector pods
+	# stamp arrival_at=0 and are drained at sector-load by main._ready;
+	# this poll is the same-sector equivalent. Function exits cheaply
+	# when the queue is empty.
+	if main.has_method("_drain_pending_pod_deliveries"):
+		main._drain_pending_pod_deliveries()
 
 
 ## Manual-launch trigger fired by the popup's Launch button. Same gate
@@ -323,11 +347,22 @@ func start_launch(anchor: Vector2i) -> bool:
 	# the destination Landing Pad's storage / outputs.
 	if "pending_pod_deliveries" in SaveManager:
 		var queue: Array = SaveManager.pending_pod_deliveries.get(dest, [])
+		# `arrival_at` is wall-clock game time (seconds) when the pod
+		# should be allowed to land. For cross-sector launches we stamp
+		# 0 (already arrived by the time the player re-enters the
+		# destination). For same-sector launches we add a short travel
+		# time so the player sees the launch + land animations as
+		# distinct events instead of the pod magically appearing on
+		# the receiving pad in the same frame.
+		var now_t: float = Time.get_ticks_msec() / 1000.0
+		var same_sector: bool = (dest == SaveManager.active_sector_id)
+		var arrival_at: float = (now_t + POD_TRAVEL_TIME) if same_sector else 0.0
 		queue.append({
 			"items": pod_items,
 			"fluids": pod_fluids,
 			"from_sector": SaveManager.active_sector_id,
 			"routing": routing,
+			"arrival_at": arrival_at,
 		})
 		SaveManager.pending_pod_deliveries[dest] = queue
 	# Pod animation: tell launch_animation to play the pod variant for

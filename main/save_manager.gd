@@ -413,6 +413,13 @@ var active_sector_id: StringName = &""
 ## is funneled into the Landing Pad's block_storage so the player picks
 ## up the cargo when they return.
 var pending_pod_deliveries: Dictionary = {}
+# Per-landing-pad delivery counter for v8-style fairness across multi-
+# pad sectors. Without this, two pads with identical filters always
+# see the FIRST one in the routing list win — the second never lands a
+# pod. v8 uses a priority swap; we use the same idea via a counter,
+# picking the live matching pad with the fewest deliveries.
+# StringName(sector_id) → Dictionary["x,y" → int].
+var landing_pad_delivery_count: Dictionary = {}
 
 ## Snapshot of every saved sector's Landing Pad filters so a Launchpad
 ## on sector A can validate that sector B has a matching pad BEFORE
@@ -1104,6 +1111,20 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 				"amount": float(pipe.get("amount", 0.0)),
 			}
 
+	# --- Pipe junction state (per-axis fluid compartments) ---
+	# Two independent fluid channels per junction so the cross-without-
+	# mixing behaviour survives a save/reload.
+	var pipe_junction_state_save := {}
+	if logistics and "pipe_junction_state" in logistics:
+		for pos in logistics.pipe_junction_state:
+			var s: Dictionary = logistics.pipe_junction_state[pos]
+			pipe_junction_state_save[_vec2i_to_str(pos)] = {
+				"v_fluid": str(s.get("v_fluid", &"")),
+				"v_amount": float(s.get("v_amount", 0.0)),
+				"h_fluid": str(s.get("h_fluid", &"")),
+				"h_amount": float(s.get("h_amount", 0.0)),
+			}
+
 	# --- Junction items (items routing through 2-axis junctions) ---
 	var junction_items_save := {}
 	if logistics and "junction_items" in logistics:
@@ -1180,6 +1201,7 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"building_rotation": _serialize_rotation(main.building_rotation),
 		"building_factions": _serialize_factions(main.building_factions),
 		"building_health": _serialize_health(main.building_health),
+		"building_home_core": _serialize_home_core(main.building_home_core if "building_home_core" in main else {}),
 		"linked_pairs": _serialize_links(links),
 		"sorter_filters": _serialize_sorter_filters(),
 		"landing_pad_filters": landing_pad_filters_serialized,
@@ -1211,6 +1233,7 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"mass_driver_state": mass_driver_state_save,
 		"mass_driver_projectiles": mass_driver_projectiles_save,
 		"pipe_contents": pipe_contents_save,
+		"pipe_junction_state": pipe_junction_state_save,
 		"junction_items": junction_items_save,
 		"belt_unloader_state": belt_unloader_state_save,
 		# Session stats — persisted per-sector so the loss-screen totals
@@ -1348,6 +1371,7 @@ func load_sector_from_path(path: String) -> bool:
 	_deserialize_buildings(main, data.get("buildings", {}))
 	_deserialize_building_rotation(main, data.get("building_rotation", {}))
 	_deserialize_building_factions(main, data.get("building_factions", {}))
+	_deserialize_home_core(main, data.get("building_home_core", {}))
 
 	# --- Load links ---
 	var links_data = data.get("linked_pairs", [])
@@ -1826,6 +1850,18 @@ func load_sector_from_path(path: String) -> bool:
 					"fluid_id": StringName(saved.get("fluid_id", "")),
 					"amount": float(saved.get("amount", 0.0)),
 				}
+		# --- Pipe junction state ---
+		if "pipe_junction_state" in load_logistics and data.has("pipe_junction_state") and data["pipe_junction_state"] is Dictionary:
+			load_logistics.pipe_junction_state.clear()
+			for key in data["pipe_junction_state"]:
+				var jp: Vector2i = _str_to_vec2i(key)
+				var s = data["pipe_junction_state"][key]
+				load_logistics.pipe_junction_state[jp] = {
+					"v_fluid": StringName(s.get("v_fluid", "")),
+					"v_amount": float(s.get("v_amount", 0.0)),
+					"h_fluid": StringName(s.get("h_fluid", "")),
+					"h_amount": float(s.get("h_amount", 0.0)),
+				}
 		# --- Junction-routed items ---
 		if "junction_items" in load_logistics and data.has("junction_items") and data["junction_items"] is Dictionary:
 			load_logistics.junction_items.clear()
@@ -2122,6 +2158,26 @@ func _deserialize_building_factions(main: Node2D, factions_data: Dictionary) -> 
 	for pos_str in factions_data:
 		var grid_pos = _str_to_vec2i(pos_str)
 		main.building_factions[grid_pos] = int(factions_data[pos_str])
+
+
+## Home-core links: anchor "x,y" → "cx,cy". Loaded by callers (the
+## sector load path) into `main.building_home_core` so a saved game
+## remembers which core each block was bound to.
+func _serialize_home_core(home_core: Dictionary) -> Dictionary:
+	var result := {}
+	for anchor in home_core:
+		result[_vec2i_to_str(anchor)] = _vec2i_to_str(home_core[anchor])
+	return result
+
+
+func _deserialize_home_core(main: Node2D, data: Dictionary) -> void:
+	if not "building_home_core" in main:
+		return
+	main.building_home_core.clear()
+	for k in data:
+		var anchor: Vector2i = _str_to_vec2i(k)
+		var core: Vector2i = _str_to_vec2i(String(data[k]))
+		main.building_home_core[anchor] = core
 
 
 func _serialize_archive_holdings() -> Dictionary:
@@ -2550,6 +2606,7 @@ func save_campaign() -> bool:
 		"global_hints_runtime": global_hints_runtime.duplicate(true),
 		"pending_pod_deliveries": _serialize_pending_pod_deliveries(),
 		"landing_pad_filters_by_sector": _serialize_landing_pad_filters_by_sector(),
+		"landing_pad_delivery_count": _serialize_landing_pad_delivery_count(),
 	}
 	return _write_json(SAVES_DIR + "campaign.json", data)
 
@@ -2629,6 +2686,29 @@ func _serialize_storage_caps() -> Dictionary:
 	for sid in sector_storage_caps:
 		result[String(sid)] = int(sector_storage_caps[sid])
 	return result
+
+
+func _serialize_landing_pad_delivery_count() -> Dictionary:
+	var result := {}
+	for sid in landing_pad_delivery_count:
+		var per_sector: Dictionary = landing_pad_delivery_count[sid]
+		var copy := {}
+		for k in per_sector:
+			copy[String(k)] = int(per_sector[k])
+		result[String(sid)] = copy
+	return result
+
+
+func _deserialize_landing_pad_delivery_count(data: Dictionary) -> void:
+	landing_pad_delivery_count.clear()
+	for sid_str in data:
+		var raw = data[sid_str]
+		if not (raw is Dictionary):
+			continue
+		var per_sector := {}
+		for k in (raw as Dictionary):
+			per_sector[String(k)] = int(raw[k])
+		landing_pad_delivery_count[StringName(sid_str)] = per_sector
 
 
 func _deserialize_storage_caps(data: Dictionary) -> void:
@@ -2847,6 +2927,8 @@ func load_campaign() -> bool:
 		_deserialize_pending_pod_deliveries(data["pending_pod_deliveries"])
 	if data.has("landing_pad_filters_by_sector") and data["landing_pad_filters_by_sector"] is Dictionary:
 		_deserialize_landing_pad_filters_by_sector(data["landing_pad_filters_by_sector"])
+	if data.has("landing_pad_delivery_count") and data["landing_pad_delivery_count"] is Dictionary:
+		_deserialize_landing_pad_delivery_count(data["landing_pad_delivery_count"])
 	# Clamp any existing stockpile against its saved cap before the
 	# accrual pass — handles the "a core was destroyed last session"
 	# case, old saves that pre-date the cap, and any other over-cap

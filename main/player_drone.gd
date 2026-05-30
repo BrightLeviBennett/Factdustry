@@ -43,6 +43,16 @@ const HEAD_SCALE := 0.35
 ## yaws — and they hold their last orientation when no target is
 ## acquired, instead of snapping back to forward.
 var _healer_aim_offset: float = 0.0
+# Shadow pipeline. CanvasGroup composites its CHILDREN to a private
+# off-screen buffer and alpha-blends that buffer with the world below
+# using the group's modulate. We need that "draw silhouettes opaque,
+# then blend the whole composite at 22 % once" behaviour so overlapping
+# turret-head shadows don't compound to darker patches under the chassis.
+# `_shadow_canvas` is the group (it doesn't draw its own visuals);
+# `_shadow_drawer` is a Node2D child whose `draw` signal emits the
+# silhouettes — CanvasGroup only buffers child draws, not its own.
+var _shadow_canvas: CanvasGroup = null
+var _shadow_drawer: Node2D = null
 ## Each turret head tracks the target from its own world-space pivot,
 ## so a close target makes the two heads visibly toe in instead of
 ## staying perfect mirrors. Left / right are independent.
@@ -89,6 +99,19 @@ const _AI_FIRE_REACH_TILES := 10
 const _AI_HEAL_REACH_TILES := HEAL_RANGE_TILES
 const _AI_IDLE_REACH_TILES := 0
 
+# Per-shardling caches so the AI tick doesn't walk every placed
+# building / every unit list every physics frame. Refreshed when
+# their respective cooldowns hit zero.
+var _cached_heal_anchor: Vector2i = Vector2i(-1, -1)
+var _cached_heal_age: float = 999.0
+var _cached_enemy: Node2D = null
+var _cached_enemy_age: float = 999.0
+var _cached_build_anchor: Vector2i = Vector2i(-1, -1)
+var _cached_build_age: float = 999.0
+const _AI_HEAL_CACHE_REFRESH: float = 0.5
+const _AI_ENEMY_CACHE_REFRESH: float = 0.2
+const _AI_BUILD_CACHE_REFRESH: float = 0.4
+
 # --- FEROX SHARDLING REBUILD TIMER ---
 # When a FEROX shardling is in build_range of its current rebuild
 # target, it spends FEROX_REBUILD_TIME seconds before the building
@@ -127,7 +150,13 @@ var _velocity_smooth: Vector2 = Vector2.ZERO
 # --- FACING ---
 var facing_angle := PI             # Current visual rotation (radians)
 var _target_facing_angle := PI     # Target rotation (persists when input stops)
-const ROTATION_SPEED := 6.0      # How fast the drone turns (radians/sec)
+const ROTATION_SPEED := 8.0      # How fast the drone turns (radians/sec)
+## Max angular gap (radians) between chassis facing and the requested
+## movement direction before the drone is allowed to start moving.
+## ~12° — small enough to feel responsive once the chassis is mostly
+## pointed at the input, large enough that the drone doesn't lock up
+## on tiny float drift in the rotation.
+const _MOVE_FACING_THRESHOLD: float = 0.21
 ## How far (in pixels) to shift the sprite along its local "up" axis
 ## so the body center sits at the pivot. Positive = shift body toward pivot.
 const SPRITE_PIVOT_OFFSET := 0.05  # Fraction of tex_size to shift
@@ -216,6 +245,35 @@ func _ready() -> void:
 	# above every animation layer.
 	z_index = 4095
 	z_as_relative = false
+	# Shadow render pipeline. CanvasGroup composites its CHILDREN to
+	# a private off-screen buffer and then alpha-blends that buffer
+	# with the world below using the group's modulate — exactly the
+	# "draw silhouettes opaque, blend the whole thing once at 22 %"
+	# behaviour we need so overlapping chassis + turret-head shadows
+	# don't compound to darker patches.
+	#
+	# Z setup: z_as_relative = false and z_index = 4094 so the
+	# composite is locked one z-tier below the drone (4095) regardless
+	# of how the parent hierarchy is configured. This puts the
+	# shadow definitively above ground units (z=0) and placed blocks
+	# (z=50).
+	_shadow_canvas = CanvasGroup.new()
+	_shadow_canvas.name = "FlyingShadow"
+	_shadow_canvas.modulate = Color(1.0, 1.0, 1.0, 0.22)
+	_shadow_canvas.z_index = 4094
+	_shadow_canvas.z_as_relative = false
+	# Shadow offset is hundreds of px below+left of the drone origin;
+	# the default fit_margin (10 px) would clip everything outside that
+	# tiny window. 1024 covers any reasonable zoom / drone scale.
+	_shadow_canvas.fit_margin = 1024.0
+	_shadow_canvas.clear_margin = 256.0
+	# Drawer child — CanvasGroup buffers only CHILD draws, not its own,
+	# so the silhouettes live on a Node2D inside the group.
+	_shadow_drawer = Node2D.new()
+	_shadow_drawer.name = "ShadowDrawer"
+	_shadow_drawer.draw.connect(_draw_flying_shadow_on_canvas)
+	_shadow_canvas.add_child(_shadow_drawer)
+	add_child(_shadow_canvas)
 	# Wait for Registry essentials (units + blocks) — drone doesn't need the
 	# non-essential planet/sector data, so don't block on those.
 	while not Registry.essentials_loaded:
@@ -244,11 +302,6 @@ func _ready() -> void:
 		health_regen = 5.0
 		drone_color = Color(0.3, 0.9, 1.0)
 
-	# FEROX shardlings get a red-tinted modulation so the player can
-	# tell them apart from friendly shardlings at a glance.
-	if ferox_controlled:
-		drone_color = Color(1.0, 0.45, 0.35)
-		modulate = Color(1.0, 0.55, 0.5)
 	range_color = Color(drone_color.r, drone_color.g, drone_color.b, 0.08)
 	range_border_color = Color(drone_color.r, drone_color.g, drone_color.b, 0.2)
 
@@ -285,6 +338,13 @@ func _process(delta: float) -> void:
 		_thruster_phase += delta * 4.0
 	_update_transfers(delta)
 	_update_head_aim(delta)
+	# Shadow visibility tracks the controlled state. The shadow lives
+	# on its own CanvasGroup with an independent draw signal, so it
+	# doesn't ride along with _draw's early-return. Toggle the canvas
+	# directly each frame.
+	if _shadow_canvas != null:
+		var um = _unit_mgr_ref()
+		_shadow_canvas.visible = not (um != null and um.controlled_entity != null)
 	queue_redraw()
 
 
@@ -416,6 +476,10 @@ func _drone_in_control() -> bool:
 ## the other side is on AI duty. Returns the world position of the
 ## nearest enemy unit in range, falling back to the nearest enemy
 ## building, or null if neither exists in range.
+##
+## AI shardlings (`ai_controlled` = true) skip the building fallback
+## entirely — only the primary player-controlled drone takes on
+## hostile buildings when no enemy units are around.
 func _ai_shoot_target_pos() -> Variant:
 	var unit_mgr = _unit_mgr_ref()
 	var combat = main.get_node_or_null("CombatSystem")
@@ -434,6 +498,8 @@ func _ai_shoot_target_pos() -> Variant:
 			nearest = e
 	if nearest != null:
 		return nearest.position
+	if ai_controlled:
+		return null
 	if combat and combat.has_method("_find_nearest_enemy_building"):
 		var nb: Vector2i = combat._find_nearest_enemy_building(position, range_px)
 		if nb != Vector2i(-9999, -9999):
@@ -456,8 +522,7 @@ func _input(event: InputEvent) -> void:
 	# When healing is on the player drives the laser with the mouse and an
 	# auto-shooter handles enemies; when healing is off the player drags to
 	# shoot and an auto-healer mends damaged blocks in range.
-	if event is InputEventKey and event.pressed and not event.echo \
-			and (event.keycode == KEY_X or event.physical_keycode == KEY_X):
+	if event.is_action_pressed("toggle_heal_mode"):
 		heal_mode = not heal_mode
 		heal_target = null
 		_heal_beam_active = false
@@ -665,10 +730,13 @@ func _handle_movement(delta: float) -> void:
 		if input_dir.dot(to_focus) < 0.0:
 			effective_speed = move_speed * 0.5
 
-	# Drift: smooth velocity toward the desired vector. Snappy ramp-up
-	# while the player holds keys (MOVE_ACCEL), gentle decay to zero on
-	# release (DRIFT_DECEL) — gives a brief glide instead of a hard stop.
-	var target_velocity: Vector2 = input_dir * effective_speed if has_input else Vector2.ZERO
+	# Movement happens immediately in the input direction — the chassis
+	# rotates toward that direction on its own (see the rotation block
+	# above), but the player doesn't have to wait for it to line up.
+	# Strafing / circle-strafing reads naturally this way.
+	var target_velocity: Vector2 = Vector2.ZERO
+	if has_input:
+		target_velocity = input_dir * effective_speed
 	var rate: float = MOVE_ACCEL if has_input else DRIFT_DECEL
 	var smoothing: float = 1.0 - exp(-rate * delta)
 	_velocity_smooth = _velocity_smooth.lerp(target_velocity, smoothing)
@@ -949,6 +1017,29 @@ func _clear_inventory() -> void:
 		mined_inventory[item.id] = 0
 
 
+## Respawns the drone at a specific LUMINA core anchor (used by Ctrl+click
+## on a core). Heals, clears mined inventory, teleports onto the core's
+## footprint, and registers the anchor in the cycle so the auto-cycle
+## picks a different one next time.
+func respawn_at_core(anchor: Vector2i) -> void:
+	if not main.placed_buildings.has(anchor):
+		return
+	var core_data: BlockData = Registry.get_block(main.placed_buildings[anchor])
+	if core_data == null or not core_data.tags.has("core"):
+		return
+	health = max_health
+	_clear_inventory()
+	var core_size: Vector2i = core_data.grid_size
+	position = Vector2(
+		(anchor.x + core_size.x / 2.0) * main.GRID_SIZE,
+		(anchor.y + core_size.y / 2.0) * main.GRID_SIZE
+	)
+	_velocity_smooth = Vector2.ZERO
+	_reset_orientation()
+	if not _used_respawn_cores.has(anchor):
+		_used_respawn_cores.append(anchor)
+
+
 func _move_to_core() -> void:
 	# Cycle through cores across consecutive respawns: first respawn picks
 	# the nearest core, subsequent ones step to the next-nearest core that
@@ -1076,26 +1167,46 @@ func _park_on_spawn_core() -> void:
 
 
 func _ai_movement_tick(delta: float) -> void:
+	# Age out the per-shardling AI caches. The heavy scans
+	# (heal-target, build-target, enemy-in-world) only refresh when
+	# their cooldown hits zero — the rest of the time we reuse the
+	# previous answer, which is fine because both buildings and units
+	# move slowly relative to a 60 Hz tick.
+	_cached_heal_age += delta
+	_cached_enemy_age += delta
+	_cached_build_age += delta
+
 	# FEROX shardlings run a different priority loop: rebuild first
 	# (the user's directive), then heal damaged FEROX buildings, and
 	# only as a fallback drift toward their home core. They are NOT
 	# combat-focused — fire still happens via _ai_fire_tick if a
 	# LUMINA unit wanders into range, but pursuit isn't a priority.
 	if ferox_controlled:
-		var rebuild_anchor: Vector2i = _ferox_step_rebuild(delta)
-		if rebuild_anchor != Vector2i(-1, -1):
-			return
-		var heal_anchor_f: Vector2i = _ai_find_heal_anchor()
-		if heal_anchor_f != Vector2i(-1, -1):
-			_ai_step_toward_grid(heal_anchor_f, _AI_HEAL_REACH_TILES, delta)
-			return
-		# Idle on home FEROX core, falling back to any remaining one.
+		# Pause rebuild + heal while LUMINA units are pressing the base.
+		# The shardling falls back to "park on home core" so it doesn't
+		# wander into the fight or finish a rebuild mid-attack.
+		var threat: Node2D = _ai_find_enemy_in_world()
+		var threat_close: bool = false
+		if threat != null:
+			# 18 tiles is wide enough to cover a typical squad approach
+			# without making the shardling freeze for every distant scout.
+			var threat_dist: float = position.distance_to(threat.position) / float(main.GRID_SIZE)
+			threat_close = threat_dist <= 18.0
+		if not threat_close:
+			var rebuild_anchor: Vector2i = _ferox_step_rebuild(delta)
+			if rebuild_anchor != Vector2i(-1, -1):
+				return
+			var heal_anchor_f: Vector2i = _ai_find_heal_anchor()
+			if heal_anchor_f != Vector2i(-1, -1):
+				_ai_step_toward_grid(heal_anchor_f, _AI_HEAL_REACH_TILES, delta)
+				return
+		# Idle on home FEROX core. If the home core is gone the shardling
+		# self-destructs — FEROX shardlings are bound to their spawn
+		# core, they don't migrate to another one.
 		if spawn_core_anchor != Vector2i(-1, -1) and main.placed_buildings.has(spawn_core_anchor):
 			_ai_step_toward_grid(spawn_core_anchor, _AI_IDLE_REACH_TILES, delta)
 			return
-		var ferox_anchors: Array = main.get_ferox_core_anchors()
-		if not ferox_anchors.is_empty():
-			spawn_core_anchor = ferox_anchors[0]
+		queue_free()
 		return
 
 	# Priority 1: in-flight builds.
@@ -1171,20 +1282,8 @@ func _ferox_finish_rebuild() -> void:
 		_ferox_rebuild_target = null
 		_ferox_rebuild_timer = 0.0
 		return
-	# Affordability check against the FEROX resource pool.
-	var can_build: bool = true
-	for item_id in bdata.build_cost:
-		var needed: int = bdata.build_cost[item_id]
-		if main.ferox_resources.get(item_id, 0) < needed:
-			can_build = false
-			break
-	if not can_build:
-		# Re-queue and try again later.
-		main.ferox_rebuild_queue.append(_ferox_rebuild_target)
-		_ferox_rebuild_target = null
-		_ferox_rebuild_timer = 0.0
-		return
-	# Space-clear check.
+	# Space-clear check first so we don't bail out on resources only to
+	# discover the cell is occupied.
 	for x in range(bdata.grid_size.x):
 		for y in range(bdata.grid_size.y):
 			var tile_pos: Vector2i = grid_pos + Vector2i(x, y)
@@ -1192,11 +1291,13 @@ func _ferox_finish_rebuild() -> void:
 				_ferox_rebuild_target = null
 				_ferox_rebuild_timer = 0.0
 				return
-	# Spend resources.
-	for item_id in bdata.build_cost:
-		main.ferox_resources[item_id] -= bdata.build_cost[item_id]
-	if "ferox_resources_changed" in main:
-		main.ferox_resources_changed.emit(main.ferox_resources)
+	# FEROX core shardlings rebuild for free — the enemy faction's
+	# "resource pool" is abstract (we don't simulate FEROX mining), so
+	# enforcing the same item-cost gate the player faces would stall
+	# every rebuild forever since `ferox_resources` is always 0. The
+	# enemy rebuilder UNIT (the tier-2 `rebuild` unit) still pays from
+	# the queue's affordability check; the shardling is meant to be
+	# the persistent "the base self-repairs" mechanic.
 	# Mirror enemy_unit._finish_rebuild's direct placement so the new
 	# block goes in with the correct faction tags and the building_placed
 	# signal fires for downstream bookkeeping (logistics, tech tree, etc).
@@ -1214,8 +1315,18 @@ func _ferox_finish_rebuild() -> void:
 
 
 func _ai_find_build_target() -> Vector2i:
+	# Cached: only re-scan the work_order every _AI_BUILD_CACHE_REFRESH
+	# seconds. The cache validates that the cached anchor is still
+	# queued and not paused — if it isn't, force a fresh scan.
+	if _cached_build_age < _AI_BUILD_CACHE_REFRESH and _cached_build_anchor != Vector2i(-1, -1):
+		if "work_order" in main and main.work_order.has(_cached_build_anchor):
+			var paused_c: Dictionary = main.work_paused if "work_paused" in main else {}
+			if not paused_c.has(_cached_build_anchor):
+				return _cached_build_anchor
+	_cached_build_age = 0.0
 	if not ("work_order" in main) or main.work_order.is_empty():
-		return Vector2i(-1, -1)
+		_cached_build_anchor = Vector2i(-1, -1)
+		return _cached_build_anchor
 	var paused: Dictionary = main.work_paused if "work_paused" in main else {}
 	var best := Vector2i(-1, -1)
 	var best_d2: float = INF
@@ -1227,10 +1338,20 @@ func _ai_find_build_target() -> Vector2i:
 		if d2 < best_d2:
 			best_d2 = d2
 			best = a
+	_cached_build_anchor = best
 	return best
 
 
 func _ai_find_enemy_in_world() -> Node2D:
+	# Cached: reuse last scan's enemy for up to _AI_ENEMY_CACHE_REFRESH
+	# seconds. Cleared on stale (dead / freed) cached target so a kill
+	# triggers an immediate rescan instead of staying empty until the
+	# next refresh.
+	if _cached_enemy_age < _AI_ENEMY_CACHE_REFRESH and _cached_enemy != null:
+		if is_instance_valid(_cached_enemy) and not (("is_dead" in _cached_enemy) and _cached_enemy.is_dead):
+			return _cached_enemy
+	_cached_enemy_age = 0.0
+	_cached_enemy = null
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr == null:
 		return null
@@ -1250,6 +1371,7 @@ func _ai_find_enemy_in_world() -> Node2D:
 			if d2 < best_d2:
 				best_d2 = d2
 				best = e
+		_cached_enemy = best
 		return best
 	if not ("enemies" in unit_mgr):
 		return null
@@ -1264,21 +1386,37 @@ func _ai_find_enemy_in_world() -> Node2D:
 		if d2 < best_d2:
 			best_d2 = d2
 			best = e
+	_cached_enemy = best
 	return best
 
 
 func _ai_find_heal_anchor() -> Vector2i:
-	# Reuse the existing heal-AI scanner; it returns the most-damaged
-	# friendly block inside HEAL_RANGE_TILES, or null. For motion
-	# planning we accept any damaged friendly within a wider radius
-	# so the AI drone closes the distance before _handle_healing
-	# locks on.
-	var range_px: float = HEAL_RANGE_TILES * float(main.GRID_SIZE)
-	var nearby = _find_ai_heal_target(range_px * 4.0)
+	# Motion-search radius is intentionally unbounded: the AI drone
+	# should travel anywhere on the map to reach the most-damaged
+	# friendly block, then `_handle_healing` enforces the actual
+	# HEAL_RANGE_TILES beam range once it arrives. Result cached for
+	# _AI_HEAL_CACHE_REFRESH so we don't iterate every placed building
+	# on every physics frame.
+	if _cached_heal_age < _AI_HEAL_CACHE_REFRESH and _cached_heal_anchor != Vector2i(-1, -1):
+		# Validate: the cached anchor must still be a damaged friendly
+		# building. If it's been fully healed or destroyed, force a
+		# rescan now so the drone doesn't fly to an obsolete target.
+		if main.placed_buildings.has(_cached_heal_anchor):
+			var bid: StringName = main.placed_buildings[_cached_heal_anchor]
+			var bd = Registry.get_block(bid)
+			if bd:
+				var cur: float = float(main.building_health.get(_cached_heal_anchor, bd.max_health))
+				if cur < bd.max_health:
+					return _cached_heal_anchor
+	_cached_heal_age = 0.0
+	var nearby = _find_ai_heal_target(INF)
 	if nearby == null:
+		_cached_heal_anchor = Vector2i(-1, -1)
 		return Vector2i(-1, -1)
 	if nearby is Vector2i:
+		_cached_heal_anchor = nearby
 		return nearby
+	_cached_heal_anchor = Vector2i(-1, -1)
 	return Vector2i(-1, -1)
 
 
@@ -1454,7 +1592,11 @@ func _has_in_range_work() -> bool:
 
 # --- DRAWING ---
 func _draw() -> void:
-	# Hide the drone entirely when controlling a unit/turret
+	# Hide the drone entirely when controlling a unit/turret. Shadow
+	# visibility is enforced in `_process` instead of here, because
+	# the shadow lives on a separate canvas and `_draw` running once
+	# isn't reliable when the drone is off-camera (the controlled
+	# unit's camera may park the drone outside the viewport).
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr and unit_mgr.controlled_entity != null:
 		return
@@ -1467,6 +1609,8 @@ func _draw() -> void:
 	# stack their barrel art over the chassis. Thruster glows draw
 	# under the chassis so the body partially clips the inner half of
 	# each circle, leaving only the exhaust visibly poking out the back.
+	# v8 flying-unit shadow — paints first so the chassis covers it.
+	_draw_flying_shadow()
 	_draw_thrusters()
 	_draw_drone()
 	_draw_turret_heads()
@@ -1481,6 +1625,72 @@ func _draw() -> void:
 		draw_arc(Vector2.ZERO, hb_radius, 0, TAU, 32, Color(1.0, 0.2, 0.9, 0.9), 1.5)
 
 
+
+
+## Soft drop-shadow under the shardling. Recipe lifted from Mindustry
+## v8's UnitType.drawShadow():
+##   - WORLD-space offset (shadowTX, shadowTY) = (-12, -13) in libgdx
+##     Y-up. Godot Y-down flips Y → (-12, +13).
+##   - Pal.shadow tint = rgba(0,0,0,0.22).
+##   - Shape = the chassis sprite + whichever turret/heal head is
+##     currently shown, rotated to match. Mirrors v8's behaviour of
+##     drawing the unit's `fullIcon` (a flattened render of every
+##     sprite layer) as one rotated silhouette.
+## Drawn before everything else in `_draw` so the chassis paints on
+## top of the shadow.
+## Trigger — kicks the drawer child to redraw its silhouettes onto
+## the CanvasGroup's private buffer. The buffer is then alpha-blended
+## with the world once via the group's modulate.a = 0.22, so
+## overlapping silhouettes (chassis + turret heads) DON'T compound
+## to a darker patch where they overlap.
+func _draw_flying_shadow() -> void:
+	if _shadow_drawer != null:
+		_shadow_drawer.queue_redraw()
+
+
+## Renders the shadow silhouettes onto the CanvasGroup's drawer child.
+## Each silhouette draws at FULLY OPAQUE black; the group composites
+## them to its private buffer (no per-draw compounding) and applies
+## the final 22 % alpha pass once at world composition time.
+## Heal head intentionally skipped — its silhouette has long emitter
+## extensions that don't read as part of the drone's outline.
+func _draw_flying_shadow_on_canvas() -> void:
+	if _shadow_drawer == null or drone_texture == null:
+		return
+	const SHADOW_TX := -78.0
+	const SHADOW_TY := 80.0    # +Y = down in Godot
+	var sf: float = main.SPRITE_SCALE_FACTOR if main else 1.0
+	var off: Vector2 = Vector2(SHADOW_TX * sf, SHADOW_TY * sf)
+	var scale_mult: float = (data.sprite_scale if data else 1.0) * sf
+	# Opaque black — the group's modulate.a multiplies down to 0.22 at
+	# composition. Overlapping opaque silhouettes inside the group
+	# stay opaque (no per-draw compounding).
+	var sil := Color(0.0, 0.0, 0.0, 1.0)
+	# --- Chassis ---
+	var tex_size_v: Vector2 = drone_texture.get_size() * scale_mult
+	var offset_y: float = tex_size_v.y * SPRITE_PIVOT_OFFSET
+	_shadow_drawer.draw_set_transform(off, facing_angle, Vector2.ONE)
+	_shadow_drawer.draw_texture_rect(
+		drone_texture,
+		Rect2(Vector2(-tex_size_v.x * 0.5, -tex_size_v.y * 0.5 + offset_y), tex_size_v),
+		false,
+		sil
+	)
+	_shadow_drawer.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	# --- Turret heads ---
+	if turret_head_texture == null:
+		return
+	var head_scale: float = (data.sprite_scale if data else 1.0) * sf * HEAD_SCALE
+	var ts: Vector2 = turret_head_texture.get_size() * head_scale
+	var rect := Rect2(-ts * 0.5, ts)
+	for right_side in [false, true]:
+		var center_local: Vector2 = _turret_local_offset(right_side).rotated(facing_angle)
+		var aim_off: float = _turret_aim_offset_right if right_side \
+				else _turret_aim_offset_left
+		_shadow_drawer.draw_set_transform(off + center_local,
+				facing_angle + aim_off, Vector2.ONE)
+		_shadow_drawer.draw_texture_rect(turret_head_texture, rect, false, sil)
+	_shadow_drawer.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _draw_drone() -> void:
@@ -1547,8 +1757,16 @@ func _draw_thrusters() -> void:
 	# breathe in lockstep with the heal / mining lasers.
 	var pulse: float = 0.5 + 0.5 * sin(_thruster_phase)
 	var alpha: float = 0.6 + 0.3 * pulse
-	var outer_color := Color(1.0, 0.92, 0.25, alpha)
-	var inner_color := Color(1.0, 1.0, 1.0, alpha)
+	# LUMINA shardlings (player + AI) push purple plumes; FEROX
+	# shardlings push brown. The pulse / shape is identical.
+	var outer_color: Color
+	var inner_color: Color
+	if ferox_controlled:
+		outer_color = Color(0.55, 0.35, 0.15, alpha)
+		inner_color = Color(0.9, 0.75, 0.5, alpha)
+	else:
+		outer_color = Color(0.6, 0.3, 0.9, alpha)
+		inner_color = Color(0.88, 0.75, 1.0, alpha)
 	var ports: Array = [
 		[Vector2(-side_x, back_y), side_r],
 		[Vector2(0.0, back_y), center_r],
@@ -1717,6 +1935,14 @@ func _handle_healing(delta: float) -> void:
 			lmb = false
 		if get_viewport().gui_get_hovered_control() != null:
 			lmb = false
+		# Same suppression list combat_system uses for manual shoot —
+		# any pending action that consumes the LMB click for itself
+		# (unit-select, inventory drop, link, world menu, derelict
+		# repair) should NOT also drive the heal beam.
+		var combat = get_node_or_null("/root/Main/CombatSystem")
+		if combat and combat.has_method("_player_action_blocks_drone") \
+				and combat._player_action_blocks_drone(self):
+			lmb = false
 		manual_heal_active = lmb
 	if manual_heal_active:
 		aim_pos = get_global_mouse_position()
@@ -1781,7 +2007,10 @@ func _handle_healing(delta: float) -> void:
 
 	# Apply healing to the locked target. Health is per-building (anchor
 	# only) so a single dict bump fully heals every tile of a multi-tile
-	# block at once.
+	# block at once. The same beam ALSO mends the block's shield (if
+	# any) on the same tick — letting the player top up a chipped
+	# barrier projector or shielded core without having to manually
+	# wait for the in-shield cooldown.
 	if heal_target == null or not (heal_target is Vector2i):
 		return
 	var anchor: Vector2i = main.building_origins.get(heal_target, heal_target)
@@ -1794,12 +2023,23 @@ func _handle_healing(delta: float) -> void:
 		return
 	var max_hp: float = bdata.max_health
 	var cur_hp: float = float(main.building_health.get(anchor, max_hp))
-	if cur_hp >= max_hp:
-		# Fully healed — release the lock so the next sweep / AI tick
-		# can pick another damaged building.
+	var block_done: bool = cur_hp >= max_hp
+	if not block_done:
+		main.building_health[anchor] = minf(cur_hp + HEAL_RATE * delta, max_hp)
+	# Shield heal pass.
+	var shield_sys = main.get_node_or_null("ShieldSystem")
+	var shield_done: bool = true
+	if shield_sys and shield_sys.has_method("is_shield_damaged"):
+		if shield_sys.is_shield_damaged(anchor):
+			shield_sys.heal_shield(anchor, HEAL_RATE * delta)
+			shield_done = not shield_sys.is_shield_damaged(anchor)
+		elif shield_sys.has_method("has_shield") and shield_sys.has_shield(anchor):
+			shield_done = true
+	# Release the lock only once BOTH HP pools are topped up — keeps
+	# the beam glued to a target with full block HP but a chipped
+	# shield (or vice-versa) instead of constantly hopping.
+	if block_done and shield_done:
 		heal_target = null
-		return
-	main.building_health[anchor] = minf(cur_hp + HEAL_RATE * delta, max_hp)
 
 
 ## Returns the point on the building's footprint perimeter that's closest
@@ -1807,6 +2047,17 @@ func _handle_healing(delta: float) -> void:
 ## on the edge of the tile nearest the cursor (or, in AI mode, nearest
 ## the drone) instead of always pointing at the anchor's centre.
 func _closest_perimeter_point_for_anchor(anchor: Vector2i, from_world: Vector2) -> Vector2:
+	# Prefer the visible shield boundary when the locked anchor has a
+	# damaged shield — the beam should land on the glowing barrier,
+	# not the block chassis hidden inside it. Falls through to the
+	# block's tile perimeter when the shield is broken / full / absent.
+	var shield_sys = main.get_node_or_null("ShieldSystem")
+	if shield_sys and shield_sys.has_method("is_shield_damaged") \
+			and shield_sys.is_shield_damaged(anchor):
+		if shield_sys.has_method("closest_shield_boundary_point"):
+			var pt: Vector2 = shield_sys.closest_shield_boundary_point(anchor, from_world)
+			if pt != Vector2.ZERO:
+				return pt
 	var bid: StringName = main.placed_buildings.get(anchor, &"")
 	var bdata = Registry.get_block(bid) if bid != &"" else null
 	var gs: float = float(main.GRID_SIZE)
@@ -1850,6 +2101,23 @@ func _resolve_heal_snap(aim_dir: Vector2, range_px: float):
 	if main == null:
 		return null
 	var lumina: int = main.Faction.LUMINA if "Faction" in main and "LUMINA" in main.Faction else 0
+	var shield_sys = main.get_node_or_null("ShieldSystem")
+	# "Needs heal" = block HP damaged OR shield HP damaged. Lets the
+	# manual snap lock onto a fully-built shield projector / shielded
+	# core when only the barrier is chipped — previously the snap
+	# bailed at `cur >= max_health` and the player couldn't aim at
+	# a damaged shield at all.
+	var needs_heal := func(anchor: Vector2i, bd: BlockData) -> bool:
+		if bd == null:
+			return false
+		var maxh_n: float = bd.max_health
+		var cur_n: float = float(main.building_health.get(anchor, maxh_n))
+		if maxh_n > 0.0 and cur_n < maxh_n:
+			return true
+		if shield_sys and shield_sys.has_method("is_shield_damaged") \
+				and shield_sys.is_shield_damaged(anchor):
+			return true
+		return false
 	# Try to keep the existing lock first.
 	if heal_target != null and heal_target is Vector2i:
 		var anchor_existing: Vector2i = main.building_origins.get(heal_target, heal_target)
@@ -1857,17 +2125,14 @@ func _resolve_heal_snap(aim_dir: Vector2, range_px: float):
 				and main.get_building_faction(anchor_existing) == lumina:
 			var bid_e: StringName = main.placed_buildings[anchor_existing]
 			var bd_e = Registry.get_block(bid_e)
-			if bd_e != null:
-				var max_e: float = bd_e.max_health
-				var cur_e: float = float(main.building_health.get(anchor_existing, max_e))
-				if cur_e < max_e:
-					var center_e: Vector2 = main.grid_to_world(anchor_existing) \
-						+ Vector2(bd_e.grid_size.x, bd_e.grid_size.y) * (main.GRID_SIZE * 0.5)
-					var to_e: Vector2 = center_e - position
-					if to_e.length() <= range_px:
-						var ang_e: float = abs(rad_to_deg(aim_dir.angle_to(to_e.normalized())))
-						if ang_e <= HEAL_SNAP_RELEASE_DEG:
-							return anchor_existing
+			if bd_e != null and needs_heal.call(anchor_existing, bd_e):
+				var center_e: Vector2 = main.grid_to_world(anchor_existing) \
+					+ Vector2(bd_e.grid_size.x, bd_e.grid_size.y) * (main.GRID_SIZE * 0.5)
+				var to_e: Vector2 = center_e - position
+				if to_e.length() <= range_px:
+					var ang_e: float = abs(rad_to_deg(aim_dir.angle_to(to_e.normalized())))
+					if ang_e <= HEAL_SNAP_RELEASE_DEG:
+						return anchor_existing
 	# Otherwise scan all friendly blocks for the most direct damaged hit.
 	var best_anchor: Variant = null
 	var best_score: float = INF
@@ -1888,9 +2153,7 @@ func _resolve_heal_snap(aim_dir: Vector2, range_px: float):
 		var bd = Registry.get_block(bid)
 		if bd == null:
 			continue
-		var maxh: float = bd.max_health
-		var cur: float = float(main.building_health.get(anchor, maxh))
-		if cur >= maxh:
+		if not needs_heal.call(anchor, bd):
 			continue
 		var center: Vector2 = main.grid_to_world(anchor) \
 			+ Vector2(bd.grid_size.x, bd.grid_size.y) * (main.GRID_SIZE * 0.5)
@@ -1923,6 +2186,7 @@ func _find_ai_heal_target(range_px: float):
 		home_faction = main.Faction.FEROX
 	elif "Faction" in main and "LUMINA" in main.Faction:
 		home_faction = main.Faction.LUMINA
+	var shield_sys = main.get_node_or_null("ShieldSystem")
 	var best_anchor: Variant = null
 	var best_pct: float = 1.0
 	var seen: Dictionary = {}
@@ -1944,13 +2208,25 @@ func _find_ai_heal_target(range_px: float):
 			continue
 		var maxh: float = bd.max_health
 		var cur: float = float(main.building_health.get(anchor, maxh))
-		if cur >= maxh:
+		var block_pct: float = cur / maxh if maxh > 0.0 else 1.0
+		# Combine block-HP and shield-HP into one "needs-healing"
+		# percentage — whichever pool is more damaged drives target
+		# selection, so the AI also auto-locks a fully-built block
+		# whose shield is chipped.
+		var shield_pct: float = 1.0
+		if shield_sys and shield_sys.has_method("is_shield_damaged") \
+				and shield_sys.is_shield_damaged(anchor):
+			var sh_max: float = float(bd.shield_health)
+			var st: Dictionary = shield_sys.states.get(anchor, {})
+			if sh_max > 0.0:
+				shield_pct = float(st.get("current_health", sh_max)) / sh_max
+		var pct: float = minf(block_pct, shield_pct)
+		if pct >= 1.0:
 			continue
 		var center: Vector2 = main.grid_to_world(anchor) \
 			+ Vector2(bd.grid_size.x, bd.grid_size.y) * (main.GRID_SIZE * 0.5)
 		if center.distance_to(position) > range_px:
 			continue
-		var pct: float = cur / maxh if maxh > 0.0 else 1.0
 		if pct < best_pct:
 			best_pct = pct
 			best_anchor = anchor
@@ -1995,9 +2271,32 @@ func _draw_mining_beam() -> void:
 	# Pulsing animation
 	var pulse: float = 0.5 + 0.5 * sin(_mining_beam_phase)
 
-	# Mindustry-style beam (yellow for mining)
+	# Counter-clockwise orbit of the beam's ore-side endpoint around the
+	# ore's centre. In Godot's Y-down 2D space a NEGATIVE angle reads as
+	# counter-clockwise on-screen, so we feed -phase into cos/sin.
+	# Orbit radius is a small fraction of the tile so the endpoint
+	# wobbles snugly inside the ore tile rather than wandering around it.
+	var orbit_phase: float = -_mining_beam_phase
+	var orbit_radius: float = float(main.GRID_SIZE) * 0.18
+	var orbit_offset: Vector2 = Vector2(cos(orbit_phase), sin(orbit_phase)) * orbit_radius
+	var endpoint_local: Vector2 = ore_local + orbit_offset
+
+	# Mindustry-style beam (yellow for mining). Endpoint at the orbiting
+	# point instead of dead-centre on the ore.
 	var main_ref = get_node("/root/Main")
-	main_ref.draw_beam(self, tip_dir, ore_local, Color.YELLOW, pulse)
+	main_ref.draw_beam(self, tip_dir, endpoint_local, Color.YELLOW, pulse)
+
+	# Small rotating square framing the ore — sells the "this tile is
+	# being mined" feel. Rotates counter-clockwise around the ore's
+	# centre slightly faster than the beam endpoint orbit.
+	var sq_size: float = float(main.GRID_SIZE) * 0.5
+	var sq_phase: float = -_mining_beam_phase * 1.3
+	var sq_color: Color = Color(1.0, 0.92, 0.35, 0.85)
+	draw_set_transform(ore_local, sq_phase, Vector2.ONE)
+	var sq_rect: Rect2 = Rect2(Vector2(-sq_size * 0.5, -sq_size * 0.5), Vector2(sq_size, sq_size))
+	draw_rect(sq_rect, sq_color, false, 2.0)
+	# Reset transform so subsequent draws (other helpers) start fresh.
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _draw_mined_inventory() -> void:

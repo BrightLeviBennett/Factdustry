@@ -1450,6 +1450,27 @@ func get_script_data() -> Array:
 ## Loads script steps from a parsed JSON array.
 func set_script_data(data: Array) -> void:
 	script_steps = data.duplicate(true)
+	# Fill in the structural keys the editor UI accesses unconditionally
+	# (`step["on_exit"]`, `step["actions"]`, `step["conditions"]`, etc.).
+	# Loaded sector JSON often omits these on older steps that only
+	# defined a condition — without the defaults, _refresh_step_detail
+	# crashes on the first `step["on_exit"]` lookup.
+	for s in script_steps:
+		if not (s is Dictionary):
+			continue
+		if not s.has("name"):
+			s["name"] = ""
+		if not s.has("actions"):
+			s["actions"] = []
+		if not s.has("on_exit"):
+			s["on_exit"] = []
+		if not s.has("conditions"):
+			# Mirror the legacy migration path in _populate_conditions.
+			if s.has("condition"):
+				s["conditions"] = [s["condition"]]
+				s.erase("condition")
+			else:
+				s["conditions"] = [{"type": "always"}]
 	selected_step_index = -1
 	if visible:
 		_refresh_step_list()

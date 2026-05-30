@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://nbujjub08o3i"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://sclunbjlt0j7" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrillComplete.png" id="1_p4xnc"]
+[ext_resource type="Texture2D" uid="uid://dyogwm2r7aiqu" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrillComplete.png" id="1_p4xnc"]
 [ext_resource type="Texture2D" uid="uid://ckwyj2rsc56df" path="res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrill.png" id="2"]
 
 [resource]
@@ -16,10 +16,22 @@ color = Color(0.6, 0.8, 0.4, 1)
 grid_size = Vector2i(2, 2)
 top_sprite = ExtResource("2")
 max_health = 160.0
+shield_shape = null
+shield_size = null
+shield_offset = null
+shield_blocks = null
+shield_health = null
+shield_cooldown = null
+shield_idle_power = null
+shield_recharge_power = null
+shield_water_boost_mult = null
 build_cost = {
 "copper": 12
 }
 build_time = 2.0
 mine_range = 2
+factory_recipes = null
 electrical_power_use = 10.0
 max_stored_items = 10
+mend_radius = null
+mend_amount = null

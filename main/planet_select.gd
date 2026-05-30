@@ -40,7 +40,7 @@ const ZOOM_SPEED := 0.5
 const AUTO_ROTATE_SPEED := 0.02
 const MARKER_RADIUS := 0.25
 const MARKER_HEIGHT := 0.05
-const MARKER_LIFT := 1.02
+const MARKER_LIFT := 1.10
 const OUTLINE_THICKNESS := 0.05  # Width of sector outline edges
 const HOVER_THICKNESS := 0.05    # Width of hover outline edges
 
@@ -486,24 +486,47 @@ func _build_planet(planet: PlanetData) -> void:
 		planets_container.add_child(planet_node)
 	planet_nodes[planet.id] = planet_node
 
-	# --- Planet Sphere ---
-	var sphere = SphereMesh.new()
-	sphere.radius = planet.mesh_radius
-	sphere.height = planet.mesh_radius * 2.0
-	sphere.radial_segments = 32
-	sphere.rings = 16
-
+	# --- Planet Surface (Mindustry-style hilly Goldberg sphere) ---
+	# Build the same dual mesh the geodesic-grid overlay uses, but at
+	# the planet's base mesh_radius (no marker lift), and displace each
+	# cell outward by 3D-noise-driven elevation. Per-corner elevation
+	# is averaged across the touching cells for smooth rolling hills.
+	# Higher-subdivision planets get more, smaller cells automatically.
+	var hill_radius: float = planet.mesh_radius
+	# Use a slightly higher subdivision than the gameplay grid so the
+	# visible terrain has more relief than the playable cell layout.
+	var terrain_sub: int = clampi(planet.subdivision_level + 1, 1, 4)
+	var hill_ico = Icosphere.generate(terrain_sub, hill_radius)
+	var hill_dual = Icosphere.generate_dual_mesh(hill_ico, hill_radius, 12)
+	# Amplitude is kept under (MARKER_LIFT - 1.0) so sector outlines
+	# always sit above the highest peak. Tweak alongside MARKER_LIFT
+	# and the atmosphere shell if you want taller mountains.
+	var hilly = Icosphere.build_hilly_mesh(
+		hill_dual,
+		hill_radius,
+		planet.texture_seed if planet.texture_seed != 0 else int(hash(planet.id)),
+		1.3,                       # noise frequency — wider features
+		hill_radius * 0.26,        # amplitude — taller cliffs
+		3,                         # octaves — few, keeps peaks crisp
+		0.78,                      # sea level — most of the planet flat
+	)
 	var mesh_inst = MeshInstance3D.new()
-	mesh_inst.mesh = sphere
+	mesh_inst.mesh = hilly.mesh
 	mesh_inst.material_override = _make_planet_material(planet)
 	planet_node.add_child(mesh_inst)
 
 	# --- Atmosphere ---
 	var atmo_sphere = SphereMesh.new()
-	atmo_sphere.radius = planet.mesh_radius * 1.08
-	atmo_sphere.height = planet.mesh_radius * 2.16
-	atmo_sphere.radial_segments = 24
-	atmo_sphere.rings = 12
+	atmo_sphere.radius = planet.mesh_radius * 1.13
+	atmo_sphere.height = planet.mesh_radius * 2.26
+	# High-res sphere so the atmosphere fresnel renders as a smooth
+	# rim instead of chunky banded arcs. The shader does
+	# `pow(1 - abs(dot(NORMAL, VIEW)), 3)`; at low subdivision the
+	# per-vertex normals jump between samples, and the cubic falloff
+	# makes those jumps visible as discrete arcs of glow around the
+	# planet (looks like an unwanted blue/teal outline).
+	atmo_sphere.radial_segments = 96
+	atmo_sphere.rings = 48
 
 	var atmo = MeshInstance3D.new()
 	atmo.mesh = atmo_sphere
@@ -576,7 +599,7 @@ func _draw_orbit_rings() -> void:
 ## planet / atmosphere instance. Previously `_make_planet_material`
 ## and `_make_atmosphere_material` called `Shader.new()` per planet,
 ## paying the shader-compile cost N times whenever the menu opened.
-const _PLANET_SHADER_CODE := "shader_type spatial;\nuniform sampler2D surface_tex : source_color, filter_linear, repeat_enable;\nuniform vec4 grid_color : source_color = vec4(0.2, 0.5, 0.3, 1.0);\nuniform float grid_density = 14.0;\nuniform float grid_opacity = 0.4;\nuniform vec4 tint_color : source_color = vec4(1.0);\nvarying vec3 local_pos;\nvoid vertex() { local_pos = VERTEX; }\nvoid fragment() {\n\tvec3 tex_col = texture(surface_tex, UV).rgb * tint_color.rgb;\n\tvec3 n = normalize(local_pos);\n\tfloat lat = asin(n.y);\n\tfloat lon = atan(n.x, n.z);\n\tfloat lat_l = abs(fract(lat * grid_density / 3.14159) - 0.5) * 2.0;\n\tfloat lon_l = abs(fract(lon * grid_density / 6.28318) - 0.5) * 2.0;\n\tfloat line = smoothstep(0.02, 0.06, min(lat_l, lon_l));\n\tALBEDO = mix(grid_color.rgb, tex_col, line);\n\tEMISSION = grid_color.rgb * (1.0 - line) * grid_opacity;\n}\n"
+const _PLANET_SHADER_CODE := "shader_type spatial;\nuniform sampler2D surface_tex : source_color, filter_linear, repeat_enable;\nuniform vec4 tint_color : source_color = vec4(1.0);\n// Grid uniforms kept for back-compat with `_make_planet_material`\n// — the grid render itself was dropped because the lat/lon lines\n// read as teal arcs around the planet, which looked like an\n// unwanted outline rather than a useful grid.\nuniform vec4 grid_color : source_color = vec4(0.2, 0.5, 0.3, 1.0);\nuniform float grid_density = 14.0;\nuniform float grid_opacity = 0.4;\nvarying vec3 local_pos;\nvoid vertex() { local_pos = VERTEX; }\nvoid fragment() {\n\t// UVs computed PER-FRAGMENT from the sphere-direction (not\n\t// interpolated from the mesh's UV attribute). The mesh has\n\t// triangles that span the longitude wrap (u ≈ 0.9 → u ≈ 0.1\n\t// across the seam tri), which would otherwise interpolate\n\t// across the middle of the texture instead of wrapping —\n\t// reading as a visible vertical stripe down the planet.\n\tvec3 n = normalize(local_pos);\n\tfloat lat = asin(n.y);\n\tfloat lon = atan(n.x, n.z);\n\tvec2 uv_local = vec2(lon / 6.28318 + 0.5, lat / 3.14159 + 0.5);\n\tvec3 tex_col = texture(surface_tex, uv_local).rgb * tint_color.rgb;\n\tALBEDO = tex_col;\n}\n"
 const _ATMO_SHADER_CODE := "shader_type spatial;\nrender_mode unshaded, blend_add, cull_front;\nuniform vec4 atmo_color : source_color = vec4(0.3, 0.7, 1.0, 0.3);\nvoid fragment() {\n\tfloat f = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0);\n\tALBEDO = atmo_color.rgb;\n\tALPHA = f * atmo_color.a;\n}\n"
 static var _planet_shader: Shader = null
 static var _atmo_shader: Shader = null

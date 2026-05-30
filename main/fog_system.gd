@@ -478,6 +478,32 @@ func reveal_region(center: Vector2i, radius: int) -> void:
 	_punch_circle_into_array(_visible, center.x, center.y, radius)
 
 
+## Returns true when `grid_pos` is currently visible to the player —
+## i.e. a LUMINA sight source has it lit this frame. Cells that the
+## player has seen before but isn't currently looking at return false
+## (they are "explored but not in view"). Used by the rendering code
+## to hide enemy units behind fog.
+func is_cell_visible(grid_pos: Vector2i) -> bool:
+	if grid_pos.x < 0 or grid_pos.y < 0 or grid_pos.x >= _grid_w or grid_pos.y >= _grid_h:
+		return false
+	# Fog disabled (sandbox / map editor) → every cell counts as visible.
+	if main and "fog_enabled" in main and not bool(main.get("fog_enabled")):
+		return true
+	if _visible.is_empty():
+		return true
+	return _visible[grid_pos.y * _grid_w + grid_pos.x] > 0.0
+
+
+## True for cells the player has ever revealed, regardless of current
+## visibility. (Not used yet, but useful for "minimap memory" features.)
+func is_cell_explored(grid_pos: Vector2i) -> bool:
+	if grid_pos.x < 0 or grid_pos.y < 0 or grid_pos.x >= _grid_w or grid_pos.y >= _grid_h:
+		return false
+	if _explored_bytes.is_empty():
+		return false
+	return _explored_bytes[grid_pos.y * _grid_w + grid_pos.x] != 0
+
+
 # ----- Save / load -----
 
 func save_state() -> Dictionary:

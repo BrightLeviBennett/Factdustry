@@ -1,20 +1,10 @@
 {
-	"archive_decoder_state": {
-
-	},
-	"archive_holdings": {
-
-	},
-	"belt_unloader_state": {
-
-	},
-	"block_storage": {
-
-	},
+	"archive_decoder_state": {},
+	"archive_holdings": {},
+	"belt_unloader_state": {},
+	"block_storage": {},
 	"build_order": [],
-	"build_progress": {
-
-	},
+	"build_progress": {},
 	"building_factions": {
 		"143,75": 1.0,
 		"143,76": 1.0,
@@ -993,12 +983,8 @@
 		"90,159": 240.0,
 		"90,160": 240.0
 	},
-	"building_resources_consumed": {
-
-	},
-	"building_resources_refunded": {
-
-	},
+	"building_resources_consumed": {},
+	"building_resources_refunded": {},
 	"building_rotation": {
 		"143,75": 2.0,
 		"143,76": 2.0,
@@ -1977,22 +1963,12 @@
 		"90,159": "vent_turbine",
 		"90,160": "vent_turbine"
 	},
-	"constructor_state": {
-
-	},
-	"conveyor_items": {
-
-	},
+	"constructor_state": {},
+	"conveyor_items": {},
 	"core_position": "87,141",
-	"crane_links": {
-
-	},
-	"crane_states": {
-
-	},
-	"deconstructor_state": {
-
-	},
+	"crane_links": {},
+	"crane_states": {},
+	"deconstructor_state": {},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
@@ -2000,12 +1976,8 @@
 		"timestamp": 1778882094.18719
 	},
 	"drone_position": "",
-	"duct_bridge_filters": {
-
-	},
-	"factory_buffers": {
-
-	},
+	"duct_bridge_filters": {},
+	"factory_buffers": {},
 	"floor_tiles": {
 		"100,117": "grassy_floor",
 		"100,118": "grassy_floor",
@@ -15096,44 +15068,16 @@
 	"grid_height": 300.0,
 	"grid_width": 300.0,
 	"hints": [],
-	"hints_runtime": {
-		"clock": 59.5884183333307,
-		"landing_fired": true,
-		"runtime": {
-			"Mass Driver": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			},
-			"bridge": {
-				"activated_at": 62390.3979561385,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			}
-		}
-	},
-	"junction_items": {
-
-	},
+	"junction_items": {},
 	"linked_pairs": [
 		[
 			"168,80",
 			"170,80"
 		]
 	],
-	"loader_state": {
-
-	},
+	"loader_state": {},
 	"mass_driver_projectiles": [],
-	"mass_driver_state": {
-
-	},
+	"mass_driver_state": {},
 	"ore_tiles": {
 		"111,157": "copper_ore",
 		"112,156": "copper_ore",
@@ -15180,12 +15124,8 @@
 		"94,120": "graphite_ore",
 		"95,120": "graphite_ore"
 	},
-	"payload_items": {
-
-	},
-	"pipe_contents": {
-
-	},
+	"payload_items": {},
+	"pipe_contents": {},
 	"player_units": [],
 	"refabricator_state": {
 		"171,83": {
@@ -15202,91 +15142,22 @@
 		"mat_silicon": 2965.0,
 		"mat_steel": 1526.0
 	},
-	"script_runtime": {
-		"core_counts": {
-
-		},
-		"core_unit_mined_counts": {
-
-		},
-		"current_step": -1.0,
-		"decoded_archive_counts": {
-
-		},
-		"deposited_baselines": {
-
-		},
-		"disabled_buildings": [],
-		"ferox_blocks_destroyed_counts": {
-
-		},
-		"hidden_tiles": [],
-		"mined_counts": {
-
-		},
-		"placed_baselines": {
-
-		},
-		"placed_counts": {
-
-		},
-		"produced_counts": {
-
-		},
-		"script_running": false,
-		"step_wait_timer": 0.0,
-		"units_destroyed_counts": {
-
-		},
-		"units_produced_counts": {
-
-		}
-	},
 	"script_steps": [
 		{
-			"_editor_pos": "120,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
-				{
-					"from": "83,139",
-					"text": "(-white)This sector has an abundance of geysers making it perfect for Steel production. ",
-					"to": "93,139",
-					"type": "text"
-				}
-			],
-			"name": "Explain (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,80",
 			"actions": [
 				{
 					"from": "130,200",
 					"include_floors": true,
 					"to": "200,40",
 					"type": "hide_region"
-				}
-			],
-			"conditions": [
+				},
 				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				0
-			],
-			"name": "Explain (hide_region)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,80",
-			"actions": [
+					"from": "83,139",
+					"id": "ET",
+					"text": "(-white)This sector has an abundance of geysers making it perfect for Steel production. ",
+					"to": "93,139",
+					"type": "draw_text"
+				},
 				{
 					"pos": "171,80",
 					"type": "disable_block"
@@ -15294,217 +15165,84 @@
 			],
 			"conditions": [
 				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				1
-			],
-			"name": "Explain (disable_block)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,80",
-			"actions": [],
-			"conditions": [
-				{
 					"seconds": 8.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				2
-			],
-			"name": "Explain (wait wait)",
-			"on_exit": []
+			"name": "Explain",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "64,137",
+					"id": "MET",
 					"text": "(-white)Research the [res://textures/blocks/resource extractors/MineralExtractor.png](-yellow)Mineral Extractor(-white) and place it on a geyser to extract [res://textures/resources/iron.png]Iron.\n(-white)You will need to power it.",
 					"to": "70,137",
-					"type": "text"
-				}
-			],
-			"name": "Mineral Ext (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"color": "white",
 					"from": "66,139",
+					"id": "MEB3",
 					"to": "68,141",
-					"type": "box"
-				}
-			],
-			"name": "Mineral Ext (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,230",
-			"actions": [],
-			"conditions": [
+					"type": "draw_box"
+				},
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "73,143",
+					"id": "MEB1",
 					"to": "73,143",
-					"type": "box"
-				}
-			],
-			"name": "Mineral Ext (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,230",
-			"actions": [],
-			"conditions": [
+					"type": "draw_box"
+				},
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "68,143",
+					"id": "MEB2",
 					"to": "68,143",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Mineral Ext (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,230",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "mineral_extractor",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				4,
-				5,
-				6,
-				7
-			],
-			"name": "Mineral Ext (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1520,230",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"amount": 2.0,
 					"block_id": "cable_node",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				4,
-				5,
-				6,
-				7
-			],
-			"name": "Mineral Ext (wait placed)",
-			"on_exit": []
+			"name": "Mineral Ext",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "1800,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				8,
-				9
-			],
-			"name": "Mineral Ext (sink)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "120,380",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				10
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "67,137",
+					"id": "SFT",
 					"text": "(-white)Now research and place a [res://textures/blocks/factories/SteelFurnace.png]Steel Furnace to produce [res://textures/resources/steel.png]Steel from [res://textures/resources/iron.png]Iron.",
 					"to": "73,137",
-					"type": "text"
-				}
-			],
-			"name": "Steel furnace (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,380",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				10
-			],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"color": "white",
 					"from": "69,139",
+					"id": "SFB",
 					"to": "71,141",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Steel furnace (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,380",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 10.0,
@@ -15512,313 +15250,125 @@
 					"type": "deposited"
 				}
 			],
-			"dependencies": [
-				11,
-				12
-			],
-			"name": "Steel furnace (wait deposited)",
-			"on_exit": []
+			"name": "Steel furnace",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				13
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "84,145",
+					"id": "RU1",
 					"text": "(-white)Research and place the Unit Refabricator with a Fabricator Facing into it to upgrade tier 1 units to tier 2.\n(-white)You will need to supply it with the required resources associated with each unit, viewable in the core database.",
 					"to": "96,145",
-					"type": "text"
-				}
-			],
-			"name": "Research Unit (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				13
-			],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"color": "white",
 					"from": "89,147",
+					"id": "RUB1",
 					"to": "91,149",
-					"type": "box"
-				}
-			],
-			"name": "Research Unit (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				13
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "orange",
 					"from": "86,147",
+					"id": "RUB2",
 					"to": "88,149",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Research Unit (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,530",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "unit_refabricator",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				14,
-				15,
-				16
-			],
-			"name": "Research Unit (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,530",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"block_id": "tank_fabricator",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				14,
-				15,
-				16
-			],
-			"name": "Research Unit (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1520,530",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"type": "units_produced",
 					"unit_id": "breach"
 				}
 			],
-			"dependencies": [
-				14,
-				15,
-				16
-			],
-			"name": "Research Unit (wait units_produced)",
-			"on_exit": []
+			"name": "Research Unit",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
+				{
+					"type": "clear_boxes"
+				}
+			]
 		},
 		{
-			"_editor_pos": "1800,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				17,
-				18,
-				19
-			],
-			"name": "Research Unit (sink)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "120,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "107,135",
+					"id": "TT",
 					"text": "(-white)You will need to resarch the [res://textures/blocks/turrets/DoubleBarrel/DoubleBarrelComplete.png]Double Barrel and [res://textures/blocks/walls/LargeSteelWall.png]Large Steel Wall then build a defense with them to better attack the enemy's stronger units. make sure to supply them with resources.",
 					"to": "119,135",
-					"type": "text"
-				}
-			],
-			"name": "Turrets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"color": "black",
 					"from": "120,149",
+					"id": "TB1",
 					"to": "121,136",
-					"type": "box"
-				}
-			],
-			"name": "Turrets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "red",
 					"from": "119,137",
+					"id": "TB2",
 					"to": "119,137",
-					"type": "box"
-				}
-			],
-			"name": "Turrets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "red",
 					"from": "119,143",
+					"id": "TB3",
 					"to": "119,143",
-					"type": "box"
-				}
-			],
-			"name": "Turrets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "red",
 					"from": "119,149",
+					"id": "TB4",
 					"to": "119,149",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Turrets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1520,680",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 3.0,
 					"block_id": "double_barrel",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				21,
-				22,
-				23,
-				24,
-				25
-			],
-			"name": "Turrets (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1800,680",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"amount": 6.0,
 					"block_id": "large_steel_wall",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				21,
-				22,
-				23,
-				24,
-				25
-			],
-			"name": "Turrets (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "2080,680",
-			"actions": [],
-			"conditions": [
+			"name": "Turrets",
+			"on_exit": [
 				{
-					"type": "always"
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
 				}
-			],
-			"dependencies": [
-				26,
-				27
-			],
-			"name": "Turrets (sink)",
-			"on_exit": []
+			]
 		},
 		{
-			"_editor_pos": "120,830",
 			"actions": [
 				{
 					"count": 3.0,
@@ -15830,130 +15380,53 @@
 			],
 			"conditions": [
 				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				28
-			],
-			"name": "Spawn units (spawn_unit)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,830",
-			"actions": [],
-			"conditions": [
-				{
 					"amount": 3.0,
 					"type": "units_destroyed",
 					"unit_id": "breach"
 				}
 			],
-			"dependencies": [
-				29
-			],
-			"name": "Spawn units (wait units_destroyed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,830",
-			"actions": [
+			"name": "Spawn units",
+			"on_exit": [
 				{
 					"from": "130,200",
 					"to": "200,40",
 					"type": "reveal_region"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				30
-			],
-			"name": "Spawn units (exit reveal_region)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,830",
-			"actions": [
+				},
 				{
 					"pos": "171,80",
 					"type": "enable_block"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				31
-			],
-			"name": "Spawn units (exit enable_block)",
-			"on_exit": []
+			]
 		},
 		{
-			"_editor_pos": "120,980",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				32
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "114,135",
+					"id": "CT",
 					"text": "(-white)Now command your units and destroy the enemy core.",
 					"to": "119,135",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Capture (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,980",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "core_shard",
 					"type": "ferox_blocks_destroyed"
 				}
 			],
-			"dependencies": [
-				33
-			],
-			"name": "Capture (wait ferox_blocks_destroyed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,980",
-			"actions": [
+			"name": "Capture",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
 				{
 					"type": "capture_sector"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				34
-			],
-			"name": "Capture (exit capture_sector)",
-			"on_exit": []
+			]
 		}
 	],
 	"sector_name": "FR",
-	"sorter_filters": {
-
-	},
+	"sorter_filters": {},
 	"stats_blocks_placed": 0.0,
 	"stats_blocks_removed": 0.0,
 	"stats_enemy_blocks_destroyed": 0.0,
@@ -15962,9 +15435,7 @@
 	"stats_units_destroyed": 0.0,
 	"stats_units_produced": 0.0,
 	"type": "sector",
-	"unloader_state": {
-
-	},
+	"unloader_state": {},
 	"version": 3.0,
 	"wall_tiles": {
 		"100,108": "grassy_wall",

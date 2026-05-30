@@ -1,5 +1,7 @@
 extends CanvasLayer
 
+const SchematicPreviewScript = preload("res://main/schematic_preview.gd")
+
 # ============================================================
 # HUD.GD - User Interface (Mindustry-style Block Menu)
 # ============================================================
@@ -126,8 +128,12 @@ var _last_hovered_grid := Vector2i(-9999, -9999)
 # at the mouse position".
 const _CURSOR_DRILL_PATH := "res://textures/mouse heads/DrillMouse.png"
 const _CURSOR_TARGET_PATH := "res://textures/mouse heads/TargetMouse.png"
+const _CURSOR_DEFAULT_PATH := "res://textures/mouse heads/DefualtMouse.png"
+const _CURSOR_WRENCH_PATH := "res://textures/mouse heads/WrenchMouse.png"
 var _cursor_drill_tex: Texture2D = null
 var _cursor_target_tex: Texture2D = null
+var _cursor_default_tex: Texture2D = null
+var _cursor_wrench_tex: Texture2D = null
 var _cursor_layer: CanvasLayer = null
 var _cursor_sprite: TextureRect = null
 # Current custom texture (or null = show system cursor)
@@ -293,6 +299,8 @@ func _ready() -> void:
 
 	_cursor_drill_tex = load(_CURSOR_DRILL_PATH) as Texture2D
 	_cursor_target_tex = load(_CURSOR_TARGET_PATH) as Texture2D
+	_cursor_default_tex = load(_CURSOR_DEFAULT_PATH) as Texture2D
+	_cursor_wrench_tex = load(_CURSOR_WRENCH_PATH) as Texture2D
 	_create_custom_cursor()
 
 	_create_portrait_panel()
@@ -398,7 +406,7 @@ func _input(event: InputEvent) -> void:
 			_open_escape_menu()
 		get_viewport().set_input_as_handled()
 		# Cmd+Shift+\ (or Ctrl+Shift+\) = Clean Save Data
-	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_P \
+	elif event.is_action_pressed("toggle_network_info") \
 			and not event.shift_pressed and not event.ctrl_pressed and not event.meta_pressed and not event.alt_pressed:
 		# Don't steal P from text inputs (rename fields, etc.).
 		var fc := get_viewport().gui_get_focus_owner()
@@ -408,7 +416,7 @@ func _input(event: InputEvent) -> void:
 		network_info_panel.visible = network_info_open
 		_network_info_last_net = -2  # force refresh on next process tick
 		get_viewport().set_input_as_handled()
-	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_N \
+	elif event.is_action_pressed("network_info_lock") \
 			and not event.shift_pressed and not event.ctrl_pressed and not event.meta_pressed and not event.alt_pressed \
 			and network_info_open:
 		var fc2 := get_viewport().gui_get_focus_owner()
@@ -531,32 +539,57 @@ func _update_mouse_cursor(hovered_grid: Vector2i, in_unit_mode: bool, unit_mgr) 
 			and main.placed_buildings.has(hovered_grid) \
 			and main.get_building_faction(hovered_grid) == main.Faction.FEROX:
 		desired_tex = _cursor_target_tex
+	# WRENCH cursor — any derelict building under the cursor. Reads as
+	# "this can be reclaimed / repaired" the same way the drill cursor
+	# reads as "this can be mined".
+	elif _cursor_wrench_tex != null \
+			and main.placed_buildings.has(hovered_grid) \
+			and main.get_building_faction(hovered_grid) == main.Faction.DERELICT:
+		desired_tex = _cursor_wrench_tex
 	# DRILL cursor — any ore overlay on the hovered cell.
 	elif _cursor_drill_tex != null:
 		var terrain = main.get_node_or_null("TerrainSystem")
 		if terrain != null and "ore_tiles" in terrain and terrain.ore_tiles.has(hovered_grid):
 			desired_tex = _cursor_drill_tex
-	# Swap textures when the choice changes, and toggle the system
-	# cursor accordingly. Show the system cursor (MOUSE_MODE_VISIBLE)
-	# when no custom texture is active; hide it (MOUSE_MODE_HIDDEN)
-	# while a custom one is up so we don't get two cursors stacked.
+	# The DEFAULT cursor is owned by the GlobalCursor autoload — see
+	# main/global_cursor.gd. That one paints across every scene (main
+	# menu, planet select, sectors). Here we only override it when HUD
+	# wants Drill or Target; otherwise we delegate by leaving the
+	# override clear, and GlobalCursor falls back to DefualtMouse.png.
+	var gc = get_node_or_null("/root/GlobalCursor")
+	if gc != null:
+		if desired_tex != null:
+			gc.set_override(desired_tex)
+		else:
+			gc.clear_override()
+	# Suppress HUD's own cursor sprite — GlobalCursor renders the cursor
+	# project-wide, so painting a second copy here would stack two
+	# cursors on top of each other.
+	if _cursor_sprite != null and _cursor_sprite.visible:
+		_cursor_sprite.visible = false
+	# Track the active texture for any per-frame consumers that still
+	# read `_cursor_active_tex` (build-cost panel placement, etc.).
 	if desired_tex != _cursor_active_tex:
 		_cursor_active_tex = desired_tex
-		if _cursor_sprite != null:
+		# Preserved legacy branch: if GlobalCursor isn't available
+		# (someone removed the autoload), fall back to painting
+		# HUD's own sprite so cursors still work in sectors.
+		if gc == null and _cursor_sprite != null:
 			_cursor_sprite.texture = desired_tex
 			_cursor_sprite.visible = desired_tex != null
 			if desired_tex != null:
-				# Source PNGs are authored at a much larger resolution
-				# than a cursor needs; clamp the on-screen size to
-				# _CURSOR_DISPLAY_SIZE (square box) and let
-				# STRETCH_KEEP_ASPECT_CENTERED preserve aspect ratio.
 				_cursor_sprite.size = Vector2(_CURSOR_DISPLAY_SIZE, _CURSOR_DISPLAY_SIZE)
-		if desired_tex != null:
-			if Input.get_mouse_mode() != Input.MOUSE_MODE_HIDDEN:
-				Input.set_mouse_mode(Input.MOUSE_MODE_HIDDEN)
-		else:
-			if Input.get_mouse_mode() != Input.MOUSE_MODE_VISIBLE:
-				Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+		# Mouse-mode handling: GlobalCursor (when present) hides the
+		# system cursor project-wide in its `_ready`, so HUD should
+		# NOT touch the mouse mode — otherwise the else-branch would
+		# un-hide it the moment HUD has no Drill/Target override.
+		if gc == null:
+			if desired_tex != null:
+				if Input.get_mouse_mode() != Input.MOUSE_MODE_HIDDEN:
+					Input.set_mouse_mode(Input.MOUSE_MODE_HIDDEN)
+			else:
+				if Input.get_mouse_mode() != Input.MOUSE_MODE_VISIBLE:
+					Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 	# Reposition every frame so the sprite tracks the pointer.
 	if _cursor_sprite != null and _cursor_sprite.visible:
 		var vp := get_viewport()
@@ -684,6 +717,18 @@ func _process(delta: float) -> void:
 		# Per-frame power bar smoothing — runs between rebuilds so the
 		# count-up animates instead of stepping every 0.25 s.
 		_tick_power_bar_display(delta)
+		block_tooltip.visible = true
+	elif _is_extractable_tile(hovered_grid):
+		# No placed building, but the hovered cell is an extractable
+		# terrain tile (ore, wall ore, liquid floor). Show the same
+		# tooltip panel populated with the tile's info instead.
+		build_cost_panel.visible = false
+		_last_cost_building = &""
+		_tooltip_refresh_timer -= delta
+		if hovered_grid != _last_hovered_grid or _tooltip_refresh_timer <= 0:
+			_last_hovered_grid = hovered_grid
+			_tooltip_refresh_timer = TOOLTIP_REFRESH_INTERVAL
+			_update_tile_tooltip(hovered_grid)
 		block_tooltip.visible = true
 	else:
 		# Neither — hide both
@@ -1498,6 +1543,52 @@ func _add_block_button(block: BlockData) -> void:
 	btn.pressed.connect(_on_building_button_pressed.bind(block.id))
 	block_grid.add_child(btn)
 	building_buttons[block.id] = btn
+	# Apply current affordability dim immediately so freshly-rebuilt
+	# buttons don't flash full-bright for a frame before the next
+	# resource tick.
+	_apply_block_button_affordability(btn, block)
+
+
+## True when the player has at least `required` of every item in the
+## block's `build_cost`. Free-build blocks return true.
+func _can_afford_block(block: BlockData) -> bool:
+	if block == null:
+		return false
+	if block.build_cost.is_empty():
+		return true
+	for item_id in block.build_cost:
+		var needed: int = int(block.build_cost[item_id])
+		if needed <= 0:
+			continue
+		var rk: StringName = main._resolve_resource_key(str(item_id))
+		var have: int = int(main.resources.get(rk, 0))
+		if have < needed:
+			return false
+	return true
+
+
+## Tints a single block button based on whether the player can afford
+## its build cost. Unaffordable blocks get a slight black overlay
+## (modulate) to match the "you can't place this right now" cue.
+func _apply_block_button_affordability(btn: Button, block: BlockData) -> void:
+	if btn == null or block == null:
+		return
+	if _can_afford_block(block):
+		btn.modulate = Color.WHITE
+	else:
+		# Tint pulls all three channels down — straight modulate works
+		# for both textured icons and color-swatch buttons.
+		btn.modulate = Color(0.45, 0.45, 0.45, 1.0)
+
+
+## Walks every active block button and re-applies affordability tint.
+## Called from `_on_resources_changed` so the menu updates whenever
+## the resource pool changes.
+func _update_block_affordability_tint() -> void:
+	for bid in building_buttons:
+		var btn = building_buttons[bid] as Button
+		var block: BlockData = Registry.get_block(bid)
+		_apply_block_button_affordability(btn, block)
 
 
 func _update_category_highlights() -> void:
@@ -1979,6 +2070,47 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		var sel_t2: StringName = StringName(rstate.get("selected_t2", &""))
 		if sel_t2 == &"":
 			_add_tooltip_line("Selected Unit: (none — click to pick)", Color(0.9, 0.7, 0.3))
+		else:
+			# Show the chosen tier-2 unit and how many of them are alive
+			# on the map. Counts ENEMY/PLAYER-team variants by ID.
+			var udata = Registry.get_unit(sel_t2)
+			var uname: String = udata.display_name if udata and udata.display_name != "" else String(sel_t2)
+			var alive_n: int = 0
+			var unit_mgr = main.get_node_or_null("UnitManager")
+			if unit_mgr:
+				var pools: Array = []
+				if "player_units" in unit_mgr:
+					pools.append(unit_mgr.player_units)
+				if "enemies" in unit_mgr:
+					pools.append(unit_mgr.enemies)
+				for pool in pools:
+					for u in pool:
+						if u == null or not is_instance_valid(u):
+							continue
+						if "is_dead" in u and u.is_dead:
+							continue
+						if "data" in u and u.data and StringName(u.data.id) == sel_t2:
+							alive_n += 1
+			_add_tooltip_line("Selected Unit: %s · %d alive" % [uname, alive_n], Color(0.9, 0.9, 0.6))
+
+	# --- Shield: live HP bar (or recharge countdown when broken) ---
+	# Only shown once the building is BOTH built and powered — i.e. once
+	# ShieldSystem has actually initialized state for it. A ghost / cold
+	# barrier projector contributes nothing to the panel.
+	if data.shield_shape != "" and data.shield_health > 0.0:
+		var ss = main.get_node_or_null("ShieldSystem")
+		if ss and "states" in ss and ss.states.has(origin):
+			var sstate: Dictionary = ss.states[origin]
+			if bool(sstate.get("is_broken", false)):
+				# Broken — show recharge time remaining as a fill-up bar.
+				var cd_total: float = data.shield_cooldown if data.shield_cooldown > 0.0 else 10.0
+				var cd_left: float = float(sstate.get("cooldown_remaining", 0.0))
+				var charge_pct: int = int(clampf(1.0 - cd_left / cd_total, 0.0, 1.0) * 100.0)
+				_add_tooltip_progress_bar(charge_pct, 100, "Shield Recharging", Color(0.5, 0.5, 0.85))
+			else:
+				var cur_hp: float = float(sstate.get("current_health", data.shield_health))
+				var max_hp: float = float(data.shield_health)
+				_add_tooltip_progress_bar(int(cur_hp), int(max_hp), "Shield", Color(0.4, 0.7, 1.0))
 
 	# --- Launchpad: pod build progress / cargo readout ---
 	# While the pad is still gathering its 60 copper + 15 steel mandatory
@@ -2067,6 +2199,131 @@ func _add_launchpad_tooltip_section(anchor: Vector2i) -> void:
 		_add_tooltip_line("- (empty)", Color(0.6, 0.6, 0.7))
 
 
+
+
+# =========================
+# EXTRACTABLE-TILE TOOLTIP
+# =========================
+# Shown when the player hovers a non-built cell that yields something
+# under a drill / pump (floor ore, wall ore, liquid floor like water).
+# Same panel chrome as the block tooltip — just sourced from
+# TerrainTileData instead of BlockData.
+
+## True when the cell at `grid_pos` is an extractable terrain tile.
+## Skips cells that already have a placed building (handled by the
+## block tooltip) and cells with no minable / extracted resource.
+func _is_extractable_tile(grid_pos: Vector2i) -> bool:
+	if main == null:
+		return false
+	if main.placed_buildings.has(grid_pos):
+		return false
+	var terrain = main.get_node_or_null("TerrainSystem")
+	if terrain == null:
+		return false
+	# Ore overlay (floor or wall-embedded) — checked first since it's
+	# the most common drillable surface.
+	if "ore_tiles" in terrain and terrain.ore_tiles.has(grid_pos):
+		var ore = Registry.get_tile(terrain.ore_tiles[grid_pos])
+		if ore and ore.minable_resource != &"":
+			return true
+	# Wall tile with a minable_resource (blackstone, bauxite walls, etc.)
+	if "wall_tiles" in terrain and terrain.wall_tiles.has(grid_pos):
+		var wd = Registry.get_tile(terrain.wall_tiles[grid_pos])
+		if wd and wd.minable_resource != &"":
+			return true
+	# Liquid floor (water etc.) — pumpable.
+	if "floor_tiles" in terrain and terrain.floor_tiles.has(grid_pos):
+		var fd = Registry.get_tile(terrain.floor_tiles[grid_pos])
+		if fd and (fd.is_liquid or fd.extracted_liquid != &""):
+			return true
+	return false
+
+
+## Returns the TerrainTileData that yields a resource at `grid_pos`,
+## or `null` if nothing is extractable. Priority matches what a drill
+## would actually mine: ore > wall ore > liquid floor.
+func _extractable_tile_for(grid_pos: Vector2i) -> TerrainTileData:
+	var terrain = main.get_node_or_null("TerrainSystem") if main else null
+	if terrain == null:
+		return null
+	if "ore_tiles" in terrain and terrain.ore_tiles.has(grid_pos):
+		var ore = Registry.get_tile(terrain.ore_tiles[grid_pos])
+		if ore and ore.minable_resource != &"":
+			return ore
+	if "wall_tiles" in terrain and terrain.wall_tiles.has(grid_pos):
+		var wd = Registry.get_tile(terrain.wall_tiles[grid_pos])
+		if wd and wd.minable_resource != &"":
+			return wd
+	if "floor_tiles" in terrain and terrain.floor_tiles.has(grid_pos):
+		var fd = Registry.get_tile(terrain.floor_tiles[grid_pos])
+		if fd and (fd.is_liquid or fd.extracted_liquid != &""):
+			return fd
+	return null
+
+
+## Populates the block tooltip panel for a hovered extractable tile.
+## Uses the tile's own icon by default, but if the tile yields a
+## liquid (water etc.) the icon is the LIQUID resource's icon so the
+## panel reads as "this is water" rather than "this is the water
+## tile floor".
+func _update_tile_tooltip(grid_pos: Vector2i) -> void:
+	for c in tooltip_vbox.get_children():
+		c.queue_free()
+	_power_bar_panel = null
+	_power_bar_fill = null
+	_power_bar_label = null
+	var tile: TerrainTileData = _extractable_tile_for(grid_pos)
+	if tile == null:
+		block_tooltip.visible = false
+		return
+	# Resolve the item / fluid the tile yields, prefer the liquid for
+	# liquid floors so the icon swaps to the water resource icon.
+	var yield_id: StringName = &""
+	if tile.is_liquid or tile.extracted_liquid != &"":
+		yield_id = tile.extracted_liquid if tile.extracted_liquid != &"" else tile.minable_resource
+	else:
+		yield_id = tile.minable_resource
+	var yield_data = Registry.get_item_or_fluid(yield_id) if yield_id != &"" else null
+
+	# --- Header: icon + name ---
+	var header_hbox = HBoxContainer.new()
+	header_hbox.add_theme_constant_override("separation", 8)
+	header_hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Icon: liquid → resource icon, otherwise the tile texture itself.
+	var icon_tex: Texture2D = null
+	if yield_data and (tile.is_liquid or tile.extracted_liquid != &""):
+		icon_tex = yield_data.icon
+	elif tile.icon:
+		icon_tex = tile.icon
+	elif yield_data:
+		icon_tex = yield_data.icon
+	if icon_tex:
+		var icon_rect = TextureRect.new()
+		icon_rect.texture = icon_tex
+		icon_rect.custom_minimum_size = Vector2(24, 24)
+		icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		header_hbox.add_child(icon_rect)
+	var name_lbl = Label.new()
+	# Display name resolution: prefer the tile's own name, fall back
+	# to the resource's name (so an un-named water floor still reads
+	# as "Water" rather than blank).
+	var disp_name: String = tile.get_display_name() if tile.has_method("get_display_name") else tile.display_name
+	if disp_name == "" and yield_data:
+		disp_name = yield_data.display_name
+	if disp_name == "":
+		disp_name = String(tile.id)
+	# Strip trailing " Ore" / " ore" — tile info shows just the resource.
+	if disp_name.to_lower().ends_with(" ore"):
+		disp_name = disp_name.substr(0, disp_name.length() - 4)
+	name_lbl.text = disp_name
+	name_lbl.add_theme_font_size_override("font_size", 16)
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	header_hbox.add_child(name_lbl)
+	tooltip_vbox.add_child(header_hbox)
+	# Extractable-tile tooltip is intentionally minimal — just the
+	# icon + name. Yields / wall HP / etc. live in the database UI.
 
 
 func _add_tooltip_line(text: String, color: Color) -> void:
@@ -2756,12 +3013,28 @@ func _update_unit_mode_icons() -> void:
 	var sig := ""
 	for uid in order:
 		sig += String(uid) + ":" + str(counts[uid]["count"]) + ","
+	# Distinguish "no units selected" from the empty-string signature
+	# we'd produce on the first ever update, so the placeholder label
+	# rebuilds when transitioning out of a real selection.
+	if order.is_empty():
+		sig = "<empty>"
 	if sig == _unit_mode_icons_signature:
 		return
 	_unit_mode_icons_signature = sig
 
 	for c in unit_mode_icon_grid.get_children():
 		c.queue_free()
+
+	if order.is_empty():
+		# Placeholder when no units are selected — reads as "[no units
+		# selected]" in the space where icons would normally live.
+		var hint := Label.new()
+		hint.text = "[no units selected]"
+		hint.add_theme_font_size_override("font_size", 12)
+		hint.add_theme_color_override("font_color", Color(0.8, 0.75, 0.55, 0.85))
+		hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		unit_mode_icon_grid.add_child(hint)
+		return
 
 	for uid in order:
 		var entry: Dictionary = counts[uid]
@@ -2929,14 +3202,17 @@ func _update_build_cost_panel(block_id: StringName) -> void:
 			var have_str := Registry.format_amount(have)
 			var req_str := Registry.format_amount(required)
 
+			# Two-state colouring:
+			#   • enough — white (neutral, "you have everything you need")
+			#   • not enough — yellow (call-out, "this is the one missing")
+			# The whole block icon dimming separately (in the block-select
+			# menu) already conveys the "you can't afford ANY of this" state,
+			# so we don't need a third red tier here.
 			var have_color: Color
-			var ratio := float(have) / float(required) if required > 0 else 1.0
-			if ratio >= 1.0:
-				have_color = Color(0.3, 0.9, 0.3)  # Green — enough
-			elif ratio >= 0.5:
-				have_color = Color(0.9, 0.85, 0.2)  # Yellow — at least half
+			if have >= required:
+				have_color = Color(0.95, 0.95, 0.95)
 			else:
-				have_color = Color(0.9, 0.3, 0.3)   # Red — less than half
+				have_color = Color(0.95, 0.85, 0.2)
 
 			var amt_hbox = HBoxContainer.new()
 			amt_hbox.add_theme_constant_override("separation", 0)
@@ -3022,6 +3298,8 @@ func _on_building_selected(block_id: StringName) -> void:
 func _on_resources_changed(res: Dictionary) -> void:
 	# Mark build cost panel dirty so it refreshes this frame with live counts.
 	_cost_dirty = true
+	# Also refresh the build-menu tinting (affordable vs not).
+	_update_block_affordability_tint()
 
 	for c in resource_grid.get_children():
 		c.queue_free()
@@ -3119,206 +3397,290 @@ func _on_misc_schematics() -> void:
 
 
 var _schematic_viewer: PanelContainer = null
-var _schematic_list_vbox: VBoxContainer = null
-var _schematic_detail_vbox: VBoxContainer = null
+var _schematic_grid: GridContainer = null
+var _schematic_search: LineEdit = null
 var _selected_schematic_name: String = ""
+
+const _SCHEMATIC_CARD_SIZE := 184.0
+const _SCHEMATIC_PREVIEW_SIZE := 168.0
 
 func _show_schematic_viewer() -> void:
 	if _schematic_viewer and is_instance_valid(_schematic_viewer):
 		_schematic_viewer.queue_free()
 
+	# --- Mindustry-style schematics dialog: grid of preview cards. ---
 	_schematic_viewer = PanelContainer.new()
 	_schematic_viewer.anchor_left = 0.5
 	_schematic_viewer.anchor_right = 0.5
 	_schematic_viewer.anchor_top = 0.5
 	_schematic_viewer.anchor_bottom = 0.5
-	_schematic_viewer.offset_left = -250
-	_schematic_viewer.offset_right = 250
-	_schematic_viewer.offset_top = -200
-	_schematic_viewer.offset_bottom = 200
+	_schematic_viewer.offset_left = -440
+	_schematic_viewer.offset_right = 440
+	_schematic_viewer.offset_top = -300
+	_schematic_viewer.offset_bottom = 300
 	_schematic_viewer.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_schematic_viewer.grow_vertical = Control.GROW_DIRECTION_BOTH
 
-	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.04, 0.05, 0.07, 0.96)
-	style.set_corner_radius_all(8)
-	style.set_border_width_all(1)
-	style.border_color = Color(0.3, 0.35, 0.4, 0.6)
-	style.content_margin_left = 10
-	style.content_margin_right = 10
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.08, 0.11, 0.98)
+	style.set_corner_radius_all(6)
+	style.set_border_width_all(2)
+	style.border_color = Color(0.32, 0.36, 0.42, 1.0)
+	style.content_margin_left = 14
+	style.content_margin_right = 14
+	style.content_margin_top = 12
+	style.content_margin_bottom = 12
 	_schematic_viewer.add_theme_stylebox_override("panel", style)
 	add_child(_schematic_viewer)
 
-	var root_vbox = VBoxContainer.new()
-	root_vbox.add_theme_constant_override("separation", 6)
+	var root_vbox := VBoxContainer.new()
+	root_vbox.add_theme_constant_override("separation", 8)
 	_schematic_viewer.add_child(root_vbox)
 
 	# Title bar
-	var title_hbox = HBoxContainer.new()
+	var title_hbox := HBoxContainer.new()
 	root_vbox.add_child(title_hbox)
-	var title_lbl = Label.new()
-	title_lbl.text = "📋 Schematics"
-	title_lbl.add_theme_font_size_override("font_size", 16)
-	title_lbl.add_theme_color_override("font_color", Color(1, 0.9, 0.3))
+	var title_lbl := Label.new()
+	title_lbl.text = "Schematics"
+	title_lbl.add_theme_font_size_override("font_size", 18)
+	title_lbl.add_theme_color_override("font_color", Color(1, 0.85, 0.35))
 	title_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_hbox.add_child(title_lbl)
-	var close_btn = Button.new()
+	var close_btn := Button.new()
 	close_btn.text = "X"
 	close_btn.pressed.connect(func(): _schematic_viewer.queue_free())
 	title_hbox.add_child(close_btn)
 
+	# Search row
+	var search_row := HBoxContainer.new()
+	search_row.add_theme_constant_override("separation", 6)
+	root_vbox.add_child(search_row)
+	var search_lbl := Label.new()
+	search_lbl.text = "Search"
+	search_lbl.add_theme_font_size_override("font_size", 13)
+	search_lbl.add_theme_color_override("font_color", Color(0.75, 0.78, 0.84))
+	search_row.add_child(search_lbl)
+	_schematic_search = LineEdit.new()
+	_schematic_search.placeholder_text = "Filter by name…"
+	_schematic_search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_schematic_search.text_changed.connect(func(_t): _refresh_schematic_list())
+	search_row.add_child(_schematic_search)
+
 	root_vbox.add_child(HSeparator.new())
 
-	# Content: list + detail
-	var content_hbox = HBoxContainer.new()
-	content_hbox.add_theme_constant_override("separation", 8)
-	content_hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root_vbox.add_child(content_hbox)
+	# Scrollable card grid.
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	root_vbox.add_child(scroll)
 
-	# Left: schematic list
-	var list_panel = PanelContainer.new()
-	var list_style = StyleBoxFlat.new()
-	list_style.bg_color = Color(0.06, 0.07, 0.1, 0.8)
-	list_style.set_corner_radius_all(4)
-	list_style.content_margin_left = 4
-	list_style.content_margin_right = 4
-	list_style.content_margin_top = 4
-	list_style.content_margin_bottom = 4
-	list_panel.add_theme_stylebox_override("panel", list_style)
-	list_panel.custom_minimum_size.x = 160
-	list_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	content_hbox.add_child(list_panel)
-
-	var list_scroll = ScrollContainer.new()
-	list_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	list_panel.add_child(list_scroll)
-
-	_schematic_list_vbox = VBoxContainer.new()
-	_schematic_list_vbox.add_theme_constant_override("separation", 2)
-	list_scroll.add_child(_schematic_list_vbox)
-
-	# Right: detail panel
-	_schematic_detail_vbox = VBoxContainer.new()
-	_schematic_detail_vbox.add_theme_constant_override("separation", 4)
-	_schematic_detail_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_schematic_detail_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	content_hbox.add_child(_schematic_detail_vbox)
+	_schematic_grid = GridContainer.new()
+	_schematic_grid.columns = 4
+	_schematic_grid.add_theme_constant_override("h_separation", 10)
+	_schematic_grid.add_theme_constant_override("v_separation", 10)
+	_schematic_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_schematic_grid)
 
 	_refresh_schematic_list()
 
 
 func _refresh_schematic_list() -> void:
-	if _schematic_list_vbox == null:
+	if _schematic_grid == null:
 		return
-	for c in _schematic_list_vbox.get_children():
+	for c in _schematic_grid.get_children():
 		c.queue_free()
+
+	var filter: String = _schematic_search.text.strip_edges().to_lower() if _schematic_search else ""
 	var names: PackedStringArray = SaveManager.list_schematics()
+	var any: bool = false
 	for sname in names:
-		var btn = Button.new()
-		btn.text = sname
-		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		btn.add_theme_font_size_override("font_size", 12)
-		var captured_name: String = sname
-		btn.pressed.connect(func(): _select_schematic(captured_name))
-		_schematic_list_vbox.add_child(btn)
+		if filter != "" and not sname.to_lower().contains(filter):
+			continue
+		any = true
+		_schematic_grid.add_child(_make_schematic_card(sname))
 
-	if names.is_empty():
-		var lbl = Label.new()
-		lbl.text = "No schematics saved."
-		lbl.add_theme_font_size_override("font_size", 11)
-		lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
-		_schematic_list_vbox.add_child(lbl)
-
-	# Clear detail
-	if _schematic_detail_vbox:
-		for c in _schematic_detail_vbox.get_children():
-			c.queue_free()
+	if not any:
+		var lbl := Label.new()
+		lbl.text = "No schematics." if filter == "" else "No schematics match \"%s\"." % filter
+		lbl.add_theme_font_size_override("font_size", 12)
+		lbl.add_theme_color_override("font_color", Color(0.55, 0.58, 0.62))
+		_schematic_grid.add_child(lbl)
 
 
-func _select_schematic(sname: String) -> void:
-	_selected_schematic_name = sname
-	if _schematic_detail_vbox == null:
-		return
-	for c in _schematic_detail_vbox.get_children():
-		c.queue_free()
+## Builds one schematic card: tiled-background preview + name footer +
+## hover border. Clicking opens the info dialog.
+func _make_schematic_card(sname: String) -> Control:
+	var data: Variant = SaveManager.load_schematic(sname)
 
+	var card := PanelContainer.new()
+	card.custom_minimum_size = Vector2(_SCHEMATIC_CARD_SIZE, _SCHEMATIC_CARD_SIZE + 36)
+	var card_style := StyleBoxFlat.new()
+	card_style.bg_color = Color(0.05, 0.06, 0.08, 1.0)
+	card_style.set_corner_radius_all(4)
+	card_style.set_border_width_all(2)
+	card_style.border_color = Color(0.32, 0.36, 0.42, 1.0)
+	card.add_theme_stylebox_override("panel", card_style)
+	var hover_style := card_style.duplicate() as StyleBoxFlat
+	hover_style.border_color = Color(1.0, 0.85, 0.35, 1.0)
+	card.mouse_entered.connect(func(): card.add_theme_stylebox_override("panel", hover_style))
+	card.mouse_exited.connect(func(): card.add_theme_stylebox_override("panel", card_style))
+
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	card.add_child(col)
+
+	# --- Preview ---
+	var preview_panel := PanelContainer.new()
+	var preview_style := StyleBoxFlat.new()
+	preview_style.bg_color = Color(0, 0, 0, 1)
+	preview_panel.add_theme_stylebox_override("panel", preview_style)
+	col.add_child(preview_panel)
+	var preview := SchematicPreviewScript.new()
+	preview.custom_minimum_size = Vector2(_SCHEMATIC_PREVIEW_SIZE, _SCHEMATIC_PREVIEW_SIZE)
+	if data != null:
+		preview.schematic = data
+	preview_panel.add_child(preview)
+
+	# --- Footer: name strip ---
+	var footer := PanelContainer.new()
+	var footer_style := StyleBoxFlat.new()
+	footer_style.bg_color = Color(0.02, 0.03, 0.05, 1.0)
+	footer_style.content_margin_left = 6
+	footer_style.content_margin_right = 6
+	footer_style.content_margin_top = 4
+	footer_style.content_margin_bottom = 4
+	footer.add_theme_stylebox_override("panel", footer_style)
+	col.add_child(footer)
+	var name_lbl := Label.new()
+	name_lbl.text = sname
+	name_lbl.add_theme_font_size_override("font_size", 12)
+	name_lbl.add_theme_color_override("font_color", Color(0.92, 0.92, 0.92))
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	name_lbl.clip_text = true
+	footer.add_child(name_lbl)
+
+	# Make the whole card clickable. PanelContainer defaults to
+	# MOUSE_FILTER_STOP so it already catches input; just wire
+	# gui_input → open the info dialog on left-click.
+	var captured_name: String = sname
+	card.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			_show_schematic_info(captured_name))
+	card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+
+	return card
+
+
+## Mindustry-style info dialog: large preview + name + dims + block list
+## + requirements + Place / Delete buttons.
+func _show_schematic_info(sname: String) -> void:
 	var data: Variant = SaveManager.load_schematic(sname)
 	if data == null:
 		return
+	_selected_schematic_name = sname
 
-	# Name
-	var name_lbl = Label.new()
-	name_lbl.text = str(data.get("name", sname))
-	name_lbl.add_theme_font_size_override("font_size", 14)
-	name_lbl.add_theme_color_override("font_color", Color(1, 0.9, 0.3))
-	_schematic_detail_vbox.add_child(name_lbl)
+	var popup := PopupPanel.new()
+	popup.size = Vector2(540, 640)
+	var pstyle := StyleBoxFlat.new()
+	pstyle.bg_color = Color(0.08, 0.09, 0.12, 0.98)
+	pstyle.set_border_width_all(2)
+	pstyle.border_color = Color(0.32, 0.36, 0.42, 1.0)
+	pstyle.set_corner_radius_all(6)
+	pstyle.content_margin_left = 14
+	pstyle.content_margin_right = 14
+	pstyle.content_margin_top = 12
+	pstyle.content_margin_bottom = 12
+	popup.add_theme_stylebox_override("panel", pstyle)
+	add_child(popup)
 
-	# Dimensions
-	var dim_lbl = Label.new()
-	dim_lbl.text = "%d x %d tiles" % [data.get("width", 0), data.get("height", 0)]
-	dim_lbl.add_theme_font_size_override("font_size", 11)
-	dim_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
-	_schematic_detail_vbox.add_child(dim_lbl)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	popup.add_child(vbox)
 
-	_schematic_detail_vbox.add_child(HSeparator.new())
+	var title_lbl := Label.new()
+	title_lbl.text = str(data.get("name", sname))
+	title_lbl.add_theme_font_size_override("font_size", 18)
+	title_lbl.add_theme_color_override("font_color", Color(1, 0.85, 0.35))
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(title_lbl)
 
-	# Block summary
-	var blocks_data: Dictionary = data.get("blocks", {})
-	var block_counts: Dictionary = {}
-	for key in blocks_data:
-		var bid: String = blocks_data[key]
-		block_counts[bid] = block_counts.get(bid, 0) + 1
+	var dim_lbl := Label.new()
+	dim_lbl.text = "%d × %d tiles" % [int(data.get("width", 0)), int(data.get("height", 0))]
+	dim_lbl.add_theme_font_size_override("font_size", 12)
+	dim_lbl.add_theme_color_override("font_color", Color(0.65, 0.68, 0.72))
+	dim_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(dim_lbl)
 
-	var blocks_lbl = Label.new()
-	blocks_lbl.text = "Blocks (%d):" % blocks_data.size()
-	blocks_lbl.add_theme_font_size_override("font_size", 12)
-	_schematic_detail_vbox.add_child(blocks_lbl)
+	# Big preview with tiled background.
+	var preview_panel := PanelContainer.new()
+	var preview_style := StyleBoxFlat.new()
+	preview_style.bg_color = Color(0, 0, 0, 1)
+	preview_style.set_border_width_all(2)
+	preview_style.border_color = Color(0.42, 0.46, 0.52, 1.0)
+	preview_panel.add_theme_stylebox_override("panel", preview_style)
+	preview_panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vbox.add_child(preview_panel)
+	var preview := SchematicPreviewScript.new()
+	preview.custom_minimum_size = Vector2(360, 360)
+	preview.schematic = data
+	preview_panel.add_child(preview)
 
-	for bid in block_counts:
-		var bd = Registry.get_block(StringName(bid))
-		var dn: String = bd.display_name if bd else bid
-		var lbl = Label.new()
-		lbl.text = "  %dx %s" % [block_counts[bid], dn]
-		lbl.add_theme_font_size_override("font_size", 11)
-		_schematic_detail_vbox.add_child(lbl)
-
-	_schematic_detail_vbox.add_child(HSeparator.new())
-
-	# Total cost
+	# Requirements (icon + count pills).
 	var total_cost: Dictionary = data.get("total_cost", {})
+	if total_cost.is_empty():
+		# Fall back to summing build costs ourselves if the schematic
+		# was saved without a `total_cost` field.
+		var blocks_data: Dictionary = data.get("blocks", {})
+		for key in blocks_data:
+			var bd = Registry.get_block(StringName(blocks_data[key]))
+			if bd:
+				for item_id in bd.build_cost:
+					total_cost[item_id] = total_cost.get(item_id, 0) + bd.build_cost[item_id]
 	if not total_cost.is_empty():
-		var cost_lbl = Label.new()
-		cost_lbl.text = "Total Cost:"
-		cost_lbl.add_theme_font_size_override("font_size", 12)
-		_schematic_detail_vbox.add_child(cost_lbl)
-		for item_str in total_cost:
-			var item_data = Registry.get_item(StringName(item_str))
-			var hbox = HBoxContainer.new()
-			hbox.add_theme_constant_override("separation", 4)
+		var req_lbl := Label.new()
+		req_lbl.text = "Requirements"
+		req_lbl.add_theme_font_size_override("font_size", 12)
+		req_lbl.add_theme_color_override("font_color", Color(0.7, 0.72, 0.78))
+		vbox.add_child(req_lbl)
+		var req_wrap := HFlowContainer.new()
+		req_wrap.add_theme_constant_override("h_separation", 10)
+		req_wrap.add_theme_constant_override("v_separation", 4)
+		vbox.add_child(req_wrap)
+		for item_id in total_cost:
+			# build_cost stores SHORT keys ("copper", "graphite") that
+			# need to be resolved to canonical resource ids
+			# ("mat_copper", …) via Main._resolve_resource_key before
+			# the Registry lookup — otherwise the icon is null and the
+			# requirements pills render as bare numbers.
+			var lookup_id: StringName = StringName(item_id)
+			if main and main.has_method("_resolve_resource_key"):
+				lookup_id = main._resolve_resource_key(str(item_id))
+			var item_data = Registry.get_item_or_fluid(lookup_id)
+			if item_data == null:
+				item_data = Registry.get_item_or_fluid(StringName(item_id))
+			var pill := HBoxContainer.new()
+			pill.add_theme_constant_override("separation", 3)
 			if item_data and item_data.icon:
-				var tex = TextureRect.new()
+				var tex := TextureRect.new()
 				tex.texture = item_data.icon
-				tex.custom_minimum_size = Vector2(14, 14)
+				tex.custom_minimum_size = Vector2(18, 18)
 				tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 				tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-				hbox.add_child(tex)
-			var clbl = Label.new()
-			var dn: String = item_data.display_name if item_data else item_str
-			clbl.text = "%s: %d" % [dn, int(total_cost[item_str])]
-			clbl.add_theme_font_size_override("font_size", 11)
-			hbox.add_child(clbl)
-			_schematic_detail_vbox.add_child(hbox)
+				pill.add_child(tex)
+			var clbl := Label.new()
+			clbl.text = str(int(total_cost[item_id]))
+			clbl.add_theme_font_size_override("font_size", 12)
+			pill.add_child(clbl)
+			req_wrap.add_child(pill)
 
-	_schematic_detail_vbox.add_child(HSeparator.new())
+	vbox.add_child(HSeparator.new())
 
-	# Buttons
-	var btn_row = HBoxContainer.new()
+	var btn_row := HBoxContainer.new()
 	btn_row.add_theme_constant_override("separation", 8)
-	_schematic_detail_vbox.add_child(btn_row)
-
-	var place_btn = Button.new()
+	vbox.add_child(btn_row)
+	var place_btn := Button.new()
 	place_btn.text = "Place"
 	place_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var data_ref: Dictionary = data
@@ -3326,19 +3688,28 @@ func _select_schematic(sname: String) -> void:
 		var bsys = _building_sys_ref()
 		if bsys:
 			bsys.start_schematic_placement(data_ref)
-		_schematic_viewer.queue_free()
+		popup.queue_free()
+		if _schematic_viewer and is_instance_valid(_schematic_viewer):
+			_schematic_viewer.queue_free()
 	)
 	btn_row.add_child(place_btn)
-
-	var del_btn = Button.new()
+	var del_btn := Button.new()
 	del_btn.text = "Delete"
 	del_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var del_name: String = sname
 	del_btn.pressed.connect(func():
 		SaveManager.delete_schematic(del_name)
+		popup.queue_free()
 		_refresh_schematic_list()
 	)
 	btn_row.add_child(del_btn)
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	close_btn.pressed.connect(func(): popup.queue_free())
+	btn_row.add_child(close_btn)
+
+	popup.popup_centered()
 
 
 func _on_misc_database() -> void:
@@ -4795,7 +5166,7 @@ func _open_network_graph_overlay() -> void:
 			# Click anywhere outside the chart area to dismiss.
 			if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
 				_close_network_graph_overlay()
-			elif ev is InputEventKey and ev.pressed and ev.keycode == KEY_ESCAPE:
+			elif ev.is_action_pressed("ui_cancel"):
 				_close_network_graph_overlay()
 		)
 		network_graph_overlay.add_child(bg)

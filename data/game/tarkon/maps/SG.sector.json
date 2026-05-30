@@ -16,183 +16,183 @@
 
 	},
 	"building_factions": {
-		"54,51": 0.0,
-		"54,52": 0.0,
-		"54,53": 0.0,
-		"55,51": 0.0,
-		"55,52": 0.0,
-		"55,53": 0.0,
-		"56,51": 0.0,
-		"56,52": 0.0,
-		"56,53": 0.0,
-		"70,16": 1.0,
-		"70,17": 1.0,
-		"70,18": 1.0,
-		"70,19": 1.0,
-		"70,20": 1.0,
-		"70,21": 1.0,
-		"70,22": 1.0,
-		"70,23": 1.0,
-		"70,24": 1.0,
-		"70,25": 1.0,
-		"71,17": 1.0,
-		"71,18": 1.0,
-		"71,19": 1.0,
-		"71,20": 1.0,
-		"71,21": 1.0,
-		"71,22": 1.0,
-		"71,23": 1.0,
-		"71,24": 1.0,
-		"71,25": 1.0,
-		"72,18": 1.0,
-		"72,21": 1.0,
-		"72,24": 1.0,
-		"73,18": 1.0,
-		"73,19": 1.0,
-		"73,20": 1.0,
-		"73,21": 1.0,
-		"73,22": 1.0,
-		"73,23": 1.0,
-		"73,24": 1.0,
-		"74,24": 1.0,
-		"75,24": 1.0,
-		"76,24": 1.0,
-		"77,24": 1.0,
-		"78,10": 1.0,
-		"78,11": 1.0,
-		"78,12": 1.0,
-		"78,13": 1.0,
-		"78,14": 1.0,
-		"78,24": 1.0,
-		"79,10": 1.0,
-		"79,11": 1.0,
-		"79,24": 1.0,
-		"79,28": 1.0,
-		"79,29": 1.0,
-		"80,10": 1.0,
-		"80,11": 1.0,
-		"80,20": 1.0,
-		"80,21": 1.0,
-		"80,22": 1.0,
-		"80,23": 1.0,
-		"80,24": 1.0,
-		"80,25": 1.0,
-		"80,26": 1.0,
-		"80,27": 1.0,
-		"80,28": 1.0,
-		"80,29": 1.0,
-		"81,10": 1.0,
-		"81,11": 1.0,
-		"81,12": 1.0,
-		"81,13": 1.0,
-		"81,14": 1.0,
-		"81,15": 1.0,
-		"81,20": 1.0,
-		"81,21": 1.0,
-		"81,22": 1.0,
-		"81,24": 1.0,
-		"81,25": 1.0,
-		"81,29": 1.0,
-		"81,30": 1.0,
-		"81,31": 1.0,
-		"82,15": 1.0,
-		"82,20": 1.0,
-		"82,21": 1.0,
-		"82,22": 1.0,
-		"82,23": 1.0,
-		"82,24": 1.0,
-		"82,25": 1.0,
-		"82,26": 1.0,
-		"82,27": 1.0,
-		"82,28": 1.0,
-		"82,29": 1.0,
-		"82,30": 1.0,
-		"82,31": 1.0,
-		"83,11": 1.0,
-		"83,15": 1.0,
-		"83,21": 1.0,
-		"83,24": 1.0,
-		"84,10": 1.0,
-		"84,11": 1.0,
-		"84,15": 1.0,
-		"84,21": 1.0,
-		"84,24": 1.0,
-		"84,28": 0.0,
-		"84,29": 0.0,
-		"84,30": 0.0,
-		"84,9": 1.0,
-		"85,10": 1.0,
-		"85,11": 1.0,
-		"85,15": 1.0,
-		"85,21": 1.0,
-		"85,24": 1.0,
-		"85,28": 0.0,
-		"85,29": 0.0,
-		"85,30": 0.0,
-		"85,9": 1.0,
-		"86,10": 1.0,
-		"86,11": 1.0,
-		"86,15": 1.0,
-		"86,21": 1.0,
-		"86,24": 1.0,
-		"86,25": 1.0,
-		"86,28": 0.0,
-		"86,29": 0.0,
-		"86,30": 0.0,
-		"86,9": 1.0,
-		"87,15": 1.0,
-		"87,16": 1.0,
-		"87,17": 1.0,
-		"87,21": 1.0,
-		"87,24": 1.0,
-		"88,15": 1.0,
-		"88,16": 1.0,
-		"88,17": 1.0,
-		"88,19": 1.0,
-		"88,20": 1.0,
-		"88,21": 1.0,
-		"88,24": 1.0,
-		"89,15": 1.0,
-		"89,16": 1.0,
-		"89,17": 1.0,
-		"89,19": 1.0,
-		"89,20": 1.0,
-		"89,21": 1.0,
-		"89,24": 1.0,
-		"90,19": 1.0,
-		"90,20": 1.0,
-		"90,21": 1.0,
-		"90,24": 1.0,
-		"91,20": 1.0,
-		"91,23": 1.0,
-		"91,24": 1.0,
-		"92,11": 0.0,
-		"92,15": 0.0,
-		"92,19": 1.0,
-		"92,20": 1.0,
-		"92,23": 1.0,
-		"92,24": 1.0,
-		"92,25": 1.0,
-		"93,15": 1.0,
-		"93,16": 1.0,
-		"93,17": 1.0,
-		"93,19": 1.0,
-		"93,20": 1.0,
-		"93,21": 1.0,
-		"93,22": 1.0,
-		"94,15": 1.0,
-		"94,16": 1.0,
-		"94,17": 1.0,
-		"94,20": 1.0,
-		"94,21": 1.0,
-		"94,22": 1.0,
-		"95,15": 1.0,
-		"95,16": 1.0,
-		"95,17": 1.0,
-		"95,19": 1.0,
-		"95,20": 1.0,
-		"96,19": 1.0,
-		"96,20": 1.0
+		"54,51": 0,
+		"54,52": 0,
+		"54,53": 0,
+		"55,51": 0,
+		"55,52": 0,
+		"55,53": 0,
+		"56,51": 0,
+		"56,52": 0,
+		"56,53": 0,
+		"70,16": 1,
+		"70,17": 1,
+		"70,18": 1,
+		"70,19": 1,
+		"70,20": 1,
+		"70,21": 1,
+		"70,22": 1,
+		"70,23": 1,
+		"70,24": 1,
+		"70,25": 1,
+		"71,17": 1,
+		"71,18": 1,
+		"71,19": 1,
+		"71,20": 1,
+		"71,21": 1,
+		"71,22": 1,
+		"71,23": 1,
+		"71,24": 1,
+		"71,25": 1,
+		"72,18": 1,
+		"72,21": 1,
+		"72,24": 1,
+		"73,18": 1,
+		"73,19": 1,
+		"73,20": 1,
+		"73,21": 1,
+		"73,22": 1,
+		"73,23": 1,
+		"73,24": 1,
+		"74,24": 1,
+		"75,24": 1,
+		"76,24": 1,
+		"77,24": 1,
+		"78,10": 1,
+		"78,11": 1,
+		"78,12": 1,
+		"78,13": 1,
+		"78,14": 1,
+		"78,24": 1,
+		"79,10": 1,
+		"79,11": 1,
+		"79,24": 1,
+		"79,28": 1,
+		"79,29": 1,
+		"80,10": 1,
+		"80,11": 1,
+		"80,20": 1,
+		"80,21": 1,
+		"80,22": 1,
+		"80,23": 1,
+		"80,24": 1,
+		"80,25": 1,
+		"80,26": 1,
+		"80,27": 1,
+		"80,28": 1,
+		"80,29": 1,
+		"81,10": 1,
+		"81,11": 1,
+		"81,12": 1,
+		"81,13": 1,
+		"81,14": 1,
+		"81,15": 1,
+		"81,20": 1,
+		"81,21": 1,
+		"81,22": 1,
+		"81,24": 1,
+		"81,25": 1,
+		"81,29": 1,
+		"81,30": 1,
+		"81,31": 1,
+		"82,15": 1,
+		"82,20": 1,
+		"82,21": 1,
+		"82,22": 1,
+		"82,23": 1,
+		"82,24": 1,
+		"82,25": 1,
+		"82,26": 1,
+		"82,27": 1,
+		"82,28": 1,
+		"82,29": 1,
+		"82,30": 1,
+		"82,31": 1,
+		"83,11": 1,
+		"83,15": 1,
+		"83,21": 1,
+		"83,24": 1,
+		"84,10": 1,
+		"84,11": 1,
+		"84,15": 1,
+		"84,21": 1,
+		"84,24": 1,
+		"84,28": 0,
+		"84,29": 0,
+		"84,30": 0,
+		"84,9": 1,
+		"85,10": 1,
+		"85,11": 1,
+		"85,15": 1,
+		"85,21": 1,
+		"85,24": 1,
+		"85,28": 0,
+		"85,29": 0,
+		"85,30": 0,
+		"85,9": 1,
+		"86,10": 1,
+		"86,11": 1,
+		"86,15": 1,
+		"86,21": 1,
+		"86,24": 1,
+		"86,25": 1,
+		"86,28": 0,
+		"86,29": 0,
+		"86,30": 0,
+		"86,9": 1,
+		"87,15": 1,
+		"87,16": 1,
+		"87,17": 1,
+		"87,21": 1,
+		"87,24": 1,
+		"88,15": 1,
+		"88,16": 1,
+		"88,17": 1,
+		"88,19": 1,
+		"88,20": 1,
+		"88,21": 1,
+		"88,24": 1,
+		"89,15": 1,
+		"89,16": 1,
+		"89,17": 1,
+		"89,19": 1,
+		"89,20": 1,
+		"89,21": 1,
+		"89,24": 1,
+		"90,19": 1,
+		"90,20": 1,
+		"90,21": 1,
+		"90,24": 1,
+		"91,20": 1,
+		"91,23": 1,
+		"91,24": 1,
+		"92,11": 1,
+		"92,15": 1,
+		"92,19": 1,
+		"92,20": 1,
+		"92,23": 1,
+		"92,24": 1,
+		"92,25": 1,
+		"93,15": 1,
+		"93,16": 1,
+		"93,17": 1,
+		"93,19": 1,
+		"93,20": 1,
+		"93,21": 1,
+		"93,22": 1,
+		"94,15": 1,
+		"94,16": 1,
+		"94,17": 1,
+		"94,20": 1,
+		"94,21": 1,
+		"94,22": 1,
+		"95,15": 1,
+		"95,16": 1,
+		"95,17": 1,
+		"95,19": 1,
+		"95,20": 1,
+		"96,19": 1,
+		"96,20": 1
 	},
 	"building_health": {
 		"54,51": 500.0,
@@ -373,6 +373,9 @@
 		"96,19": 160.0,
 		"96,20": 160.0
 	},
+	"building_home_core": {
+
+	},
 	"building_resources_consumed": {
 
 	},
@@ -380,183 +383,183 @@
 
 	},
 	"building_rotation": {
-		"54,51": 0.0,
-		"54,52": 0.0,
-		"54,53": 0.0,
-		"55,51": 0.0,
-		"55,52": 0.0,
-		"55,53": 0.0,
-		"56,51": 0.0,
-		"56,52": 0.0,
-		"56,53": 0.0,
-		"70,16": 0.0,
-		"70,17": 0.0,
-		"70,18": 0.0,
-		"70,19": 0.0,
-		"70,20": 0.0,
-		"70,21": 0.0,
-		"70,22": 0.0,
-		"70,23": 0.0,
-		"70,24": 0.0,
-		"70,25": 0.0,
-		"71,17": 0.0,
-		"71,18": 0.0,
-		"71,19": 0.0,
-		"71,20": 0.0,
-		"71,21": 0.0,
-		"71,22": 0.0,
-		"71,23": 0.0,
-		"71,24": 0.0,
-		"71,25": 0.0,
-		"72,18": 0.0,
-		"72,21": 0.0,
-		"72,24": 0.0,
-		"73,18": 2.0,
-		"73,19": 3.0,
-		"73,20": 3.0,
-		"73,21": 3.0,
-		"73,22": 3.0,
-		"73,23": 3.0,
-		"73,24": 2.0,
-		"74,24": 2.0,
-		"75,24": 2.0,
-		"76,24": 2.0,
-		"77,24": 2.0,
-		"78,10": 3.0,
-		"78,11": 3.0,
-		"78,12": 1.0,
-		"78,13": 1.0,
-		"78,14": 1.0,
-		"78,24": 2.0,
-		"79,10": 3.0,
-		"79,11": 3.0,
-		"79,24": 2.0,
-		"79,28": 1.0,
-		"79,29": 1.0,
-		"80,10": 3.0,
-		"80,11": 3.0,
-		"80,20": 3.0,
-		"80,21": 3.0,
-		"80,22": 3.0,
-		"80,23": 3.0,
-		"80,24": 2.0,
-		"80,25": 3.0,
-		"80,26": 3.0,
-		"80,27": 3.0,
-		"80,28": 1.0,
-		"80,29": 1.0,
-		"81,10": 3.0,
-		"81,11": 3.0,
-		"81,12": 1.0,
-		"81,13": 1.0,
-		"81,14": 1.0,
-		"81,15": 0.0,
-		"81,20": 3.0,
-		"81,21": 3.0,
-		"81,22": 3.0,
-		"81,24": 2.0,
-		"81,25": 3.0,
-		"81,29": 0.0,
-		"81,30": 1.0,
-		"81,31": 1.0,
-		"82,15": 0.0,
-		"82,20": 3.0,
-		"82,21": 3.0,
-		"82,22": 3.0,
-		"82,23": 3.0,
-		"82,24": 2.0,
-		"82,25": 3.0,
-		"82,26": 3.0,
-		"82,27": 3.0,
-		"82,28": 3.0,
-		"82,29": 3.0,
-		"82,30": 1.0,
-		"82,31": 1.0,
-		"83,11": 3.0,
-		"83,15": 0.0,
-		"83,21": 0.0,
-		"83,24": 2.0,
-		"84,10": 2.0,
-		"84,11": 2.0,
-		"84,15": 0.0,
-		"84,21": 0.0,
-		"84,24": 2.0,
-		"84,28": 0.0,
-		"84,29": 0.0,
-		"84,30": 0.0,
-		"84,9": 2.0,
-		"85,10": 2.0,
-		"85,11": 2.0,
-		"85,15": 0.0,
-		"85,21": 0.0,
-		"85,24": 2.0,
-		"85,28": 0.0,
-		"85,29": 0.0,
-		"85,30": 0.0,
-		"85,9": 2.0,
-		"86,10": 2.0,
-		"86,11": 2.0,
-		"86,15": 0.0,
-		"86,21": 0.0,
-		"86,24": 2.0,
-		"86,25": 0.0,
-		"86,28": 0.0,
-		"86,29": 0.0,
-		"86,30": 0.0,
-		"86,9": 2.0,
-		"87,15": 0.0,
-		"87,16": 0.0,
-		"87,17": 0.0,
-		"87,21": 0.0,
-		"87,24": 2.0,
-		"88,15": 0.0,
-		"88,16": 0.0,
-		"88,17": 0.0,
-		"88,19": 2.0,
-		"88,20": 2.0,
-		"88,21": 2.0,
-		"88,24": 2.0,
-		"89,15": 0.0,
-		"89,16": 0.0,
-		"89,17": 0.0,
-		"89,19": 2.0,
-		"89,20": 2.0,
-		"89,21": 2.0,
-		"89,24": 2.0,
-		"90,19": 2.0,
-		"90,20": 2.0,
-		"90,21": 2.0,
-		"90,24": 2.0,
-		"91,20": 2.0,
-		"91,23": 0.0,
-		"91,24": 0.0,
-		"92,11": 0.0,
-		"92,15": 0.0,
-		"92,19": 2.0,
-		"92,20": 2.0,
-		"92,23": 0.0,
-		"92,24": 0.0,
-		"92,25": 0.0,
-		"93,15": 2.0,
-		"93,16": 2.0,
-		"93,17": 2.0,
-		"93,19": 0.0,
-		"93,20": 2.0,
-		"93,21": 1.0,
-		"93,22": 1.0,
-		"94,15": 2.0,
-		"94,16": 2.0,
-		"94,17": 2.0,
-		"94,20": 2.0,
-		"94,21": 1.0,
-		"94,22": 1.0,
-		"95,15": 2.0,
-		"95,16": 2.0,
-		"95,17": 2.0,
-		"95,19": 1.0,
-		"95,20": 1.0,
-		"96,19": 1.0,
-		"96,20": 1.0
+		"54,51": 0,
+		"54,52": 0,
+		"54,53": 0,
+		"55,51": 0,
+		"55,52": 0,
+		"55,53": 0,
+		"56,51": 0,
+		"56,52": 0,
+		"56,53": 0,
+		"70,16": 0,
+		"70,17": 0,
+		"70,18": 0,
+		"70,19": 0,
+		"70,20": 0,
+		"70,21": 0,
+		"70,22": 0,
+		"70,23": 0,
+		"70,24": 0,
+		"70,25": 0,
+		"71,17": 0,
+		"71,18": 0,
+		"71,19": 0,
+		"71,20": 0,
+		"71,21": 0,
+		"71,22": 0,
+		"71,23": 0,
+		"71,24": 0,
+		"71,25": 0,
+		"72,18": 0,
+		"72,21": 0,
+		"72,24": 0,
+		"73,18": 2,
+		"73,19": 3,
+		"73,20": 3,
+		"73,21": 3,
+		"73,22": 3,
+		"73,23": 3,
+		"73,24": 2,
+		"74,24": 2,
+		"75,24": 2,
+		"76,24": 2,
+		"77,24": 2,
+		"78,10": 3,
+		"78,11": 3,
+		"78,12": 1,
+		"78,13": 1,
+		"78,14": 1,
+		"78,24": 2,
+		"79,10": 3,
+		"79,11": 3,
+		"79,24": 2,
+		"79,28": 1,
+		"79,29": 1,
+		"80,10": 3,
+		"80,11": 3,
+		"80,20": 3,
+		"80,21": 3,
+		"80,22": 3,
+		"80,23": 3,
+		"80,24": 2,
+		"80,25": 3,
+		"80,26": 3,
+		"80,27": 3,
+		"80,28": 1,
+		"80,29": 1,
+		"81,10": 3,
+		"81,11": 3,
+		"81,12": 1,
+		"81,13": 1,
+		"81,14": 1,
+		"81,15": 0,
+		"81,20": 3,
+		"81,21": 3,
+		"81,22": 3,
+		"81,24": 2,
+		"81,25": 3,
+		"81,29": 0,
+		"81,30": 1,
+		"81,31": 1,
+		"82,15": 0,
+		"82,20": 3,
+		"82,21": 3,
+		"82,22": 3,
+		"82,23": 3,
+		"82,24": 2,
+		"82,25": 3,
+		"82,26": 3,
+		"82,27": 3,
+		"82,28": 3,
+		"82,29": 3,
+		"82,30": 1,
+		"82,31": 1,
+		"83,11": 3,
+		"83,15": 0,
+		"83,21": 0,
+		"83,24": 2,
+		"84,10": 2,
+		"84,11": 2,
+		"84,15": 0,
+		"84,21": 0,
+		"84,24": 2,
+		"84,28": 0,
+		"84,29": 0,
+		"84,30": 0,
+		"84,9": 2,
+		"85,10": 2,
+		"85,11": 2,
+		"85,15": 0,
+		"85,21": 0,
+		"85,24": 2,
+		"85,28": 0,
+		"85,29": 0,
+		"85,30": 0,
+		"85,9": 2,
+		"86,10": 2,
+		"86,11": 2,
+		"86,15": 0,
+		"86,21": 0,
+		"86,24": 2,
+		"86,25": 0,
+		"86,28": 0,
+		"86,29": 0,
+		"86,30": 0,
+		"86,9": 2,
+		"87,15": 0,
+		"87,16": 0,
+		"87,17": 0,
+		"87,21": 0,
+		"87,24": 2,
+		"88,15": 0,
+		"88,16": 0,
+		"88,17": 0,
+		"88,19": 2,
+		"88,20": 2,
+		"88,21": 2,
+		"88,24": 2,
+		"89,15": 0,
+		"89,16": 0,
+		"89,17": 0,
+		"89,19": 2,
+		"89,20": 2,
+		"89,21": 2,
+		"89,24": 2,
+		"90,19": 2,
+		"90,20": 2,
+		"90,21": 2,
+		"90,24": 2,
+		"91,20": 2,
+		"91,23": 0,
+		"91,24": 0,
+		"92,11": 0,
+		"92,15": 0,
+		"92,19": 2,
+		"92,20": 2,
+		"92,23": 0,
+		"92,24": 0,
+		"92,25": 0,
+		"93,15": 2,
+		"93,16": 2,
+		"93,17": 2,
+		"93,19": 0,
+		"93,20": 2,
+		"93,21": 1,
+		"93,22": 1,
+		"94,15": 2,
+		"94,16": 2,
+		"94,17": 2,
+		"94,20": 2,
+		"94,21": 1,
+		"94,22": 1,
+		"95,15": 2,
+		"95,16": 2,
+		"95,17": 2,
+		"95,19": 1,
+		"95,20": 1,
+		"96,19": 1,
+		"96,20": 1
 	},
 	"buildings": {
 		"54,51": "core_shard",
@@ -757,7 +760,7 @@
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1779196977.19915
+		"timestamp": 1780087497.53756
 	},
 	"drone_position": "",
 	"duct_bridge_filters": {
@@ -3208,8 +3211,8 @@
 	},
 	"fog_darkness_mult": 1.0,
 	"fog_enabled": false,
-	"grid_height": 100.0,
-	"grid_width": 100.0,
+	"grid_height": 100,
+	"grid_width": 100,
 	"hints": [
 		{
 			"can_be_ignored": true,
@@ -3259,36 +3262,6 @@
 			"text": "You need to be in command mode to command units.\nPress \"U\" to go into command mode then left-click and drag to select units; then right-click to have the units go where you right-clicked."
 		}
 	],
-	"hints_runtime": {
-		"clock": 34.5373830000017,
-		"landing_fired": true,
-		"runtime": {
-			"Mass Driver": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			},
-			"bridge": {
-				"activated_at": 488.219110888587,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			},
-			"move": {
-				"activated_at": 0.0322046666666666,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "active"
-			}
-		}
-	},
 	"junction_items": {
 
 	},
@@ -3359,94 +3332,25 @@
 
 	},
 	"resources": {
-		"mat_copper": 994.0,
-		"mat_graphite": 574.0,
-		"mat_silicon": 379.0,
-		"mat_steel": 232.0
-	},
-	"script_runtime": {
-		"core_counts": {
-
-		},
-		"core_unit_mined_counts": {
-
-		},
-		"current_step": -1.0,
-		"decoded_archive_counts": {
-
-		},
-		"deposited_baselines": {
-
-		},
-		"disabled_buildings": [],
-		"ferox_blocks_destroyed_counts": {
-
-		},
-		"hidden_tiles": [],
-		"mined_counts": {
-
-		},
-		"placed_baselines": {
-
-		},
-		"placed_counts": {
-
-		},
-		"produced_counts": {
-
-		},
-		"script_running": false,
-		"step_wait_timer": 0.0,
-		"units_destroyed_counts": {
-
-		},
-		"units_produced_counts": {
-
-		}
+		"mat_copper": 994,
+		"mat_graphite": 574,
+		"mat_silicon": 379,
+		"mat_steel": 232
 	},
 	"script_steps": [
 		{
-			"_editor_pos": "120,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+			"actions": [
 				{
 					"from": "53,48",
+					"id": "ET",
 					"text": "[res://textures/resources/copper.png](-orange)Copper (-white) is a important resorce on Tarkon. you'll need to mine it.",
 					"to": "57,48",
-					"type": "text"
-				}
-			],
-			"name": "Explanition (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,80",
-			"actions": [
+					"type": "draw_text"
+				},
 				{
 					"pos": "89,20",
 					"type": "disable_block"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				0
-			],
-			"name": "Explanition (disable_block)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,80",
-			"actions": [
+				},
 				{
 					"from": "38,34",
 					"to": "99,0",
@@ -3455,77 +3359,34 @@
 			],
 			"conditions": [
 				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				1
-			],
-			"name": "Explanition (hide_region)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,80",
-			"actions": [],
-			"conditions": [
-				{
 					"seconds": 7.5,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				2
-			],
-			"name": "Explanition (wait wait)",
-			"on_exit": []
+			"name": "Explanition",
+			"on_exit": [
+				{
+					"id": "ET",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "59,53",
+					"id": "MCT",
 					"text": "(-white)You'll need to mine [res://textures/resources/copper.png](-orange)Copper(-white) manually first. Click on [res://textures/terrain/CopperOre.png](-orange)Copper Ore(-white) to mine it with your core drone.",
 					"to": "64,53",
-					"type": "text"
-				}
-			],
-			"name": "Mine copper (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,230",
-			"actions": [],
-			"conditions": [
+					"type": "draw_text"
+				},
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "65,52",
+					"id": "MCB",
 					"to": "65,52",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Mine copper (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,230",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 30.0,
@@ -3533,120 +3394,70 @@
 					"type": "core_unit_mined"
 				}
 			],
-			"dependencies": [
-				4,
-				5
-			],
-			"name": "Mine copper (wait core_unit_mined)",
-			"on_exit": []
+			"name": "Mine copper",
+			"on_exit": [
+				{
+					"id": "MCB",
+					"type": "remove_box"
+				},
+				{
+					"id": "MCT",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,380",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				6
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "61,57",
+					"id": "VTB",
 					"to": "63,59",
-					"type": "box"
-				}
-			],
-			"name": "Vent Turbine (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,380",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				6
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "59,56",
+					"id": "VTT",
 					"text": "(-white)Researh the [res://textures/blocks/power/VentTurbine.png](-black)Vent Turbine(-white) and place it on a vent.",
 					"to": "63,56",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Vent Turbine (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,380",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "vent_turbine",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				7,
-				8
-			],
-			"name": "Vent Turbine (wait placed)",
-			"on_exit": []
+			"name": "Vent Turbine",
+			"on_exit": [
+				{
+					"id": "VTB",
+					"type": "remove_box"
+				},
+				{
+					"id": "VTT",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				9
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "yellow",
 					"from": "64,57",
+					"id": "pow2b",
 					"to": "64,57",
-					"type": "box"
-				}
-			],
-			"name": "Power (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,530",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				9
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "59,55",
+					"id": "pow2t",
 					"text": "(-white)Now resarch and place a [res://textures/blocks/power/CableNode.png](-orange)Cable Node(-white) to transmit power.",
 					"to": "63,55",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Power (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,530",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 1.0,
@@ -3654,120 +3465,70 @@
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				10,
-				11
-			],
-			"name": "Power (wait placed)",
-			"on_exit": []
+			"name": "Power",
+			"on_exit": [
+				{
+					"id": "pow2b",
+					"type": "remove_box"
+				},
+				{
+					"id": "pow2t",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				12
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "64,53",
+					"id": "DB",
 					"to": "63,52",
-					"type": "box"
-				}
-			],
-			"name": "Drill (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,680",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				12
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "58,51",
+					"id": "DT",
 					"text": "(-white)Research and place a [res://textures/blocks/resource extractors/MechanicalDrill/MechanicalDrillComplete.png](-brown)Mechanical Drill(-white) facing copper ore to automate the mining of copper.",
 					"to": "63,51",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Drill (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,680",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "mechanical_drill",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				13,
-				14
-			],
-			"name": "Drill (wait placed)",
-			"on_exit": []
+			"name": "Drill",
+			"on_exit": [
+				{
+					"id": "DB",
+					"type": "remove_box"
+				},
+				{
+					"id": "DT",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,830",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				15
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "62,52",
+					"id": "CB",
 					"to": "57,52",
-					"type": "box"
-				}
-			],
-			"name": "Conveyor (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,830",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				15
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "58,51",
+					"id": "CT",
 					"text": "(-white)Now research and place 6 [res://textures/blocks/item transportation/Belt/Belt.png](-brown)Conveyor Belts(-white) to move items from the drill to your core.",
 					"to": "63,51",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Conveyor (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,830",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 6.0,
@@ -3775,38 +3536,28 @@
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				16,
-				17
-			],
-			"name": "Conveyor (wait placed)",
-			"on_exit": []
+			"name": "Conveyor",
+			"on_exit": [
+				{
+					"id": "CB",
+					"type": "remove_box"
+				},
+				{
+					"id": "CT",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,980",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				18
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "54,50",
+					"id": "GR",
 					"text": "Mine 10 Copper.",
 					"to": "56,50",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Get resources (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,980",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 10.0,
@@ -3814,154 +3565,69 @@
 					"type": "deposited"
 				}
 			],
-			"dependencies": [
-				19
-			],
-			"name": "Get resources (wait deposited)",
-			"on_exit": []
+			"name": "Get resources",
+			"on_exit": [
+				{
+					"id": "GR",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,1130",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "63,50",
+					"id": "EB1",
 					"to": "64,51",
-					"type": "box"
-				}
-			],
-			"name": "Expand (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,1130",
-			"actions": [],
-			"conditions": [
+					"type": "draw_box"
+				},
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "62,51",
+					"id": "EB2",
 					"to": "62,51",
-					"type": "box"
-				}
-			],
-			"name": "Expand (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,1130",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				20
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "60,49",
+					"id": "ET",
 					"text": "(-white)Place another drill and conveyor.",
 					"to": "63,49",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Expand (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,1130",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 1.0,
 					"block_id": "mechanical_drill",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				21,
-				22,
-				23
-			],
-			"name": "Expand (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,1130",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"amount": 1.0,
 					"block_id": "conveyor_belt",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				21,
-				22,
-				23
-			],
-			"name": "Expand (wait placed)",
-			"on_exit": []
+			"name": "Expand",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "1520,1130",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				24,
-				25
-			],
-			"name": "Expand (sink)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "120,1280",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				26
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "54,50",
+					"id": "MRT",
 					"text": "(-white)Mine 80 copper.",
 					"to": "56,50",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "More resources (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,1280",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 80.0,
@@ -3969,59 +3635,31 @@
 					"type": "deposited"
 				}
 			],
-			"dependencies": [
-				27
-			],
-			"name": "More resources (wait deposited)",
-			"on_exit": []
+			"name": "More resources",
+			"on_exit": [
+				{
+					"id": "MRT",
+					"type": "remove_text"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,1430",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				28
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "48,64",
+					"id": "GB",
 					"to": "51,64",
-					"type": "box"
-				}
-			],
-			"name": "Graphite (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,1430",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				28
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "47,61",
+					"id": "GT",
 					"text": "[res://textures/resources/graphite.png](-black)Graphite(-white) is also an important resource. Set up power, drills and conveyors to mine it.",
 					"to": "52,61",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Graphite (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,1430",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 10.0,
@@ -4029,154 +3667,70 @@
 					"type": "deposited"
 				}
 			],
-			"dependencies": [
-				29,
-				30
-			],
-			"name": "Graphite (wait deposited)",
-			"on_exit": []
+			"name": "Graphite",
+			"on_exit": [
+				{
+					"id": "GT",
+					"type": "remove_text"
+				},
+				{
+					"id": "GB",
+					"type": "remove_box"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,1580",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				31
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "46,63",
+					"id": "PBB1",
 					"to": "47,64",
-					"type": "box"
-				}
-			],
-			"name": "Place Blocks (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,1580",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				31
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "white",
 					"from": "46,55",
+					"id": "PBB2",
 					"to": "48,57",
-					"type": "box"
-				}
-			],
-			"name": "Place Blocks (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,1580",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				31
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "44,61",
+					"id": "PBT1",
 					"text": "(-white)Research and place a [res://textures/blocks/resource extractors/WallCrusher/WallCrusherComplete.png]Wall Crusher to grind sand from the walls.",
 					"to": "48,61",
-					"type": "text"
-				}
-			],
-			"name": "Place Blocks (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,1580",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				31
-			],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"from": "45,54",
+					"id": "PBT2",
 					"text": "(-white)Research and place a [res://textures/blocks/factories/Silicon Refinery/SiliconRefineryComplete.png]Silicon Refinery.\n(-white)You'll need to provide it with graphite, sand and power.",
 					"to": "51,54",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Place Blocks (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,1580",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "wall_crusher",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				32,
-				33,
-				34,
-				35
-			],
-			"name": "Place Blocks (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1520,1580",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"block_id": "silicon_mixer",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				32,
-				33,
-				34,
-				35
-			],
-			"name": "Place Blocks (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1800,1580",
-			"actions": [],
-			"conditions": [
+			"name": "Place Blocks",
+			"on_exit": [
 				{
-					"type": "always"
+					"type": "clear_texts"
+				},
+				{
+					"type": "clear_boxes"
 				}
-			],
-			"dependencies": [
-				36,
-				37
-			],
-			"name": "Place Blocks (sink)",
-			"on_exit": []
+			]
 		},
 		{
-			"_editor_pos": "120,1730",
 			"actions": [],
 			"conditions": [
 				{
@@ -4185,103 +3739,40 @@
 					"type": "deposited"
 				}
 			],
-			"dependencies": [
-				38
-			],
-			"name": "Produce silicon (wait deposited)",
+			"name": "Produce silicon",
 			"on_exit": []
 		},
 		{
-			"_editor_pos": "120,1880",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				39
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "47,43",
-					"text": "(-white)Set up power, drills, and conveyors; then research and place 3 [res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png](-gray)Single Barrel (-white)turrets to defend your base from enemies. \n(-white)You'll also need to research the [res://textures/blocks/item transportation/BeltRouter.jpeg]Belt Router to split resources on belts in multiple directions.",
+					"id": "TT",
+					"text": "(-white)Set up power, drills, and conveyors; then research and place 3 [res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png](-gray)Single Barrel (-white)turrets to defend your base from enemies. \n(-white)You'll also need to research the [res://textures/blocks/item transportation/BeltRouter.png]Belt Router to split resources on belts in multiple directions.",
 					"to": "53,43",
-					"type": "text"
-				}
-			],
-			"name": "Turets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,1880",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				39
-			],
-			"markers": [
+					"type": "draw_text"
+				},
 				{
 					"color": "red",
 					"from": "47,46",
+					"id": "TB1",
 					"to": "47,46",
-					"type": "box"
-				}
-			],
-			"name": "Turets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,1880",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				39
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "red",
 					"from": "51,46",
+					"id": "TB2",
 					"to": "51,46",
-					"type": "box"
-				}
-			],
-			"name": "Turets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,1880",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				39
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "red",
 					"from": "55,46",
+					"id": "TB3",
 					"to": "55,46",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Turets (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,1880",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 3.0,
@@ -4289,62 +3780,32 @@
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				40,
-				41,
-				42,
-				43
-			],
-			"name": "Turets (wait placed)",
-			"on_exit": []
+			"name": "Turets",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
+				{
+					"type": "clear_boxes"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,2030",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				44
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "48,43",
+					"id": "WT",
 					"text": "(-white)Now research and place 6 [res://textures/blocks/walls/LargeCopperWall.png]Large Copper Walls to protect your base from enemies.",
 					"to": "54,43",
-					"type": "text"
-				}
-			],
-			"name": "Walls (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,2030",
-			"actions": [],
-			"conditions": [
+					"type": "draw_text"
+				},
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				44
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "46,44",
+					"id": "WB",
 					"to": "57,45",
-					"type": "box"
+					"type": "draw_box"
 				}
 			],
-			"name": "Walls (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,2030",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 6.0,
@@ -4352,97 +3813,50 @@
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				45,
-				46
-			],
-			"name": "Walls (wait placed)",
-			"on_exit": []
+			"name": "Walls",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
+				{
+					"type": "clear_boxes"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,2180",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				47
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "50,43",
 					"text": "(-white)Enemies incomming. Prepare to defend.",
 					"to": "53,43",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Spawn Enemy (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,2180",
-			"actions": [],
 			"conditions": [
 				{
 					"seconds": 5.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				48
-			],
-			"name": "Spawn Enemy (wait wait)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,2180",
-			"actions": [
+			"name": "Spawn Enemy",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				},
 				{
 					"count": 1.0,
 					"faction": "ferox",
 					"pos": "49,35",
 					"type": "spawn_unit",
 					"unit_id": "press"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				49
-			],
-			"name": "Spawn Enemy (exit spawn_unit)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,2180",
-			"actions": [
+				},
 				{
 					"count": 1.0,
 					"faction": "ferox",
 					"pos": "50,35",
 					"type": "spawn_unit",
 					"unit_id": "press"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				50
-			],
-			"name": "Spawn Enemy (exit spawn_unit)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "1240,2180",
-			"actions": [
+				},
 				{
 					"count": 1.0,
 					"faction": "ferox",
@@ -4450,20 +3864,9 @@
 					"type": "spawn_unit",
 					"unit_id": "press"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				51
-			],
-			"name": "Spawn Enemy (exit spawn_unit)",
-			"on_exit": []
+			]
 		},
 		{
-			"_editor_pos": "120,2330",
 			"actions": [],
 			"conditions": [
 				{
@@ -4472,76 +3875,29 @@
 					"unit_id": "press"
 				}
 			],
-			"dependencies": [
-				52
-			],
-			"name": "Unlock Map (wait units_destroyed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,2330",
-			"actions": [
+			"name": "Unlock Map",
+			"on_exit": [
 				{
 					"from": "38,34",
 					"to": "99,0",
 					"type": "reveal_region"
-				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				53
-			],
-			"name": "Unlock Map (exit reveal_region)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,2330",
-			"actions": [
+				},
 				{
 					"pos": "89,20",
 					"type": "enable_block"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				54
-			],
-			"name": "Unlock Map (exit enable_block)",
-			"on_exit": []
+			]
 		},
 		{
-			"_editor_pos": "120,2480",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				55
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "35,55",
+					"id": "UPT",
 					"text": "(-white)Next, you'll need to produce your own units to attack the enemy base.\n(-white)Set up drills and conveyors and research the [res://textures/blocks/units/TankFabricator.png]Tank Fabricator. You'll need to supply resources to it to produce units.",
 					"to": "42,56",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Unit Production (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,2480",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 1.0,
@@ -4549,158 +3905,100 @@
 					"unit_id": "press"
 				}
 			],
-			"dependencies": [
-				56
-			],
-			"name": "Unit Production (wait units_produced)",
-			"on_exit": []
+			"name": "Unit Production",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,2630",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				57
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "35,55",
 					"text": "(-white)Now command your units and destroy the enemy base. You may need to wait for more units to be produced",
 					"to": "43,55",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Destroy Enemy (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,2630",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "core_shard",
 					"type": "ferox_blocks_destroyed"
 				}
 			],
-			"dependencies": [
-				58
-			],
-			"name": "Destroy Enemy (wait ferox_blocks_destroyed)",
-			"on_exit": []
+			"name": "Destroy Enemy",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,2780",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				59
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "86,18",
+					"id": "PCT",
 					"text": "(-white)Now place your own core. Cores can only be placed on core zone tiles.",
 					"to": "90,18",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Place Core (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,2780",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "core_shard",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				60
-			],
-			"name": "Place Core (wait placed)",
-			"on_exit": []
+			"name": "Place Core",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,2930",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				61
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "86,19",
 					"text": "(-white)Congratulations! You've captured your first sector.",
 					"to": "90,18",
-					"type": "text"
-				}
-			],
-			"name": "Final (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,2930",
-			"actions": [
+					"type": "draw_text"
+				},
 				{
 					"type": "capture_sector"
 				}
 			],
 			"conditions": [
 				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				62
-			],
-			"name": "Final (capture_sector)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,2930",
-			"actions": [],
-			"conditions": [
-				{
 					"seconds": 30.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				63
-			],
-			"name": "Final (wait wait)",
-			"on_exit": []
+			"name": "Final",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		}
 	],
 	"sector_name": "SG",
 	"sorter_filters": {
 
 	},
-	"stats_blocks_placed": 0.0,
-	"stats_blocks_removed": 0.0,
-	"stats_enemy_blocks_destroyed": 0.0,
-	"stats_enemy_units_destroyed": 0.0,
+	"stats_blocks_placed": 0,
+	"stats_blocks_removed": 0,
+	"stats_enemy_blocks_destroyed": 0,
+	"stats_enemy_units_destroyed": 0,
 	"stats_play_time": 0.0,
-	"stats_units_destroyed": 0.0,
-	"stats_units_produced": 0.0,
+	"stats_units_destroyed": 0,
+	"stats_units_produced": 0,
 	"type": "sector",
 	"unloader_state": {
 
 	},
-	"version": 3.0,
+	"version": 3,
 	"wall_tiles": {
 		"23,46": "grassy_wall",
 		"23,47": "grassy_wall",
@@ -6876,7 +6174,7 @@
 	"waves_bundle": {
 		"config": {
 			"auto_unit_templates": [],
-			"auto_wave_count": 10.0,
+			"auto_wave_count": 10,
 			"generation_mode": "manual",
 			"initial_delay": 30.0,
 			"interval": 30.0,

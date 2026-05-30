@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cusaf6ko8fva1"
-path="res://.godot/imported/BlockRuins.png-fad3df54f6682ef479748b3118b28f58.ctex"
+uid="uid://isxy2hijbxn5"
+path="res://.godot/imported/PipeJunction.png-0d7518b5e1d5a8fe2e35187f33222622.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/BlockRuins.png"
-dest_files=["res://.godot/imported/BlockRuins.png-fad3df54f6682ef479748b3118b28f58.ctex"]
+source_file="res://textures/blocks/fluid transportation/PipeJunction.png"
+dest_files=["res://.godot/imported/PipeJunction.png-0d7518b5e1d5a8fe2e35187f33222622.ctex"]
 
 [params]
 

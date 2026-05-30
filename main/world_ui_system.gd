@@ -30,6 +30,16 @@ var storage_panel_pos: Vector2i = Vector2i.ZERO
 var storage_panel_items: Array = []
 var storage_panel_hovered: int = -1
 
+# Logistical Requestor / Dispatcher sub-flow state. The requestor's
+# condition is configured in three steps (kind → resource → amount);
+# the dispatcher likewise: action_kind → link-to-requestor (if applicable).
+# These two persist the in-progress picks across the chained menus.
+var requestor_pending_kind: String = ""        # "storage_has" / "units_produced"
+var requestor_pending_resource: StringName = &""
+var requestor_pending_anchor: Vector2i = Vector2i.ZERO
+var dispatcher_pending_action: String = ""     # "stop_block" / "manual_toggle"
+var dispatcher_pending_anchor: Vector2i = Vector2i.ZERO
+
 # Landing-pad filter pick: which slot the next world-menu item-pick is
 # filling. Set by `open("landing_pad", ...)` then read back when the
 # sub-picker (`landing_pad_slot`) confirms.
@@ -153,6 +163,58 @@ func _build_menu_items(type: String, grid_pos: Vector2i) -> void:
 	elif type == "landing_pad":
 		world_menu_items.append({"id": &"__slot_0", "icon": null, "name": "Slot 1"})
 		world_menu_items.append({"id": &"__slot_1", "icon": null, "name": "Slot 2"})
+	elif type == "requestor":
+		# Top-level requestor menu — pick which condition kind to set.
+		# `__clear` wipes the requestor's condition. The other entries
+		# walk the player into a sub-picker (`requestor_resource` →
+		# `requestor_amount`).
+		world_menu_items.append({"id": &"__clear", "icon": null, "name": "Clear Condition"})
+		world_menu_items.append({"id": &"__storage_has", "icon": null, "name": "Storage Has [X] of …"})
+		# Only show units_produced when the faced block is a fabricator,
+		# to mirror the design's "list varies slightly depending on what
+		# block it is facing".
+		var lc = main.get_node_or_null("LogisticControlSystem") if main else null
+		var faced_anchor: Vector2i = Vector2i(-9999, -9999)
+		if lc and lc.has_method("get_faced_block"):
+			faced_anchor = lc.get_faced_block(grid_pos)
+		var faced_bid: StringName = &""
+		if main and main.placed_buildings.has(faced_anchor):
+			faced_bid = main.placed_buildings[faced_anchor]
+		var faced_data = Registry.get_block(faced_bid) if faced_bid != &"" else null
+		if faced_data and faced_data.tags.has("fabricator"):
+			world_menu_items.append({"id": &"__units_produced", "icon": null, "name": "[X] Units Produced"})
+	elif type == "requestor_resource":
+		# Resource picker for "storage_has". Item / fluid list filtered to
+		# whatever's currently unlocked in the tech tree.
+		var gate_on_research: bool = "require_research" in main and main.require_research
+		for item in Registry.items_list:
+			if gate_on_research and TechTree.nodes.has(item.id) \
+					and not TechTree.is_researched(item.id):
+				continue
+			world_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name})
+		for fluid in Registry.fluids_list:
+			if gate_on_research and TechTree.nodes.has(fluid.id) \
+					and not TechTree.is_researched(fluid.id):
+				continue
+			world_menu_items.append({"id": fluid.id, "icon": fluid.icon, "name": fluid.display_name})
+	elif type == "requestor_amount":
+		# Quantised amount tiers. Player picks one — full freeform is out
+		# of scope for the world-menu picker (no text input here).
+		for amt in [10, 50, 100, 250, 500, 1000, 5000]:
+			world_menu_items.append({
+				"id": StringName("__amt_%d" % amt),
+				"icon": null,
+				"name": "%d" % amt,
+			})
+	elif type == "dispatcher":
+		# Action picker for a Logistical Dispatcher. The Manual Toggle
+		# entry doesn't need a requestor — it flips the disable bit
+		# directly. Stop Block walks the player into a link-picker (the
+		# requestor anchor is then chosen by clicking a requestor block
+		# in the world).
+		world_menu_items.append({"id": &"__clear", "icon": null, "name": "Clear Action"})
+		world_menu_items.append({"id": &"__manual_toggle", "icon": null, "name": "Toggle Block Activation"})
+		world_menu_items.append({"id": &"__stop_block", "icon": null, "name": "Make Block Stop Working"})
 	elif type == "landing_pad_slot":
 		world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
 		var gate_on_research: bool = "require_research" in main and main.require_research
@@ -247,6 +309,29 @@ func close() -> void:
 		bsys.queue_redraw()
 		if "_popup_overlay" in bsys and bsys._popup_overlay:
 			bsys._popup_overlay.queue_redraw()
+
+
+## Called by BuildingSystem on a world click when a dispatcher's
+## "Stop Block Working" mode has parked its anchor — interprets the
+## click as the chosen requestor to link. Returns true if a link was
+## made, so the caller can swallow the click.
+func try_complete_dispatcher_link(clicked_anchor: Vector2i) -> bool:
+	if dispatcher_pending_action != "stop_block":
+		return false
+	if dispatcher_pending_anchor == Vector2i.ZERO:
+		return false
+	if main == null or not main.placed_buildings.has(clicked_anchor):
+		return false
+	var data = Registry.get_block(main.placed_buildings[clicked_anchor])
+	if data == null or not data.tags.has("logistic_requestor"):
+		return false
+	var lc = main.get_node_or_null("LogisticControlSystem")
+	if lc == null:
+		return false
+	lc.link_dispatcher_to_requestor(dispatcher_pending_anchor, clicked_anchor)
+	dispatcher_pending_anchor = Vector2i.ZERO
+	dispatcher_pending_action = ""
+	return true
 
 
 ## Applies the user's click selection on cell `index`. Writes through
@@ -351,6 +436,84 @@ func apply_selection(index: int) -> void:
 		landing_pad_pick_slot = -1
 		close()
 		open("landing_pad", slot_anchor)
+		return
+
+	elif world_menu_type == "requestor":
+		# Pick condition kind. Walks the player into a resource picker
+		# (storage_has) or amount picker (units_produced).
+		var lc = main.get_node_or_null("LogisticControlSystem") if main else null
+		var anchor_rq: Vector2i = world_menu_pos
+		if selected_id == &"__clear":
+			if lc:
+				lc.set_requestor_condition(anchor_rq, "", &"", 0.0)
+			close()
+			return
+		if selected_id == &"__storage_has":
+			requestor_pending_kind = "storage_has"
+			requestor_pending_anchor = anchor_rq
+			close()
+			open("requestor_resource", anchor_rq)
+			return
+		if selected_id == &"__units_produced":
+			requestor_pending_kind = "units_produced"
+			requestor_pending_anchor = anchor_rq
+			requestor_pending_resource = &""  # no resource needed
+			close()
+			open("requestor_amount", anchor_rq)
+			return
+		close()
+		return
+
+	elif world_menu_type == "requestor_resource":
+		requestor_pending_resource = selected_id
+		var anchor_rr: Vector2i = world_menu_pos
+		close()
+		open("requestor_amount", anchor_rr)
+		return
+
+	elif world_menu_type == "requestor_amount":
+		# Decode "__amt_<N>" → integer N. Commit the full condition to
+		# the control system and close the chain.
+		var lc2 = main.get_node_or_null("LogisticControlSystem") if main else null
+		var amount: float = 0.0
+		var sid_str: String = String(selected_id)
+		if sid_str.begins_with("__amt_"):
+			amount = float(sid_str.substr(6).to_int())
+		if lc2 and requestor_pending_anchor != Vector2i.ZERO:
+			lc2.set_requestor_condition(
+				requestor_pending_anchor,
+				requestor_pending_kind,
+				requestor_pending_resource,
+				amount)
+		requestor_pending_kind = ""
+		requestor_pending_resource = &""
+		requestor_pending_anchor = Vector2i.ZERO
+		close()
+		return
+
+	elif world_menu_type == "dispatcher":
+		var lc3 = main.get_node_or_null("LogisticControlSystem") if main else null
+		var anchor_dp: Vector2i = world_menu_pos
+		if lc3 == null:
+			close()
+			return
+		if selected_id == &"__clear":
+			lc3.set_dispatcher_action(anchor_dp, "")
+		elif selected_id == &"__manual_toggle":
+			lc3.set_dispatcher_action(anchor_dp, "manual_toggle")
+			# Flip the bit immediately so the player gets feedback —
+			# the menu acts as a toggle button rather than just a mode
+			# selector. Re-opening the menu and clicking again flips
+			# back.
+			lc3.toggle_dispatcher_manual(anchor_dp)
+		elif selected_id == &"__stop_block":
+			lc3.set_dispatcher_action(anchor_dp, "stop_block")
+			# Park the anchor for the link-picker. Player's next world
+			# click on a requestor will resolve to a link via
+			# `try_complete_dispatcher_link`.
+			dispatcher_pending_anchor = anchor_dp
+			dispatcher_pending_action = "stop_block"
+		close()
 		return
 
 	close()

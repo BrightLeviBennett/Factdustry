@@ -38,6 +38,25 @@ var building_health := {}
 var building_rotation := {}
 var building_origins := {}
 var building_factions := {}
+
+
+## Shim that mirrors main.gd's `get_building_anchors()` API. The
+## BuildingSystem's draw path now culls per-anchor instead of
+## per-tile, calling `main.get_building_anchors()` — without this
+## stub the editor's main (this script) would fall through to the
+## empty-dict default and stop rendering placed blocks entirely.
+##
+## Recomputes each call (no cache invalidation hooks in the editor
+## scene); cheap given typical authored maps. Returns a Dictionary
+## keyed by anchor cell with value `true`, matching main.gd's
+## contract.
+func get_building_anchors() -> Dictionary:
+	var out: Dictionary = {}
+	for cell in placed_buildings:
+		var origin: Vector2i = building_origins.get(cell, cell)
+		if not out.has(origin):
+			out[origin] = true
+	return out
 ## Authored wave bundle — staged here in the editor, serialized into
 ## the sector .json by SaveManager, and consumed by WaveManager at
 ## runtime. Three pieces:
@@ -275,22 +294,26 @@ func _unhandled_input(event: InputEvent) -> void:
 		# laptop docked to an external keyboard works the same as the
 		# native one. Shift+Cmd+Z is redo (the macOS convention); Ctrl+Y
 		# is also accepted for Windows/Linux muscle memory.
-		if event.keycode == KEY_Z and (event.meta_pressed or event.ctrl_pressed):
-			if event.shift_pressed:
-				redo()
-			else:
-				undo()
-			return
-		if event.keycode == KEY_Y and event.ctrl_pressed:
+		# ui_undo / ui_redo are Godot built-in input actions: ui_undo
+		# defaults to Cmd/Ctrl+Z, ui_redo defaults to Cmd/Ctrl+Shift+Z
+		# AND Ctrl+Y on Windows/Linux.
+		if event.is_action_pressed("ui_redo"):
 			redo()
 			return
-		# Rotation key (Q) for building mode
-		if event.keycode == KEY_Q and editor_mode == EditorMode.BUILDING:
+		if event.is_action_pressed("ui_undo"):
+			undo()
+			return
+		# Rotation key for building mode — reuses the existing
+		# `rotate_clockwise` input action so the same keybind drives both
+		# in-game placement rotation and editor placement rotation.
+		if event.is_action_pressed("rotate_clockwise") and editor_mode == EditorMode.BUILDING:
 			placement_rotation = (placement_rotation + 1) % 4
 			_overlay.queue_redraw()
 			return
-		# Set spawn core (C) — hover a core and press C
-		if event.keycode == KEY_C:
+		# Set spawn core — uses the existing `schematic_capture` action
+		# (default: C) since this editor doesn't have schematics, freeing
+		# the key for spawn-core selection here.
+		if event.is_action_pressed("schematic_capture"):
 			var grid_pos := world_to_grid(get_global_mouse_position())
 			if placed_buildings.has(grid_pos):
 				var block_id = placed_buildings[grid_pos]
@@ -324,7 +347,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		# next click on another linkable block creates the pair. The L key
 		# is kept only as a quick "cancel any in-flight link source" so a
 		# muscle-memory press doesn't break anything.
-		if event.keycode == KEY_L:
+		if event.is_action_pressed("toggle_link_mode"):
 			if link_source != Vector2i(-1, -1):
 				link_source = Vector2i(-1, -1)
 				_overlay.queue_redraw()

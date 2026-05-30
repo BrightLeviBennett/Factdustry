@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"logistical_requestor"
+display_name = "Logistical Requestor"
+description = "Requests configured items from the data-cable network and emits them on adjacent belts. The passive receiver paired with a Logistical Dispatcher."
+category = 3
+color = Color(0.6, 0.55, 0.95, 1)
+grid_size = Vector2i(2, 2)
+max_health = 220.0
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
+build_time = 2.0
+electrical_power_use = 3.0
+max_stored_items = 80
+tags = PackedStringArray("logistic", "logistic_requestor", "data")

@@ -187,96 +187,117 @@ func show_save_dialog(captured_override = null) -> void:
 		confirmed = false
 		return
 
+	# --- Mindustry-style save dialog ---
+	# Big tiled-background preview at top, name field, then collapsible
+	# block list + requirement list, then Cancel / Save.
 	popup = PopupPanel.new()
-	popup.size = Vector2(320, 400)
+	popup.size = Vector2(420, 560)
+	# Match the dark Mindustry-ish chrome instead of Godot's default
+	# light-gray PopupPanel.
+	var popup_style := StyleBoxFlat.new()
+	popup_style.bg_color = Color(0.08, 0.09, 0.12, 0.98)
+	popup_style.set_border_width_all(2)
+	popup_style.border_color = Color(0.32, 0.36, 0.42, 1.0)
+	popup_style.set_corner_radius_all(6)
+	popup_style.content_margin_left = 14
+	popup_style.content_margin_right = 14
+	popup_style.content_margin_top = 12
+	popup_style.content_margin_bottom = 12
+	popup.add_theme_stylebox_override("panel", popup_style)
 	bsys.add_child(popup)
 
-	var vbox = VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 6)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
 	popup.add_child(vbox)
 
-	var title = Label.new()
+	# --- Title ---
+	var title := Label.new()
 	title.text = "Save Schematic"
-	title.add_theme_font_size_override("font_size", 16)
-	title.add_theme_color_override("font_color", Color(1, 0.9, 0.3))
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(1, 0.85, 0.35))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(title)
 
-	vbox.add_child(HSeparator.new())
+	# --- Large preview with tiled background ---
+	var preview_holder := PanelContainer.new()
+	var preview_style := StyleBoxFlat.new()
+	preview_style.bg_color = Color(0, 0, 0, 1)
+	preview_style.set_border_width_all(2)
+	preview_style.border_color = Color(0.42, 0.46, 0.52, 1.0)
+	preview_holder.add_theme_stylebox_override("panel", preview_style)
+	preview_holder.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vbox.add_child(preview_holder)
+	var preview := SchematicPreview.new()
+	preview.custom_minimum_size = Vector2(280, 280)
+	preview.schematic = captured
+	preview_holder.add_child(preview)
 
-	var block_counts: Dictionary = {}
-	for key in captured["blocks"]:
-		var bid: String = captured["blocks"][key]
-		block_counts[bid] = block_counts.get(bid, 0) + 1
+	# --- Name field ---
+	var name_row := HBoxContainer.new()
+	name_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(name_row)
+	var name_label := Label.new()
+	name_label.text = "Name"
+	name_label.add_theme_font_size_override("font_size", 13)
+	name_label.add_theme_color_override("font_color", Color(0.8, 0.82, 0.86))
+	name_row.add_child(name_label)
+	var name_input := LineEdit.new()
+	name_input.placeholder_text = "Schematic name..."
+	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_row.add_child(name_input)
 
-	var summary_label = Label.new()
-	summary_label.text = "Blocks:"
-	summary_label.add_theme_font_size_override("font_size", 12)
-	vbox.add_child(summary_label)
-
-	var summary_scroll = ScrollContainer.new()
-	summary_scroll.custom_minimum_size.y = 100
-	vbox.add_child(summary_scroll)
-	var summary_vbox = VBoxContainer.new()
-	summary_scroll.add_child(summary_vbox)
-
-	for bid in block_counts:
-		var data = Registry.get_block(StringName(bid))
-		var display_name: String = data.display_name if data else bid
-		var lbl = Label.new()
-		lbl.text = "  %dx %s" % [block_counts[bid], display_name]
-		lbl.add_theme_font_size_override("font_size", 11)
-		summary_vbox.add_child(lbl)
-
-	vbox.add_child(HSeparator.new())
-
-	var cost_label = Label.new()
-	cost_label.text = "Total Cost:"
-	cost_label.add_theme_font_size_override("font_size", 12)
-	vbox.add_child(cost_label)
-
+	# --- Requirements (item icons + counts in a wrap row, Mindustry style) ---
 	var total_cost: Dictionary = {}
 	for key in captured["blocks"]:
-		var bid: StringName = StringName(captured["blocks"][key])
-		var data = Registry.get_block(bid)
-		if data:
-			for item_id in data.build_cost:
-				total_cost[item_id] = total_cost.get(item_id, 0) + data.build_cost[item_id]
+		var bid_c: StringName = StringName(captured["blocks"][key])
+		var bd_c = Registry.get_block(bid_c)
+		if bd_c:
+			for item_id in bd_c.build_cost:
+				total_cost[item_id] = total_cost.get(item_id, 0) + bd_c.build_cost[item_id]
 
-	for item_id in total_cost:
-		var item_data = Registry.get_item(item_id)
-		var hbox = HBoxContainer.new()
-		hbox.add_theme_constant_override("separation", 4)
-		if item_data and item_data.icon:
-			var tex = TextureRect.new()
-			tex.texture = item_data.icon
-			tex.custom_minimum_size = Vector2(14, 14)
-			tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			hbox.add_child(tex)
-		var clbl = Label.new()
-		var dn: String = item_data.display_name if item_data else String(item_id)
-		clbl.text = "%s: %d" % [dn, total_cost[item_id]]
-		clbl.add_theme_font_size_override("font_size", 11)
-		hbox.add_child(clbl)
-		vbox.add_child(hbox)
+	if not total_cost.is_empty():
+		var req_label := Label.new()
+		req_label.text = "Requirements"
+		req_label.add_theme_font_size_override("font_size", 12)
+		req_label.add_theme_color_override("font_color", Color(0.7, 0.72, 0.78))
+		vbox.add_child(req_label)
+		var req_wrap := HFlowContainer.new()
+		req_wrap.add_theme_constant_override("h_separation", 10)
+		req_wrap.add_theme_constant_override("v_separation", 4)
+		vbox.add_child(req_wrap)
+		for item_id in total_cost:
+			# build_cost uses SHORT keys ("copper", "graphite") that have
+			# to be resolved to canonical resource ids ("mat_copper", …)
+			# via Main._resolve_resource_key before the Registry lookup,
+			# or `get_item_or_fluid` returns null and the icon column
+			# disappears.
+			var lookup_id: StringName = item_id
+			if main and main.has_method("_resolve_resource_key"):
+				lookup_id = main._resolve_resource_key(str(item_id))
+			var item_data = Registry.get_item_or_fluid(lookup_id)
+			if item_data == null:
+				item_data = Registry.get_item_or_fluid(item_id)
+			var pill := HBoxContainer.new()
+			pill.add_theme_constant_override("separation", 3)
+			if item_data and item_data.icon:
+				var tex := TextureRect.new()
+				tex.texture = item_data.icon
+				tex.custom_minimum_size = Vector2(18, 18)
+				tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				pill.add_child(tex)
+			var clbl := Label.new()
+			clbl.text = str(int(total_cost[item_id]))
+			clbl.add_theme_font_size_override("font_size", 12)
+			pill.add_child(clbl)
+			req_wrap.add_child(pill)
 
+	# --- Buttons ---
 	vbox.add_child(HSeparator.new())
-
-	var name_label = Label.new()
-	name_label.text = "Name:"
-	name_label.add_theme_font_size_override("font_size", 12)
-	vbox.add_child(name_label)
-
-	var name_input = LineEdit.new()
-	name_input.placeholder_text = "Schematic name..."
-	vbox.add_child(name_input)
-
-	var btn_row = HBoxContainer.new()
+	var btn_row := HBoxContainer.new()
 	btn_row.add_theme_constant_override("separation", 8)
 	vbox.add_child(btn_row)
-
-	var cancel_btn = Button.new()
+	var cancel_btn := Button.new()
 	cancel_btn.text = "Cancel"
 	cancel_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	cancel_btn.pressed.connect(func():
@@ -286,8 +307,7 @@ func show_save_dialog(captured_override = null) -> void:
 		bsys.queue_redraw()
 	)
 	btn_row.add_child(cancel_btn)
-
-	var save_btn = Button.new()
+	var save_btn := Button.new()
 	save_btn.text = "Save"
 	save_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var cap_ref: Dictionary = captured

@@ -1,23 +1,15 @@
 {
-	"archive_decoder_state": {
-
-	},
+	"archive_decoder_state": {},
 	"archive_holdings": {
 		"125,39": "archive_freight_systems",
 		"20,14": "archive_launch_systems",
 		"42,131": "",
 		"42,132": "archive_brass_turrets"
 	},
-	"belt_unloader_state": {
-
-	},
-	"block_storage": {
-
-	},
+	"belt_unloader_state": {},
+	"block_storage": {},
 	"build_order": [],
-	"build_progress": {
-
-	},
+	"build_progress": {},
 	"building_factions": {
 		"10,127": 2.0,
 		"10,128": 2.0,
@@ -1948,12 +1940,8 @@
 		"99,143": 160.0,
 		"99,144": 160.0
 	},
-	"building_resources_consumed": {
-
-	},
-	"building_resources_refunded": {
-
-	},
+	"building_resources_consumed": {},
+	"building_resources_refunded": {},
 	"building_rotation": {
 		"10,127": 0.0,
 		"10,128": 0.0,
@@ -3884,16 +3872,10 @@
 		"99,143": "mechanical_drill",
 		"99,144": "mechanical_drill"
 	},
-	"constructor_state": {
-
-	},
-	"conveyor_items": {
-
-	},
+	"constructor_state": {},
+	"conveyor_items": {},
 	"core_position": "101,111",
-	"crane_links": {
-
-	},
+	"crane_links": {},
 	"crane_states": {
 		"114,47": {
 			"arm_angle": -1.5707963267949,
@@ -3902,9 +3884,7 @@
 			"held_payload": null
 		}
 	},
-	"deconstructor_state": {
-
-	},
+	"deconstructor_state": {},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
@@ -3912,12 +3892,8 @@
 		"timestamp": 1779195214.52718
 	},
 	"drone_position": "",
-	"duct_bridge_filters": {
-
-	},
-	"factory_buffers": {
-
-	},
+	"duct_bridge_filters": {},
+	"factory_buffers": {},
 	"floor_tiles": {
 		"0,0": "blackstone_floor",
 		"0,1": "blackstone_floor",
@@ -25711,45 +25687,13 @@
 	"grid_height": 150.0,
 	"grid_width": 150.0,
 	"hints": [],
-	"hints_runtime": {
-		"clock": 14.1838767777779,
-		"landing_fired": true,
-		"runtime": {
-			"Mass Driver": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			},
-			"bridge": {
-				"activated_at": 4519.55109756418,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			}
-		}
-	},
-	"junction_items": {
-
-	},
-	"landing_pad_filters": {
-
-	},
-	"launchpad_state": {
-
-	},
+	"junction_items": {},
+	"landing_pad_filters": {},
+	"launchpad_state": {},
 	"linked_pairs": [],
-	"loader_state": {
-
-	},
+	"loader_state": {},
 	"mass_driver_projectiles": [],
-	"mass_driver_state": {
-
-	},
+	"mass_driver_state": {},
 	"ore_tiles": {
 		"100,145": "copper_ore",
 		"115,100": "zinc_ore",
@@ -25909,272 +25853,120 @@
 		"98,144": "copper_ore",
 		"99,145": "copper_ore"
 	},
-	"payload_items": {
-
-	},
-	"pipe_contents": {
-
-	},
+	"payload_items": {},
+	"pipe_contents": {},
 	"player_units": [],
-	"refabricator_state": {
-
-	},
+	"refabricator_state": {},
 	"resources": {
 		"mat_copper": 993.0,
 		"mat_graphite": 574.0,
 		"mat_silicon": 2965.0,
 		"mat_steel": 1526.0
 	},
-	"script_runtime": {
-		"core_counts": {
-
-		},
-		"core_unit_mined_counts": {
-
-		},
-		"current_step": -1.0,
-		"decoded_archive_counts": {
-
-		},
-		"deposited_baselines": {
-
-		},
-		"disabled_buildings": [],
-		"ferox_blocks_destroyed_counts": {
-
-		},
-		"hidden_tiles": [],
-		"mined_counts": {
-
-		},
-		"placed_baselines": {
-
-		},
-		"placed_counts": {
-
-		},
-		"produced_counts": {
-
-		},
-		"script_running": false,
-		"step_wait_timer": 0.0,
-		"units_destroyed_counts": {
-
-		},
-		"units_produced_counts": {
-
-		}
-	},
 	"script_steps": [
 		{
-			"_editor_pos": "120,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "84,121",
+					"id": "DB1",
 					"to": "85,122",
-					"type": "box"
-				}
-			],
-			"name": "Drill (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"color": "white",
 					"from": "85,123",
+					"id": "DB2",
 					"to": "86,124",
-					"type": "box"
-				}
-			],
-			"name": "Drill (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "83,125",
+					"id": "DT",
 					"text": "(-white)Research and place 2 [res://textures/blocks/resource extractors/Impact Drill/ImpactDrillComplete.png]Impact Drills to extract[res://textures/resources/zinc.png]Zinc.",
 					"to": "88,125",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Drill (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,80",
-			"actions": [],
 			"conditions": [
 				{
 					"amount": 2.0,
-					"block_id": "impact_drill",
+					"block_id": "advanced_plasma_bore",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				0,
-				1,
-				2
-			],
-			"name": "Drill (wait placed)",
-			"on_exit": []
+			"name": "Drill",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "86,120",
+					"id": "MB",
 					"to": "88,122",
-					"type": "box"
-				}
-			],
-			"name": "Mixer (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				3
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "85,119",
-					"text": "(-white)Now place a[res://textures/blocks/factories/Brass Mixer/BrassMixerComplete.png]Brass Mixer and supply it zinc and copper to produce  [res://textures/resources/Brass.png](-gold)Brass",
+					"id": "MT",
+					"text": "(-white)Now place a[res://textures/blocks/factories/Brass Mixer/BrassMixerComplete.png]Brass Mixer and supply it zinc and copper to produce  [res://textures/TexNotFound.png](-gold)Brass",
 					"to": "89,119",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Mixer (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,230",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "brass_mixer",
 					"type": "placed"
-				}
-			],
-			"dependencies": [
-				4,
-				5
-			],
-			"name": "Mixer (wait placed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "960,230",
-			"actions": [],
-			"conditions": [
+				},
 				{
 					"amount": 10.0,
 					"item_id": "mat_brass",
 					"type": "deposited"
 				}
 			],
-			"dependencies": [
-				4,
-				5
-			],
-			"name": "Mixer (wait deposited)",
-			"on_exit": []
+			"name": "Mixer",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "1240,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				6,
-				7
-			],
-			"name": "Mixer (sink)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "120,380",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				8
-			],
-			"markers": [
+			"actions": [
 				{
 					"from": "98,116",
+					"id": "AT",
 					"text": "(-white)There are [res://textures/blocks/cores/Archive.png]Archives on this sector, Decode them.\n(-white)Eniemies incomming, prepare to defend.",
 					"to": "102,116",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Archives (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,380",
-			"actions": [],
 			"conditions": [
 				{
 					"seconds": 8.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				9
-			],
-			"name": "Archives (wait wait)",
-			"on_exit": []
+			"name": "Archives",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,530",
 			"actions": [],
 			"conditions": [
 				{
@@ -26182,35 +25974,16 @@
 					"type": "ferox_blocks_destroyed"
 				}
 			],
-			"dependencies": [
-				10
-			],
-			"name": "Capture (wait ferox_blocks_destroyed)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,530",
-			"actions": [
+			"name": "Capture",
+			"on_exit": [
 				{
 					"type": "capture_sector"
 				}
-			],
-			"conditions": [
-				{
-					"type": "always"
-				}
-			],
-			"dependencies": [
-				11
-			],
-			"name": "Capture (exit capture_sector)",
-			"on_exit": []
+			]
 		}
 	],
 	"sector_name": "ZD",
-	"sorter_filters": {
-
-	},
+	"sorter_filters": {},
 	"stats_blocks_placed": 0.0,
 	"stats_blocks_removed": 0.0,
 	"stats_enemy_blocks_destroyed": 0.0,
@@ -26219,9 +25992,7 @@
 	"stats_units_destroyed": 0.0,
 	"stats_units_produced": 0.0,
 	"type": "sector",
-	"unloader_state": {
-
-	},
+	"unloader_state": {},
 	"version": 3.0,
 	"wall_tiles": {
 		"0,0": "blackstone_wall",

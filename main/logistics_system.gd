@@ -81,6 +81,25 @@ var conveyor_items := {}
 #   "amount": float — 0.0 to units_per_segment (from FluidData)
 var pipe_contents := {}
 
+# --- PIPE JUNCTION STATE ---
+# Pipe junctions act like their belt-counterpart junctions: fluid
+# crosses through without mixing. Each junction is two independent
+# fluid channels — `v` (vertical N↔S axis) and `h` (horizontal E↔W
+# axis). They never share fluid through this cell, so a vertical
+# pipe network and a horizontal one can cross the same junction
+# without merging.
+#
+# Key  = Vector2i (junction anchor)
+# Value = {
+#   "v_fluid":  StringName, "v_amount": float,    # vertical channel
+#   "h_fluid":  StringName, "h_amount": float,    # horizontal channel
+# }
+#
+# Junctions are EXCLUDED from `pipe_contents` and from the pipe-network
+# flood-fill (`_find_pipe_network`). They equalize with their plain-pipe
+# neighbours actively each tick via `_tick_pipe_junctions`.
+var pipe_junction_state := {}
+
 # --- PUDDLE STATE ---
 # Spawned by the pipe-leak tick: a pipe whose facing-front cell has no
 # building (or a wall) leaks 0.5 fluid/sec into the front cell, forming
@@ -98,12 +117,19 @@ var pipe_contents := {}
 #   "fed":        bool       — set true each frame a pipe leaks into it,
 #                              read by the dry-up pass and then cleared
 var puddles: Dictionary = {}
-const PUDDLE_LEAK_RATE := 0.5    # fluid units / second drained from pipe
-# A fully-fed puddle reaches PUDDLE_MAX_AMOUNT after ~30 seconds of
-# continuous dripping (15 / 0.5). At that point the polygon is at
-# full size — roughly 2.5 tiles across the longest axis.
+const PUDDLE_LEAK_RATE := 2.5    # fluid units / second drained from pipe
+# Mindustry PuddleComp parity: at `amount >= maxLiquid / 1.5` a puddle
+# starts overflowing into its 4 cardinal neighbours. Used both in the
+# spread tick (Phase E) and in the visual draw (the `f` fill ratio is
+# `amount / _SPREAD_THRESHOLD`, matching Mindustry's `amount / (maxLiquid/1.5f)`).
+const _SPREAD_THRESHOLD: float = 15.0 / 1.5    # == PUDDLE_MAX_AMOUNT / 1.5
+const _SPREAD_DEPOSIT_CAP: float = 0.3         # units per neighbour per second
+# A fully-fed puddle reaches PUDDLE_MAX_AMOUNT after ~6 seconds of
+# continuous dripping (15 / 2.5). At that point the visible blob is
+# at full size — roughly the central 8 px Mindustry-scale × 4 tile
+# scale = ~one tile across.
 const PUDDLE_MAX_AMOUNT := 15.0
-const PUDDLE_DRY_RATE := 0.25    # units / second drained from puddle when not fed
+const PUDDLE_DRY_RATE := 1.5     # units / second drained from puddle when not fed
 # Max circles in a fully-fed puddle. The pre-generated template
 # stores this many; how many are actually drawn each frame is gated
 # by each circle's own `threshold` against the puddle's current fill.
@@ -1088,7 +1114,7 @@ func _update_pumps(delta: float) -> void:
 						continue
 					if not _is_pipe_cell(neighbor):
 						continue
-					if _add_fluid_to_pipe(neighbor, fluid_id, amount):
+					if _add_fluid_to_pipe(neighbor, fluid_id, amount, dir):
 						pushed_any = true
 					if pushed_any:
 						break
@@ -1144,7 +1170,7 @@ func _drain_pump_storage_to_pipes(anchor: Vector2i, data: BlockData, delta: floa
 						continue
 					if not _is_pipe_cell(neighbor):
 						continue
-					if _add_fluid_to_pipe(neighbor, fluid_id, to_drain):
+					if _add_fluid_to_pipe(neighbor, fluid_id, to_drain, dir):
 						available = maxf(0.0, available - to_drain)
 						pushed = true
 						dirty = true
@@ -1679,12 +1705,29 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 
 	# --- Turret ammo (any side) ---
 	if data.is_turret() and not data.ammo_types.is_empty():
+		var accepts_item: bool = false
 		for ammo in data.ammo_types:
 			if ammo == null or not (ammo is AmmoType):
 				continue
 			if (ammo as AmmoType).item_id == item_id:
-				return true
-		return false
+				accepts_item = true
+				break
+		if not accepts_item:
+			return false
+		# Respect the turret's ammo cap — otherwise the router picker
+		# would keep committing to a full turret because "the ammo type
+		# matches", even though `_try_accept_turret_ammo` is rejecting
+		# every transfer for being over capacity. That stranded items
+		# at the router and prevented round-robin to other outputs.
+		var turret_anchor = main.get_building_anchor(grid_pos)
+		var turret_origin: Vector2i = turret_anchor if turret_anchor != null else grid_pos
+		var cap_t: int = data.max_stored_items if data.max_stored_items > 0 else 30
+		var storage_t: Dictionary = block_storage.get(turret_origin, {})
+		var items_t: Dictionary = storage_t.get("items", {})
+		var total_t: int = 0
+		for k in items_t:
+			total_t += int(items_t[k])
+		return total_t < cap_t
 
 	return false
 
@@ -2489,7 +2532,16 @@ func _try_handoff_payload_to_block(out_pos: Vector2i, payload_data: Dictionary, 
 # =========================
 
 ## Adds fluid to a pipe cell. Returns true if successful.
-func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float) -> bool:
+##
+## When `grid_pos` is a junction, the new fluid is routed into the
+## junction's V (vertical N↔S) or H (horizontal E↔W) channel based on
+## `from_dir` — the direction the caller went TO REACH `grid_pos`. So
+## a pump pushing east (dir 0) pumps into the junction's H channel
+## (fluid enters from the west = the H axis). Callers that don't know
+## the direction (factory unload, etc.) pass `from_dir = -1`; the
+## function then refuses the add for junctions, and the junction
+## receives fluid via the per-axis equalize tick instead.
+func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float, from_dir: int = -1) -> bool:
 	# Fluid can't enter a pipe that isn't fully built, is deconstructing, or is
 	# derelict. This blocks every caller (pumps, factories, storage unloading,
 	# belt-unloaders) without having to check at each site.
@@ -2498,6 +2550,29 @@ func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float)
 	var fluid = Registry.get_fluid(fluid_id)
 	if fluid == null:
 		return false
+	# Junction handling: route into the correct axis compartment.
+	if _is_junction_cell(grid_pos):
+		if from_dir < 0:
+			return false
+		# dirs 0 (east) and 2 (west) → H channel; dirs 1 (south) and
+		# 3 (north) → V channel.
+		var axis: String = "h" if from_dir == 0 or from_dir == 2 else "v"
+		var state: Dictionary = pipe_junction_state.get(grid_pos, {
+			"v_fluid": &"", "v_amount": 0.0,
+			"h_fluid": &"", "h_amount": 0.0,
+		})
+		var fluid_key: String = axis + "_fluid"
+		var amount_key: String = axis + "_amount"
+		var existing_fluid: StringName = state.get(fluid_key, &"")
+		var existing_amount: float = float(state.get(amount_key, 0.0))
+		if existing_fluid != &"" and existing_fluid != fluid_id:
+			return false
+		if existing_amount >= fluid.units_per_segment:
+			return false
+		state[fluid_key] = fluid_id
+		state[amount_key] = minf(existing_amount + amount, fluid.units_per_segment)
+		pipe_junction_state[grid_pos] = state
+		return true
 
 	if pipe_contents.has(grid_pos):
 		var pipe = pipe_contents[grid_pos]
@@ -2523,10 +2598,15 @@ func _update_pipes(delta: float) -> void:
 
 	# Also check all placed pipe cells (even empty ones) for equalization.
 	# Skip inactive pipes so they can't equalize fluid through a cell that
-	# isn't finished building yet.
+	# isn't finished building yet. Also skip junctions — they're
+	# explicitly NOT part of pipe networks; their per-axis state is
+	# equalized in `_tick_pipe_junctions` below so the two axes never
+	# mix.
 	var all_pipe_cells := {}
 	for grid_pos in main.placed_buildings:
 		if not _is_pipe_cell(grid_pos):
+			continue
+		if _is_junction_cell(grid_pos):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
 			continue
@@ -2563,6 +2643,15 @@ func _update_pipes(delta: float) -> void:
 					pipe_contents[pos] = {"fluid_id": fluid_id, "amount": avg}
 			elif pipe_contents.has(pos):
 				pipe_contents[pos]["amount"] = 0.0
+
+	# --- Phase A.5: Junction cross-without-mixing ---
+	# Each junction is two independent fluid channels — vertical (N↔S)
+	# and horizontal (E↔W). They never share fluid through the junction
+	# cell, so a vertical and a horizontal pipe network can cross the
+	# same tile without merging. Implemented by equalizing each axis
+	# with its 2 same-axis plain-pipe neighbours and skipping junctions
+	# during the regular pipe-network flood-fill (above).
+	_tick_pipe_junctions()
 
 	# --- Phase B: Leak from fully orphaned pipes (no neighbors at all) ---
 	var to_clean := []
@@ -2632,6 +2721,50 @@ func _update_pipes(delta: float) -> void:
 				if pipe["amount"] <= 0:
 					break
 
+	# Feed factories directly adjacent to junctions, using whichever
+	# axis compartment lines up with the factory's side. Without this,
+	# a factory sitting right next to a junction (no plain pipe in
+	# between) would never be fed.
+	for j_anchor in pipe_junction_state:
+		if not _is_junction_cell(j_anchor):
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(j_anchor):
+			continue
+		var j_state: Dictionary = pipe_junction_state[j_anchor]
+		# axis → (fluid_key, amount_key, neighbour offsets)
+		var axis_specs := [
+			{"axis": "v", "neighbors": [Vector2i(0, -1), Vector2i(0, 1)], "dirs": [3, 1]},
+			{"axis": "h", "neighbors": [Vector2i(1, 0), Vector2i(-1, 0)], "dirs": [0, 2]},
+		]
+		for spec in axis_specs:
+			var ax: String = spec["axis"]
+			var fk: String = ax + "_fluid"
+			var ak: String = ax + "_amount"
+			var jf_id: StringName = j_state.get(fk, &"")
+			if jf_id == &"":
+				continue
+			var jf_data = Registry.get_fluid(jf_id)
+			if jf_data == null:
+				continue
+			var jf_needed: float = jf_data.units_per_item if jf_data.units_per_item > 0 else 10.0
+			var jf_amount: float = float(j_state.get(ak, 0.0))
+			var neighbours: Array = spec["neighbors"]
+			var dirs: Array = spec["dirs"]
+			for i in range(neighbours.size()):
+				if jf_amount < jf_needed:
+					break
+				var nb_cell: Vector2i = j_anchor + neighbours[i]
+				var entry_dir: int = (int(dirs[i]) + 2) % 4
+				if _is_cross_faction(j_anchor, nb_cell):
+					continue
+				if _try_accept_factory_item(nb_cell, jf_id, entry_dir):
+					jf_amount -= jf_needed
+					continue
+				if _try_accept_booster_fluid(nb_cell, jf_id):
+					jf_amount -= jf_needed
+			j_state[ak] = maxf(0.0, jf_amount)
+		pipe_junction_state[j_anchor] = j_state
+
 	# Clean up empty pipe entries
 	for pos in to_clean:
 		if pipe_contents.has(pos) and pipe_contents[pos]["amount"] <= 0:
@@ -2647,6 +2780,13 @@ func _update_pipes(delta: float) -> void:
 		if pipe2["amount"] <= 0:
 			continue
 		if not _is_pipe_cell(grid_pos):
+			continue
+		# Skip junctions, routers, and bridges — these are connector /
+		# crossover blocks. They don't have a single "front" facing and
+		# shouldn't drip into the cell their rotation happens to point
+		# at. Only plain pipe segments leak from an open front.
+		if _is_junction_cell(grid_pos) or _has_block_tag(grid_pos, "router") \
+				or _is_bridge_cell(grid_pos):
 			continue
 		var rot: int = main.building_rotation.get(grid_pos, 0)
 		var front_cell: Vector2i = grid_pos + DIR_VECTORS[rot]
@@ -2695,18 +2835,93 @@ func _update_pipes(delta: float) -> void:
 	if not puddles.is_empty() and _unit_mgr:
 		_apply_puddle_wet_status()
 
-	# --- Phase E: Puddle dry-up ---
-	# Any puddle that wasn't topped up this tick loses PUDDLE_DRY_RATE
-	# units/sec. Empties get erased so we don't carry stale entries.
+	# --- Phase E: Mindustry-style spread + viscosity-modulated dry-up ---
+	# Mirrors Mindustry's PuddleComp:
+	#   amount -= delta * (1 - viscosity) / (5 + addSpeed)
+	#   if amount >= maxLiquid/1.5 → deposit (amount - maxLiquid/1.5)/4
+	#                                 (capped at 0.3 * delta) to each
+	#                                 of the 4 cardinal neighbour tiles.
+	# We piggy-back on `_feed_puddle` for the deposit so the receiving
+	# tile (a) creates a new puddle if one wasn't there, (b) ignores
+	# walls / solid floors via the existing pipe-leak gates, and
+	# (c) refuses to mix different fluids (first-in wins).
 	var puddle_to_erase: Array = []
+	# Build the spread queue first; applying spreads inside the iter
+	# loop would mutate `puddles` mid-iteration.
+	var spread_queue: Array = []  # [from_cell, fluid_id, amount_per_neighbour]
 	for pp in puddles:
 		var pd: Dictionary = puddles[pp]
+		var amt: float = float(pd["amount"])
+
+		# (1) Spread once we cross the threshold.
+		if amt >= _SPREAD_THRESHOLD:
+			var overflow: float = (amt - _SPREAD_THRESHOLD) / 4.0
+			var dep: float = minf(overflow, _SPREAD_DEPOSIT_CAP * delta)
+			if dep > 0.0:
+				spread_queue.append([pp, StringName(pd.get("fluid_id", &"")), dep])
+
+		# (2) Evaporate. Mindustry: rate scales with (1 - viscosity);
+		# water (viscosity ~0.3) evaporates faster than oil. The
+		# PUDDLE_DRY_RATE multiplier maps Mindustry's constants into
+		# our timeline (15-unit puddle vs. their 70).
 		if pd.get("fed", false):
 			pd["fed"] = false
 		else:
-			pd["amount"] = maxf(0.0, float(pd["amount"]) - PUDDLE_DRY_RATE * delta)
+			var visc: float = 1.0
+			var fid: StringName = StringName(pd.get("fluid_id", &""))
+			if fid != &"":
+				var fdata = Registry.get_fluid(fid)
+				if fdata != null:
+					visc = clampf(float(fdata.viscosity), 0.0, 1.0)
+			# At viscosity 0 → full PUDDLE_DRY_RATE; viscosity 1 → 0.
+			var dry_rate: float = PUDDLE_DRY_RATE * maxf(0.05, 1.0 - visc)
+			pd["amount"] = maxf(0.0, float(pd["amount"]) - dry_rate * delta)
 			if pd["amount"] <= 0.0:
 				puddle_to_erase.append(pp)
+
+	# Apply spreads. Each entry pushes `dep` units into the 4 cardinal
+	# neighbours of `from_cell`, leaving `from_cell` lighter by the
+	# total delivered. _feed_puddle already enforces same-fluid +
+	# wall / out-of-bounds rejection (we replicate the wall check here
+	# since _feed_puddle currently has no such gate).
+	for entry in spread_queue:
+		var from_cell: Vector2i = entry[0]
+		var spread_fid: StringName = entry[1]
+		var per_nb: float = entry[2]
+		if spread_fid == &"":
+			continue
+		var src_pd: Dictionary = puddles.get(from_cell, {})
+		if src_pd.is_empty():
+			continue
+		for dir in range(4):
+			var nb: Vector2i = from_cell + DIR_VECTORS[dir]
+			if not main.is_within_bounds(nb):
+				continue
+			# Walls / buildings block the spread the same way they
+			# block a pipe's initial front-leak — water doesn't pool
+			# inside rock or under a placed block.
+			if main.placed_buildings.has(nb):
+				continue
+			if _terrain and _terrain.has_method("has_wall") and _terrain.has_wall(nb):
+				continue
+			# Different-fluid neighbour blocks the spread (Mindustry
+			# would react here; we simply refuse the deposit so the
+			# existing puddle keeps its identity).
+			var nb_pd: Dictionary = puddles.get(nb, {})
+			if not nb_pd.is_empty() \
+					and StringName(nb_pd.get("fluid_id", &"")) != spread_fid:
+				continue
+			var back_dir: Vector2i = -DIR_VECTORS[dir]
+			# Stronger edge bias for SPREAD puddles — pulls the new
+			# blob's centre to the shared edge with the source so the
+			# two visibly merge instead of leaving a gap in the
+			# middle of the receiving tile.
+			_feed_puddle(nb, spread_fid, per_nb, back_dir, 0.5)
+			src_pd["amount"] = maxf(0.0, float(src_pd["amount"]) - per_nb)
+		puddles[from_cell] = src_pd
+		if float(src_pd["amount"]) <= 0.0 and not puddle_to_erase.has(from_cell):
+			puddle_to_erase.append(from_cell)
+
 	for pp in puddle_to_erase:
 		puddles.erase(pp)
 
@@ -2718,18 +2933,27 @@ func _update_pipes(delta: float) -> void:
 ## `pipe_back_dir` points from the puddle cell back to the leaking
 ## pipe, so the puddle pools against that edge of the cell.
 func _feed_puddle(cell: Vector2i, fluid_id: StringName, amount: float,
-		pipe_back_dir: Vector2i = Vector2i.ZERO) -> void:
+		pipe_back_dir: Vector2i = Vector2i.ZERO,
+		edge_offset: float = 0.32) -> void:
 	if amount <= 0.0:
 		return
 	var existing: Dictionary = puddles.get(cell, {})
 	if existing.is_empty() or existing.get("fluid_id", &"") != fluid_id:
 		var fluid = Registry.get_fluid(fluid_id)
 		var col: Color = fluid.color if fluid else Color(0.4, 0.6, 0.95, 1.0)
-		var shape_data: Dictionary = _make_puddle_shape(cell, pipe_back_dir)
+		var shape_data: Dictionary = _make_puddle_shape(cell, pipe_back_dir, edge_offset)
 		existing = {
 			"fluid_id": fluid_id,
 			"color": col,
 			"amount": 0.0,
+			# Unit vector pointing INTO the source side of this
+			# puddle (i.e. opposite of pipe_back_dir for leaks, and
+			# pointing back at the source puddle for spreads). The
+			# draw uses this to bias the 3 satellite circles toward
+			# the source so a spread puddle visually merges with
+			# whatever fed it instead of scattering off to one side
+			# of the neighbour tile.
+			"primary_dir": Vector2(pipe_back_dir.x, pipe_back_dir.y),
 			# Pre-generated 12-circle template: every entry stores its
 			# local pos / radius / activation threshold / reach. The
 			# active circles are the ones whose `threshold <= amount`.
@@ -2798,6 +3022,27 @@ func _apply_puddle_wet_status() -> void:
 		all_units.append_array(_unit_mgr.enemies)
 	if _unit_mgr.has_method("get") and "player_units" in _unit_mgr:
 		all_units.append_array(_unit_mgr.player_units)
+	# Track per-puddle hazard payload alongside the centre / radius so
+	# units standing in an acid / petroleum etc. puddle also take its
+	# `hazard_damage` per second (Mindustry's PuddleComp does this via
+	# the liquid's effect; ours is a separate stat on FluidData).
+	var dt: float = get_process_delta_time()
+	var hazards: Array = []   # parallel to `hits`: float dmg-per-sec
+	hazards.resize(hits.size())
+	for i in range(hits.size()):
+		hazards[i] = 0.0
+	var hi := 0
+	for cell in puddles:
+		var pd: Dictionary = puddles[cell]
+		var amt: float = float(pd.get("amount", 0.0))
+		if amt <= 0.0:
+			continue
+		var fid: StringName = StringName(pd.get("fluid_id", &""))
+		if fid != &"":
+			var fdata = Registry.get_fluid(fid)
+			if fdata != null and bool(fdata.is_hazardous):
+				hazards[hi] = float(fdata.hazard_damage)
+		hi += 1
 	for u in all_units:
 		if u == null or not is_instance_valid(u) or u.is_dead:
 			continue
@@ -2808,11 +3053,15 @@ func _apply_puddle_wet_status() -> void:
 		if ml != UnitData.MovementLayer.GROUND and ml != UnitData.MovementLayer.CRAWLER:
 			continue
 		var pos: Vector2 = u.position
-		for entry in hits:
+		for ei in range(hits.size()):
+			var entry: Array = hits[ei]
 			var centre: Vector2 = entry[0]
 			var r2: float = entry[1]
 			if pos.distance_squared_to(centre) <= r2:
 				u.apply_status_effect(wet_effect)
+				var dmg: float = float(hazards[ei])
+				if dmg > 0.0 and u.has_method("take_damage"):
+					u.take_damage(dmg * dt)
 				break
 
 
@@ -2844,12 +3093,17 @@ func _apply_puddle_wet_status() -> void:
 ## already shows a tiny puddle. Subsequent circles spread outward
 ## (distance from centre grows with index) so the puddle expands
 ## roughly radially as fluid accumulates.
-func _make_puddle_shape(cell: Vector2i, pipe_back_dir: Vector2i = Vector2i.ZERO) -> Dictionary:
+func _make_puddle_shape(cell: Vector2i, pipe_back_dir: Vector2i = Vector2i.ZERO,
+		edge_offset: float = 0.32) -> Dictionary:
 	var gs: float = float(main.GRID_SIZE)
-	# Offset centre toward the pipe edge of the cell.
-	const _PUDDLE_EDGE_OFFSET := 0.32
+	# Offset centre toward the source edge of the cell. The default
+	# `0.32` is for pipe leaks (pipe-mouth pooling); the spread tick
+	# passes a larger value (~0.5) so a spread puddle's centre sits
+	# right at the shared edge with the source — the blob grows out
+	# of the source puddle instead of starting alone in the middle of
+	# the next tile.
 	var centre: Vector2 = Vector2(gs * 0.5, gs * 0.5) \
-		+ Vector2(pipe_back_dir.x, pipe_back_dir.y) * (gs * _PUDDLE_EDGE_OFFSET)
+		+ Vector2(pipe_back_dir.x, pipe_back_dir.y) * (gs * edge_offset)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = (int(cell.x) * 73856093) ^ (int(cell.y) * 19349663) \
 		^ (int(pipe_back_dir.x) * 83492791) ^ (int(pipe_back_dir.y) * 49979687)
@@ -2965,51 +3219,80 @@ func _union_polygons(polys: Array) -> Array:
 func _draw_puddles(canvas: CanvasItem) -> void:
 	if puddles.is_empty():
 		return
+	# Port of Mindustry's `Liquid.drawPuddle`:
+	#   float f = clamp(amount / (maxLiquid / 1.5));
+	#   Draw color (base, shiftValue(-0.05));   // 5% darker
+	#   Fill.circle(x + wob, y + wob, f * 8);   // central blob
+	#   for(i = 0; i < 3; i++):
+	#       v = trns(rand(360), rand(f * 6));
+	#       Fill.circle(x + v.x + wob, y + v.y + wob, f * 5);
+	# Mindustry tiles are 32 px, ours are 128 px, so radii / offsets
+	# all multiply by `tile_scale = gs / 32.0` to read at the same
+	# relative size.
 	var gs: float = float(main.GRID_SIZE)
+	var tile_scale: float = gs / 32.0
+	var t: float = float(Time.get_ticks_msec()) * 0.001
+	var wob_scl: float = 25.0
+	var wob_mag: float = 0.6 * tile_scale
 	for cell in puddles:
 		var pd: Dictionary = puddles[cell]
 		var amt: float = float(pd.get("amount", 0.0))
 		if amt <= 0.0:
 			continue
-		var template: Array = pd.get("template", [])
-		if template.is_empty():
+		var f: float = clampf(amt / _SPREAD_THRESHOLD, 0.0, 1.0)
+		if f <= 0.0:
 			continue
-		# Refresh the cached union when the active circle count
-		# changes — adding fluid pushes the count up, drying drops it
-		# down. The expensive `Geometry2D.merge_polygons` walk only
-		# fires across these threshold crossings.
-		_refresh_puddle_active_set(pd)
-		var polygons: Array = pd.get("polygons", [])
-		if polygons.is_empty():
-			continue
+		var base_col: Color = pd.get("color", Color(0.4, 0.6, 0.95, 1.0))
+		# Mindustry's `shiftValue(-0.05)` = drop HSV value by 5 %.
+		var col: Color = base_col.darkened(0.05)
+		# Tail-fade so a draining puddle doesn't pop out at the end.
+		var fade_window: float = _SPREAD_THRESHOLD * 0.15
+		if amt < fade_window and fade_window > 0.0:
+			col.a *= clampf(amt / fade_window, 0.0, 1.0)
+		# Centre on the cell's grid-to-world position + shape_centre
+		# bias (so pipe-fed puddles pool toward the pipe mouth instead
+		# of the geometric middle of the tile).
 		var shape_centre: Vector2 = pd.get("shape_centre", Vector2(gs * 0.5, gs * 0.5))
-		var col: Color = pd.get("color", Color(0.4, 0.6, 0.95, 1.0))
-		# Tail-fade: when the puddle is down to just the core circle
-		# and `amount` is approaching 0, fade alpha so the last spot
-		# doesn't pop out. Above that, draw at full opacity.
-		var alpha_t: float = 1.0
-		var active_count: int = int(pd.get("active_count", 0))
-		if active_count <= 1:
-			var first_next_threshold: float = float(template[1].get("threshold", PUDDLE_MAX_AMOUNT)) \
-				if template.size() >= 2 else PUDDLE_MAX_AMOUNT
-			# Fade across the bottom slice of the first threshold band
-			# (the "still only one circle" zone, drying).
-			var fade_window: float = first_next_threshold * 0.4
-			if fade_window > 0.0 and amt < fade_window:
-				alpha_t = clampf(amt / fade_window, 0.0, 1.0)
-		var fill_color: Color = Color(col.r, col.g, col.b, alpha_t)
-		var origin: Vector2 = main.grid_to_world(cell)
-		for poly in polygons:
-			var p: PackedVector2Array = poly
-			if p.size() < 3:
-				continue
-			var translated := PackedVector2Array()
-			translated.resize(p.size())
-			for i in p.size():
-				# Polygon vertices are stored relative to Vector2.ZERO.
-				# Translate into world space relative to `shape_centre`.
-				translated[i] = origin + shape_centre + p[i]
-			canvas.draw_colored_polygon(translated, fill_color)
+		var x: float = main.grid_to_world(cell).x + shape_centre.x
+		var y: float = main.grid_to_world(cell).y + shape_centre.y
+		# Deterministic per-puddle seed for the 3 satellite offsets,
+		# matching Mindustry's `rand.setSeed(id)` then 3 random draws.
+		var pseed: int = (cell.x * 73856093) ^ (cell.y * 19349663)
+		var rng := RandomNumberGenerator.new()
+		rng.seed = pseed
+		# (1) Central blob.
+		var c_wob_x: float = sin(t / wob_scl + float(pseed) * 0.0013) * wob_mag
+		var c_wob_y: float = sin(t / wob_scl + float(pseed) * 0.0017) * wob_mag
+		canvas.draw_circle(Vector2(x + c_wob_x, y + c_wob_y), f * 8.0 * tile_scale, col)
+		# (2) Three satellite blobs. Mindustry scatters across the
+		# full 360°; we restrict to a 180° arc facing the source side
+		# when `primary_dir` is set (every puddle the system creates
+		# has one — pipes point at the leak edge, spreads point back
+		# at the feeding puddle). The result is satellite blobs that
+		# cluster on the source-facing half of the cell so a spread
+		# puddle visibly merges with the puddle that fed it instead
+		# of dropping detached dots in the next tile over.
+		var primary: Vector2 = pd.get("primary_dir", Vector2.ZERO)
+		var has_primary: bool = primary.length_squared() > 0.01
+		var base_ang: float = primary.angle() if has_primary else 0.0
+		var length: float = f * 6.0 * tile_scale
+		for i in range(3):
+			var ang: float
+			if has_primary:
+				# Random ±90° around primary_dir → satellites all sit
+				# on the source side of the cell centre.
+				ang = base_ang + rng.randf_range(-PI * 0.5, PI * 0.5)
+			else:
+				ang = rng.randf_range(0.0, TAU)
+			var dist: float = rng.randf_range(0.0, length)
+			var vx: float = x + cos(ang) * dist
+			var vy: float = y + sin(ang) * dist
+			var s_wob_x: float = sin(t / wob_scl + float(i) * 0.532) * wob_mag
+			var s_wob_y: float = sin(t / wob_scl + float(i) * 0.053) * wob_mag
+			canvas.draw_circle(Vector2(vx + s_wob_x, vy + s_wob_y), f * 5.0 * tile_scale, col)
+		# Update the cached reach for `_apply_puddle_wet_status` — the
+		# farthest point any satellite can reach is `length + f*5`.
+		pd["active_max_radius_px"] = (f * 6.0 + f * 5.0) * tile_scale
 
 
 ## Recomputes `pd.polygons` + `pd.active_count` + `pd.active_max_radius_px`
@@ -3060,11 +3343,144 @@ func _refresh_puddle_active_set(pd: Dictionary) -> void:
 ## Flood-fills from a pipe cell to find all connected pipe cells.
 ## Pipes connect omnidirectionally (any adjacent pipe is connected).
 ## Only connects pipes of the same faction to prevent cross-faction fluid flow.
+## Equalizes every active junction's two axis compartments with their
+## same-axis plain-pipe neighbours. Vertical channel averages with the
+## N + S pipe cells; horizontal channel averages with E + W. The two
+## channels share no fluid — that's the entire point of a junction.
+##
+## Junction-to-junction direct chains (a vertical channel touching
+## another junction's vertical channel as its N neighbour) are NOT
+## propagated through here. If the player wants to chain, they can
+## drop a 1-tile pipe segment between the two junctions and fluid
+## will pass through via that pipe.
+func _tick_pipe_junctions() -> void:
+	if pipe_junction_state.is_empty() and not _any_junction_placed():
+		return
+	# GC: drop state entries for junctions that no longer exist (block
+	# was removed / faction-flipped).
+	var dead: Array = []
+	for anchor in pipe_junction_state:
+		if not main.placed_buildings.has(anchor) or not _is_junction_cell(anchor):
+			dead.append(anchor)
+	for d in dead:
+		pipe_junction_state.erase(d)
+
+	for anchor in main.placed_buildings:
+		if not _is_junction_cell(anchor):
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+			continue
+		var state: Dictionary = pipe_junction_state.get(anchor, {
+			"v_fluid": &"", "v_amount": 0.0,
+			"h_fluid": &"", "h_amount": 0.0,
+		})
+		_equalize_junction_axis(state, anchor, "v",
+			[anchor + Vector2i(0, -1), anchor + Vector2i(0, 1)])
+		_equalize_junction_axis(state, anchor, "h",
+			[anchor + Vector2i(1, 0), anchor + Vector2i(-1, 0)])
+		# Persist if any channel has live fluid, otherwise drop the
+		# entry to keep the dict small.
+		if float(state["v_amount"]) > 0.0 or float(state["h_amount"]) > 0.0:
+			pipe_junction_state[anchor] = state
+		else:
+			pipe_junction_state.erase(anchor)
+
+
+## Cheap precheck so `_tick_pipe_junctions` can skip the GC walk + main
+## loop when there are no junctions placed at all.
+func _any_junction_placed() -> bool:
+	for grid_pos in main.placed_buildings:
+		if _is_junction_cell(grid_pos):
+			return true
+	return false
+
+
+## Averages a junction axis compartment with the two same-axis
+## neighbours, with same-fluid mixing rules.
+##
+## `state`   — the junction's state dict; mutated in place.
+## `anchor`  — the junction's grid cell.
+## `axis`    — "v" or "h" (which compartment keys to read/write).
+## `neighbors` — the two grid cells on this axis (N+S for v, E+W for h).
+func _equalize_junction_axis(state: Dictionary, anchor: Vector2i, axis: String, neighbors: Array) -> void:
+	var fluid_key: String = axis + "_fluid"
+	var amount_key: String = axis + "_amount"
+	var j_fluid: StringName = state.get(fluid_key, &"")
+	var j_amount: float = float(state.get(amount_key, 0.0))
+	# Pick a unifying fluid_id. Prefer the junction's existing fluid
+	# (so a half-full channel doesn't randomly switch fluid). Otherwise
+	# adopt the first non-empty neighbour's fluid.
+	var unifying: StringName = j_fluid
+	for nb in neighbors:
+		if unifying != &"":
+			break
+		if pipe_contents.has(nb):
+			unifying = pipe_contents[nb]["fluid_id"]
+	if unifying == &"":
+		# Nothing in this axis at all — nothing to equalize. Reset
+		# fluid id for cleanliness.
+		state[fluid_key] = &""
+		state[amount_key] = 0.0
+		return
+	# Collect contributors that share the unifying fluid. Mismatched
+	# neighbours are skipped (you can't equalize copper into water).
+	var contributors: Array = []   # array of {kind, ref, amount}
+	var total: float = 0.0
+	# Include the junction's own channel.
+	if j_fluid == unifying or j_fluid == &"":
+		contributors.append({"kind": "junction", "ref": null, "amount": j_amount})
+		total += j_amount
+	# Include matching plain-pipe neighbours that aren't themselves
+	# junctions/routers/bridges and are the same faction as the
+	# junction (cross-faction fluid is rejected just like in the
+	# regular network loop).
+	var jf: int = main.get_building_faction(anchor)
+	for nb in neighbors:
+		if _is_junction_cell(nb):
+			continue
+		if not _is_pipe_cell(nb):
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(nb):
+			continue
+		if main.get_building_faction(nb) != jf:
+			continue
+		if pipe_contents.has(nb):
+			var nb_data: Dictionary = pipe_contents[nb]
+			if nb_data["fluid_id"] != unifying:
+				continue
+			contributors.append({"kind": "pipe", "ref": nb, "amount": float(nb_data["amount"])})
+			total += float(nb_data["amount"])
+		else:
+			# Empty cell — still counts as a contributor (its amount
+			# is 0) so the junction's overflow can flow into it.
+			contributors.append({"kind": "pipe_empty", "ref": nb, "amount": 0.0})
+	if contributors.is_empty() or total <= 0.0:
+		state[fluid_key] = unifying
+		state[amount_key] = j_amount
+		return
+	var avg: float = total / float(contributors.size())
+	# Push the averaged amount back to every contributor.
+	for c in contributors:
+		match c["kind"]:
+			"junction":
+				state[amount_key] = avg
+				state[fluid_key] = unifying
+			"pipe":
+				pipe_contents[c["ref"]]["amount"] = avg
+			"pipe_empty":
+				if avg > 0.0001:
+					pipe_contents[c["ref"]] = {
+						"fluid_id": unifying,
+						"amount": avg,
+					}
+
+
 func _find_pipe_network(start: Vector2i) -> Array[Vector2i]:
 	var network: Array[Vector2i] = []
 	var queue := [start]
 	var seen := {start: true}
 	var start_faction: int = main.get_building_faction(start)
+	var power_sys = _power_sys_ref()
 
 	while queue.size() > 0:
 		var pos: Vector2i = queue.pop_front()
@@ -3074,6 +3490,15 @@ func _find_pipe_network(start: Vector2i) -> Array[Vector2i]:
 			var neighbor: Vector2i = pos + DIR_VECTORS[dir]
 			if seen.has(neighbor) or not _is_pipe_cell(neighbor):
 				continue
+			# Junctions are explicitly NOT part of any pipe network —
+			# the flood-fill stops at them, and their per-axis state
+			# bridges fluid through them in `_tick_pipe_junctions`. This
+			# is what enforces "cross without mixing": a vertical
+			# network ends at a junction's V side and the matching S
+			# network is its own thing; they exchange fluid only via
+			# the junction's V channel.
+			if _is_junction_cell(neighbor):
+				continue
 			# Don't cross into pipes that aren't finished building / are being
 			# deconstructed / are derelict — fluid can't flow through them.
 			if main.has_method("is_building_inactive") and main.is_building_inactive(neighbor):
@@ -3081,6 +3506,28 @@ func _find_pipe_network(start: Vector2i) -> Array[Vector2i]:
 			if main.get_building_faction(neighbor) == start_faction:
 				seen[neighbor] = true
 				queue.append(neighbor)
+
+		# Bridge link: if this cell is a fluid bridge, also pull in its
+		# linked partner(s) so fluid equalizes across the bridge. Without
+		# this, a linked pair of pipe_bridges acts like two disjoint
+		# networks and no fluid ever crosses the link.
+		if power_sys != null and _is_bridge_cell(pos):
+			for pair in power_sys.linked_pairs:
+				var partner: Vector2i
+				if pair[0] == pos:
+					partner = pair[1]
+				elif pair[1] == pos:
+					partner = pair[0]
+				else:
+					continue
+				if seen.has(partner) or not _is_pipe_cell(partner):
+					continue
+				if main.has_method("is_building_inactive") and main.is_building_inactive(partner):
+					continue
+				if main.get_building_faction(partner) != start_faction:
+					continue
+				seen[partner] = true
+				queue.append(partner)
 
 	return network
 
@@ -3306,13 +3753,20 @@ func _update_storage_unloading(_delta: float) -> void:
 		# conveyor placed against a stocked container would suck items
 		# straight onto the belt — making the belt unloader pointless
 		# and turning storage into a passive output station.
-		if data and data.tags.has("storage"):
+		# Exception: landing pads carry the "storage" tag because they
+		# stockpile incoming pod cargo, but they're meant to passively
+		# feed conveyors / pipes — they're the destination of the
+		# logistics chain, not a manual buffer.
+		if data and data.tags.has("storage") and not data.tags.has("landing_pad"):
 			continue
 		var grid_size: Vector2i = data.grid_size if data else Vector2i(1, 1)
 		var rot: int = main.building_rotation.get(origin, 0)
 		# Omnidirectional blocks push from all four edges regardless of rotation.
+		# Landing pads also use the full ring — they don't have a real
+		# "input face" (cargo arrives from the sky), so the player
+		# should be able to attach belts on any side.
 		var output_cells: Array
-		if data and data.tags.has("omnidirectional"):
+		if data and (data.tags.has("omnidirectional") or data.tags.has("landing_pad")):
 			output_cells = _get_full_ring(origin, grid_size)
 		else:
 			output_cells = _get_all_output_cells(origin, grid_size, rot)
@@ -3371,7 +3825,7 @@ func _update_storage_unloading(_delta: float) -> void:
 				if _is_cross_faction(origin, neighbor):
 					continue
 				if _is_pipe_cell(neighbor):
-					if _add_fluid_to_pipe(neighbor, fluid_id, PIPE_PUSH_AMOUNT):
+					if _add_fluid_to_pipe(neighbor, fluid_id, PIPE_PUSH_AMOUNT, dir):
 						storage["fluids"][fluid_id] = float(storage["fluids"][fluid_id]) - 1.0
 						if float(storage["fluids"][fluid_id]) <= 0:
 							fluids_to_remove[fluid_id] = true
@@ -5598,7 +6052,28 @@ func _draw_items() -> void:
 	var building_sys = _building_sys_ref()
 	var _ss_items = _sector_script_ref()
 
+	# Viewport culling: items off-screen contribute nothing visible but
+	# cost full draw work otherwise. On a large map with thousands of
+	# items moving across belts this was the dominant per-frame script
+	# cost — culling drops it to "items on screen" instead of "items on
+	# the entire map".
+	var camera := get_viewport().get_camera_2d()
+	var vp_grid_min: Vector2i = Vector2i(-1, -1)
+	var vp_grid_max: Vector2i = Vector2i(-1, -1)
+	if camera != null:
+		var cam_center: Vector2 = camera.get_screen_center_position()
+		var viewport_size: Vector2 = get_viewport_rect().size
+		var cam_zoom: Vector2 = camera.zoom if camera.zoom != Vector2.ZERO else Vector2.ONE
+		var half_view: Vector2 = viewport_size / (2.0 * cam_zoom)
+		vp_grid_min = main.world_to_grid(cam_center - half_view) - Vector2i(1, 1)
+		vp_grid_max = main.world_to_grid(cam_center + half_view) + Vector2i(1, 1)
+
 	for grid_pos in conveyor_items:
+		if vp_grid_min != Vector2i(-1, -1):
+			if grid_pos.x < vp_grid_min.x or grid_pos.x > vp_grid_max.x:
+				continue
+			if grid_pos.y < vp_grid_min.y or grid_pos.y > vp_grid_max.y:
+				continue
 		if _ss_items and _ss_items.is_tile_hidden(grid_pos):
 			continue
 		# Bridges are visually "underground" — items inside one are
@@ -5731,7 +6206,27 @@ func _draw_payloads() -> void:
 	var _ss_payload = _sector_script_ref()
 	var gs: float = main.GRID_SIZE
 
+	# Same viewport culling as `_draw_items` — payloads off-screen
+	# contribute nothing visible but cost full draw work otherwise.
+	var camera := get_viewport().get_camera_2d()
+	var vp_grid_min: Vector2i = Vector2i(-1, -1)
+	var vp_grid_max: Vector2i = Vector2i(-1, -1)
+	if camera != null:
+		var cam_center: Vector2 = camera.get_screen_center_position()
+		var viewport_size: Vector2 = get_viewport_rect().size
+		var cam_zoom: Vector2 = camera.zoom if camera.zoom != Vector2.ZERO else Vector2.ONE
+		var half_view: Vector2 = viewport_size / (2.0 * cam_zoom)
+		# Payloads are bigger than items, so pad the culling box more
+		# generously to avoid clipping at the screen edge.
+		vp_grid_min = main.world_to_grid(cam_center - half_view) - Vector2i(3, 3)
+		vp_grid_max = main.world_to_grid(cam_center + half_view) + Vector2i(3, 3)
+
 	for grid_pos in payload_items:
+		if vp_grid_min != Vector2i(-1, -1):
+			if grid_pos.x < vp_grid_min.x or grid_pos.x > vp_grid_max.x:
+				continue
+			if grid_pos.y < vp_grid_min.y or grid_pos.y > vp_grid_max.y:
+				continue
 		if _ss_payload and _ss_payload.is_tile_hidden(grid_pos):
 			continue
 		var entry = payload_items[grid_pos]

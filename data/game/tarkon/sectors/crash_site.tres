@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="SectorData" format=3]
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://dlk2bc082nxd6"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
 
@@ -6,7 +6,9 @@
 script = ExtResource("1")
 id = &"crash_site"
 display_name = "Crash Site"
-description = "Wreckage of a long-dead vessel. Unknown salvage rumored to lie in the debris field."
+description = "<Optional Sector>
+While you were on Ferum Ridge, our sensors detected some strange seismic activity here; From our closer scans it appears to be a metorite that crash-landed.
+ Our sensors also detected a ferox scout group heading in this direction, so be careful."
 planet_id = &"Tarkon"
 hex_q = 2
 hex_r = -1
@@ -14,5 +16,4 @@ available_resources = PackedStringArray("mat_copper", "mat_iron")
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray()
 required_sectors = PackedStringArray("ferrum_ridge")
-map_path = ""
 tags = PackedStringArray("campaign", "sector")

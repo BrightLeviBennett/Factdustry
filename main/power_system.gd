@@ -880,15 +880,20 @@ func _get_effective_elec_gen(grid_pos: Vector2i, data: BlockData) -> float:
 		var nuc_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 		if not nuc.is_reactor_active(nuc_anchor):
 			return 0.0
-	# Sun-deprived sectors (Nightfall Depths, Dark Valley) starve solar
-	# AND vent-driven generators of their full output — vent turbines
-	# only manage 40 power instead of the usual 120 there. Lore: the
-	# whole side of the planet sees almost no sun, so the vents run
-	# colder / weaker. Other generator types are unaffected.
-	if data.id == &"vent_turbine":
-		var sid: StringName = SaveManager.active_sector_id
-		if sid == &"nightfall_depths" or sid == &"dark_valley":
+	# Sun-deprived sectors (Nightfall Depths, Dark Valley):
+	#   - vent turbines manage 40 power instead of the usual 120
+	#     (the vents run colder on the dark side of the planet),
+	#   - solar generators of every size output ZERO — there's
+	#     effectively no sunlight reaching the surface.
+	# Other generator types (combustion, nuclear, etc.) are unaffected.
+	var sun_starved: bool = (SaveManager.active_sector_id == &"nightfall_depths"
+		or SaveManager.active_sector_id == &"dark_valley")
+	if sun_starved:
+		if data.id == &"vent_turbine":
 			return 40.0
+		if data.id == &"solar_panel" or data.id == &"large_solar_panel" \
+				or data.id == &"solar_array":
+			return 0.0
 	return data.electrical_power_gen
 
 

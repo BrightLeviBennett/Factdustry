@@ -93,6 +93,13 @@ var building_origins := {}
 ## Key = Vector2i, Value = int (Faction.LUMINA or Faction.FEROX)
 ## Missing entries default to LUMINA for backward compatibility.
 var building_factions := {}
+## Maps each non-core building anchor → the core anchor it was placed
+## near (same faction). When that core dies, every block in this map
+## that points to it gets flipped to DERELICT, mirroring Mindustry's
+## "destroy the core, the base goes neutral" behaviour.
+## Populated lazily — pre-authored buildings get an entry on first
+## scan, freshly-placed ones get an entry from `_on_building_placed`.
+var building_home_core := {}
 
 ## Tracks buildings currently under construction.
 ## Key = Vector2i (anchor), Value = float (seconds elapsed since placement).
@@ -543,6 +550,21 @@ func _ready() -> void:
 	_sync_ai_shardlings()
 	building_completed.connect(_on_building_completed_for_shardlings)
 	building_destroyed.connect(_on_building_destroyed_for_shardlings)
+	# Core-loss → derelict-everything-bound-to-it. Hook both placement
+	# and destruction so freshly-built blocks register their home core
+	# and core deaths fan out to their dependents.
+	building_placed.connect(_on_building_placed_for_home_core)
+	building_destroyed.connect(_on_building_destroyed_for_home_core)
+	# Keep the overdrive-sources cache in sync without walking every
+	# placed building on every call. We invalidate cheaply when the
+	# affected block actually has the `overdrive` tag.
+	building_placed.connect(func(block_id: StringName, _gp): _invalidate_overdrive_cache_if_needed(block_id))
+	building_destroyed.connect(func(_gp): _invalidate_overdrive_cache())
+	# Anchors-only cache: any structural change marks it dirty so the
+	# next `get_building_anchors()` call rebuilds it. Used by hot draw
+	# loops to skip iterating every tile of every multi-tile block.
+	building_placed.connect(func(_id, _gp): _invalidate_anchors_cache())
+	building_destroyed.connect(func(_gp): _invalidate_anchors_cache())
 
 	# Sync resources to global pool whenever they change
 	resources_changed.connect(_on_resources_changed_sync)
@@ -680,8 +702,17 @@ func _drain_pending_pod_deliveries() -> void:
 	# the first live pad that has space. Falls back to any live pad if
 	# nothing in the routing list resolves (handles cases where the
 	# destination's pads were rebuilt with different filters mid-flight).
+	var now_t: float = Time.get_ticks_msec() / 1000.0
 	var remaining: Array = []
 	for pod in queue:
+		# Honor the pod's `arrival_at` stamp (set by LaunchpadSystem.
+		# start_launch). Same-sector launches sit in the queue for a
+		# few seconds so the launch / land animations sequence
+		# correctly; cross-sector launches stamp 0 and land on entry.
+		var arrival_at: float = float(pod.get("arrival_at", 0.0))
+		if now_t < arrival_at:
+			remaining.append(pod)
+			continue
 		var routing: Array = pod.get("routing", [])
 		var pi: Dictionary = pod.get("items", {})
 		var pf: Dictionary = pod.get("fluids", {})
@@ -711,7 +742,14 @@ func _drain_pending_pod_deliveries() -> void:
 			var pad_world: Vector2 = grid_to_world(target_anchor) + Vector2(
 				float(pdata.grid_size.x) * gs * 0.5 if pdata else gs * 0.5,
 				float(pdata.grid_size.y) * gs * 0.5 if pdata else gs * 0.5)
-			anim_n.play_pod_landing(pad_world)
+			# Match the in-pad pod preview size (min(w,h) * 0.7) so the
+			# descending pod doesn't shrink as it docks onto the pad.
+			var pod_base_sz: float = float(gs) * 0.9
+			if pdata:
+				pod_base_sz = minf(
+					float(pdata.grid_size.x) * gs,
+					float(pdata.grid_size.y) * gs) * 0.7
+			anim_n.play_pod_landing(pad_world, pod_base_sz, target_anchor)
 	# Re-queue any pods we couldn't resolve; clear the slot if everyone
 	# delivered.
 	if remaining.is_empty():
@@ -729,21 +767,60 @@ func _resolve_pod_target(routing: Array, live_anchors: Array) -> Vector2i:
 	var live_set: Dictionary = {}
 	for a in live_anchors:
 		live_set[a] = true
-	for key in routing:
-		var s := String(key)
+	# Collect every routing entry that resolves to a live pad — we want
+	# the *least-recently-delivered* of these, not just the first.
+	# Mirrors Mindustry v8's priority-swap behaviour: each successful
+	# delivery rotates the pad to the back of the queue. We use a
+	# per-anchor delivery counter (lower = served less = picked next),
+	# tie-breaking by routing-list order so the source-side priority
+	# still wins when counts are equal.
+	var sid: StringName = SaveManager.active_sector_id
+	var sector_counts: Dictionary = SaveManager.landing_pad_delivery_count.get(sid, {})
+	var best: Vector2i = Vector2i(-1, -1)
+	var best_count: int = -1
+	var best_rank: int = -1
+	for i in range(routing.size()):
+		var s := String(routing[i])
 		var parts: PackedStringArray = s.split(",")
 		if parts.size() != 2:
 			continue
 		var v := Vector2i(int(parts[0]), int(parts[1]))
-		if live_set.has(v):
-			return v
-	# Fallback: if the saved routing list went completely stale, deposit
-	# into the first live pad anyway so the cargo isn't permanently
-	# orphaned. The match was already validated source-side at launch
-	# time; this just keeps the player's cargo from disappearing.
-	if live_anchors.size() > 0:
-		return live_anchors[0]
-	return Vector2i(-1, -1)
+		if not live_set.has(v):
+			continue
+		var c: int = int(sector_counts.get(s, 0))
+		# Pick the lowest count; on tie, earliest in routing order
+		# (lowest rank). Initialised best_count=-1 forces first-match
+		# to win unconditionally on the first eligible entry.
+		if best_count == -1 \
+				or c < best_count \
+				or (c == best_count and i < best_rank):
+			best = v
+			best_count = c
+			best_rank = i
+	if best != Vector2i(-1, -1):
+		# Bump the chosen pad's counter so its peers get the next pod.
+		var key: String = "%d,%d" % [best.x, best.y]
+		sector_counts[key] = int(sector_counts.get(key, 0)) + 1
+		SaveManager.landing_pad_delivery_count[sid] = sector_counts
+		return best
+	# Fallback: routing went completely stale (every entry references
+	# an anchor that no longer exists). Deliver to whichever live pad
+	# has the fewest deliveries so the cargo isn't permanently orphaned
+	# AND ties keep rotating fairly.
+	if live_anchors.is_empty():
+		return Vector2i(-1, -1)
+	var fb_best: Vector2i = live_anchors[0]
+	var fb_count: int = int(sector_counts.get("%d,%d" % [fb_best.x, fb_best.y], 0))
+	for a in live_anchors:
+		var k: String = "%d,%d" % [a.x, a.y]
+		var c2: int = int(sector_counts.get(k, 0))
+		if c2 < fb_count:
+			fb_best = a
+			fb_count = c2
+	var fb_key: String = "%d,%d" % [fb_best.x, fb_best.y]
+	sector_counts[fb_key] = int(sector_counts.get(fb_key, 0)) + 1
+	SaveManager.landing_pad_delivery_count[sid] = sector_counts
+	return fb_best
 
 
 ## Populates the _hud / _tech_ui / etc. cache. Call after the main scene tree
@@ -1059,6 +1136,84 @@ func get_lumina_core_anchors() -> Array:
 ##
 ## The boost multiplier is `data.overdrive_multiplier` directly (so an
 ## entry of 2.25 = 225 % of base, i.e. "+125 % additional efficiency").
+## Cached list of active overdrive sources so `get_overdrive_multiplier`
+## doesn't have to walk every placed building per call (was a ~9 ms
+## per-frame chokepoint on big maps). Each entry:
+##   { "world": Vector2, "radius": float, "mult": float, "anchor": Vector2i }
+## Built lazily and invalidated whenever an overdrive-tagged block is
+## placed or destroyed (see `_invalidate_overdrive_cache_if_needed`).
+var _overdrive_sources_cache: Array = []
+var _overdrive_cache_dirty: bool = true
+
+## Set of building ANCHOR positions, kept in sync with placed_buildings
+## so anyone iterating "every building" doesn't have to walk every
+## tile of every multi-tile block + filter. Roughly 1/N the iterations
+## where N is average block footprint. Maintained by the building
+## placed/destroyed signal handlers below.
+var _building_anchors_cache: Dictionary = {}
+var _anchors_cache_dirty: bool = true
+
+
+func _invalidate_anchors_cache() -> void:
+	_anchors_cache_dirty = true
+
+
+## Returns a Dictionary keyed by every active building anchor (the
+## value is just `true`). Iterate with `for anchor in dict.keys()`
+## or `for anchor in dict:`. Rebuilds lazily — cheap when stable.
+func get_building_anchors() -> Dictionary:
+	if _anchors_cache_dirty:
+		_building_anchors_cache.clear()
+		for cell in placed_buildings:
+			var origin: Vector2i = building_origins.get(cell, cell)
+			if not _building_anchors_cache.has(origin):
+				_building_anchors_cache[origin] = true
+		_anchors_cache_dirty = false
+	return _building_anchors_cache
+
+
+func _invalidate_overdrive_cache() -> void:
+	_overdrive_cache_dirty = true
+
+
+## Cheap precheck: only flip the dirty flag when the affected block is
+## actually overdrive-tagged. Avoids rebuilding for placements of
+## generic walls / belts / drills.
+func _invalidate_overdrive_cache_if_needed(block_id: StringName) -> void:
+	if block_id == &"":
+		_overdrive_cache_dirty = true
+		return
+	var d = Registry.get_block(block_id)
+	if d == null:
+		_overdrive_cache_dirty = true
+		return
+	if d.tags.has("overdrive"):
+		_overdrive_cache_dirty = true
+
+
+func _rebuild_overdrive_cache() -> void:
+	_overdrive_sources_cache.clear()
+	for od_pos in placed_buildings:
+		if building_origins.get(od_pos, od_pos) != od_pos:
+			continue
+		var od_data = Registry.get_block(placed_buildings[od_pos])
+		if od_data == null or not od_data.tags.has("overdrive"):
+			continue
+		if od_data.overdrive_radius <= 0.0 or od_data.overdrive_multiplier <= 1.0:
+			continue
+		if get_building_faction(od_pos) != Faction.LUMINA:
+			continue
+		var od_world: Vector2 = grid_to_world(od_pos) \
+			+ Vector2(od_data.grid_size.x * GRID_SIZE * 0.5, od_data.grid_size.y * GRID_SIZE * 0.5)
+		_overdrive_sources_cache.append({
+			"world": od_world,
+			"radius": od_data.overdrive_radius,
+			"mult": od_data.overdrive_multiplier,
+			"anchor": od_pos,
+		})
+	_overdrive_cache_dirty = false
+
+
 func get_overdrive_multiplier(grid_pos: Vector2i) -> float:
 	var data = Registry.get_block(placed_buildings.get(grid_pos, &""))
 	if data == null:
@@ -1082,27 +1237,27 @@ func get_overdrive_multiplier(grid_pos: Vector2i) -> float:
 		eligible = false
 	if not eligible:
 		return 1.0
+	if _overdrive_cache_dirty:
+		_rebuild_overdrive_cache()
+	# Short-circuit when no overdrivers exist on the map at all — the
+	# common case for early-game and most sectors.
+	if _overdrive_sources_cache.is_empty():
+		return 1.0
 	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
 	var anchor_world: Vector2 = grid_to_world(anchor) \
 		+ Vector2(data.grid_size.x * GRID_SIZE * 0.5, data.grid_size.y * GRID_SIZE * 0.5)
 	var best: float = 1.0
-	for od_pos in placed_buildings:
-		if building_origins.get(od_pos, od_pos) != od_pos:
-			continue
-		var od_data = Registry.get_block(placed_buildings[od_pos])
-		if od_data == null or not od_data.tags.has("overdrive"):
-			continue
-		if od_data.overdrive_radius <= 0.0 or od_data.overdrive_multiplier <= 1.0:
-			continue
-		if get_building_faction(od_pos) != Faction.LUMINA:
-			continue
+	var gs_f: float = float(GRID_SIZE)
+	for entry in _overdrive_sources_cache:
+		var od_pos: Vector2i = entry["anchor"]
+		# Inactive check is per-call (cache stores the source's geometry,
+		# not its power state) so a brownout actually drops the boost.
 		if is_building_inactive(od_pos):
 			continue
-		var od_world: Vector2 = grid_to_world(od_pos) \
-			+ Vector2(od_data.grid_size.x * GRID_SIZE * 0.5, od_data.grid_size.y * GRID_SIZE * 0.5)
-		var d: float = anchor_world.distance_to(od_world) / float(GRID_SIZE)
-		if d <= od_data.overdrive_radius and od_data.overdrive_multiplier > best:
-			best = od_data.overdrive_multiplier
+		var d: float = anchor_world.distance_to(entry["world"]) / gs_f
+		var entry_mult: float = float(entry["mult"])
+		if d <= float(entry["radius"]) and entry_mult > best:
+			best = entry_mult
 	return best
 
 
@@ -1260,6 +1415,15 @@ func is_building_inactive(grid_pos: Vector2i) -> bool:
 	var la = get_node_or_null("LaunchAnimation")
 	if la and la.has_method("is_block_hidden") and la.is_block_hidden(anchor_check):
 		return true
+	# Blocks shut off by a Logistical Dispatcher are reported as inactive
+	# so every existing tick path (factories, drills, conveyors, turrets,
+	# cable nodes / towers, etc.) inherits the "stopped working" effect
+	# without each of them needing to know about the dispatcher feature.
+	# The whitelist of WHAT can be disabled lives on the control system —
+	# this check just consults the resulting set.
+	var lc = get_node_or_null("LogisticControlSystem")
+	if lc and lc.has_method("is_block_disabled") and lc.is_block_disabled(anchor_check):
+		return true
 	return false
 
 
@@ -1281,6 +1445,12 @@ func is_belt_conveyance_blocked(grid_pos: Vector2i) -> bool:
 		return true
 	var la = get_node_or_null("LaunchAnimation")
 	if la and la.has_method("is_block_hidden") and la.is_block_hidden(anchor_check):
+		return true
+	# Dispatcher-disabled belts freeze items on them the same way a
+	# deconstructing belt does — consistent with the rest of the
+	# logistic-control effect being applied via is_building_inactive.
+	var lc = get_node_or_null("LogisticControlSystem")
+	if lc and lc.has_method("is_block_disabled") and lc.is_block_disabled(anchor_check):
 		return true
 	return false
 
@@ -1866,26 +2036,12 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 				# 3 s auto-expire — the HUD ticks it down and clears the
 				# banner automatically once damage stops landing.
 				hud_a.push_alert(&"core_damage", "<Core Is Taking Damage>", 3.0)
-	# Polish: nudge the camera so the player can feel damage land.
-	# (The white hit-flash overlay was removed — it tinted enemy
-	# blocks gray when they were under sustained fire and read as a
-	# weird persistent rectangle. Shake alone gives enough feedback.)
-	var fb = get_node_or_null("FeedbackSystem")
-	if fb:
-		var bldg_data = Registry.get_block(placed_buildings.get(anchor, &""))
-		var max_hp: float = bldg_data.max_health if bldg_data else 100.0
-		fb.add_shake(clampf(amount / max_hp * 8.0, 0.0, 6.0))
+	# Camera shake on damage is intentionally disabled — even modest
+	# per-hit shake adds up during sustained turret fire and reads as
+	# motion sickness. Cores and reactors still trigger their explosion
+	# animation (which has its own shake) via particle_overlay /
+	# nuclear_reactor_system on destruction.
 	if building_health[anchor] <= 0:
-		# Destruction shake reserved for enemy (FEROX) cores only —
-		# every other block / unit going down emits sound via the
-		# destroy signal but doesn't rattle the camera. Toppling an
-		# enemy core is a tide-turning moment so it gets a small
-		# punch of feedback.
-		if fb:
-			var ddata = Registry.get_block(placed_buildings.get(anchor, &""))
-			var ddata_faction: int = get_building_faction(anchor)
-			if ddata and ddata.tags.has("core") and ddata_faction == Faction.FEROX:
-				fb.add_shake(4.0)
 		destroy_building(anchor, true)
 
 
@@ -2750,6 +2906,14 @@ func convert_derelict_in_rect(from: Vector2i, to: Vector2i) -> void:
 					if not seen_anchors.has(anchor):
 						seen_anchors[anchor] = true
 						building_sys.register_conversion_flash(anchor)
+						# Also fire the build-pulse outline so converting
+						# a derelict block looks identical to finishing a
+						# fresh construction.
+						var po = get_node_or_null("ParticleOverlay")
+						if po and po.has_method("spawn_build_pulse"):
+							var bdata = Registry.get_block(placed_buildings.get(anchor, &""))
+							if bdata:
+								po.spawn_build_pulse(anchor, bdata.grid_size)
 
 
 ## Queue destroyed player buildings in a rect for rebuild.
@@ -2932,10 +3096,139 @@ func _on_building_completed_for_shardlings(block_id: StringName, anchor: Vector2
 		_spawn_ferox_shardling_for_core(anchor)
 
 
-func _on_building_destroyed_for_shardlings(anchor: Vector2i) -> void:
-	# When a core is removed we don't know its block id any more (the
-	# entry has already been cleared from placed_buildings by this
-	# point in the signal flow), so just attempt both despawns — the
-	# helpers are no-ops when no matching child exists.
+func _on_building_destroyed_for_shardlings(grid_pos: Vector2i) -> void:
+	# `building_destroyed` fires with the destroyed grid_pos which may
+	# be any tile of a multi-tile core, not necessarily the anchor. We
+	# resolve to the anchor via building_origins (signal fires BEFORE
+	# erasure so the lookup still works). Falls back to grid_pos itself
+	# for single-tile blocks.
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
 	_despawn_ai_shardling_for_core(anchor)
 	_despawn_ferox_shardling_for_core(anchor)
+
+
+# =========================
+# HOME CORE / DERELICT-ON-CORE-LOSS
+# =========================
+# Mindustry-style ownership: each built block remembers the core it
+# was placed near. When that core dies, every block that points to it
+# is flipped to DERELICT — the base "goes feral" instead of staying
+# operational forever.
+
+## Returns the anchor of the nearest active core of `faction` to
+## `grid_pos`. Returns Vector2i(-1,-1) when no such core exists.
+func _find_nearest_core_of_faction(grid_pos: Vector2i, faction: int) -> Vector2i:
+	var best := Vector2i(-1, -1)
+	var best_d2: float = INF
+	for cell in placed_buildings:
+		if building_origins.get(cell, cell) != cell:
+			continue
+		if get_building_faction(cell) != faction:
+			continue
+		var d = Registry.get_block(placed_buildings[cell])
+		if d == null or not d.tags.has("core"):
+			continue
+		var dx = float(cell.x - grid_pos.x)
+		var dy = float(cell.y - grid_pos.y)
+		var d2: float = dx * dx + dy * dy
+		if d2 < best_d2:
+			best_d2 = d2
+			best = cell
+	return best
+
+
+## Records the home-core for a freshly-placed (or freshly-completed)
+## building. Cores themselves are skipped — they ARE the home, not
+## bound to one. Buildings of factions without a core in the sector
+## are left unassociated (they survive every core's death because
+## there's nothing to bind to).
+func _on_building_placed_for_home_core(block_id: StringName, grid_pos: Vector2i) -> void:
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return
+	# A core never gets a home — it IS one.
+	if data.tags.has("core"):
+		return
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	if anchor != grid_pos:
+		return  # only record on the anchor tile
+	var faction: int = get_building_faction(anchor)
+	if faction == Faction.DERELICT:
+		return  # derelict blocks have no master
+	var home: Vector2i = _find_nearest_core_of_faction(anchor, faction)
+	if home != Vector2i(-1, -1):
+		building_home_core[anchor] = home
+
+
+## When a core dies, every building that nominated it as their home
+## flips to DERELICT. We also clear those entries from `building_home_core`
+## so a later sweep doesn't reconvert. Non-core building destructions
+## just drop the home entry.
+func _on_building_destroyed_for_home_core(grid_pos: Vector2i) -> void:
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	# Was the destroyed building a core? Signal fires BEFORE erasure
+	# so the lookup still resolves.
+	var was_core: bool = false
+	if placed_buildings.has(anchor):
+		var d = Registry.get_block(placed_buildings[anchor])
+		if d != null and d.tags.has("core"):
+			was_core = true
+	if not was_core:
+		# Generic block death — just drop its home entry.
+		building_home_core.erase(anchor)
+		return
+	# Core death: collect every building that referenced this core,
+	# plus any building of the same faction in the sector that never
+	# got an explicit home entry (pre-authored map blocks etc.) and is
+	# closest to THIS core. They all go derelict together.
+	var core_faction: int = get_building_faction(anchor)
+	var orphans: Array[Vector2i] = []
+	# Pass 1: explicit home pointers.
+	for k in building_home_core.keys():
+		if Vector2i(building_home_core[k]) == anchor:
+			orphans.append(k)
+	# Pass 2: backfill — any same-faction building in placed_buildings
+	# that doesn't have a home entry yet and is closest to this core.
+	# We skip cores (other surviving cores keep their own bases).
+	var seen: Dictionary = {}
+	for o in orphans:
+		seen[o] = true
+	for cell in placed_buildings:
+		var cell_anchor: Vector2i = building_origins.get(cell, cell)
+		if cell_anchor != cell or seen.has(cell_anchor):
+			continue
+		if cell_anchor == anchor:
+			continue   # the destroyed core itself
+		if get_building_faction(cell_anchor) != core_faction:
+			continue
+		var dd = Registry.get_block(placed_buildings[cell_anchor])
+		if dd == null or dd.tags.has("core"):
+			continue
+		if building_home_core.has(cell_anchor):
+			continue   # already bound to a (still-alive) core
+		# Closest core to this orphan in its own faction. If it's the
+		# core that just died, the block belonged to it.
+		var nearest: Vector2i = _find_nearest_core_of_faction(cell_anchor, core_faction)
+		if nearest == Vector2i(-1, -1):
+			# No surviving core in this faction — sweep everything.
+			orphans.append(cell_anchor)
+			seen[cell_anchor] = true
+		# Otherwise the block has a different (still-alive) home; skip.
+	# Apply: flip every orphan's faction to DERELICT and drop the home
+	# entry. Per-tile flip covers multi-tile buildings via building_origins.
+	for orphan in orphans:
+		_convert_anchor_to_derelict(orphan)
+		building_home_core.erase(orphan)
+
+
+func _convert_anchor_to_derelict(anchor: Vector2i) -> void:
+	if not placed_buildings.has(anchor):
+		return
+	var bdata = Registry.get_block(placed_buildings[anchor])
+	if bdata == null:
+		return
+	for x in range(bdata.grid_size.x):
+		for y in range(bdata.grid_size.y):
+			var p: Vector2i = anchor + Vector2i(x, y)
+			if building_factions.has(p):
+				building_factions[p] = Faction.DERELICT

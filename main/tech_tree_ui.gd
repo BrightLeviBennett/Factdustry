@@ -13,6 +13,10 @@ extends CanvasLayer
 var main: Node2D
 var is_open := false
 var hovered_node_id: StringName = &""
+# Set true while the cursor is physically inside `tooltip_panel`.
+# Used to keep the tooltip open even after the cursor leaves the
+# tree node, so the "i" info button is actually reachable.
+var _mouse_over_tooltip: bool = false
 
 # Shared lock texture rendered over LOCKED nodes (replaces the emoji).
 var _lock_icon: Texture2D = preload("res://textures/UI/LockIcon.png")
@@ -191,11 +195,20 @@ func _build_ui() -> void:
 	tooltip_panel = PanelContainer.new()
 	tooltip_panel.add_theme_stylebox_override("panel", _make_style(Color(0.06, 0.08, 0.1, 0.97), 8))
 	tooltip_panel.visible = false
-	tooltip_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# STOP (not IGNORE) so the embedded "i" button can be clicked.
+	# `_mouse_over_tooltip` + the hover gating below keeps the panel
+	# visible while the cursor is inside it instead of snapping shut
+	# the moment the cursor leaves the tree node.
+	tooltip_panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	tooltip_panel.z_index = 100
+	tooltip_panel.mouse_entered.connect(func():
+		_mouse_over_tooltip = true)
+	tooltip_panel.mouse_exited.connect(func():
+		_mouse_over_tooltip = false
+		_maybe_hide_tooltip())
 	add_child(tooltip_panel)
 	tooltip_vbox = VBoxContainer.new()
-	tooltip_vbox.add_theme_constant_override("separation", 4)
+	tooltip_vbox.add_theme_constant_override("separation", 6)
 	tooltip_panel.add_child(tooltip_vbox)
 	
 	_build_resource_panel()
@@ -326,105 +339,6 @@ func _draw_same_row_connection(pp: Vector2, cp: Vector2, _nw: float, nh: float,
 		tree_canvas.draw_line(Vector2(cp.x, mid_y), Vector2(cp.x, cp.y - nh / 2.0), lc, 2.0)
 
 
-## Picks a horizontal-segment Y for an orthogonal connection line that
-## avoids passing under non-target node rectangles when possible.
-## Computes the empty vertical gaps along the segment's x range and picks
-## the gap whose center is closest to the geometric midpoint.
-func _pick_clear_mid_y(pp: Vector2, cp: Vector2, _nw: float, nh: float,
-		child_id: StringName, parent_id: StringName, rects: Array) -> float:
-	var default_mid: float = (pp.y + cp.y) / 2.0
-	# Horizontal extents of the segment, padded slightly to catch grazes.
-	var x_lo: float = minf(pp.x, cp.x) - 1.0
-	var x_hi: float = maxf(pp.x, cp.x) + 1.0
-
-	# Corridor: keep mid_y strictly between the two endpoints so the vertical
-	# stubs still go the right direction.
-	var top_y: float = minf(pp.y, cp.y) + nh / 2.0 + 2.0
-	var bot_y: float = maxf(pp.y, cp.y) - nh / 2.0 - 2.0
-	if top_y >= bot_y:
-		return default_mid
-
-	# Y ranges occupied by the parent's and child's own rows. Nodes in those
-	# rows (siblings) are not real obstacles because the horizontal segment
-	# runs in the corridor *between* rows, not through either endpoint row.
-	var p_row_top: float = pp.y - nh / 2.0
-	var p_row_bot: float = pp.y + nh / 2.0
-	var c_row_top: float = cp.y - nh / 2.0
-	var c_row_bot: float = cp.y + nh / 2.0
-
-	# Collect vertical [top, bottom] intervals of node rects whose x overlaps
-	# the horizontal segment, excluding the endpoints and any node sitting in
-	# the same row as either endpoint.
-	var pad: float = 2.0
-	var intervals: Array = []
-	for entry in rects:
-		var rid: StringName = entry["id"]
-		if rid == child_id or rid == parent_id:
-			continue
-		var r: Rect2 = entry["rect"]
-		if r.position.x + r.size.x < x_lo or r.position.x > x_hi:
-			continue
-		var r_top: float = r.position.y
-		var r_bot: float = r.position.y + r.size.y
-		# Skip nodes that share the parent or child row.
-		if r_bot >= p_row_top and r_top <= p_row_bot:
-			continue
-		if r_bot >= c_row_top and r_top <= c_row_bot:
-			continue
-		intervals.append([r_top - pad, r_bot + pad])
-
-	if intervals.is_empty():
-		return default_mid
-
-	# Sort by top edge and merge overlapping intervals.
-	intervals.sort_custom(func(a, b): return a[0] < b[0])
-	var merged: Array = []
-	for itv in intervals:
-		if merged.is_empty() or itv[0] > merged[-1][1]:
-			merged.append([itv[0], itv[1]])
-		else:
-			merged[-1][1] = maxf(merged[-1][1], itv[1])
-
-	# Find clear gaps inside the corridor.
-	var gaps: Array = []
-	var cur: float = top_y
-	for m in merged:
-		if m[1] < top_y:
-			continue
-		if m[0] > bot_y:
-			break
-		if m[0] > cur:
-			gaps.append([cur, minf(m[0], bot_y)])
-		cur = maxf(cur, m[1])
-		if cur >= bot_y:
-			break
-	if cur < bot_y:
-		gaps.append([cur, bot_y])
-
-	if gaps.is_empty():
-		return default_mid
-
-	# Prefer the gap whose center is closest to the geometric midpoint, but
-	# require the gap to be at least a few pixels tall so the line has breathing room.
-	var min_gap_height: float = 4.0
-	var best_y: float = default_mid
-	var best_dist: float = INF
-	var found: bool = false
-	for g in gaps:
-		if g[1] - g[0] < min_gap_height:
-			continue
-		# Clamp the geometric midpoint into the gap, then measure distance.
-		var clamped: float = clampf(default_mid, g[0], g[1])
-		var d: float = absf(clamped - default_mid)
-		if d < best_dist:
-			best_dist = d
-			best_y = clamped
-			found = true
-	if found:
-		return best_y
-	return default_mid
-
-
 func _on_tree_draw() -> void:
 	var z = zoom_level
 	var nw = NODE_W * z
@@ -440,7 +354,24 @@ func _on_tree_draw() -> void:
 			"rect": Rect2(vp.x - nw / 2.0, vp.y - nh / 2.0, nw, nh),
 		})
 
-	# Connection lines (only between visible nodes)
+	# Connection lines (only between visible nodes). Pure port of
+	# Mindustry's ResearchDialog.View.drawChildren:
+	#
+	#   if |dy| ≈ |dx| (within 1 unit) AND distance <= node.width*3:
+	#       draw ONE straight line parent → child
+	#   else:
+	#       draw a 2-segment L (horizontal at parent.y, then vertical
+	#       at child.x)
+	#
+	# Same-row connections (`|dy| ≈ 0`) naturally fall into one of
+	# these two cases:
+	#   - Adjacent same-row → diagonal test passes (|dx-dy|≈|dx|, but
+	#     manhattan ≤ width*3 only when close), drawn as a straight
+	#     horizontal line.
+	#   - Far same-row → L-shape collapses to a straight horizontal
+	#     since the vertical segment has zero length.
+	# Either way, no U-detour — the user wants neighbours to connect
+	# with a clean straight line, not arc through the row gap.
 	for nid in node_positions:
 		if not _is_node_visible(nid): continue
 		var node = TechTree.get_node_data(nid)
@@ -451,17 +382,27 @@ func _on_tree_draw() -> void:
 			if not _is_node_visible(pid): continue
 			var pp = node_positions[pid] * z
 			var lc = line_color_researched if TechTree.is_researched(pid) else line_color
-			# Same-row connections: draw a U-shaped detour through the gap
-			# above or below the shared row instead of cutting across the row.
-			# Only trigger when the two nodes are essentially on the same y line
-			# (their rects vertically overlap by more than half the node height).
-			if absf(pp.y - cp.y) <= 1.0:
-				_draw_same_row_connection(pp, cp, nw, nh, nid, pid, visible_rects, lc)
+			var dx_abs: float = absf(cp.x - pp.x)
+			var dy_abs: float = absf(cp.y - pp.y)
+			var manhattan: float = dx_abs + dy_abs
+			# Mindustry test: roughly diagonal AND close enough that
+			# a single segment doesn't look like a long stretched
+			# slash across the tree. Same-row pairs (dy_abs ≈ 0)
+			# pass when they're horizontally close too — drawn as a
+			# clean straight horizontal line.
+			var diagonal: bool = absf(dx_abs - dy_abs) <= 1.0 \
+					and manhattan <= nw * 3.0
+			if diagonal:
+				tree_canvas.draw_line(pp, cp, lc, 2.0)
 			else:
-				var mid_y: float = _pick_clear_mid_y(pp, cp, nw, nh, nid, pid, visible_rects)
-				tree_canvas.draw_line(Vector2(pp.x, pp.y - nh / 2.0), Vector2(pp.x, mid_y), lc, 2.0)
-				tree_canvas.draw_line(Vector2(pp.x, mid_y), Vector2(cp.x, mid_y), lc, 2.0)
-				tree_canvas.draw_line(Vector2(cp.x, mid_y), Vector2(cp.x, cp.y + nh / 2.0), lc, 2.0)
+				# L-shape: parent → (child.x, parent.y) → child.
+				# For same-row pairs the vertical segment collapses
+				# to zero length — net result is just a horizontal
+				# line, no U-detour.
+				tree_canvas.draw_line(pp,
+					Vector2(cp.x, pp.y), lc, 2.0)
+				tree_canvas.draw_line(Vector2(cp.x, pp.y), cp,
+					lc, 2.0)
 
 	# Nodes (only visible ones)
 	for nid in node_positions:
@@ -532,6 +473,12 @@ func _on_tree_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		var hit = _hit_test(event.position)
 		if hit != hovered_node_id:
+			# Don't blank the tooltip just because the cursor drifted
+			# off the tree node to reach the "i" button. Check both
+			# the cached flag AND the actual cursor rect — the flag
+			# may not be updated yet if mouse_entered hasn't fired.
+			if hit == &"" and _cursor_over_tooltip():
+				return
 			hovered_node_id = hit
 			tree_canvas.queue_redraw()
 			_update_tooltip(hit, event.global_position)
@@ -545,11 +492,35 @@ func _on_tree_input(event: InputEvent) -> void:
 			var hit = _hit_test(event.position)
 			if hit != &"": _on_node_clicked(hit)
 
+
+## True if the actual mouse cursor is currently inside the tooltip
+## panel's rect. Used as a backstop for the `_mouse_over_tooltip`
+## signal-driven flag, which can lag a frame behind a fast cursor.
+func _cursor_over_tooltip() -> bool:
+	if not tooltip_panel.visible:
+		return false
+	return tooltip_panel.get_global_rect().has_point(get_viewport().get_mouse_position())
+
 func _on_tree_mouse_exit() -> void:
 	if hovered_node_id != &"":
 		hovered_node_id = &""
 		tree_canvas.queue_redraw()
-		tooltip_panel.visible = false
+		# Defer the actual hide so a cursor that's already over the
+		# tooltip (very common — the tooltip sits next to the node)
+		# doesn't snap the panel shut before it's reachable.
+		_maybe_hide_tooltip()
+
+
+## Hides the tooltip ONLY when the cursor is on neither a tree node
+## nor the tooltip itself. Called from both the tree mouse-exit hook
+## and the tooltip's own mouse_exited signal so whichever fires last
+## wins gracefully.
+func _maybe_hide_tooltip() -> void:
+	if _mouse_over_tooltip or _cursor_over_tooltip():
+		return
+	if hovered_node_id != &"":
+		return
+	tooltip_panel.visible = false
 
 
 ## Zooms in/out centered on the mouse position.
@@ -619,6 +590,29 @@ func _on_node_clicked(nid: StringName) -> void:
 # TOOLTIP
 # =========================
 
+## Returns the description string the database UI would show for this
+## tech-tree node, or "" if none is found. Tries each Registry type
+## the node could map to — block ids dominate, but sectors / items /
+## fluids / units also appear as tech-tree nodes.
+func _get_description_for(nid: StringName) -> String:
+	var b = Registry.get_block(nid)
+	if b and "description" in b and b.description != "":
+		return b.description
+	var s = Registry.get_sector(nid)
+	if s and "description" in s and s.description != "":
+		return s.description
+	var u = Registry.get_unit(nid)
+	if u and "description" in u and u.description != "":
+		return u.description
+	var item = Registry.get_item(nid)
+	if item and "description" in item and item.description != "":
+		return item.description
+	var fluid = Registry.get_fluid(nid)
+	if fluid and "description" in fluid and fluid.description != "":
+		return fluid.description
+	return ""
+
+
 func _update_tooltip(nid: StringName, screen_pos: Vector2) -> void:
 	if nid == &"":
 		tooltip_panel.visible = false
@@ -630,8 +624,42 @@ func _update_tooltip(nid: StringName, screen_pos: Vector2) -> void:
 	var state = TechTree.get_state(nid)
 	for child in tooltip_vbox.get_children(): child.queue_free()
 
-	var nl = Label.new()
-	# Locked nodes show "???" instead of their name to keep them mysterious
+	# --- HEADER ROW: [i button] [name + cost/state stacked] -----------
+	# Mindustry-style block tooltip: small square "i" button on the
+	# left opens the database entry for this node, the right side
+	# stacks the node name + (either "Researched" in yellow OR the
+	# research cost / locked deps).
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 10)
+	header.alignment = BoxContainer.ALIGNMENT_BEGIN
+	tooltip_vbox.add_child(header)
+
+	var i_btn := Button.new()
+	i_btn.text = "i"
+	i_btn.custom_minimum_size = Vector2(36, 36)
+	i_btn.add_theme_font_size_override("font_size", 20)
+	i_btn.add_theme_color_override("font_color", Color(0.55, 0.78, 0.95))
+	i_btn.add_theme_color_override("font_hover_color", Color(0.8, 0.95, 1.0))
+	i_btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var captured_nid: StringName = nid
+	# Locked nodes hide their identity, so the database link would
+	# spoil that — disable the i button until at least UNLOCKED.
+	if state == TechTree.NodeState.LOCKED:
+		i_btn.disabled = true
+	i_btn.pressed.connect(func():
+		var db_ui = get_node_or_null("/root/Main/DatabaseUI")
+		if db_ui and db_ui.has_method("show_entry_detail_only"):
+			db_ui.show_entry_detail_only(captured_nid))
+	header.add_child(i_btn)
+
+	var info_vbox := VBoxContainer.new()
+	info_vbox.add_theme_constant_override("separation", 2)
+	info_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	info_vbox.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	header.add_child(info_vbox)
+
+	# Node name (top of the right column).
+	var nl := Label.new()
 	if state == TechTree.NodeState.LOCKED:
 		nl.text = "???"
 	else:
@@ -640,11 +668,19 @@ func _update_tooltip(nid: StringName, screen_pos: Vector2) -> void:
 	match state:
 		TechTree.NodeState.LOCKED: nl.add_theme_color_override("font_color", locked_outline)
 		TechTree.NodeState.UNLOCKED: nl.add_theme_color_override("font_color", text_color)
-		TechTree.NodeState.RESEARCHED: nl.add_theme_color_override("font_color", researched_outline)
-	tooltip_vbox.add_child(nl)
+		TechTree.NodeState.RESEARCHED: nl.add_theme_color_override("font_color", text_color)
+	info_vbox.add_child(nl)
 
-	var cost = nd["research_cost"]
-	if not cost.is_empty() and state == TechTree.NodeState.UNLOCKED:
+	# State line: "Researched" (yellow) when done, otherwise the
+	# research cost list inline under the name.
+	if state == TechTree.NodeState.RESEARCHED:
+		var rs := Label.new()
+		rs.text = "Researched"
+		rs.add_theme_font_size_override("font_size", 13)
+		rs.add_theme_color_override("font_color", researched_outline)
+		info_vbox.add_child(rs)
+	elif state == TechTree.NodeState.UNLOCKED:
+		var cost = nd["research_cost"]
 		for item_id in cost:
 			var req = cost[item_id]
 			var spt = TechTree.get_spent(nid, item_id)
@@ -654,27 +690,42 @@ func _update_tooltip(nid: StringName, screen_pos: Vector2) -> void:
 			if item_data and item_data.icon:
 				var tex_rect = TextureRect.new()
 				tex_rect.texture = item_data.icon
-				tex_rect.custom_minimum_size = Vector2(12, 12)
+				tex_rect.custom_minimum_size = Vector2(14, 14)
 				tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 				tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 				hbox.add_child(tex_rect)
 			else:
 				var sw = ColorRect.new()
-				sw.custom_minimum_size = Vector2(12, 12)
+				sw.custom_minimum_size = Vector2(14, 14)
 				sw.color = item_data.color if item_data else Color.GRAY
 				hbox.add_child(sw)
 			var rn = Label.new()
 			rn.text = item_data.display_name if item_data else str(item_id)
-			rn.add_theme_font_size_override("font_size", 13)
+			rn.add_theme_font_size_override("font_size", 12)
 			rn.add_theme_color_override("font_color", dim_color)
 			rn.custom_minimum_size.x = 90
 			hbox.add_child(rn)
 			var al = Label.new()
 			al.text = "%s / %s" % [Registry.format_amount(spt), Registry.format_amount(req)]
-			al.add_theme_font_size_override("font_size", 13)
+			al.add_theme_font_size_override("font_size", 12)
 			al.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3) if spt >= req else Color(0.9, 0.5, 0.3))
 			hbox.add_child(al)
-			tooltip_vbox.add_child(hbox)
+			info_vbox.add_child(hbox)
+
+	# --- DESCRIPTION (below the header, full width) -------------------
+	# Pull from whichever Registry entry the tech-tree id corresponds
+	# to (block / item / fluid / sector / unit). Skipped for LOCKED
+	# nodes so they don't leak content.
+	if state != TechTree.NodeState.LOCKED:
+		var desc: String = _get_description_for(nid)
+		if desc != "":
+			var dl := Label.new()
+			dl.text = desc
+			dl.add_theme_font_size_override("font_size", 13)
+			dl.add_theme_color_override("font_color", text_color)
+			dl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			dl.custom_minimum_size.x = 260
+			tooltip_vbox.add_child(dl)
 
 	var deps: Array = nd.get("dependencies", [])
 	if state == TechTree.NodeState.LOCKED and not deps.is_empty():

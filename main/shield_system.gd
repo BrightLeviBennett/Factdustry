@@ -39,6 +39,13 @@ const _VANISH_SCALE := 0.05
 const _RESPAWN_SCALE := 0.05
 const _WATER_FLUID_ID := &"mat_water"
 
+# Mindustry-parity "animate shields" toggle. When TRUE, idle shields
+# get a moving wave pattern (rotating gradient + slow circumference
+# shimmer) instead of the static flat fill. Driven from the Settings
+# UI "Shield Animation" toggle, which writes both this field and the
+# `shield_animation` setting in settings.json.
+@export var animate_shields: bool = true
+
 
 # Per-anchor state. Public so combat / unit-manager can peek directly:
 #   "current_health":     float (live HP, 0..max)
@@ -63,7 +70,18 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if main == null:
 		return
-	if "world_paused" in main and main.world_paused:
+	var paused: bool = "world_paused" in main and bool(main.world_paused)
+	if not paused:
+		# Advance the shader clock only while the game is running.
+		# Pushing the new value to every active shield material here
+		# (rather than in _update_anim_visual) keeps the clock cheap
+		# even when no shield is being rebuilt this frame.
+		_shader_anim_time += delta
+		for a in _anim_visuals:
+			var spr: Sprite2D = _anim_visuals[a]
+			if spr.visible and spr.material is ShaderMaterial:
+				(spr.material as ShaderMaterial).set_shader_parameter("anim_time", _shader_anim_time)
+	if paused:
 		return
 	_tick(delta)
 	queue_redraw()
@@ -86,15 +104,14 @@ func _tick(delta: float) -> void:
 		var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
 		if data == null or data.shield_shape == "":
 			continue
+		# Skip blocks that aren't actually live yet (under construction,
+		# under deconstruction, derelict, etc.). No state entry means
+		# no HP bar in the HUD and no intercept of bullets/units. The
+		# state gets initialized only once the block is "online".
+		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+			states.erase(anchor)
+			continue
 		var state: Dictionary = states.get(anchor, {})
-		if state.is_empty():
-			state = {
-				"current_health": float(data.shield_health),
-				"is_broken": false,
-				"cooldown_remaining": 0.0,
-				"visual_scale": 1.0,
-				"target_scale": 1.0,
-			}
 		# Power gate. Idle draw is baked into the block's electrical
 		# power use; this only watches the live efficiency for tick
 		# decisions. While broken AND recharging we also stack the
@@ -102,6 +119,22 @@ func _tick(delta: float) -> void:
 		var powered: bool = true
 		if power_sys and power_sys.has_method("get_electrical_efficiency"):
 			powered = power_sys.get_electrical_efficiency(anchor) > 0.0
+		if state.is_empty():
+			# First-time init only fires when the block is BOTH built
+			# and powered — otherwise we hold off so the shield doesn't
+			# "pop into existence" before the player has finished wiring
+			# up power. Once initialized the state persists across
+			# brownouts (HP carries over) and only the visual / intercept
+			# gates respond to power.
+			if not powered:
+				continue
+			state = {
+				"current_health": float(data.shield_health),
+				"is_broken": false,
+				"cooldown_remaining": 0.0,
+				"visual_scale": _RESPAWN_SCALE,
+				"target_scale": 1.0,
+			}
 		# Stack the recharge bump while broken — drops when active.
 		if power_sys and power_sys.has_method("set_dynamic_power_use"):
 			var dyn: float = float(data.shield_recharge_power) if state["is_broken"] else 0.0
@@ -145,10 +178,11 @@ func _tick(delta: float) -> void:
 			# While broken the visual stays small / hidden.
 			state["target_scale"] = 0.0 if state["visual_scale"] <= _VANISH_SCALE else state["target_scale"]
 		else:
-			# Active. If unpowered, the shield is still up (it tracks
-			# stored charge implicitly via current_health), it just
-			# doesn't recharge from a break.
-			state["target_scale"] = 1.0
+			# Active. While unpowered the shield COLLAPSES (visual + intercept
+			# gates both clamp at < 0.5 scale, so bullets and units stop
+			# being blocked) but its stored HP carries through so it
+			# re-expands at full strength when power returns.
+			state["target_scale"] = 1.0 if powered else 0.0
 		# Drive visual scale toward its target. Skip the lerp when the
 		# scale is below the vanish threshold AND the target is also
 		# 0 so we can fully erase a broken shield's draw.
@@ -244,6 +278,112 @@ func apply_bullet_damage(anchor: Vector2i, damage: float) -> void:
 	else:
 		state["current_health"] = hp
 	states[anchor] = state
+
+
+# =========================
+# HEAL API
+# =========================
+
+## Adds `amount` HP back to a shield, clamped at the block's
+## `shield_health` max. Skips broken shields (those re-fill on their
+## own cooldown timer) and missing / non-shield blocks. Called from
+## the player drone's heal beam and from `_tick_menders`.
+func heal_shield(anchor: Vector2i, amount: float) -> void:
+	if amount <= 0.0:
+		return
+	if not states.has(anchor):
+		return
+	var state: Dictionary = states[anchor]
+	if state.get("is_broken", false):
+		return
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or data.shield_shape == "":
+		return
+	var max_hp: float = float(data.shield_health)
+	var cur: float = float(state.get("current_health", 0.0))
+	if cur >= max_hp:
+		return
+	state["current_health"] = minf(cur + amount, max_hp)
+	states[anchor] = state
+
+
+## True if `anchor` has an active (non-broken) shield whose current
+## HP is below max — i.e. it's a valid heal target. Used by the AI
+## heal-target picker so the drone autonomously locks onto damaged
+## shields the same way it locks onto damaged buildings.
+func is_shield_damaged(anchor: Vector2i) -> bool:
+	if not states.has(anchor):
+		return false
+	var state: Dictionary = states[anchor]
+	if state.get("is_broken", false):
+		return false
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or data.shield_shape == "":
+		return false
+	return float(state.get("current_health", 0.0)) < float(data.shield_health)
+
+
+## True if a shield exists at `anchor` (regardless of HP / broken
+## state). Lets the heal pipeline notice that a block CAN have a
+## shield even when the shield is currently 100 % so it can stop
+## issuing futile heal ticks once it's full.
+func has_shield(anchor: Vector2i) -> bool:
+	return states.has(anchor)
+
+
+## Returns the point on the shield's VISIBLE boundary closest to
+## `from_world`. Used by the heal beam so the laser lands on the
+## glowing barrier instead of the block's chassis when the shield is
+## what's being mended. Returns `Vector2.ZERO` if the shield is
+## broken / missing — callers should fall back to the block perimeter.
+func closest_shield_boundary_point(anchor: Vector2i, from_world: Vector2) -> Vector2:
+	if not states.has(anchor):
+		return Vector2.ZERO
+	var state: Dictionary = states[anchor]
+	if state.get("is_broken", false):
+		return Vector2.ZERO
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or data.shield_shape == "":
+		return Vector2.ZERO
+	var centre: Vector2 = _shield_centre(anchor, data)
+	var extent: Vector2 = _shield_extent_px(data, state)
+	if extent.x <= 0.0:
+		return centre
+	if data.shield_shape == "circle":
+		# Project `from_world` onto the disc of radius `extent.x` around
+		# `centre`. Inside-the-disc cursor gets the same nearest-edge
+		# treatment as the block-perimeter helper so the beam endpoint
+		# stays on the rim.
+		var to: Vector2 = from_world - centre
+		var d: float = to.length()
+		if d <= 0.0001:
+			return centre + Vector2(extent.x, 0.0)
+		return centre + to / d * extent.x
+	# Rect — work in the block's local frame.
+	var ang: float = _block_facing_angle(anchor)
+	var local: Vector2 = (from_world - centre).rotated(-ang)
+	var half_w: float = extent.x * 0.5
+	var half_h: float = extent.y * 0.5
+	var clamped := Vector2(
+		clampf(local.x, -half_w, half_w),
+		clampf(local.y, -half_h, half_h),
+	)
+	if clamped == local:
+		# Inside the rect — push out to the nearest edge.
+		var d_left: float = local.x + half_w
+		var d_right: float = half_w - local.x
+		var d_top: float = local.y + half_h
+		var d_bottom: float = half_h - local.y
+		var m: float = minf(minf(d_left, d_right), minf(d_top, d_bottom))
+		if m == d_left:
+			clamped = Vector2(-half_w, local.y)
+		elif m == d_right:
+			clamped = Vector2(half_w, local.y)
+		elif m == d_top:
+			clamped = Vector2(local.x, -half_h)
+		else:
+			clamped = Vector2(local.x, half_h)
+	return centre + clamped.rotated(ang)
 
 
 # =========================
@@ -357,8 +497,14 @@ func _segment_boundary(prev: Vector2, next: Vector2, anchor: Vector2i, data: Blo
 # =========================
 
 func _draw() -> void:
-	if states.is_empty():
-		return
+	# NB: don't early-return here when `states` is empty — the
+	# `_anim_visuals` GC at the bottom of this function is the ONLY
+	# place that frees the per-shield Sprite2D children, and bailing
+	# above would leak them when the last shield block on the map is
+	# destroyed (the shader-driven visual would stay frozen on screen
+	# with no shield underneath it). When there are zero active
+	# states the per-anchor draw loop simply iterates nothing and we
+	# proceed straight to the cleanup pass.
 	for anchor in states:
 		var state: Dictionary = states[anchor]
 		var vs: float = float(state.get("visual_scale", 0.0))
@@ -376,6 +522,15 @@ func _draw() -> void:
 		const _SHIELD_HUE := Color(1.0, 0.92, 0.25)
 		var fill: Color = Color(_SHIELD_HUE.r, _SHIELD_HUE.g, _SHIELD_HUE.b, 0.10 + 0.05 * pulse)
 		var rim: Color = Color(_SHIELD_HUE.r, _SHIELD_HUE.g, _SHIELD_HUE.b, 0.55 + 0.10 * pulse)
+		if animate_shields:
+			# Mindustry's `renderer.animateShields` path. Routed to a
+			# per-shield child Sprite2D running the ported shield.frag
+			# shader — the diagonal wavy stripe pattern + rim are done
+			# in GLSL, not approximated in _draw.
+			_ensure_anim_visual(anchor).visible = true
+			_update_anim_visual(anchor, data, state, centre, extent)
+			# Skip the static fill — the shader covers the fill area.
+			continue
 		if data.shield_shape == "circle":
 			draw_circle(centre, extent.x, fill)
 			draw_arc(centre, extent.x, 0.0, TAU, 64, rim, 2.0, true)
@@ -391,6 +546,111 @@ func _draw() -> void:
 			draw_rect(rect, fill, true)
 			draw_rect(rect, rim, false, 2.0)
 			draw_set_transform(Vector2.ZERO, 0.0)
+	# Garbage-collect any animated sprites whose shield is broken /
+	# unpowered / removed (so they don't keep rendering on top of
+	# nothing). Also hides them when the toggle is off.
+	var dead_visuals: Array = []
+	for a in _anim_visuals.keys():
+		var still_active: bool = false
+		var anchor_exists: bool = states.has(a) and main.placed_buildings.has(a)
+		if animate_shields and anchor_exists:
+			var s2: Dictionary = states[a]
+			var d2: BlockData = Registry.get_block(main.placed_buildings.get(a, &""))
+			if d2 != null and d2.shield_shape != "" \
+					and not bool(s2.get("is_broken", false)) \
+					and float(s2.get("visual_scale", 0.0)) > _VANISH_SCALE:
+				still_active = true
+		var node: Node2D = _anim_visuals[a]
+		if not still_active:
+			node.visible = false
+		# Free outright when the anchor is gone — no point hanging on
+		# to a sprite whose shield will never come back.
+		if not anchor_exists:
+			dead_visuals.append(a)
+	for a in dead_visuals:
+		var n: Node2D = _anim_visuals[a]
+		_anim_visuals.erase(a)
+		n.queue_free()
+
+
+# =========================
+# IDLE-ANIMATION VISUALS (Mindustry "animateShields")
+# =========================
+# When the `Shield Animation` setting is on we delegate the fill
+# render to a per-shield Sprite2D running a port of Mindustry's
+# `core/assets/shaders/shield.frag`. Sprite2D gives us 0..1 UVs over
+# the shield's bounding rect; the shader does its diagonal-stripe +
+# rim pattern in GLSL exactly the way Mindustry does.
+
+const _SHIELD_SHADER_PATH := "res://shaders/shield_shader.gdshader"
+# Pixels of empty padding on each side of the shield mask, inside the
+# sprite quad. Has to be ≥ the shader's WOBBLE_AMP_PX (2.0) + the rim
+# band so the breathing edge isn't sliced off at the quad boundary.
+const _SHIELD_VISUAL_PAD := 16.0
+# Pausable clock fed into every shield's shader. Advances by delta
+# each frame in `_process`, but only when the game isn't paused —
+# so the shield wobble freezes alongside the rest of the world.
+var _shader_anim_time: float = 0.0
+var _shield_shader: Shader = null
+var _white_pixel: Texture2D = null
+# anchor → Sprite2D
+var _anim_visuals: Dictionary = {}
+
+
+func _ensure_anim_visual(anchor: Vector2i) -> Sprite2D:
+	if _anim_visuals.has(anchor):
+		return _anim_visuals[anchor]
+	if _shield_shader == null:
+		_shield_shader = load(_SHIELD_SHADER_PATH)
+	if _white_pixel == null:
+		var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+		img.set_pixel(0, 0, Color(1, 1, 1, 1))
+		_white_pixel = ImageTexture.create_from_image(img)
+	var spr := Sprite2D.new()
+	spr.texture = _white_pixel
+	spr.centered = true
+	# z slightly above the static draw so the shader output sits at
+	# the same depth as if we'd drawn it ourselves. Stays under
+	# turret heads (z 60-ish on parent already).
+	spr.z_as_relative = false
+	spr.z_index = z_index
+	var mat := ShaderMaterial.new()
+	mat.shader = _shield_shader
+	spr.material = mat
+	add_child(spr)
+	_anim_visuals[anchor] = spr
+	return spr
+
+
+func _update_anim_visual(
+		anchor: Vector2i,
+		data: BlockData,
+		_state: Dictionary,
+		centre: Vector2,
+		extent: Vector2) -> void:
+	var spr: Sprite2D = _anim_visuals[anchor]
+	spr.position = centre
+	# `shield_size_px` is the actual hit area; the sprite is rendered
+	# `_SHIELD_VISUAL_PAD` larger on each side so the wobble + rim
+	# swing into that padding instead of clipping at the quad edge.
+	var shield_size: Vector2
+	if data.shield_shape == "circle":
+		shield_size = Vector2(extent.x * 2.0, extent.x * 2.0)
+		spr.rotation = 0.0
+	else:
+		shield_size = extent
+		spr.rotation = _block_facing_angle(anchor)
+	var pad := Vector2(_SHIELD_VISUAL_PAD, _SHIELD_VISUAL_PAD) * 2.0
+	var sprite_size: Vector2 = shield_size + pad
+	spr.scale = sprite_size
+	var mat: ShaderMaterial = spr.material
+	mat.set_shader_parameter("shape_type", 0 if data.shield_shape == "circle" else 1)
+	mat.set_shader_parameter("shield_size_px", shield_size)
+	mat.set_shader_parameter("sprite_size_px", sprite_size)
+	mat.set_shader_parameter("shield_color", Color(1.0, 0.88, 0.18, 1.0))
+	# Per-shield phase offset so neighbouring shields don't sweep in
+	# lock-step. Derived from anchor — stable, no RNG.
+	mat.set_shader_parameter("time_offset", float(anchor.x * 13 + anchor.y * 47) * 0.31)
 
 
 # =========================

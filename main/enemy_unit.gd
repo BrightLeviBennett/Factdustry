@@ -17,6 +17,11 @@ var max_health: float
 var move_speed: float
 var damage: float
 var attack_cooldown: float
+# See `_ready` — high-z CanvasGroup that owns the flying-unit shadow
+# composition. Built on `_ready` only for flying units (movement_layer
+# == FLYING); ground units leave both refs null and never draw a shadow.
+var _shadow_canvas: CanvasGroup = null
+var _shadow_drawer: Node2D = null
 var unit_color: Color
 var unit_size: float
 
@@ -37,7 +42,29 @@ var is_selected := false
 #         "boost": float (1.0 default; >1.0 if amplified by an affinity) }
 var active_statuses: Dictionary = {}
 var _status_tick_acc: float = 0.0
+
+# --- FOG VISIBILITY CACHE ---
+# Refreshed by `_update_fog_visibility` once every _FOG_CHECK_INTERVAL
+# seconds. Toggling `visible` (a Node2D property) is much cheaper than
+# guarding `_draw` because Godot skips the entire redraw path when
+# the node is invisible.
+var _fog_check_accum: float = 999.0   # force an initial check
+const _FOG_CHECK_INTERVAL: float = 0.15
 var is_controlled := false  # True when the player is directly controlling this unit
+
+# --- FLYING-UNIT HOVER ORBIT ---
+# Flying units that aren't currently being driven by the player drift
+# in a small circle so they read as hovering instead of pasted in
+# place. The orbit is applied as a position delta (not a render-only
+# offset) so any per-frame visual element attached to the unit —
+# health bar, shadow, projectile spawn, etc. — follows along
+# naturally. Radius is small enough not to disturb pathfinding /
+# combat.
+const _ORBIT_RADIUS: float = 5.0           # pixels
+const _ORBIT_SPEED: float = 1.4            # rad/sec
+const _ORBIT_DECAY_RATE: float = 6.0       # how fast offset settles back to 0
+var _orbit_phase: float = 0.0
+var _orbit_prev_off: Vector2 = Vector2.ZERO
 var target_unit: Variant = null  # Node2D — enemy unit targeted by player units
 
 # --- MOVE COMMAND ---
@@ -161,6 +188,14 @@ const WATER_DROWN_TIME := 8.0
 var _stuck_timer := 0.0
 var _stuck_origin := Vector2.ZERO
 var _stuck_streak: int = 0           # Consecutive stuck triggers — escalates rescue
+# Mindustry-style "blocked-this-frame" counter. Ticks up every frame
+# the move step actually fails to advance, regardless of position. A
+# unit pressed against a freshly-placed wall flatlines its position
+# but `_stuck_timer` only fires after STUCK_TIME (1.5 s). This shorter
+# counter triggers a repath in ~12 frames (~0.2 s) so the unit picks
+# a new route the instant the world changes under it.
+var _blocked_frames: int = 0
+const _BLOCKED_FRAMES_REPATH: int = 12
 var _last_repath_time: float = -10.0 # Wall-clock seconds; throttled to REPATH_COOLDOWN
 # Set while a manually-controlled unit runs `_check_wall_overlap` so the
 # rescue can still slide the unit out of a solid cell without firing a
@@ -210,6 +245,28 @@ func _is_valid_attack_target(grid_pos: Vector2i) -> bool:
 func _ready() -> void:
 	_terrain = get_node_or_null("/root/Main/TerrainSystem")
 	_combat_sys = get_node_or_null("/root/Main/CombatSystem")
+	# Flying units render with a high absolute z so their entire
+	# canvas (chassis + drop-shadow drawn on the same surface) sits
+	# above ground units (default z=0). z_as_relative=false locks
+	# the absolute value so any parent re-parenting can't pull it
+	# back down. Picked 81 — above ground units (0) and placed
+	# blocks (50), below the combat overlay (70+) and unit/HUD
+	# layers (4095+). The PREVIOUS CanvasGroup approach put the
+	# shadow on a private buffer that apparently wasn't compositing
+	# in our build; drawing on the unit's own canvas with a bumped
+	# z is the simplest reliable path.
+	if data and data.movement_layer == UnitData.MovementLayer.FLYING:
+		# Godot 4 caps z_index at 4096. Use the cap so flying units
+		# render above absolutely everything in the world layer —
+		# ground units, AI shardlings (4095), blocks, fog. Combat
+		# overlays at z=4095+ may still paint above on a tie, but
+		# the shadow is guaranteed above ground.
+		z_index = 4096
+		z_as_relative = false
+		print("[enemy_unit] flying z=4096 applied for %s" % str(data.id))
+	# Stagger each flying unit's hover-orbit so a squad doesn't bob in
+	# lockstep — the random phase makes a group look organic.
+	_orbit_phase = randf() * TAU
 	# Load stats from the UnitData resource. UnitData.move_speed is stored in
 	# tiles/sec; convert once here into pixels/sec (what _tick_movement uses).
 	if data:
@@ -319,9 +376,23 @@ func _tick_status_effects(delta: float) -> void:
 func _process(delta: float) -> void:
 	if is_dead:
 		return
+	# Fog visibility for ENEMY units is updated every few physics
+	# frames rather than every draw. Toggling Node2D.visible lets
+	# Godot skip the whole queued-redraw path while the unit is
+	# under fog. PLAYER units are always shown.
+	_fog_check_accum += delta
+	if _fog_check_accum >= _FOG_CHECK_INTERVAL:
+		_fog_check_accum = 0.0
+		_update_fog_visibility()
 	if main.world_paused:
 		return
 	_tick_status_effects(delta)
+	# Hovering-orbit motion for flying units that aren't currently
+	# under direct player control. Applied as a position delta so it
+	# composes naturally with regular movement (the orbit just adds a
+	# small per-frame wobble on top of whatever AI / path motion the
+	# unit is already doing).
+	_tick_hover_orbit(delta)
 
 	# PLAYER UNIT: allow shooting while moving. Opportunistic fire always ticks,
 	# and manual targets (right-click orders) are pursued persistently.
@@ -473,15 +544,32 @@ func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector
 	var angle_err: float = wrapf(desired_face - facing_angle, -PI, PI)
 	var turn_radius: float = data.turn_radius if data else 0.0
 	var turn_speed: float = data.body_turn_speed if data and data.body_turn_speed > 0.0 else 2.0
+	# Mindustry-style anti-stuck guards apply here too — tank-steering
+	# units share the same blocked-frames → fast repath escalation as
+	# omnidirectional units. Tanks can't perpendicular-slide (they're
+	# locked to their facing axis), so the rescue is just "reject the
+	# step + bump the counter". The wider `_check_stuck` / wall-overlap
+	# rescue further down catches the cases the fast repath misses.
+	var ml_walk: int = data.movement_layer if data else 0
+	var step_walkable := func(p: Vector2) -> bool:
+		return unit_manager == null \
+			or unit_manager.is_world_pos_walkable(p, ml_walk, team)
+	var moved: bool = false
 
 	# Already aligned (or close enough): drive straight forward.
 	if absf(angle_err) < 0.01 or forward_step <= 0.0:
 		var straight_dir: Vector2 = Vector2.RIGHT.rotated(facing_angle)
 		if dist_to_waypoint > 0.0 and forward_step >= dist_to_waypoint:
-			position = waypoint
-			path_index += 1
+			if step_walkable.call(waypoint):
+				position = waypoint
+				path_index += 1
+				moved = true
 		else:
-			position += straight_dir * forward_step
+			var cand: Vector2 = position + straight_dir * forward_step
+			if step_walkable.call(cand):
+				position = cand
+				moved = true
+		_tank_track_blocked(moved)
 		return
 
 	if turn_radius > 0.0:
@@ -497,8 +585,18 @@ func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector
 		var limit_step: float = turn_speed * get_process_delta_time() if turn_speed > 0.0 else arc_step
 		var step_size: float = minf(absf(angle_err), minf(arc_step, limit_step))
 		var d_angle: float = step_size * signf(angle_err)
-		position = pivot + (position - pivot).rotated(d_angle)
-		facing_angle = wrapf(facing_angle + d_angle, -PI, PI)
+		var arc_pos: Vector2 = pivot + (position - pivot).rotated(d_angle)
+		if step_walkable.call(arc_pos):
+			position = arc_pos
+			facing_angle = wrapf(facing_angle + d_angle, -PI, PI)
+			moved = true
+		else:
+			# Walls along the arc — still rotate in place so the tank's
+			# heading converges toward the desired direction, but don't
+			# translate. Lets the unit pivot away from a wall it just
+			# drove into instead of locking up.
+			facing_angle = wrapf(facing_angle + d_angle, -PI, PI)
+		_tank_track_blocked(moved)
 		return
 
 	# turn_radius == 0: pivot in place until aligned, then drive.
@@ -507,10 +605,33 @@ func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector
 	if err_after < deg_to_rad(10.0):
 		var fwd: Vector2 = Vector2.RIGHT.rotated(facing_angle)
 		if dist_to_waypoint > 0.0 and forward_step >= dist_to_waypoint:
-			position = waypoint
-			path_index += 1
+			if step_walkable.call(waypoint):
+				position = waypoint
+				path_index += 1
+				moved = true
 		else:
-			position += fwd * forward_step
+			var cand2: Vector2 = position + fwd * forward_step
+			if step_walkable.call(cand2):
+				position = cand2
+				moved = true
+	else:
+		# Still rotating into alignment — not "blocked", just pivoting.
+		moved = true
+	_tank_track_blocked(moved)
+
+
+## Tank counterpart of the omnidirectional step's blocked-frames track.
+## Tanks can't perpendicular-slide, but they DO share the fast-repath
+## escalation so a tank pressed against a freshly-placed wall picks a
+## new route in ~0.2 s instead of waiting on the 1.5 s spatial timer.
+func _tank_track_blocked(moved: bool) -> void:
+	if moved:
+		_blocked_frames = 0
+	else:
+		_blocked_frames += 1
+		if _blocked_frames >= _BLOCKED_FRAMES_REPATH:
+			_request_repath()
+			_blocked_frames = 0
 
 
 ## Returns the world position of the nearest opposing unit (or Ferox building
@@ -898,31 +1019,61 @@ func _follow_path(delta: float) -> void:
 	if step >= distance:
 		position = target_pos
 		path_index += 1
+		_blocked_frames = 0
 	else:
+		var ml_walk: int = data.movement_layer if data else 0
+		var moved_this_frame: bool = false
+		# Helper closure: ground-truth walkability for a candidate pos
+		# (shield-aware via `team`). Repeated below for the original
+		# direction, the separation-modified direction, and the two
+		# perpendicular slide attempts.
+		var step_walkable := func(p: Vector2) -> bool:
+			return unit_manager == null \
+				or unit_manager.is_world_pos_walkable(p, ml_walk, team)
 		var candidate: Vector2 = position + move_dir * step
-		# Pass `team` so hostile unit-blocking shields count as walls
-		# for this unit. Friendly shields (and bullets-only shields)
-		# pass through unchanged.
-		if move_dir == direction or unit_manager == null \
-				or unit_manager.is_world_pos_walkable(candidate, data.movement_layer if data else 0, team):
-			# Reject the straight-direction step too when it lands
-			# inside a hostile shield, otherwise the unit would just
-			# slide past the boundary along the path tangent.
-			if unit_manager != null \
-					and not unit_manager.is_world_pos_walkable(candidate, data.movement_layer if data else 0, team):
-				# Don't move this frame — let the bottleneck-yield /
-				# repath system catch us and route around.
-				pass
-			else:
+		if move_dir == direction or step_walkable.call(candidate):
+			if step_walkable.call(candidate):
 				position = candidate
+				moved_this_frame = true
 		else:
 			# Separation-modified step would land on a wall — fall back
 			# to the unmodified path step, gated on the same team-
 			# aware walkability so hostile shields still block.
 			var fallback: Vector2 = position + direction * step
-			if unit_manager == null \
-					or unit_manager.is_world_pos_walkable(fallback, data.movement_layer if data else 0, team):
+			if step_walkable.call(fallback):
 				position = fallback
+				moved_this_frame = true
+		# Mindustry-style wall slide. When the chosen step couldn't be
+		# taken (wall placed mid-path, blocked by hostile shield, an
+		# obstructing unit), try sliding along the perpendicular axis
+		# at half speed before giving up. This is what stops a unit
+		# from freezing nose-against-the-wall for 1.5 s waiting on the
+		# stuck timer to fire — it scoots sideways and the next path
+		# tick finds an open lane.
+		if not moved_this_frame and step > 0.0:
+			var perp := Vector2(-direction.y, direction.x)
+			# Pick the perpendicular side closer to the next waypoint so
+			# we slide TOWARD progress rather than away from it.
+			var lookahead: Vector2 = target_pos
+			if path_index + 1 < path.size():
+				lookahead = path[path_index + 1]
+			if perp.dot(lookahead - position) < 0.0:
+				perp = -perp
+			for side in [perp, -perp]:
+				var slide: Vector2 = position + side * (step * 0.5)
+				if step_walkable.call(slide):
+					position = slide
+					moved_this_frame = true
+					break
+		# Track the "actually got nowhere this frame" run for fast
+		# repath escalation, separate from the spatial stuck timer.
+		if moved_this_frame:
+			_blocked_frames = 0
+		else:
+			_blocked_frames += 1
+			if _blocked_frames >= _BLOCKED_FRAMES_REPATH:
+				_request_repath()
+				_blocked_frames = 0
 
 
 ## Sums a soft repulsion vector from every same-layer unit within
@@ -2031,12 +2182,59 @@ func _tick_assist_build(delta: float) -> bool:
 # --- DRAWING ---
 
 
+## Refreshes the Node2D `visible` flag based on whether the current
+## cell is in fog. PLAYER-team units are always visible. ENEMY units
+## are visible only when the fog system says their cell is currently
+## lit. Throttled by `_FOG_CHECK_INTERVAL` so we don't pay this per
+## frame for hundreds of units.
+func _update_fog_visibility() -> void:
+	if team != UnitData.Team.ENEMY:
+		if not visible:
+			visible = true
+		return
+	if main == null:
+		return
+	# Hard short-circuit: when the sector's author-time fog toggle is
+	# OFF (most campaign maps ship with `fog_enabled = false`), enemy
+	# units should always render. Doing this guard at the enemy_unit
+	# layer — rather than relying on `FogSystem.is_cell_visible` to
+	# notice the flag — avoids any sequencing window where the unit's
+	# fog tick runs before SaveManager has copied the per-sector flag
+	# onto `main`, leaving every enemy invisible until you toggle fog
+	# manually.
+	if "fog_enabled" in main and not bool(main.fog_enabled):
+		if not visible:
+			visible = true
+		return
+	var fog = main.get_node_or_null("FogSystem")
+	if fog == null or not fog.has_method("is_cell_visible"):
+		if not visible:
+			visible = true
+		return
+	var cell: Vector2i = main.world_to_grid(position)
+	var lit: bool = fog.is_cell_visible(cell)
+	if visible != lit:
+		visible = lit
+
+
 func _draw() -> void:
 	if is_dead:
 		return
 
+	# Fog visibility is reflected in `visible` (toggled by
+	# `_update_fog_visibility`). When the unit is fogged, Godot
+	# skips _draw entirely — no per-draw guard needed here.
+
 	# Hit-flash removed — see take_damage. modulate is left untouched
 	# so other systems can tint the unit if they ever need to.
+
+	# Flying units cast a soft drop-shadow. Drawn on the unit's own
+	# canvas (which `_ready` bumps to z=81) so it paints above ground
+	# units. Painted FIRST so the chassis covers the shadow under
+	# the unit's footprint.
+	var is_flying: bool = data != null and data.movement_layer == UnitData.MovementLayer.FLYING
+	if is_flying:
+		_draw_flying_shadow()
 
 	# Textured rendering (turret-style: base + rotating head) takes precedence
 	# over the primitive-shape fallbacks whenever the .tres supplies sprites.
@@ -2064,9 +2262,102 @@ func _draw() -> void:
 		draw_arc(Vector2.ZERO, unit_size, 0, TAU, 32, Color(1.0, 0.2, 0.9, 0.9), 1.5)
 
 
+## Per-frame hover orbit for flying units (Mindustry-style).
+##
+## Each unit drifts in a small fixed-radius circle that doesn't rotate
+## the chassis — only the position offset moves. The offset is
+## applied as a DELTA between this frame's offset and last frame's so
+## any combination of orbit + AI movement composes correctly: the
+## unit's "logical" position keeps advancing along its path while the
+## visual position bobs.
+##
+## Suppressed when:
+##   • the unit isn't flying,
+##   • the player is directly controlling this unit (so WASD response
+##     stays crisp), or
+##   • the unit hasn't loaded its UnitData yet.
+## On suppression the existing offset decays smoothly back to zero
+## instead of snapping, so toggling control doesn't visibly jolt the
+## unit.
+func _tick_hover_orbit(delta: float) -> void:
+	var should_orbit: bool = data != null \
+			and data.movement_layer == UnitData.MovementLayer.FLYING \
+			and not is_controlled
+	var new_off: Vector2
+	if should_orbit:
+		_orbit_phase = wrapf(_orbit_phase + delta * _ORBIT_SPEED, 0.0, TAU)
+		new_off = Vector2(cos(_orbit_phase), sin(_orbit_phase)) * _ORBIT_RADIUS
+	else:
+		# Smoothly settle back to centre when control kicks in.
+		new_off = _orbit_prev_off.lerp(Vector2.ZERO, clampf(delta * _ORBIT_DECAY_RATE, 0.0, 1.0))
+	position += new_off - _orbit_prev_off
+	_orbit_prev_off = new_off
+
+
+## Soft drop-shadow for FLYING units. Recipe lifted from Mindustry v8's
+## UnitType.drawShadow():
+##   - World-space offset (shadowTX, shadowTY) = (-12, -13). In libgdx
+##     Y is up, so -13Y is "below" the unit — in Godot Y-down that's
+##     +13Y. The offset is in WORLD pixels, independent of the unit's
+##     facing, so the shadow always reads as cast by an upper-right
+##     "sun" the same way it does in Mindustry.
+##   - Tint = Pal.shadow = rgba(0,0,0,0.22).
+##   - Shape = the unit's sprites rotated with the unit. v8 uses a
+##     single pre-baked fullIcon; we mirror it by silhouetting the
+##     base sprite (and the head, since rotating heads add to the
+##     read of "this is the unit's outline overhead").
+##   - We scale the offset by SPRITE_SCALE_FACTOR so the shadow tracks
+##     the world's pixel scale — same idea as v8 baking shadow offsets
+##     in world units.
+## Renders the flying unit's drop-shadow inline on the unit's own
+## canvas. The unit's z_index is bumped to 81 in `_ready`, so the
+## whole composite (shadow + chassis) paints above ground units.
+## Silhouettes use Pal.shadow alpha; overlapping chassis + head
+## silhouettes will compound slightly where they overlap, which is
+## an acceptable trade for getting a reliable z-order above ground.
+func _draw_flying_shadow() -> void:
+	const SHADOW_TX := -28.0
+	const SHADOW_TY := 30.0
+	var shadow_tint: Color = Color(0.0, 0.0, 0.0, 0.22)
+	var sf: float = main.SPRITE_SCALE_FACTOR if main else 1.0
+	var off: Vector2 = Vector2(SHADOW_TX * sf, SHADOW_TY * sf)
+	var drew_tex_shadow: bool = false
+	if data != null and (data.base_sprite != null or data.head_sprite != null):
+		var scale_f: float = (data.sprite_scale if data and data.sprite_scale > 0.0 else 1.0) * sf
+		# Base layer (rotates with chassis).
+		if data.base_sprite:
+			var b_size: Vector2 = data.base_sprite.get_size() * scale_f
+			draw_set_transform(off, facing_angle + PI / 2.0)
+			draw_texture_rect(
+				data.base_sprite,
+				Rect2(-b_size * 0.5, b_size),
+				false,
+				shadow_tint
+			)
+			draw_set_transform(Vector2.ZERO, 0.0)
+			drew_tex_shadow = true
+		# Head layer (rotates with aim).
+		if data.head_sprite:
+			var h_size: Vector2 = data.head_sprite.get_size() * scale_f
+			var h_angle: float = aim_angle + PI / 2.0
+			draw_set_transform(off, h_angle)
+			draw_texture_rect(
+				data.head_sprite,
+				Rect2(-h_size * 0.5, h_size),
+				false,
+				shadow_tint
+			)
+			draw_set_transform(Vector2.ZERO, 0.0)
+			drew_tex_shadow = true
+	if not drew_tex_shadow:
+		# Shape fallback — draw a filled disc the size of the unit.
+		draw_circle(off, unit_size, shadow_tint)
+
+
 ## Renders the unit as a stacked base + rotating head, mirroring the
-## turret_head_sprite pattern (source textures face UP, so +PI/2 is added
-## to convert the aim angle into a texture angle). Tinted by water state.
+## turret_head_sprite pattern (source textures face UP, so +PI/2 is
+## added to convert facing/aim angles into texture angles). Tinted
+## toward blue when the unit is drowning, otherwise full brightness.
 func _draw_textured_unit() -> void:
 	var tint: Color = _get_display_color()
 	# Preserve alpha but otherwise render the textures at full brightness

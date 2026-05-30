@@ -21,3 +21,4 @@ build_cost = {
 build_time = 3.0
 mend_radius = 10.0
 mend_amount = 20.0
+electrical_power_use = 12.0

@@ -109,6 +109,12 @@ var CRANE_GRABBER_SIZE := 28.0  # Half-length of each cross bar
 # --- PREVIEW STATE ---
 var preview_grid_pos := Vector2i.ZERO
 var can_place := false
+## Same checks as `can_place` minus the drone build-range constraint.
+## Drives the preview TINT so an out-of-range-but-otherwise-valid
+## placement reads as a normal white ghost (queued for the drone)
+## rather than a red "invalid" warning. Actual click-to-place gating
+## still uses `can_place`, which keeps the range check.
+var can_place_excluding_range := false
 
 # Direction arrow constants (same as logistics_system)
 const DIR_VECTORS := [
@@ -1380,23 +1386,23 @@ func _draw_launchpad_pod_previews() -> void:
 			top_pos + Vector2((w - pod_size) * 0.5, (h - pod_size) * 0.5),
 			Vector2(pod_size, pod_size))
 		var pct: float = clampf(lp_sys.get_pod_build_progress(anchor), 0.0, 1.0)
-		# Solid pod once construction is complete — drawn opaque so the
-		# player sees it's ready. While building, the pod is fully drawn
-		# but the unbuilt portion gets a translucent dark "blueprint"
-		# overlay and a yellow build-front line, matching block builds.
-		draw_texture_rect(pod_tex, pod_rect, false, Color(1, 1, 1, 1.0))
-		if pct < 1.0:
-			var reveal_x: float = pod_rect.size.x * pct
-			var unbuilt_rect := Rect2(
-				pod_rect.position.x + reveal_x,
-				pod_rect.position.y,
-				pod_rect.size.x - reveal_x,
-				pod_rect.size.y)
-			# Dark wash so the unbuilt portion reads as "not yet here"
-			# rather than a faint white blast.
-			draw_rect(unbuilt_rect, Color(0.05, 0.05, 0.07, 0.55), true)
-			# Yellow build-front line.
-			var line_x: float = pod_rect.position.x + reveal_x
+		# Pod isn't "fabricated" until the build_timer has filled. While
+		# building, only the BUILT portion of the pod sprite is rendered
+		# — the rest of the pad stays clear so the player can see the
+		# pod growing into existence rather than waiting under a wash.
+		if pct >= 1.0:
+			draw_texture_rect(pod_tex, pod_rect, false, Color(1, 1, 1, 1.0))
+		elif pct > 0.0:
+			# Sample only the left (built) part of the source texture so
+			# the right edge is a clean cut, not a stretched compression.
+			var src_w: float = pod_tex.get_width() * pct
+			var src_rect := Rect2(0.0, 0.0, src_w, pod_tex.get_height())
+			var dst_rect := Rect2(
+				pod_rect.position,
+				Vector2(pod_rect.size.x * pct, pod_rect.size.y))
+			draw_texture_rect_region(pod_tex, dst_rect, src_rect, Color(1, 1, 1, 1.0))
+			# Yellow build-front line at the construction edge.
+			var line_x: float = pod_rect.position.x + pod_rect.size.x * pct
 			draw_line(
 				Vector2(line_x, pod_rect.position.y),
 				Vector2(line_x, pod_rect.position.y + pod_rect.size.y),
@@ -1425,6 +1431,59 @@ func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: fl
 ## placed turret, paint its `attack_range` as a dashed white circle so
 ## the player can see how far it'll shoot. Skipped while placement /
 ## drag preview is showing the same circle for the selected block.
+## Hover preview for any placed LUMINA extractor / pump — paints a
+## small floating icon above the building showing which item / fluid
+## it's currently outputting. Same data path the placement preview
+## uses (`compute_extractor_preview_output`), so a freshly-placed
+## drill and a long-running one read the same.
+func _draw_hovered_extractor_output() -> void:
+	# Hold off while a placement is in flight — the placement preview
+	# already draws its own efficiency + icon readout.
+	if main.selected_building != &"":
+		return
+	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
+		return
+	if _logistics == null or not _logistics.has_method("compute_extractor_preview_output"):
+		return
+	var mouse_world: Vector2 = get_global_mouse_position()
+	var grid_pos: Vector2i = main.world_to_grid(mouse_world)
+	if not main.placed_buildings.has(grid_pos):
+		return
+	if main.get_building_faction(grid_pos) != FACTION_LUMINA:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null:
+		return
+	# Limit to actual extractors / pumps so a turret hover doesn't draw
+	# an empty floating icon slot.
+	var is_extractor: bool = data.category == BlockData.BlockCategory.EXTRACTORS or data.tags.has("pump")
+	if not is_extractor:
+		return
+	if data.id == &"vent_turbine" or data.id == &"vent_condenser":
+		return
+	var rot: int = main.building_rotation.get(anchor, 0)
+	var out_info: Dictionary = _logistics.compute_extractor_preview_output(anchor, data, rot)
+	var item_id: StringName = StringName(out_info.get("item_id", &""))
+	if item_id == &"":
+		return
+	var icon_tex: Texture2D = null
+	var item_d = Registry.get_item(item_id)
+	if item_d and item_d.icon:
+		icon_tex = item_d.icon
+	else:
+		var fluid_d = Registry.get_fluid(item_id)
+		if fluid_d and fluid_d.icon:
+			icon_tex = fluid_d.icon
+	if icon_tex == null:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var top_left: Vector2 = main.grid_to_world(anchor)
+	var icon_size: float = gs * 0.5
+	var icon_rect := Rect2(top_left - Vector2(icon_size * 0.5, icon_size * 0.5), Vector2(icon_size, icon_size))
+	draw_texture_rect(icon_tex, icon_rect, false)
+
+
 func _draw_hovered_turret_range() -> void:
 	# Don't compete with the placement preview's range circle.
 	if main.selected_building != &"":
@@ -2095,17 +2154,36 @@ func _input(event: InputEvent) -> void:
 		_schematic.end = main.world_to_grid(mw)
 		queue_redraw()
 
-	# --- SCHEMATIC PLACEMENT: click to place repeatedly, G/H flip, V save ---
+	# Right-click cancels an active schematic selection or paste-mode
+	# stamp — same effect as Esc, just reachable without leaving the
+	# mouse. Consume the event so it doesn't fall through to "rotate
+	# placed block" or any other right-click handler.
+	if _schematic and event is InputEventMouseButton \
+			and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		if _schematic.mode or _schematic.dragging:
+			_schematic.mode = false
+			_schematic.confirmed = false
+			_schematic.dragging = false
+			queue_redraw()
+			get_viewport().set_input_as_handled()
+			return
+		elif _schematic.placing:
+			_schematic.placing = false
+			queue_redraw()
+			get_viewport().set_input_as_handled()
+			return
+
+	# --- SCHEMATIC PLACEMENT: click to place, flip-x / flip-y / save actions ---
 	if _schematic and _schematic.placing and event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_G:
+		if event.is_action_pressed("schematic_flip_x"):
 			_schematic.flip_placement_x()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_H:
+		elif event.is_action_pressed("schematic_flip_y"):
 			_schematic.flip_placement_y()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_V:
+		elif event.is_action_pressed("schematic_save_placement"):
 			_schematic.show_save_dialog_from_placement()
 			get_viewport().set_input_as_handled()
 			return
@@ -2329,6 +2407,10 @@ func _process(_delta: float) -> void:
 
 	# Compute the can_place flag for the single-cell hover preview
 	can_place = _can_place_at(preview_grid_pos, main.selected_building)
+	# Tint-only flag: same checks minus the build-range constraint, so
+	# hovering outside the drone's reach still reads as a valid ghost.
+	can_place_excluding_range = _can_place_ignoring_range(
+		preview_grid_pos, main.selected_building, main.placement_rotation)
 
 	# Compute drag cells (axis-locked line or pathfinding)
 	if _drag_placing:
@@ -2336,7 +2418,7 @@ func _process(_delta: float) -> void:
 		var data = Registry.get_block(main.selected_building)
 		var grid_w: int = data.grid_size.x if data else 1
 		var grid_h: int = data.grid_size.y if data else 1
-		var alt_held := Input.is_key_pressed(KEY_ALT)
+		var alt_held := Input.is_action_pressed("pathfind_modifier")
 
 		if alt_held and _is_transport_block(main.selected_building):
 			# --- Pathfind mode: route around obstacles ---
@@ -2673,6 +2755,13 @@ func _tick_progressive_deconstruct(anchor: Vector2i, delta: float) -> void:
 			main.resume_auto_paused_by(anchor)
 		if "work_paused" in main:
 			main.work_paused.erase(anchor)
+		# Deconstruct pulse + shrapnel — fire BEFORE destroy_building so
+		# the BlockData is still resolvable for footprint sizing.
+		var decon_data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if decon_data != null:
+			var po = get_node_or_null("/root/Main/ParticleOverlay")
+			if po and po.has_method("spawn_decon_pulse"):
+				po.spawn_decon_pulse(anchor, decon_data.grid_size)
 		main.destroy_building(anchor)
 		main.resources_changed.emit(main.resources)
 
@@ -2822,8 +2911,14 @@ func _all_player_drones() -> Array:
 	for child in main.get_children():
 		if child == null or not is_instance_valid(child):
 			continue
-		if child.has_method("is_in_build_range"):
-			out.append(child)
+		if not child.has_method("is_in_build_range"):
+			continue
+		# FEROX shardlings share the player_drone.gd script but must
+		# NOT contribute to player build/deconstruct progress. Skip
+		# any drone flying the `ferox_controlled` flag.
+		if "ferox_controlled" in child and bool(child.get("ferox_controlled")):
+			continue
+		out.append(child)
 	return out
 
 
@@ -2897,10 +2992,13 @@ func _builders_with_facing_for(anchor: Vector2i) -> Array:
 ##                              true: stripes slide block→unit (decon).
 func _draw_active_build_beams(anchor: Vector2i, line_top: Vector2, line_bot: Vector2,
 		hue: Color = Color(1.0, 0.9, 0.2), reverse_stripe: bool = false) -> void:
-	# Hide the laser triangle while build/world is paused — the drone
-	# isn't actually working this frame, so a beam pointing at the
-	# anchor reads as a lie.
-	if _is_build_paused():
+	# Hide the laser while the player has explicitly paused construction
+	# (build_paused) — that's a deliberate "stop working" toggle. World
+	# pause is different: the player just wants time to stop. Keep the
+	# laser drawn there so they can still see what the drone is on; the
+	# stripe phase doesn't advance under world pause (see `_process`),
+	# so the moving bands freeze in place naturally.
+	if "build_paused" in main and main.build_paused:
 		return
 	var builders: Array = _builders_with_facing_for(anchor)
 	if builders.is_empty():
@@ -3011,10 +3109,12 @@ func _draw_build_beam_diamond_on(canvas: CanvasItem, origin: Vector2, axis: Vect
 ## would sit at the BuildingSystem's default z and disappear behind
 ## the very sprite it's supposed to emerge from.
 func _draw_active_work_diamonds() -> void:
-	# Pulsing diamond is the "I'm actively working on this" cue — kill
-	# it whenever build/world pause halts that work, so a paused drone
-	# doesn't keep emitting the diamond at its mouth.
-	if _is_build_paused():
+	# Pulsing diamond is the "I'm actively working on this" cue. Hide
+	# it only when the player has explicitly paused construction —
+	# under plain world pause we keep it visible (frozen in mid-pulse
+	# since `_build_beam_phase` doesn't advance) so it stays in sync
+	# with the laser triangle next to it.
+	if "build_paused" in main and main.build_paused:
 		return
 	var canvas: CanvasItem = _crane_draw_canvas if _crane_draw_canvas != null else self
 	# Active build anchor — at most one ticks per frame (the work
@@ -3755,6 +3855,14 @@ func _unhandled_input(event: InputEvent) -> void:
 						# The map editor uses its own click handler, so this
 						# guard only affects in-game clicks.
 						var click_faction: int = main.get_building_faction(click_anchor) if main.has_method("get_building_faction") else FACTION_LUMINA
+						# Clicking a DERELICT block claims it for the player.
+						# Reuses the rect-conversion helper with a 1-tile rect
+						# so the conversion flash + faction flip happen the
+						# same way as the Hold-B rebuild rectangle.
+						if click_faction == FACTION_DERELICT and main.has_method("convert_derelict_in_rect"):
+							main.convert_derelict_in_rect(click_anchor, click_anchor)
+							get_viewport().set_input_as_handled()
+							return
 						if click_faction == FACTION_LUMINA and click_data:
 							# Shift+click on a duct bridge that has any
 							# incoming links opens the per-input filter menu
@@ -3828,6 +3936,25 @@ func _unhandled_input(event: InputEvent) -> void:
 								# in "landing_pad" mode — two slot rows that
 								# open a sub-picker on click.
 								if _world_ui: _world_ui.open("landing_pad", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.tags.has("logistic_requestor"):
+								# Logistical Requestor — if a dispatcher is
+								# waiting for its link target, this click
+								# completes the link instead of opening
+								# the condition picker.
+								if _world_ui and _world_ui.try_complete_dispatcher_link(click_anchor):
+									get_viewport().set_input_as_handled()
+									return
+								# Otherwise: open the condition picker
+								# (storage_has / units_produced).
+								if _world_ui: _world_ui.open("requestor", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.tags.has("logistic_dispatcher"):
+								# Logistical Dispatcher — opens the action
+								# picker (stop_block / manual_toggle).
+								if _world_ui: _world_ui.open("dispatcher", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
 							# Fallback: any block with non-empty storage shows a
@@ -4531,6 +4658,7 @@ func _draw() -> void:
 	# set so every draw call lands on its higher-z surface.
 	_draw_crane_link_overlays()
 	_draw_hovered_turret_range()
+	_draw_hovered_extractor_output()
 	_draw_archive_scan_overlay()
 	_draw_paused_queue()
 	_draw_preview()
@@ -5469,6 +5597,8 @@ func _compute_is_directional(block_id: StringName) -> bool:
 		or data.tags.has("payload_unloader") or data.tags.has("freight_unloader") \
 		or data.tags.has("archive_scanner") \
 		or data.tags.has("fabricator") \
+		or data.tags.has("logistic_dispatcher") \
+		or data.tags.has("logistic_requestor") \
 		or data.shield_shape != "" \
 		or not data.side_inputs.is_empty() or not data.side_outputs.is_empty()
 
@@ -6022,12 +6152,28 @@ func _draw_placed_buildings() -> void:
 	# as the ring travels. Skip those anchors entirely so they don't
 	# appear early in any of the building draw passes.
 	var la_filter = get_node_or_null("/root/Main/LaunchAnimation")
-	for grid_pos in main.placed_buildings:
-		if grid_pos.x < grid_min.x or grid_pos.x > grid_max.x:
+	# Iterate ANCHORS only. The previous loop walked every tile of
+	# every multi-tile block and threw away non-anchor cells via
+	# `is_building_anchor`, which scales as O(total_tiles) rather than
+	# O(building_count). For a map of 5000 building tiles where the
+	# average block is 3 tiles, this is ~3× fewer iterations.
+	var anchors: Dictionary = main.get_building_anchors() if main.has_method("get_building_anchors") else {}
+	for grid_pos in anchors:
+		# Cull against the block's FULL footprint, not just its anchor
+		# cell. A 3×3 turret anchored just off the left edge still has
+		# 6 of its 9 tiles visible — checking only the anchor would
+		# pop the whole block out the moment the anchor crossed the
+		# edge. Read grid_size from BlockData; fall back to 1×1 if the
+		# id can't be resolved.
+		var bdata_cull: BlockData = Registry.get_block(main.placed_buildings.get(grid_pos, &""))
+		var fx_max: int = grid_pos.x
+		var fy_max: int = grid_pos.y
+		if bdata_cull != null:
+			fx_max = grid_pos.x + maxi(bdata_cull.grid_size.x, 1) - 1
+			fy_max = grid_pos.y + maxi(bdata_cull.grid_size.y, 1) - 1
+		if fx_max < grid_min.x or grid_pos.x > grid_max.x:
 			continue
-		if grid_pos.y < grid_min.y or grid_pos.y > grid_max.y:
-			continue
-		if not main.is_building_anchor(grid_pos):
+		if fy_max < grid_min.y or grid_pos.y > grid_max.y:
 			continue
 		if la_filter and la_filter.has_method("is_block_hidden") and la_filter.is_block_hidden(grid_pos):
 			continue
@@ -6140,6 +6286,48 @@ func _draw_placed_buildings() -> void:
 		var sz: Vector2i = bd.grid_size if bd else Vector2i.ONE
 		block_size_cache[bid] = sz
 		return sz
+
+	# --- PASS 0: Covered-platform underlay ---
+	# Platforms that got "covered" by a block placed on top are stashed
+	# in `main._platform_under` and pulled out of `placed_buildings`,
+	# so the normal anchor loop would never draw them. Paint their
+	# top sprite here, before the covering block's sides + top, so the
+	# platform peeks out under the cover's parallax (and stays visible
+	# at the cover's base instead of disappearing). Multi-tile covered
+	# platforms only need one draw per unique anchor.
+	if "_platform_under" in main and not main._platform_under.is_empty():
+		var drawn_p_anchors: Dictionary = {}
+		for pcell in main._platform_under:
+			var pstash: Dictionary = main._platform_under[pcell]
+			var p_anchor: Vector2i = pstash.get("anchor", pcell)
+			if drawn_p_anchors.has(p_anchor):
+				continue
+			drawn_p_anchors[p_anchor] = true
+			# Skip platforms whose anchor cell is still in
+			# `placed_buildings` as the platform — those still take the
+			# normal draw path (only non-anchor cells got covered).
+			if main.placed_buildings.get(p_anchor, &"") == pstash.get("block_id", &""):
+				continue
+			# Cull against the visible grid.
+			var p_block_id: StringName = StringName(pstash.get("block_id", &""))
+			if p_block_id == &"":
+				continue
+			var p_data: BlockData = Registry.get_block(p_block_id)
+			if p_data == null or p_data.top_sprite == null:
+				continue
+			var p_fx_max: int = p_anchor.x + maxi(p_data.grid_size.x, 1) - 1
+			var p_fy_max: int = p_anchor.y + maxi(p_data.grid_size.y, 1) - 1
+			if p_fx_max < grid_min.x or p_anchor.x > grid_max.x:
+				continue
+			if p_fy_max < grid_min.y or p_anchor.y > grid_max.y:
+				continue
+			if ss and ss.is_tile_hidden(p_anchor):
+				continue
+			var p_world: Vector2 = main.grid_to_world(p_anchor)
+			var p_w: float = float(p_data.grid_size.x) * gs
+			var p_h: float = float(p_data.grid_size.y) * gs
+			var p_rot: int = int(pstash.get("rotation", 0))
+			_draw_block_texture(p_data.top_sprite, p_world, p_w, p_h, p_rot, Color.WHITE, _is_directional(p_block_id))
 
 	# --- PASS 1: Draw ALL sides ---
 	for idx in order:
@@ -7320,7 +7508,11 @@ func _draw_preview() -> void:
 					or (cell_block_id == &"duct" and not _duct_textures.is_empty()) \
 					or (cell_block_id == &"fluid_pipe" and not _pipe_textures.is_empty())
 
-			var cell_valid := _can_place_at(cell, cell_block_id)
+			# Out-of-range cells stay white — the drone will pick them up
+			# when it walks past. Only "actually invalid" cells (bad
+			# terrain, overlap, wrong facing, etc.) tint red.
+			var cell_rot_check: int = _pathfind_rotations.get(cell, main.placement_rotation) if _is_directional(cell_block_id) else 0
+			var cell_valid := _can_place_ignoring_range(cell, cell_block_id, cell_rot_check)
 			var cell_ok := cell_valid  # No affordability gate — progressive consumption
 
 			# Per-cell flag: set true when a baked composite painted all
@@ -7450,9 +7642,11 @@ func _draw_preview() -> void:
 	var world_pos = main.grid_to_world(preview_grid_pos)
 	var offset = _get_top_offset(world_pos) * _get_height_scale(main.selected_building)
 	var color = _get_block_color(main.selected_building)
-	# With progressive resource consumption, placement is valid even without
-	# enough resources — the ghost is placed and builds as resources arrive.
-	var cell_ok: bool = can_place
+	# With progressive resource consumption, placement is valid even
+	# without enough resources — the ghost is placed and builds as
+	# resources arrive. Range likewise doesn't matter for the TINT —
+	# an out-of-range ghost is queued for the drone, so render white.
+	var cell_ok: bool = can_place_excluding_range
 
 	var width: float = float(main.GRID_SIZE) * grid_w
 	var height: float = float(main.GRID_SIZE) * grid_h
@@ -7563,7 +7757,7 @@ func _draw_preview() -> void:
 			main.GRID_SIZE * grid_w / 2.0,
 			main.GRID_SIZE * grid_h / 2.0
 		) + offset
-		var arrow_color = Color(1, 1, 1, 0.8) if can_place else Color(1, 0.3, 0.3, 0.6)
+		var arrow_color = Color(1, 1, 1, 0.8) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.6)
 		_draw_direction_arrow(center, main.placement_rotation, arrow_color)
 	# Front-cell orange arrow — drawn for ALL directional previews
 	# (textured and belts included) so the player can see exactly
@@ -7576,14 +7770,14 @@ func _draw_preview() -> void:
 	# Skipped when the bake path already painted the heads as part of
 	# the composite — otherwise the heads would render twice.
 	if data and data.is_turret() and not hover_used_bake:
-		var t_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		var t_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
 		_draw_turret_preview_heads(data, top_pos, width, height, main.placement_rotation, t_tint)
 
 	# Scraper / impact-drill heads in the preview. Both draw on top of
 	# the base sprite the same way the live render does — without this,
 	# the placement ghost was a headless body plate.
 	if data and data.tags.has("scraper_head"):
-		var sh_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		var sh_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
 		if _scraper_head_texture:
 			var sh_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
 			draw_set_transform(sh_center, 0.0)
@@ -7592,7 +7786,7 @@ func _draw_preview() -> void:
 				false, sh_tint)
 			draw_set_transform(Vector2.ZERO, 0.0)
 	if data and data.tags.has("impact_head"):
-		var ih_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		var ih_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
 		if _impact_head_texture:
 			# At-rest pose = full IMPACT_HEAD_MAX_SCALE (slam_progress = 1).
 			var ih_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
@@ -7607,7 +7801,7 @@ func _draw_preview() -> void:
 	# Crane preview: arm + grabber + base pivot at the default pose so
 	# the player sees the silhouette before placing.
 	if data and data.tags.has("crane"):
-		var c_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		var c_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
 		_draw_crane_preview(top_pos, width, height, c_tint)
 
 	# Turret attack-range circle in the placement preview — dashed, same
@@ -7622,10 +7816,10 @@ func _draw_preview() -> void:
 	# drill regardless of placement validity.
 	if data and data.tags.has("drill_heads"):
 		var dh_levels: Dictionary = _get_drill_head_levels(preview_grid_pos, main.placement_rotation, data.grid_size)
-		var dh_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		var dh_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
 		_draw_drill_heads(preview_grid_pos, main.placement_rotation, data.grid_size, dh_levels, main.selected_building, dh_tint)
 	if data and (data.tags.has("crusher_heads") or data.tags.has("grinder_heads")):
-		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place else Color(1, 0.3, 0.3, 0.5)
+		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
 		_draw_crusher_heads(preview_grid_pos, main.placement_rotation, data.grid_size, main.selected_building, ch_tint, false)
 
 	# Extractor efficiency readout — preview-only. A white tick the width
@@ -8057,6 +8251,12 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 	var terrain_ref = _terrain_ref()
 	if terrain_ref and terrain_ref.wall_tiles.has(_grid_pos):
 		_walls_dirty = true
+	# Drop any LogisticControlSystem state attached to this anchor so a
+	# destroyed dispatcher / requestor doesn't keep emitting disable
+	# assertions, and so a destroyed FACED block's disable entry clears.
+	var lc = get_node_or_null("/root/Main/LogisticControlSystem")
+	if lc and lc.has_method("on_block_removed"):
+		lc.on_block_removed(_grid_pos)
 	crane_states.erase(_grid_pos)
 	# Remove this crane's link plan AND any references to it from other
 	# cranes' inputs/outputs (block-kind specs that point at this anchor).
@@ -8688,20 +8888,38 @@ func _draw_schematic_placement() -> void:
 					slot_ok = false
 				elif _terrain and _terrain.has_wall(cp):
 					slot_ok = false
-		var color: Color = _get_block_color(block_id)
 		var slot_tint: Color
+		var sprite_tint: Color
+		var border_col: Color
 		if slot_ok:
-			color.a = 0.4
-			draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
-			draw_rect(Rect2(top_pos, Vector2(w, h)), Color(0.3, 1.0, 0.3, 0.6), false, 1.5)
+			sprite_tint = Color(1, 1, 1, 0.85)
+			border_col = Color(0.3, 1.0, 0.3, 0.6)
 			slot_tint = Color(1, 1, 1, 0.6)
 		else:
-			color = Color(1.0, 0.3, 0.3, 0.3)
-			draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
-			draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.3, 0.3, 0.6), false, 1.5)
+			sprite_tint = Color(1.0, 0.55, 0.55, 0.85)
+			border_col = Color(1.0, 0.3, 0.3, 0.7)
 			slot_tint = Color(1, 0.3, 0.3, 0.5)
+		# Use the actual block sprite(s) instead of a flat colour. Prefer
+		# base+top layered (matches what a placed block looks like); fall
+		# back to top-only, then icon, then the legacy colour rect.
+		var t_rot: int = int(_schematic.place_rotation.get(rel_pos, 0))
+		var is_dir: bool = _is_directional(block_id)
+		if data.base_sprite and data.top_sprite:
+			_draw_block_texture(data.base_sprite, top_pos, w, h, t_rot, sprite_tint, is_dir)
+			_draw_block_texture(data.top_sprite, top_pos, w, h, t_rot, sprite_tint, is_dir)
+		elif data.top_sprite:
+			_draw_block_texture(data.top_sprite, top_pos, w, h, t_rot, sprite_tint, is_dir)
+		elif data.base_sprite:
+			_draw_block_texture(data.base_sprite, top_pos, w, h, t_rot, sprite_tint, is_dir)
+		elif data.icon:
+			draw_texture_rect(data.icon, Rect2(top_pos, Vector2(w, h)), false, sprite_tint)
+		else:
+			var fallback_col: Color = _get_block_color(block_id)
+			fallback_col.a = 0.4
+			draw_rect(Rect2(top_pos, Vector2(w, h)), fallback_col, true)
+		# Tint frame: green = placeable, red = blocked.
+		draw_rect(Rect2(top_pos, Vector2(w, h)), border_col, false, 1.5)
 		if data.is_turret():
-			var t_rot: int = int(_schematic.place_rotation.get(rel_pos, 0))
 			_draw_turret_preview_heads(data, top_pos, w, h, t_rot, slot_tint)
 
 
@@ -8911,6 +9129,7 @@ func _tick_menders(delta: float) -> void:
 	if delta <= 0.0:
 		return
 	var gs: float = float(main.GRID_SIZE)
+	var power_sys = _power_sys_ref()
 	var menders: Array = []
 	for anchor in main.placed_buildings:
 		if main.building_origins.get(anchor, anchor) != anchor:
@@ -8924,19 +9143,34 @@ func _tick_menders(delta: float) -> void:
 			continue
 		if main.is_building_inactive(anchor):
 			continue
+		# Power gate. Menders with `electrical_power_use > 0` scale
+		# their heal rate by the network's efficiency — fully powered
+		# → full mend_amount; brownout → proportionally weaker; zero
+		# power → mender is skipped entirely. Menders that authored
+		# zero power use (free heal) are unaffected.
+		var eff: float = 1.0
+		if power_sys and data.electrical_power_use > 0.0:
+			if power_sys.has_method("get_electrical_efficiency"):
+				eff = clampf(float(power_sys.get_electrical_efficiency(anchor)), 0.0, 1.0)
+			if eff <= 0.0:
+				continue
 		var center: Vector2 = main.grid_to_world(anchor) \
 			+ Vector2(data.grid_size.x * gs * 0.5, data.grid_size.y * gs * 0.5)
 		menders.append({
 			"center": center,
 			"radius_px": data.mend_radius * gs,
-			"amount": data.mend_amount,
+			"amount": data.mend_amount * eff,
 		})
 	if menders.is_empty():
 		return
+	var shield_sys = main.get_node_or_null("ShieldSystem")
 	# For each friendly placed building, find the strongest mender in
 	# range and apply its heal. (Multiple menders covering the same
 	# target don't stack — taking the max keeps the math predictable
-	# and matches how overdrive picks the best zone.)
+	# and matches how overdrive picks the best zone.) The same loop
+	# also applies the heal to the target's shield (if any) so a
+	# shield projector / shielded core inside a mender field tops
+	# its barrier back up — not just its chassis HP.
 	for t_anchor in main.placed_buildings:
 		if main.building_origins.get(t_anchor, t_anchor) != t_anchor:
 			continue
@@ -8946,7 +9180,14 @@ func _tick_menders(delta: float) -> void:
 		if t_data == null or t_data.max_health <= 0.0:
 			continue
 		var current: float = float(main.building_health.get(t_anchor, 0.0))
-		if current <= 0.0 or current >= t_data.max_health:
+		# Anything that needs SOMETHING healed (block HP and/or shield HP)
+		# is a candidate this tick. The two pools are processed
+		# independently below.
+		var block_needs_heal: bool = current > 0.0 and current < t_data.max_health
+		var shield_needs_heal: bool = shield_sys != null \
+			and shield_sys.has_method("is_shield_damaged") \
+			and shield_sys.is_shield_damaged(t_anchor)
+		if not block_needs_heal and not shield_needs_heal:
 			continue
 		var t_center: Vector2 = main.grid_to_world(t_anchor) \
 			+ Vector2(t_data.grid_size.x * gs * 0.5, t_data.grid_size.y * gs * 0.5)
@@ -8956,8 +9197,10 @@ func _tick_menders(delta: float) -> void:
 				best_rate = maxf(best_rate, float(m["amount"]))
 		if best_rate <= 0.0:
 			continue
-		var new_hp: float = minf(current + best_rate * delta, t_data.max_health)
-		main.building_health[t_anchor] = new_hp
+		if block_needs_heal:
+			main.building_health[t_anchor] = minf(current + best_rate * delta, t_data.max_health)
+		if shield_needs_heal:
+			shield_sys.heal_shield(t_anchor, best_rate * delta)
 
 
 

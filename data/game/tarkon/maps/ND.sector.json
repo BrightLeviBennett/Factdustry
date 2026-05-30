@@ -1,20 +1,10 @@
 {
-	"archive_decoder_state": {
-
-	},
-	"archive_holdings": {
-
-	},
-	"belt_unloader_state": {
-
-	},
-	"block_storage": {
-
-	},
+	"archive_decoder_state": {},
+	"archive_holdings": {},
+	"belt_unloader_state": {},
+	"block_storage": {},
 	"build_order": [],
-	"build_progress": {
-
-	},
+	"build_progress": {},
 	"building_factions": {
 		"100,312": 0.0,
 		"100,337": 0.0,
@@ -1895,12 +1885,8 @@
 		"99,312": 120.0,
 		"99,337": 120.0
 	},
-	"building_resources_consumed": {
-
-	},
-	"building_resources_refunded": {
-
-	},
+	"building_resources_consumed": {},
+	"building_resources_refunded": {},
 	"building_rotation": {
 		"100,312": 0.0,
 		"100,337": 0.0,
@@ -3781,22 +3767,12 @@
 		"99,312": "conveyor_belt",
 		"99,337": "conveyor_belt"
 	},
-	"constructor_state": {
-
-	},
-	"conveyor_items": {
-
-	},
+	"constructor_state": {},
+	"conveyor_items": {},
 	"core_position": "103,313",
-	"crane_links": {
-
-	},
-	"crane_states": {
-
-	},
-	"deconstructor_state": {
-
-	},
+	"crane_links": {},
+	"crane_states": {},
+	"deconstructor_state": {},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
@@ -3804,12 +3780,8 @@
 		"timestamp": 1778865232.40268
 	},
 	"drone_position": "",
-	"duct_bridge_filters": {
-
-	},
-	"factory_buffers": {
-
-	},
+	"duct_bridge_filters": {},
+	"factory_buffers": {},
 	"floor_tiles": {
 		"100,203": "purple_floor",
 		"100,204": "purple_floor",
@@ -18297,39 +18269,11 @@
 			"text": "The Cobustion Generator takes 1 coal and produces 20 power for 3 seconds. "
 		}
 	],
-	"hints_runtime": {
-		"clock": 4.49999999999995,
-		"landing_fired": true,
-		"runtime": {
-			"Mass Driver": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			},
-			"bridge": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			}
-		}
-	},
-	"junction_items": {
-
-	},
+	"junction_items": {},
 	"linked_pairs": [],
-	"loader_state": {
-
-	},
+	"loader_state": {},
 	"mass_driver_projectiles": [],
-	"mass_driver_state": {
-
-	},
+	"mass_driver_state": {},
 	"ore_tiles": {
 		"105,233": "graphite_ore",
 		"105,234": "graphite_ore",
@@ -18609,12 +18553,8 @@
 		"97,314": "coal_ore",
 		"97,315": "coal_ore"
 	},
-	"payload_items": {
-
-	},
-	"pipe_contents": {
-
-	},
+	"payload_items": {},
+	"pipe_contents": {},
 	"player_units": [],
 	"refabricator_state": {
 		"156,203": {
@@ -18638,207 +18578,98 @@
 		"mat_silicon": 2965.0,
 		"mat_steel": 1526.0
 	},
-	"script_runtime": {
-		"core_counts": {
-
-		},
-		"core_unit_mined_counts": {
-
-		},
-		"current_step": -1.0,
-		"decoded_archive_counts": {
-
-		},
-		"deposited_baselines": {
-
-		},
-		"disabled_buildings": [],
-		"ferox_blocks_destroyed_counts": {
-
-		},
-		"hidden_tiles": [],
-		"mined_counts": {
-
-		},
-		"placed_baselines": {
-
-		},
-		"placed_counts": {
-
-		},
-		"produced_counts": {
-
-		},
-		"script_running": false,
-		"step_wait_timer": 0.0,
-		"units_destroyed_counts": {
-
-		},
-		"units_produced_counts": {
-
-		}
-	},
 	"script_steps": [
 		{
-			"_editor_pos": "120,80",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [],
-			"markers": [
+			"actions": [
 				{
 					"from": "101,311",
+					"id": "ET",
 					"text": "(-white)Due to the lack of vents on this sector, you will need to use coal to generate power.",
 					"to": "108,311",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Explain (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,80",
-			"actions": [],
 			"conditions": [
 				{
 					"seconds": 8.0,
 					"type": "wait"
 				}
 			],
-			"dependencies": [
-				0
-			],
-			"name": "Explain (wait wait)",
-			"on_exit": []
+			"name": "Explain",
+			"on_exit": [
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				1
-			],
-			"markers": [
+			"actions": [
 				{
 					"color": "white",
 					"from": "95,317",
+					"id": "PDB",
 					"to": "96,318",
-					"type": "box"
-				}
-			],
-			"name": "Place Drill (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,230",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				1
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "93,315",
+					"id": "PDT",
 					"text": "(-white)Place a [res://textures/blocks/resource extractors/Ground Scraper/GroundScraperComplete.png]Ground Scraper on coal to extract coal.",
 					"to": "98,315",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Place Drill (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,230",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "ground_scraper",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				2,
-				3
-			],
-			"name": "Place Drill (wait placed)",
-			"on_exit": []
+			"name": "Place Drill",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		},
 		{
-			"_editor_pos": "120,380",
-			"actions": [],
-			"conditions": [
+			"actions": [
 				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				4
-			],
-			"markers": [
-				{
-					"color": "yellow",
 					"from": "94,319",
+					"id": "PPB",
 					"to": "96,321",
-					"type": "box"
-				}
-			],
-			"name": "Place Power (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "400,380",
-			"actions": [],
-			"conditions": [
-				{
-					"type": "descendants_done"
-				}
-			],
-			"dependencies": [
-				4
-			],
-			"markers": [
+					"type": "draw_box"
+				},
 				{
 					"from": "93,317",
+					"id": "PPT",
 					"text": "(-white)Place a [res://textures/blocks/power/CombustionGenerator.png]Combustion Generator and give it coal to create power.",
 					"to": "98,317",
-					"type": "text"
+					"type": "draw_text"
 				}
 			],
-			"name": "Place Power (marker)",
-			"on_exit": []
-		},
-		{
-			"_editor_pos": "680,380",
-			"actions": [],
 			"conditions": [
 				{
 					"block_id": "combustion_generator",
 					"type": "placed"
 				}
 			],
-			"dependencies": [
-				5,
-				6
-			],
-			"name": "Place Power (wait placed)",
-			"on_exit": []
+			"name": "Place Power",
+			"on_exit": [
+				{
+					"type": "clear_boxes"
+				},
+				{
+					"type": "clear_texts"
+				}
+			]
 		}
 	],
 	"sector_name": "ND",
-	"sorter_filters": {
-
-	},
+	"sorter_filters": {},
 	"stats_blocks_placed": 0.0,
 	"stats_blocks_removed": 0.0,
 	"stats_enemy_blocks_destroyed": 0.0,
@@ -18847,9 +18678,7 @@
 	"stats_units_destroyed": 0.0,
 	"stats_units_produced": 0.0,
 	"type": "sector",
-	"unloader_state": {
-
-	},
+	"unloader_state": {},
 	"version": 3.0,
 	"wall_tiles": {
 		"100,198": "purple_wall",

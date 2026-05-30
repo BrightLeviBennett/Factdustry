@@ -233,11 +233,46 @@ func _ready() -> void:
 	# the absolute z so it survives even if UnitManager's z changes.
 	_ctrl_hover_overlay = Node2D.new()
 	_ctrl_hover_overlay.name = "CtrlHoverOverlay"
-	_ctrl_hover_overlay.z_index = 4099
+	_ctrl_hover_overlay.z_index = 4096
 	_ctrl_hover_overlay.z_as_relative = false
 	_ctrl_hover_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
 	add_child(_ctrl_hover_overlay)
 	_ctrl_hover_overlay.draw.connect(_draw_ctrl_hover_on_overlay)
+	# Build the silhouette shader once. Replaces a sprite's RGB with the
+	# overlay color while preserving its alpha — same trick Mindustry
+	# uses for the "controlling this unit" outline.
+	var sil_shader := Shader.new()
+	sil_shader.code = """
+shader_type canvas_item;
+uniform vec4 silhouette_color : source_color = vec4(1.0, 0.85, 0.2, 1.0);
+void fragment() {
+	vec4 t = texture(TEXTURE, UV);
+	COLOR = vec4(silhouette_color.rgb, t.a * silhouette_color.a);
+}
+"""
+	_silhouette_material = ShaderMaterial.new()
+	_silhouette_material.shader = sil_shader
+	_silhouette_material.set_shader_parameter("silhouette_color", Color(1.0, 0.85, 0.2, 1.0))
+	# Sub-canvas dedicated to silhouette sprite draws (so the shader
+	# only applies to those, not to the arrows / block rects).
+	_ctrl_hover_silhouette = Node2D.new()
+	_ctrl_hover_silhouette.name = "Silhouette"
+	_ctrl_hover_silhouette.material = _silhouette_material
+	_ctrl_hover_overlay.add_child(_ctrl_hover_silhouette)
+	_ctrl_hover_silhouette.draw.connect(_draw_ctrl_hover_silhouette)
+	# Godot caps z_index at 4096, and BuildingSystem's crane / popup
+	# overlays are already at that cap. Reparent to Main as the LAST
+	# child so the tree-order tiebreak puts us on top of them.
+	call_deferred("_reparent_ctrl_overlay_to_top")
+
+
+func _reparent_ctrl_overlay_to_top() -> void:
+	if _ctrl_hover_overlay == null or main == null:
+		return
+	if _ctrl_hover_overlay.get_parent() != main:
+		_ctrl_hover_overlay.get_parent().remove_child(_ctrl_hover_overlay)
+		main.add_child(_ctrl_hover_overlay)
+	main.move_child(_ctrl_hover_overlay, main.get_child_count() - 1)
 
 
 func _exit_tree() -> void:
@@ -252,6 +287,14 @@ var _ctrl_hover_phase: float = 0.0
 # and turret-head canvases sit higher, which previously buried the
 # control-hover fill. Built in `_ready`.
 var _ctrl_hover_overlay: Node2D = null
+# Sub-canvas under `_ctrl_hover_overlay` whose material is the
+# silhouette shader — sprites drawn here come out as solid-color
+# alpha-masked silhouettes instead of tinted multiplications.
+var _ctrl_hover_silhouette: Node2D = null
+var _silhouette_material: ShaderMaterial = null
+# Set by `_paint_ctrl_overlay_for_unit` and consumed by the deferred
+# `_draw_ctrl_hover_silhouette` callback. Cleared each frame.
+var _silhouette_targets: Array = []
 
 # --- COMMAND INDICATORS ---
 # The most recent right-click command. When a group is told to move,
@@ -307,14 +350,28 @@ func _input(event: InputEvent) -> void:
 	var is_ctrl_click: bool = event is InputEventMouseButton and event.pressed and event.ctrl_pressed and (event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT)
 	if is_ctrl_click:
 		var mouse_world := get_global_mouse_position()
+		var grid_pos: Vector2i = main.world_to_grid(mouse_world)
+		# --- LUMINA core: spawn / take control of its associated core
+		# unit. Runs BEFORE the unit / turret / crane checks so an
+		# unowned-but-clickable cell on a core's footprint reads as
+		# "go to this core's unit" instead of "release control".
+		if main.placed_buildings.has(grid_pos):
+			var core_bid: StringName = main.placed_buildings[grid_pos]
+			var core_d: BlockData = Registry.get_block(core_bid)
+			if core_d and core_d.tags.has("core") \
+					and main.get_building_faction(grid_pos) == main.Faction.LUMINA:
+				var core_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+				var drone = main.get_node_or_null("PlayerDrone")
+				if drone and drone.has_method("respawn_at_core"):
+					drone.respawn_at_core(core_anchor)
+				get_viewport().set_input_as_handled()
+				return
 		# Check for player unit at click position
 		var clicked_unit := _get_player_unit_at(mouse_world)
 		if clicked_unit:
 			_take_control_of_unit(clicked_unit)
 			get_viewport().set_input_as_handled()
 			return
-		# Check for LUMINA turret at click position
-		var grid_pos: Vector2i = main.world_to_grid(mouse_world)
 		if main.placed_buildings.has(grid_pos):
 			var block_id = main.placed_buildings[grid_pos]
 			var bdata = Registry.get_block(block_id)
@@ -328,8 +385,11 @@ func _input(event: InputEvent) -> void:
 				_take_control_of_crane(anchor)
 				get_viewport().set_input_as_handled()
 				return
-		# Ctrl+clicked empty space — release control
-		_release_control()
+		# Ctrl+clicked empty ground. Previously released control + respawned
+		# the drone at the click point — that read as "you got teleported
+		# for misclicking" any time the player meant to control something
+		# but missed. Now it's a no-op while controlling (R still releases
+		# cleanly), and a no-op when not controlling.
 		get_viewport().set_input_as_handled()
 		return
 
@@ -660,6 +720,52 @@ func _deselect_all() -> void:
 # DIRECT CONTROL (Ctrl+click)
 # =========================
 
+## Ctrl+click on a LUMINA core. Resolves the core's "core unit"
+## (BlockData.spawned_unit, falling back to produced_unit). If a
+## friendly instance of that unit is already alive within roughly
+## one core footprint of the anchor, we take control of THAT one
+## (so repeated ctrl+clicks don't pile up duplicates). Otherwise we
+## spawn a fresh instance at the core's centre and control it.
+func _take_control_of_core_unit(core_cell: Vector2i, core_data: BlockData, unit_id: StringName) -> void:
+	if core_data == null or unit_id == &"":
+		return
+	var anchor: Vector2i = main.building_origins.get(core_cell, core_cell)
+	var gs: float = float(main.GRID_SIZE)
+	var sz: Vector2i = core_data.grid_size
+	var center: Vector2 = main.grid_to_world(anchor) + Vector2(
+		float(sz.x) * gs * 0.5,
+		float(sz.y) * gs * 0.5,
+	)
+	# Look for an existing alive PLAYER unit of the requested type near
+	# the core. If we find one we control IT instead of spawning a new
+	# copy — keeps the unit roster from growing on every repeat click.
+	var radius_px: float = maxf(float(sz.x), float(sz.y)) * gs * 1.5
+	var radius_sq: float = radius_px * radius_px
+	var nearest: Node2D = null
+	var nearest_d2: float = radius_sq
+	for u in player_units:
+		if u == null or not is_instance_valid(u) or u.is_dead:
+			continue
+		var ud = u.data if "data" in u else null
+		if ud == null or StringName(ud.id) != unit_id:
+			continue
+		var d2: float = center.distance_squared_to(u.position)
+		if d2 < nearest_d2:
+			nearest_d2 = d2
+			nearest = u
+	if nearest != null:
+		_take_control_of_unit(nearest)
+		return
+	# Spawn a new core unit at the core centre and take control. The
+	# newly-spawned unit is appended to `player_units` (last index).
+	spawn_player_unit(center, unit_id)
+	if player_units.is_empty():
+		return
+	var spawned: Node2D = player_units[player_units.size() - 1]
+	if spawned != null and is_instance_valid(spawned):
+		_take_control_of_unit(spawned)
+
+
 func _take_control_of_unit(unit: Node2D) -> void:
 	_release_control()
 	_deselect_all()
@@ -823,15 +929,15 @@ func _update_controlled_crane(delta: float) -> void:
 	if building_sys.has_method("update_crane_telescope"):
 		building_sys.update_crane_telescope(anchor, state["target_pos"], delta)
 
-	# Handle E key for pickup/drop
-	if Input.is_key_pressed(KEY_E) and not _crane_e_held:
+	# Handle crane-pickup action for pickup/drop
+	if Input.is_action_pressed("crane_pickup") and not _crane_e_held:
 		_crane_e_held = true
 		_crane_interact(anchor, state, crane_center, max_reach)
-	elif not Input.is_key_pressed(KEY_E):
+	elif not Input.is_action_pressed("crane_pickup"):
 		_crane_e_held = false
 
-	# Handle Q key to rotate held payload by 90°
-	if Input.is_key_pressed(KEY_Q) and not _crane_q_held:
+	# Handle crane-drop action to rotate held payload by 90°
+	if Input.is_action_pressed("crane_drop") and not _crane_q_held:
 		_crane_q_held = true
 		if state["held_payload"] != null and state["held_payload"].get("type", "") == "building":
 			var bdata_q = Registry.get_block(StringName(state["held_payload"].get("block_id", "")))
@@ -839,7 +945,7 @@ func _update_controlled_crane(delta: float) -> void:
 			var is_dir: bool = building_sys_q != null and bdata_q != null and building_sys_q._is_directional(bdata_q.id)
 			if is_dir:
 				state["held_payload"]["rotation"] = (int(state["held_payload"].get("rotation", 0)) + 1) % 4
-	elif not Input.is_key_pressed(KEY_Q):
+	elif not Input.is_action_pressed("crane_drop"):
 		_crane_q_held = false
 
 	# Smoothly lerp grabber angle toward target rotation
@@ -1756,6 +1862,7 @@ func _on_building_placed(_block_id: StringName, grid_pos: Vector2i) -> void:
 	# can block a previously-fine route; a destroyed wall can open one).
 	# Same for base-cluster topology — recompute lazily next tick.
 	_invalidate_flow_fields()
+	_invalidate_target_caches()
 	_base_dirty = true
 	var data = Registry.get_block(_block_id)
 	# Platforms now count as passable so ground units can cross water
@@ -1816,6 +1923,7 @@ func _on_building_placed(_block_id: StringName, grid_pos: Vector2i) -> void:
 
 func on_building_destroyed(grid_pos: Vector2i) -> void:
 	_invalidate_flow_fields()
+	_invalidate_target_caches()
 	_base_dirty = true
 	# Always non-solid for ground / crawler (water is no longer hard-
 	# blocked). Water cells get their pathfinding penalty restored so
@@ -2119,13 +2227,17 @@ func _score_building_for_attack(grid_pos: Vector2i, bdata: BlockData, from: Vect
 
 
 ## Returns a 0.4 .. 1.0 vulnerability factor. 1.0 = no surrounding
-## walls. 0.4 = densely walled in. Cheap 8-neighbour scan around the
-## building footprint.
+## walls. 0.4 = densely walled in. Cheap 5×5 scan around the building
+## anchor. Results are cached per-anchor and refreshed on building
+## placement / destruction (see `_invalidate_target_caches`), so the
+## per-frame cost is one dict lookup unless the local terrain changed.
+var _vulnerability_cache: Dictionary = {}
+
 func _building_vulnerability(grid_pos: Vector2i) -> float:
+	if _vulnerability_cache.has(grid_pos):
+		return _vulnerability_cache[grid_pos]
 	var wall_n: int = 0
 	var checked: int = 0
-	# 3x3 footprint scan around the anchor is good enough — we don't
-	# need to be exact, just approximate.
 	for dx in [-2, -1, 0, 1, 2]:
 		for dy in [-2, -1, 0, 1, 2]:
 			if dx == 0 and dy == 0:
@@ -2142,10 +2254,32 @@ func _building_vulnerability(grid_pos: Vector2i) -> float:
 				continue
 			if nbd.tags.has("wall"):
 				wall_n += 1
-	if checked == 0:
-		return 1.0
-	var dense: float = clampf(float(wall_n) / float(checked), 0.0, 1.0)
-	return lerpf(1.0, 0.4, dense)
+	var result: float = 1.0
+	if checked > 0:
+		var dense: float = clampf(float(wall_n) / float(checked), 0.0, 1.0)
+		result = lerpf(1.0, 0.4, dense)
+	_vulnerability_cache[grid_pos] = result
+	return result
+
+
+## Drops cached target-scoring data. Called from `_on_building_placed`
+## and `on_building_destroyed`, so any structural change refreshes the
+## cache lazily on the next squad scan.
+func _invalidate_target_caches() -> void:
+	_vulnerability_cache.clear()
+	_threat_cache_valid_until = 0.0
+	_scored_targets_cache_until = 0.0
+
+
+## Cached threat assessment — recomputed at most every
+## `_SQUAD_SCAN_INTERVAL`. Squad scans share the result so multiple
+## bases firing in the same second don't each walk every building.
+var _threat_cache_value: float = 0.0
+var _threat_cache_valid_until: float = 0.0
+## Cached scored-target list keyed by (faction, origin-bucket).
+## Bucket = origin / 8 tiles so nearby origins reuse one cached scan.
+var _scored_targets_cache: Dictionary = {}
+var _scored_targets_cache_until: float = 0.0
 
 
 func _building_target_weight(bdata: BlockData) -> float:
@@ -2217,6 +2351,11 @@ func _compute_rally_point(fab_anchor: Vector2i) -> Vector2:
 ## Tiny turrets contribute their share; high-DPS turrets dominate. Used
 ## as the input to `_compute_release_threshold`.
 func _assess_player_threat() -> float:
+	# Cached for _SQUAD_SCAN_INTERVAL — multiple squads firing inside
+	# the same scan window reuse one walk over placed_buildings.
+	var now: float = float(Time.get_ticks_msec()) * 0.001
+	if now < _threat_cache_valid_until:
+		return _threat_cache_value
 	var total: float = 0.0
 	for grid_pos in main.placed_buildings:
 		if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
@@ -2246,6 +2385,8 @@ func _assess_player_threat() -> float:
 			if uspd <= 0.0:
 				uspd = 1.0
 			total += udmg / uspd
+	_threat_cache_value = total
+	_threat_cache_valid_until = now + _SQUAD_SCAN_INTERVAL
 	return total
 
 
@@ -2322,20 +2463,33 @@ func _release_squad(fab_anchor: Vector2i) -> void:
 ## worth attacking).
 func _pick_push_targets(origin: Vector2i, count: int, faction: int = -1) -> Array[Vector2i]:
 	var target_faction: int = main.Faction.LUMINA if faction < 0 else faction
+	# Cache scored lists by (faction, origin-bucket). 8-tile buckets
+	# let nearby origins share one scan — perfect for multi-fabricator
+	# bases all firing within the same 2 s window.
+	var bucket: Vector2i = Vector2i(origin.x / 8, origin.y / 8)
+	var key: String = "%d,%d,%d" % [target_faction, bucket.x, bucket.y]
+	var now: float = float(Time.get_ticks_msec()) * 0.001
 	var scored: Array = []
-	var aggression: float = _pressure_mult()
-	for grid_pos in main.placed_buildings:
-		if main.get_building_faction(grid_pos) != target_faction:
-			continue
-		var bid: StringName = main.placed_buildings[grid_pos]
-		var bdata = Registry.get_block(bid)
-		if bdata == null or bdata.tags.has("platform"):
-			continue
-		var score: float = _score_building_for_attack(grid_pos, bdata, origin, aggression)
-		if score <= 0.0:
-			continue
-		scored.append({"pos": grid_pos, "score": score})
-	scored.sort_custom(func(a, b): return a["score"] > b["score"])
+	if now < _scored_targets_cache_until and _scored_targets_cache.has(key):
+		scored = _scored_targets_cache[key]
+	else:
+		var aggression: float = _pressure_mult()
+		for grid_pos in main.placed_buildings:
+			if main.get_building_faction(grid_pos) != target_faction:
+				continue
+			var bid: StringName = main.placed_buildings[grid_pos]
+			var bdata = Registry.get_block(bid)
+			if bdata == null or bdata.tags.has("platform"):
+				continue
+			var score: float = _score_building_for_attack(grid_pos, bdata, origin, aggression)
+			if score <= 0.0:
+				continue
+			scored.append({"pos": grid_pos, "score": score})
+		scored.sort_custom(func(a, b): return a["score"] > b["score"])
+		_scored_targets_cache[key] = scored
+		# Refresh window — keep the cache valid until building churn or
+		# the next squad scan interval, whichever comes first.
+		_scored_targets_cache_until = now + _SQUAD_SCAN_INTERVAL
 	var out: Array[Vector2i] = []
 	var min_sep_sq: int = 8 * 8
 	for entry in scored:
@@ -3243,23 +3397,38 @@ func _draw() -> void:
 		_draw_move_targets()
 
 
-## Draw callback for the dedicated Ctrl-hover overlay (z=4099). Renders
-## a translucent yellow tint covering the hovered LUMINA turret / unit /
-## crane plus four arrowheads orbiting it CCW. Turret coverage is a
-## rect padded outward by 1 tile in every direction so the tint includes
-## the turret's heads (multi-barrel layouts have heads sticking past
-## the base footprint). Units use a circle scaled to their unit_size.
+## Draw callback for the dedicated control overlay (z=4099). Runs every
+## frame and renders both:
+##   1. A persistent "you are controlling THIS" overlay on the currently-
+##      controlled unit / turret / crane.
+##   2. A Ctrl-hover preview on whatever the player is hovering over
+##      with the `additive_select_modifier` held.
+##
+## Turret / crane → flat yellow rect at the block's actual footprint
+## (matches the in-game style: just the block, no padding).
+## Unit → the unit's sprite re-drawn on the overlay tinted yellow so
+## the controlled silhouette reads as the dominant element.
+## Both styles get the four orbiting arrowheads.
 func _draw_ctrl_hover_on_overlay() -> void:
-	if main == null or main.is_ui_blocking():
+	if main == null:
 		return
-	if not (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
+	# Reset and queue the silhouette sub-canvas every frame so stale
+	# sprites from the last frame don't linger when the cursor moves off.
+	_silhouette_targets.clear()
+	if _ctrl_hover_silhouette:
+		_ctrl_hover_silhouette.queue_redraw()
+	# Only show the overlay while the modifier is held and the cursor is
+	# over a valid target — controlling an entity no longer paints it.
+	if main.is_ui_blocking():
+		return
+	var ctrl_held: bool = Input.is_action_pressed("additive_select_modifier") \
+			or Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)
+	if not ctrl_held:
 		return
 	var mouse_world: Vector2 = get_global_mouse_position()
-	# Allied unit takes priority over a building underneath it.
 	var hovered_unit := _get_player_unit_at(mouse_world)
 	if hovered_unit and is_instance_valid(hovered_unit) and not hovered_unit.is_dead:
-		var u_radius: float = float(hovered_unit.unit_size) if "unit_size" in hovered_unit else 18.0
-		_paint_ctrl_hover_circle(hovered_unit.position, u_radius)
+		_paint_ctrl_overlay_for_unit(hovered_unit, 1.0)
 		return
 	var grid_pos: Vector2i = main.world_to_grid(mouse_world)
 	if not main.placed_buildings.has(grid_pos):
@@ -3268,53 +3437,179 @@ func _draw_ctrl_hover_on_overlay() -> void:
 	var bdata = Registry.get_block(block_id)
 	if bdata == null:
 		return
-	if not (bdata.is_turret() or bdata.tags.has("crane")):
+	if not (bdata.is_turret() or bdata.tags.has("crane") or bdata.tags.has("core")):
 		return
 	if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
 		return
 	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-	var adata = Registry.get_block(main.placed_buildings.get(anchor, &""))
-	if adata == null:
+	_paint_ctrl_overlay_for_block(anchor, bdata, 0.45)
+
+
+## Block-style overlay: a flat yellow rect at the block's exact
+## footprint (no padding around it — the user only wants the block
+## tile area covered) plus the four orbiting arrows.
+func _paint_ctrl_overlay_for_block(anchor: Vector2i, bdata: BlockData, alpha: float) -> void:
+	if _ctrl_hover_overlay == null:
 		return
 	var gs: float = float(main.GRID_SIZE)
-	var size_x: float = float(maxi(adata.grid_size.x, 1)) * gs
-	var size_y: float = float(maxi(adata.grid_size.y, 1)) * gs
-	var base_pos: Vector2 = main.grid_to_world(anchor)
-	# Pad the rect by one tile in each direction so the yellow tint
-	# fully covers protruding heads on multi-barrel turrets. Cranes
-	# get the same treatment so the grabber arm sits inside the tint.
-	var pad: float = gs * 1.0
-	var rect_pos: Vector2 = base_pos - Vector2(pad, pad)
-	var rect_size: Vector2 = Vector2(size_x + pad * 2.0, size_y + pad * 2.0)
-	_paint_ctrl_hover_rect(rect_pos, rect_size)
-
-
-func _paint_ctrl_hover_circle(center: Vector2, radius: float) -> void:
-	if _ctrl_hover_overlay == null:
-		return
-	var fill_color := Color(1.0, 0.85, 0.2, 0.55)
-	_ctrl_hover_overlay.draw_circle(center, radius, fill_color)
-	_paint_ctrl_hover_arrows(center, radius)
-
-
-func _paint_ctrl_hover_rect(top_left: Vector2, size: Vector2) -> void:
-	if _ctrl_hover_overlay == null:
-		return
-	var fill_color := Color(1.0, 0.85, 0.2, 0.55)
-	_ctrl_hover_overlay.draw_rect(Rect2(top_left, size), fill_color, true)
+	var size: Vector2 = Vector2(
+		float(maxi(bdata.grid_size.x, 1)) * gs,
+		float(maxi(bdata.grid_size.y, 1)) * gs,
+	)
+	var top_left: Vector2 = main.grid_to_world(anchor)
 	var center: Vector2 = top_left + size * 0.5
-	# Arrow orbit radius scales with the rect's larger half-axis so the
-	# four arrows always sit just outside the tinted region.
-	var orbit_r: float = maxf(size.x, size.y) * 0.5 + 6.0
-	_paint_ctrl_hover_arrows(center, orbit_r - 8.0)
+	var radius: float = maxf(size.x, size.y) * 0.5
+
+	# Turret / crane → silhouette of the base sprite + (turret only)
+	# the head sprite(s) at the live aim angle. Falls back to a flat
+	# rect for blocks with no base_sprite.
+	var did_silhouette: bool = false
+	if (bdata.is_turret() or bdata.tags.has("crane")) and bdata.base_sprite:
+		_silhouette_targets.append({
+			"tex": bdata.base_sprite,
+			"pos": center,
+			"angle": 0.0,
+			"size": size,
+		})
+		did_silhouette = true
+		# Turret heads, one per barrel, oriented by the live aim.
+		if bdata.is_turret() and bdata.turret_head_sprite:
+			_queue_turret_head_silhouettes(anchor, bdata, center)
+	# Core: silhouette its base sprite filled to the footprint.
+	elif bdata.tags.has("core") and bdata.base_sprite:
+		_silhouette_targets.append({
+			"tex": bdata.base_sprite,
+			"pos": center,
+			"angle": 0.0,
+			"size": size,
+		})
+		did_silhouette = true
+
+	if not did_silhouette:
+		var fill := Color(1.0, 0.85, 0.2, 1.0)
+		_ctrl_hover_overlay.draw_rect(Rect2(top_left, size), fill, true)
+	_paint_ctrl_hover_arrows(center, radius + 10.0)
+
+
+## Queues one silhouette draw per turret barrel head, rotated to match
+## the live per-barrel aim from CombatSystem. Falls back to the chassis
+## aim if the per-barrel array hasn't been seeded yet.
+func _queue_turret_head_silhouettes(anchor: Vector2i, bdata: BlockData, center: Vector2) -> void:
+	var head_tex: Texture2D = bdata.turret_head_sprite
+	if head_tex == null:
+		return
+	var combat = main.get_node_or_null("CombatSystem")
+	var chassis_aim: float = float(main.building_rotation.get(anchor, 0)) * (PI * 0.5)
+	if combat and "turret_angles" in combat and combat.turret_angles.has(anchor):
+		chassis_aim = float(combat.turret_angles[anchor])
+	var barrels: Array = []
+	if combat and "turret_barrel_angles" in combat and combat.turret_barrel_angles.has(anchor):
+		barrels = combat.turret_barrel_angles[anchor]
+	var bcount: int = maxi(bdata.barrel_count, 1)
+	var tex_size: Vector2 = head_tex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+	var chassis_dir := Vector2.from_angle(chassis_aim)
+	var chassis_perp := Vector2(-chassis_dir.y, chassis_dir.x)
+	# Multi-barrel chassis plate.
+	if bcount > 1 and bdata.turret_chassis_sprite:
+		var ctex: Texture2D = bdata.turret_chassis_sprite
+		var csize: Vector2 = ctex.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+		_silhouette_targets.append({
+			"tex": ctex,
+			"pos": center,
+			"angle": chassis_aim + PI * 0.5,
+			"size": csize,
+		})
+	# Each head — the live render rect is offset along the barrel axis
+	# by `(-tex_size.y * 0.5 + 14 * sf)`. We bake that offset into the
+	# silhouette pose by translating along the barrel direction.
+	for i in range(bcount):
+		var lateral: float = 0.0
+		if bcount > 1:
+			lateral = (float(i) - (float(bcount) - 1.0) * 0.5) * bdata.barrel_spacing
+		var barrel_aim: float = chassis_aim
+		if i < barrels.size():
+			barrel_aim = float(barrels[i])
+		var pivot: Vector2 = center + chassis_perp * lateral
+		var bdir := Vector2.from_angle(barrel_aim)
+		var head_offset: float = -tex_size.y * 0.5 + 14.0 * main.SPRITE_SCALE_FACTOR
+		# `head_offset` is measured along the barrel "up" axis in the
+		# live draw (after the +PI/2 rotation), which maps to forward
+		# along bdir. Push the head out by `-head_offset` so it lands
+		# in front of the pivot.
+		var head_center: Vector2 = pivot + bdir * (-head_offset)
+		_silhouette_targets.append({
+			"tex": head_tex,
+			"pos": head_center,
+			"angle": barrel_aim + PI * 0.5,
+			"size": tex_size,
+		})
+
+
+## Unit-style overlay: re-draw the unit's sprite onto the overlay
+## canvas tinted yellow, so the controlled unit reads as a glowing
+## silhouette. Shape-fallback units get a filled yellow disc the size
+## of `unit_size` instead.
+func _paint_ctrl_overlay_for_unit(unit: Node2D, alpha: float) -> void:
+	if _ctrl_hover_overlay == null:
+		return
+	var udata = unit.data if "data" in unit else null
+	var fill := Color(1.0, 0.85, 0.2, 1.0)
+	var u_radius: float = float(unit.unit_size) if "unit_size" in unit else 18.0
+	if udata != null and (udata.base_sprite != null or udata.head_sprite != null):
+		var scale_f: float = (udata.sprite_scale if udata.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
+		var face_angle: float = float(unit.facing_angle) if "facing_angle" in unit else 0.0
+		var aim_angle: float = float(unit.aim_angle) if "aim_angle" in unit else face_angle
+		var sprite_max: float = 0.0
+		if udata.base_sprite:
+			var b_size: Vector2 = udata.base_sprite.get_size() * scale_f
+			sprite_max = maxf(sprite_max, maxf(b_size.x, b_size.y))
+			_silhouette_targets.append({
+				"tex": udata.base_sprite,
+				"pos": unit.position,
+				"angle": face_angle + PI * 0.5,
+				"size": b_size,
+			})
+		if udata.head_sprite:
+			var h_size: Vector2 = udata.head_sprite.get_size() * scale_f
+			sprite_max = maxf(sprite_max, maxf(h_size.x, h_size.y))
+			_silhouette_targets.append({
+				"tex": udata.head_sprite,
+				"pos": unit.position,
+				"angle": aim_angle + PI * 0.5,
+				"size": h_size,
+			})
+		u_radius = maxf(u_radius, sprite_max * 0.5)
+	else:
+		# No sprite — fall back to a solid disc on the main overlay.
+		_ctrl_hover_overlay.draw_circle(unit.position, u_radius, fill)
+	_paint_ctrl_hover_arrows(unit.position, u_radius)
+
+
+## Draws the queued silhouette sprites on the shader-material'd sub-canvas.
+## Receives one entry per sprite (base + head), each with a pre-rotated
+## transform — the shader replaces RGB with the silhouette color while
+## the texture's alpha mask shapes the silhouette.
+func _draw_ctrl_hover_silhouette() -> void:
+	if _ctrl_hover_silhouette == null:
+		return
+	for s in _silhouette_targets:
+		var tex: Texture2D = s.get("tex")
+		if tex == null:
+			continue
+		var pos: Vector2 = s.get("pos", Vector2.ZERO)
+		var ang: float = s.get("angle", 0.0)
+		var sz: Vector2 = s.get("size", Vector2.ZERO)
+		_ctrl_hover_silhouette.draw_set_transform(pos, ang, Vector2.ONE)
+		_ctrl_hover_silhouette.draw_texture_rect(tex, Rect2(-sz * 0.5, sz), false)
+		_ctrl_hover_silhouette.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _paint_ctrl_hover_arrows(center: Vector2, target_radius: float) -> void:
 	if _ctrl_hover_overlay == null:
 		return
-	var orbit_r: float = target_radius + 14.0
-	var arrow_len: float = 12.0
-	var arrow_half: float = 7.0
+	var orbit_r: float = target_radius + 24.0
+	var arrow_len: float = 20.0
+	var arrow_half: float = 12.0
 	var arrow_color := Color(1.0, 0.92, 0.25, 1.0)
 	for i in range(4):
 		var angle: float = -_ctrl_hover_phase + float(i) * TAU * 0.25
