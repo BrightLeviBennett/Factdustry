@@ -610,6 +610,9 @@ func _get_description_for(nid: StringName) -> String:
 	var fluid = Registry.get_fluid(nid)
 	if fluid and "description" in fluid and fluid.description != "":
 		return fluid.description
+	var arch = Registry.get_archive(nid)
+	if arch and "description" in arch and arch.description != "":
+		return arch.description
 	return ""
 
 
@@ -980,8 +983,12 @@ func _get_node_icon(nid: StringName) -> Texture2D:
 		return Registry.blocks[nid].icon
 	if Registry.items.has(nid) and Registry.items[nid].icon:
 		return Registry.items[nid].icon
+	if Registry.fluids.has(nid) and Registry.fluids[nid].icon:
+		return Registry.fluids[nid].icon
 	if Registry.units.has(nid) and Registry.units[nid].icon:
 		return Registry.units[nid].icon
 	if Registry.sectors.has(nid) and Registry.sectors[nid].icon:
 		return Registry.sectors[nid].icon
+	if Registry.archives.has(nid) and Registry.archives[nid].icon:
+		return Registry.archives[nid].icon
 	return fallback_icon

@@ -1,0 +1,9 @@
+[gd_resource type="Resource" script_class="ArchiveData" format=3 uid="uid://bngn5a2juobde"]
+
+[ext_resource type="Script" uid="uid://d0yon0msrif8h" path="res://data/game/tarkon/archives/archive_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"archive_freight_systems"
+display_name = "Archive: Freight Systems"
+description = "A upgraded set of payload blocks designed to be able to deal with larger payloads, made after The Primtives found themselves needing to be able to transport larger groups of materials."

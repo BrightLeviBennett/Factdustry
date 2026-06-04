@@ -1,0 +1,27 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cva7wy1o3a4u5" path="res://textures/blocks/resource extractors/PetroliumDrill.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"fume_extractor"
+display_name = "Fume Extractor"
+description = "Caps a sulfur vent and pipes out sulfur fumes. Must be placed on a sulfur vent."
+icon = ExtResource("2")
+category = 1
+tags = PackedStringArray("fluid", "transport", "pump", "condenser", "extraction", "omnidirectional")
+color = Color(0.8, 0.75, 0.3, 1)
+grid_size = Vector2i(3, 3)
+top_sprite = ExtResource("2")
+max_health = 240.0
+build_cost = {
+"copper": 120,
+"silicon": 40
+}
+build_time = 1.5
+liquid_capacity = 50.0
+transports_fluid = true
+vent_tile = &"sulfur_vent"
+vent_fluid = &"mat_sulfur_fumes"
+vent_rate = 4.0

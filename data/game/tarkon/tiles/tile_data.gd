@@ -71,6 +71,10 @@ enum TileCategory {
 @export var is_liquid: bool = false
 ## What item ID this liquid source yields when pumped (empty = no extraction)
 @export var extracted_liquid: StringName = &""
+## Optional texture for this liquid tile's shallow/shore underlay (the band
+## the water fades into at the edges). When null the global Sand texture is
+## used. Lets e.g. sulfur water fade into a sulfur shore instead of sand.
+@export var shore_icon: Texture2D
 ## Water depth for liquid tiles. 0 = not water / safe ground.
 ##   1 = shallow (ankle-deep). Ground/crawler units can cross at half speed,
 ##       accumulate submersion damage, take a blue tint. Pumps placeable.

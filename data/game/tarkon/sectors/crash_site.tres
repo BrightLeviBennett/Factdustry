@@ -8,10 +8,10 @@ id = &"crash_site"
 display_name = "Crash Site"
 description = "<Optional Sector>
 While you were on Ferum Ridge, our sensors detected some strange seismic activity here; From our closer scans it appears to be a metorite that crash-landed.
- Our sensors also detected a ferox scout group heading in this direction, so be careful."
+Our sensors also detected a ferox scout group heading in this direction, so be careful."
 planet_id = &"Tarkon"
-hex_q = 2
-hex_r = -1
+hex_q = 3
+hex_r = 3
 available_resources = PackedStringArray("mat_copper", "mat_iron")
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray()

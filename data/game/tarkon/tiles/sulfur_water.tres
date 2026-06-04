@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dqgt0rhxginx8"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bru2x7aohinef" path="res://textures/terrain/SulfurWater.png" id="1_mo34l"]
+[ext_resource type="Texture2D" uid="uid://bspjmdw3dcvwg" path="res://textures/terrain/SulfurFloor.png" id="3_gfw04"]
+
+[resource]
+script = ExtResource("1")
+id = &"sulfur_water"
+display_name = "Sulfur Water"
+icon = ExtResource("1_mo34l")
+speed_modifier = 0.5
+tags = PackedStringArray("liquid", "water")
+is_liquid = true
+extracted_liquid = &"mat_sulfur_water"
+shore_icon = ExtResource("3_gfw04")

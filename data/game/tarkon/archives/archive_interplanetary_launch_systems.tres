@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="ArchiveData" format=3 uid="uid://b36a4dmgcb24y"]
+
+[ext_resource type="Script" uid="uid://d0yon0msrif8h" path="res://data/game/tarkon/archives/archive_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"archive_interplanetary_launch_systems"
+display_name = "Archive: Interplanetary Launch Systems"
+description = "A upgraded version of the launchpad, built to be able to launch to other planets, and a improved version of it designed to launch cores to other planets.
+
+Strange... ferox seemed to be heavily guarding the archive containing this... I wonder why..."

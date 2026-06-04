@@ -310,7 +310,6 @@ func tick_layered_spinners(delta: float) -> void:
 	if bsys == null:
 		return
 	var spinners: Dictionary = bsys._LAYERED_SPINNERS
-	var logistics = main.get_node_or_null("LogisticsSystem")
 	var to_erase: Array[Vector2i] = []
 	for cell in main.placed_buildings:
 		var anchor: Vector2i = main.building_origins.get(cell, cell)
@@ -319,7 +318,7 @@ func tick_layered_spinners(delta: float) -> void:
 		var bid: StringName = main.placed_buildings.get(anchor, &"")
 		if not spinners.has(bid):
 			continue
-		bsys._layered_spinner_state[anchor] = {"angle": 0.0, "vel": 0.0, "prev_timer": -1.0}
+		bsys._layered_spinner_state[anchor] = {"angle": 0.0, "vel": 0.0}
 	for anchor in bsys._layered_spinner_state:
 		if not main.placed_buildings.has(anchor):
 			to_erase.append(anchor)
@@ -330,18 +329,19 @@ func tick_layered_spinners(delta: float) -> void:
 			continue
 		var cfg: Dictionary = spinners[bid2]
 		var s: Dictionary = bsys._layered_spinner_state[anchor]
-		var phase_active: bool = is_layered_spinner_producing(anchor)
-		var cur_timer: float = -1.0
-		if logistics and "factory_buffers" in logistics and logistics.factory_buffers.has(anchor):
-			cur_timer = float(logistics.factory_buffers[anchor].get("timer", -1.0))
-		var prev_timer: float = float(s.get("prev_timer", -1.0))
-		var timer_advanced: bool = prev_timer > 0.0 and cur_timer >= 0.0 and cur_timer < prev_timer
-		var active: bool = phase_active and timer_advanced
+		# Spin steadily for the whole "processing" phase — same as crusher /
+		# scraper heads, which gate on a stable boolean. The old code ALSO
+		# required the factory's production timer to have advanced *this
+		# frame* (`timer_advanced`); but factories tick at ~12 Hz while this
+		# head ticks at 60 fps, so the timer only moved ~1 frame in 5. That
+		# made the head accelerate for one frame then decelerate for four,
+		# netting almost zero velocity — the "barely spins" bug. Gating on
+		# the phase alone lets the head reach full speed while producing.
+		var active: bool = is_layered_spinner_producing(anchor)
 		var target: float = float(cfg["spin"]) if active else 0.0
 		var step: float = float(cfg["accel"]) * delta
 		s["vel"] = move_toward(float(s["vel"]), target, step)
 		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
-		s["prev_timer"] = cur_timer
 	for a in to_erase:
 		bsys._layered_spinner_state.erase(a)
 

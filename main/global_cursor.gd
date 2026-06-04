@@ -28,6 +28,14 @@ extends Node
 
 const _CURSOR_DEFAULT_PATH := "res://textures/mouse heads/DefualtMouse.png"
 const _CURSOR_DISPLAY_SIZE := 40.0     # on-screen size in viewport px
+## Hotspot as a fraction of the display size — the point on the sprite
+## that lines up with the actual mouse position. All cursor art points
+## up-left with the tip in the top-left corner, so the hotspot sits at
+## (0, 0); a small inset would land it on the arrowhead apex if the art
+## ever gains a transparent margin there. The square textures fill the
+## square display box exactly (STRETCH_KEEP_ASPECT_CENTERED), so this
+## fraction maps straight onto the box.
+const _CURSOR_HOTSPOT := Vector2(0.0, 0.0)
 
 var _layer: CanvasLayer = null
 var _sprite: TextureRect = null
@@ -148,9 +156,11 @@ func _process(_delta: float) -> void:
 	if _sprite == null or not _sprite.visible:
 		return
 	var mp: Vector2 = _layer.get_viewport().get_mouse_position()
-	# Hotspot at the center so UI hit-test (which uses the OS-reported
-	# mouse position) lines up with where the player visually clicks.
-	_sprite.position = mp - _sprite.size * 0.5
+	# Anchor the cursor's TIP (top-left of the up-left-pointing art) on
+	# the OS mouse position, so the pointed end touches exactly what the
+	# OS hit-tests / the player aims at — rather than centering the
+	# sprite, which floated the tip up-left of the real click point.
+	_sprite.position = mp - _sprite.size * _CURSOR_HOTSPOT
 
 
 ## Replace the default cursor with `tex` until `clear_override` runs.

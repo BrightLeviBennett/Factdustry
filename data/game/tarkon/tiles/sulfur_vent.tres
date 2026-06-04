@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://w47bhwbbguyw"]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://c4s2h8p1gy4km" path="res://textures/terrain/SulfurVent.png" id="1_ly4fp"]
+
+[resource]
+script = ExtResource("1")
+id = &"sulfur_vent"
+display_name = "Sulfur Vent"
+icon = ExtResource("1_ly4fp")
+tags = PackedStringArray("vent")

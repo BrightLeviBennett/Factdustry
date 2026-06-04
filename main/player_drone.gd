@@ -114,10 +114,21 @@ const _AI_BUILD_CACHE_REFRESH: float = 0.4
 
 # --- FEROX SHARDLING REBUILD TIMER ---
 # When a FEROX shardling is in build_range of its current rebuild
-# target, it spends FEROX_REBUILD_TIME seconds before the building
-# actually pops into existence — same pacing the rebuilder unit uses.
+# target, it spends FEROX_REBUILD_TIME seconds rebuilding the block. The
+# block is placed up-front (as FEROX) the moment building starts and the
+# left-to-right construction reveal plays over the timer — same visual
+# the player's drone builds get — then `building_completed` fires when the
+# reveal finishes. `_ferox_rebuild_placed` guards the one-time placement.
 var _ferox_rebuild_target: Variant = null   # Dictionary from main.ferox_rebuild_queue
 var _ferox_rebuild_timer: float = 0.0
+var _ferox_rebuild_placed: bool = false
+# After a failed rebuild attempt (footprint blocked OR the FEROX pool can't
+# afford it), the shardling backs off for this long before grabbing another
+# target — otherwise it sprints between every un-buildable cell in the queue
+# every single frame, never settling and never falling through to its heal
+# priority. Counts down in `_ferox_step_rebuild`.
+var _ferox_rebuild_cooldown: float = 0.0
+const FEROX_REBUILD_RETRY_COOLDOWN: float = 2.5
 const FEROX_REBUILD_TIME: float = 1.5
 
 # --- DATA ---
@@ -150,7 +161,7 @@ var _velocity_smooth: Vector2 = Vector2.ZERO
 # --- FACING ---
 var facing_angle := PI             # Current visual rotation (radians)
 var _target_facing_angle := PI     # Target rotation (persists when input stops)
-const ROTATION_SPEED := 8.0      # How fast the drone turns (radians/sec)
+const ROTATION_SPEED := 11.0     # How fast the drone turns (radians/sec)
 ## Max angular gap (radians) between chassis facing and the requested
 ## movement direction before the drone is allowed to start moving.
 ## ~12° — small enough to feel responsive once the chassis is mostly
@@ -344,7 +355,9 @@ func _process(delta: float) -> void:
 	# directly each frame.
 	if _shadow_canvas != null:
 		var um = _unit_mgr_ref()
-		_shadow_canvas.visible = not (um != null and um.controlled_entity != null)
+		# Only the primary drone's shadow hides while controlling something;
+		# AI shardlings (LUMINA + FEROX) keep their shadow.
+		_shadow_canvas.visible = ai_controlled or not (um != null and um.controlled_entity != null)
 	queue_redraw()
 
 
@@ -692,7 +705,15 @@ func _handle_movement(delta: float) -> void:
 		# Don't override rotation while focused — focus locks rotation toward
 		# the ore/building. Only free movement steers the facing.
 		if focus_pos == null:
-			_target_facing_angle = input_dir.angle() + PI / 2.0 + PI  # Tip faces movement direction
+			# Aim the chassis at the ACTUAL smoothed travel direction rather
+			# than the raw 8-way WASD vector. Once we're moving, the velocity
+			# curves continuously as it lerps toward new input, so facing the
+			# velocity keeps the body tracking the real motion instead of
+			# snapping to the nearest cardinal/diagonal — smoother direction
+			# changes at speed. Fall back to the input direction for the
+			# first kick off a standstill (velocity still ~0, no angle yet).
+			var face_src: Vector2 = _velocity_smooth if _velocity_smooth.length_squared() > 100.0 else input_dir
+			_target_facing_angle = face_src.angle() + PI / 2.0 + PI  # Tip faces movement direction
 
 	# While focused, lock rotation toward the focus point (non-mining case
 	# previously had no lock — now builds behave the same as mining).
@@ -884,12 +905,36 @@ func _get_inventory_total() -> int:
 	return total
 
 
+## The single item type the drone is currently carrying, or &"" when the
+## bag is empty. The drone holds only one resource type at a time, so this
+## is unambiguous.
+func held_item_type() -> StringName:
+	for item_id in mined_inventory:
+		if int(mined_inventory[item_id]) > 0:
+			return item_id
+	return &""
+
+
+## Whether the drone can take `item_id` right now — true only when the bag
+## is empty or already holding that same type. Enforces the one-type-at-a-
+## time storage rule for both mining and storage-block withdrawals.
+func can_hold_item(item_id: StringName) -> bool:
+	var held := held_item_type()
+	return held == &"" or held == item_id
+
+
 func _mine_item() -> void:
 	if mining_item_id == &"":
 		return
 
 	# Inventory full — stop collecting
 	if _get_inventory_total() >= MAX_INVENTORY:
+		return
+
+	# One resource type at a time: don't start collecting a different item
+	# while the drone is still carrying something else. Deliver / empty the
+	# current load first.
+	if not can_hold_item(mining_item_id):
 		return
 
 	# Add to inventory
@@ -989,13 +1034,20 @@ func take_damage(amount: float) -> void:
 
 
 func _on_death() -> void:
+	# A FEROX shardling dying mid-rebuild would leave its block frozen
+	# under construction (it was popped off the queue, so nothing re-picks
+	# it). Finalise it so the base-repair doesn't stall on a corpse.
+	if ferox_controlled:
+		_abandon_ferox_rebuild()
 	# Boom + ruin decal at the death spot before we teleport home.
+	# Mindustry-style unit death blast (Fx.dynamicExplosion port).
+	var vis_size: float = data.visual_size if data else 14.0
+	var expl_u = main.get_node_or_null("ExplosionSystem") if main else null
+	if expl_u and expl_u.has_method("unit_death"):
+		expl_u.unit_death(position, vis_size * 0.5)
 	var overlay = main.get_node_or_null("ParticleOverlay") if main else null
 	if overlay:
-		if overlay.has_method("spawn_burst"):
-			overlay.spawn_burst(position, "explosion_unit")
 		if overlay.has_method("spawn_unit_ruins"):
-			var vis_size: float = data.visual_size if data else 14.0
 			overlay.spawn_unit_ruins(position, vis_size)
 	health = max_health
 	_clear_inventory()
@@ -1206,6 +1258,9 @@ func _ai_movement_tick(delta: float) -> void:
 		if spawn_core_anchor != Vector2i(-1, -1) and main.placed_buildings.has(spawn_core_anchor):
 			_ai_step_toward_grid(spawn_core_anchor, _AI_IDLE_REACH_TILES, delta)
 			return
+		# Leaving the world with a half-built block in progress would freeze
+		# it under construction forever — finalise it before despawning.
+		_abandon_ferox_rebuild()
 		queue_free()
 		return
 
@@ -1243,64 +1298,134 @@ func _ai_movement_tick(delta: float) -> void:
 # to rebuild this tick.
 
 func _ferox_step_rebuild(delta: float) -> Vector2i:
-	# Drop a stale target that another rebuilder already finished.
+	# Retry pacing after a "can't fund it yet" hold. We do NOT clear the target
+	# here — the cooldown just lets the shardling heal/idle a beat before
+	# re-attempting the SAME committed target.
+	if _ferox_rebuild_cooldown > 0.0:
+		_ferox_rebuild_cooldown = maxf(0.0, _ferox_rebuild_cooldown - delta)
+		return Vector2i(-1, -1)
+
+	# --- Commitment checks on the current target ---
+	# Once a target is set the shardling sticks with it until it's fully built;
+	# the only releases are: built by someone else, or destroyed mid-build.
 	if _ferox_rebuild_target != null:
-		var gp: Vector2i = _ferox_rebuild_target["grid_pos"]
-		if main.placed_buildings.has(gp):
-			_ferox_rebuild_target = null
-			_ferox_rebuild_timer = 0.0
-	# Acquire a new target if we don't have one.
+		var tgp: Vector2i = _ferox_rebuild_target["grid_pos"]
+		if _ferox_rebuild_placed:
+			# We broke ground. If our under-construction block was destroyed
+			# (knocked out mid-build), send the order to the BACK of the queue
+			# and move on to the next target.
+			if not main.placed_buildings.has(tgp):
+				main.ferox_rebuild_queue.append(_ferox_rebuild_target)
+				_ferox_rebuild_target = null
+				_ferox_rebuild_timer = 0.0
+				_ferox_rebuild_placed = false
+				return Vector2i(-1, -1)
+		else:
+			# Haven't broken ground yet. If the cell is now occupied, someone
+			# else finished it — that counts as "built", so release and move on.
+			if main.placed_buildings.has(tgp):
+				_ferox_rebuild_target = null
+				_ferox_rebuild_timer = 0.0
+
+	# --- Acquire a new target only when we don't have one ---
 	if _ferox_rebuild_target == null:
 		if main.ferox_rebuild_queue.is_empty():
 			return Vector2i(-1, -1)
 		_ferox_rebuild_target = main.ferox_rebuild_queue.pop_front()
 		_ferox_rebuild_timer = 0.0
+		_ferox_rebuild_placed = false
+
 	var target_gp: Vector2i = _ferox_rebuild_target["grid_pos"]
 	var target_world: Vector2 = main.grid_to_world(target_gp) + Vector2(
 		main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
 	var dist: float = position.distance_to(target_world)
 	var build_range_px: float = float(main.GRID_SIZE) * 2.5
-	if dist > build_range_px:
+
+	if not _ferox_rebuild_placed:
+		# Travel to the target, then break ground.
+		if dist > build_range_px:
+			_ai_step_toward_world(target_world, 2, delta)
+			_ferox_rebuild_timer = 0.0
+			return target_gp
+		var reason: String = _ferox_begin_rebuild()
+		if reason != "ok":
+			if reason == "broke":
+				# Can't fund it yet — HOLD the target (don't abandon it) and
+				# retry after a short beat; the shardling can heal in between.
+				_ferox_rebuild_cooldown = FEROX_REBUILD_RETRY_COOLDOWN
+				_ferox_rebuild_timer = 0.0
+				return Vector2i(-1, -1)
+			# bad_data / occupied — can't ever build here; discard and re-target
+			# immediately. No retry cooldown: switching to the next queued target
+			# should be instant (the cooldown is only for holding a target we
+			# can't fund yet, not for moving on from a dead one).
+			_ferox_rebuild_target = null
+			_ferox_rebuild_timer = 0.0
+			return Vector2i(-1, -1)
+		# Broke ground (placed) — fall through to the build advance below.
+	elif dist > build_range_px:
+		# Already building but we drifted out of range (e.g. retreated from a
+		# unit and came back) — travel back and DON'T advance progress yet.
 		_ai_step_toward_world(target_world, 2, delta)
-		_ferox_rebuild_timer = 0.0
 		return target_gp
-	# In range — start (or continue) the build timer.
+
+	# In range and building — advance the construction reveal.
 	_ferox_rebuild_timer += delta
+	_ferox_advance_rebuild_progress()
 	if _ferox_rebuild_timer >= FEROX_REBUILD_TIME:
 		_ferox_finish_rebuild()
 	return target_gp
 
 
-func _ferox_finish_rebuild() -> void:
+# Lays the rebuild target down as an under-construction FEROX block and
+# opens a build-progress entry so the left-to-right construction reveal
+# animates over FEROX_REBUILD_TIME. Returns a reason code WITHOUT placing on
+# failure: "bad_data", "occupied", or "broke" (FEROX pool can't afford it);
+# "ok" on success. The caller decides what to do with the target — this no
+# longer mutates the rebuild queue. Does NOT touch `work_order` (the player's
+# build queue); FEROX rebuilds are free and self-driven.
+func _ferox_begin_rebuild() -> String:
 	if _ferox_rebuild_target == null:
-		return
+		return "bad_data"
 	var block_id: StringName = _ferox_rebuild_target["block_id"]
 	var grid_pos: Vector2i = _ferox_rebuild_target["grid_pos"]
 	var rot: int = _ferox_rebuild_target["rotation"]
 	var bdata = Registry.get_block(block_id)
 	if bdata == null:
-		_ferox_rebuild_target = null
-		_ferox_rebuild_timer = 0.0
-		return
-	# Space-clear check first so we don't bail out on resources only to
-	# discover the cell is occupied.
+		return "bad_data"
+	# Space-clear check — abandon if any footprint cell is occupied.
 	for x in range(bdata.grid_size.x):
 		for y in range(bdata.grid_size.y):
 			var tile_pos: Vector2i = grid_pos + Vector2i(x, y)
 			if main.placed_buildings.has(tile_pos):
-				_ferox_rebuild_target = null
-				_ferox_rebuild_timer = 0.0
-				return
-	# FEROX core shardlings rebuild for free — the enemy faction's
-	# "resource pool" is abstract (we don't simulate FEROX mining), so
-	# enforcing the same item-cost gate the player faces would stall
-	# every rebuild forever since `ferox_resources` is always 0. The
-	# enemy rebuilder UNIT (the tier-2 `rebuild` unit) still pays from
-	# the queue's affordability check; the shardling is meant to be
-	# the persistent "the base self-repairs" mechanic.
-	# Mirror enemy_unit._finish_rebuild's direct placement so the new
-	# block goes in with the correct faction tags and the building_placed
-	# signal fires for downstream bookkeeping (logistics, tech tree, etc).
+				return "occupied"
+	# Resource gate: the shardling pays the block's build_cost out of the
+	# FEROX sector pool (`main.ferox_resources`), just like the player pays
+	# from `main.resources`. The pool is keyed by canonical item ids, while
+	# build_cost uses short keys ("copper"), so resolve each like the player
+	# build does. If the base can't afford it, the caller holds the target and
+	# retries later rather than building for free.
+	if "ferox_resources" in main and main.require_resources and not bdata.build_cost.is_empty():
+		var can_afford := true
+		for item_id in bdata.build_cost:
+			var rk: StringName = main._resolve_resource_key(str(item_id))
+			if int(main.ferox_resources.get(rk, 0)) < int(bdata.build_cost[item_id]):
+				can_afford = false
+				break
+		if not can_afford:
+			# Caller HOLDS the target and retries later — don't re-queue here
+			# (that would duplicate it).
+			return "broke"
+		# Deduct the cost up-front (the block is placed up-front too).
+		for item_id in bdata.build_cost:
+			var rk2: StringName = main._resolve_resource_key(str(item_id))
+			main.ferox_resources[rk2] = int(main.ferox_resources.get(rk2, 0)) - int(bdata.build_cost[item_id])
+		if main.has_signal("ferox_resources_changed"):
+			main.ferox_resources_changed.emit(main.ferox_resources)
+	# Place the block as FEROX, then open a build-progress entry so the
+	# reveal animation plays (the draw pass iterates every
+	# building_build_progress entry regardless of faction). building_placed
+	# fires now for downstream bookkeeping (logistics, tech tree, etc).
 	for x in range(bdata.grid_size.x):
 		for y in range(bdata.grid_size.y):
 			var tile_pos: Vector2i = grid_pos + Vector2i(x, y)
@@ -1309,9 +1434,71 @@ func _ferox_finish_rebuild() -> void:
 			main.building_rotation[tile_pos] = rot
 			main.building_origins[tile_pos] = grid_pos
 			main.building_factions[tile_pos] = main.Faction.FEROX
+	# Only blocks with a build_time get the reveal; instant blocks (if any)
+	# just complete on the timer with no entry, same as before.
+	if bdata.build_time > 0.0 and "building_build_progress" in main:
+		main.building_build_progress[grid_pos] = 0.0
 	main.building_placed.emit(block_id, grid_pos)
+	_ferox_rebuild_placed = true
+	return "ok"
+
+
+# Tracks the construction reveal to the rebuild timer. The reveal draw uses
+# `building_build_progress[anchor] / build_time`, so scale our timer
+# (0..FEROX_REBUILD_TIME) onto the block's build_time.
+func _ferox_advance_rebuild_progress() -> void:
+	if _ferox_rebuild_target == null or not _ferox_rebuild_placed:
+		return
+	if not ("building_build_progress" in main):
+		return
+	var grid_pos: Vector2i = _ferox_rebuild_target["grid_pos"]
+	if not main.building_build_progress.has(grid_pos):
+		return
+	var bdata = Registry.get_block(_ferox_rebuild_target["block_id"])
+	if bdata == null or bdata.build_time <= 0.0:
+		return
+	var frac: float = clampf(_ferox_rebuild_timer / FEROX_REBUILD_TIME, 0.0, 1.0)
+	main.building_build_progress[grid_pos] = frac * bdata.build_time
+
+
+# Called when the shardling leaves the world (death / despawn) with a
+# rebuild in flight. If we'd already broken ground, finalise the block so
+# it doesn't sit frozen under construction forever (it was popped from the
+# queue, so nothing else picks it up); otherwise just drop the target back
+# isn't needed since it's already out of the queue — clear our state.
+func _abandon_ferox_rebuild() -> void:
+	if _ferox_rebuild_target == null:
+		return
+	if _ferox_rebuild_placed:
+		# We own a half-built block — complete it in place.
+		_ferox_finish_rebuild()
+	else:
+		# Hadn't placed anything yet; just forget the target.
+		_ferox_rebuild_target = null
+		_ferox_rebuild_timer = 0.0
+		_ferox_rebuild_placed = false
+
+
+# Closes out the rebuild: clears the build-progress entry (which ends the
+# reveal and flips the block active) and fires building_completed, matching
+# the player's progressive-build completion path.
+func _ferox_finish_rebuild() -> void:
+	if _ferox_rebuild_target == null:
+		return
+	var block_id: StringName = _ferox_rebuild_target["block_id"]
+	var grid_pos: Vector2i = _ferox_rebuild_target["grid_pos"]
+	if "building_build_progress" in main:
+		main.building_build_progress.erase(grid_pos)
+	if main.placed_buildings.has(grid_pos) and main.has_signal("building_completed"):
+		main.building_completed.emit(block_id, grid_pos)
+	# Re-establish any links this block had before it was destroyed, to
+	# whichever captured partners are alive again (the other end auto-links
+	# from its own rebuild if it's still pending).
+	if main.has_method("ferox_relink_after_rebuild"):
+		main.ferox_relink_after_rebuild(_ferox_rebuild_target)
 	_ferox_rebuild_target = null
 	_ferox_rebuild_timer = 0.0
+	_ferox_rebuild_placed = false
 
 
 func _ai_find_build_target() -> Vector2i:
@@ -1592,13 +1779,16 @@ func _has_in_range_work() -> bool:
 
 # --- DRAWING ---
 func _draw() -> void:
-	# Hide the drone entirely when controlling a unit/turret. Shadow
-	# visibility is enforced in `_process` instead of here, because
-	# the shadow lives on a separate canvas and `_draw` running once
-	# isn't reliable when the drone is off-camera (the controlled
-	# unit's camera may park the drone outside the viewport).
+	# Hide ONLY the primary player drone when the player is controlling a
+	# unit/turret — the player is "inside" that entity, so its drone vanishes.
+	# AI shardlings (LUMINA helpers + FEROX enemy drones) are independent
+	# entities and must keep rendering regardless of what the player drives.
+	# Shadow visibility is enforced in `_process` instead of here, because the
+	# shadow lives on a separate canvas and `_draw` running once isn't reliable
+	# when the drone is off-camera (the controlled unit's camera may park the
+	# drone outside the viewport).
 	var unit_mgr = _unit_mgr_ref()
-	if unit_mgr and unit_mgr.controlled_entity != null:
+	if not ai_controlled and unit_mgr and unit_mgr.controlled_entity != null:
 		return
 	# (Build-range visualizer removed — the blue square around the
 	# drone was too noisy for normal play. The range itself still

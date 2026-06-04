@@ -53,3 +53,7 @@ enum ItemCategory {
 @export var base_value: float = 1.0
 ## Whether this item can be placed on conveyors
 @export var conveyable: bool = true
+
+## Whether this is a burnable resource — a block holding any flammable item
+## (or fluid) keeps burning indefinitely and lets fire spread to it.
+@export var flammable: bool = false

@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://dii2d2a6sp8ot"]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b5fotur81qf38" path="res://textures/resources/blastCompound.png" id="1_00bsn"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_blast_compound"
+display_name = "Blast Compound"
+description = "Volatile mix of sulfur and coal. Combined with petroleum to brew simple fuel."
+icon = ExtResource("1_00bsn")
+max_stack = 200
+category = 1
+color = Color(0.4, 0.3, 0.15, 1)
+base_value = 2.0
+flammable = true

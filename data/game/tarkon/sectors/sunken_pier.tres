@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="SectorData" format=3]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"sunken_pier"
+display_name = "Sunken Pier"
+description = "A half-drowned dock district. Rising water has swallowed most of the old defenses — what's left clings to the rotting piers."
+planet_id = &"Tarkon"
+hex_q = -19
+hex_r = 0
+available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_iron")
+wave_units_data = PackedStringArray()
+objective = 0
+unlocks = PackedStringArray("salt_flats")
+required_sectors = PackedStringArray("nightfall_depths")
+tags = PackedStringArray("campaign", "sector")

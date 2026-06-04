@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://kw2rr83ix2dc"]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://lfi8p0cw6nqv" path="res://textures/resources/sulfur.png" id="1_f4475"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_sulfur"
+display_name = "Sulfur"
+description = "Yellow crystalline mineral mined from sulfur ore. Feedstock for acids, blast compound, and fumes."
+icon = ExtResource("1_f4475")
+max_stack = 200
+color = Color(0.85, 0.8, 0.2, 1)
+flammable = true

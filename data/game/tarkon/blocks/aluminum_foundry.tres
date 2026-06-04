@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"aluminum_foundry"
 display_name = "Aluminum Foundry"
-description = "Smelts bauxite directly into pure aluminum. Accepts bauxite from any side and outputs aluminum from any side. Requires electrical power."
+description = "Smelts bauxite into pure aluminum, tapping molten slag as a byproduct. Accepts bauxite from any side; outputs aluminum and pipes out slag. Requires electrical power."
 category = 2
 tags = PackedStringArray("production", "processing", "omnidirectional")
 color = Color(0.78, 0.82, 0.86, 1)
@@ -22,9 +22,11 @@ input_items = {
 "mat_bauxite": 2
 }
 output_items = {
-"mat_aluminum": 1
+"mat_aluminum": 1,
+"mat_slag": 3
 }
 production_time = 3.0
 power_consumption = 4.0
 electrical_power_use = 18.0
+liquid_capacity = 30.0
 max_stored_items = 30

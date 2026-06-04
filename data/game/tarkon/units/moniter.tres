@@ -16,3 +16,7 @@ attack_damage = 50.0
 immunities = PackedStringArray()
 spawn_count = 1
 threat_value = 8.0
+
+tier = 5
+
+movement_layer = 1

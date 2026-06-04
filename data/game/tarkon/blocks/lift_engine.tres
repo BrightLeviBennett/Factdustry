@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"lift_engine"
+display_name = "Lift Engine"
+description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+category = 10
+tags = PackedStringArray("module")
+module_unit_layers = [2, 3]
+color = Color(0.85, 0.7, 0.3, 1)
+grid_size = Vector2i(2, 2)
+max_health = 1.0

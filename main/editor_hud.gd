@@ -327,9 +327,11 @@ func _update_tool_highlight() -> void:
 		else:
 			btn.remove_theme_stylebox_override("normal")
 	# Show the brush-size spinner only when a tool that uses thickness
-	# is selected — currently the Line and Circle tools share the same
+	# is selected — the Pencil, Line, and Circle tools share the same
 	# `line_size` field. Hidden in every other mode.
-	var uses_size: bool = main.current_tool == main.Tool.LINE or main.current_tool == main.Tool.CIRCLE
+	var uses_size: bool = main.current_tool == main.Tool.PENCIL \
+		or main.current_tool == main.Tool.LINE \
+		or main.current_tool == main.Tool.CIRCLE
 	var show_line_size: bool = uses_size and (main.editor_mode == main.EditorMode.TERRAIN)
 	if line_size_label:
 		line_size_label.visible = show_line_size
@@ -670,6 +672,10 @@ func _populate_blocks(category: int) -> void:
 
 	var blocks = Registry.get_blocks_by_category(category)
 	for block in blocks:
+		# Unit modules are constructor/payload-only — never directly placeable,
+		# so keep them out of the editor palette too.
+		if block.tags.has("module"):
+			continue
 		_add_block_button(block)
 
 

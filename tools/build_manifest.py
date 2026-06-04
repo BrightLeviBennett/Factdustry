@@ -30,6 +30,7 @@ GROUPS = {
     "status_effects": "data/game/tarkon/status_effects",
     "sectors":        "data/game/tarkon/sectors",
     "planets":        "data/game/planets",
+    "archives":       "data/game/tarkon/archives",
 }
 
 OUT_PATH = os.path.join(REPO_ROOT, "data/game/manifest.json")
@@ -49,8 +50,11 @@ def main() -> int:
         total += len(files)
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    # sort_keys keeps this byte-identical to the in-editor GDScript builder
+    # (addons/manifest_builder), whose JSON.stringify sorts keys — so the two
+    # generators never produce diff churn against each other.
     with open(OUT_PATH, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=2)
+        json.dump(out, fh, indent=2, sort_keys=True)
         fh.write("\n")
 
     print(f"Wrote {OUT_PATH} ({total} entries across {len(GROUPS)} groups)")

@@ -11,3 +11,5 @@ description = "Crude oil. Refined into fuels and plastics."
 icon = ExtResource("2")
 color = Color(0.2, 0.2, 0.25, 1)
 viscosity = 2.0
+
+flammable = true

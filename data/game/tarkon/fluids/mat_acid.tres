@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="FluidData" format=3]
+
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_acid"
+display_name = "Acid"
+description = "Corrosive fluid brewed from sulfur, water, and oxygen."
+color = Color(0.55, 0.85, 0.2, 1)
+viscosity = 0.9
+is_hazardous = true
+hazard_damage = 6.0

@@ -1,17 +1,35 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b2te8amnkloqi"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cav5nro788wme" path="res://textures/blocks/units/Unit Upgrader/UnitUpgraderStraight.png" id="1_7gts3"]
+[ext_resource type="Texture2D" uid="uid://deftxfddj6c4j" path="res://textures/blocks/units/Unit Upgrader/UnitUpgraderLeft.png" id="2_w1oio"]
+[ext_resource type="Texture2D" uid="uid://dtxg5gm1e87c5" path="res://textures/blocks/units/Unit Upgrader/UnitUpgraderRight.png" id="3_rtseh"]
+[ext_resource type="Texture2D" uid="uid://dmjccepyvtpin" path="res://textures/blocks/units/FabricatorTopBottom.png" id="4_1vuf1"]
+[ext_resource type="Texture2D" uid="uid://borsu0j7t23np" path="res://textures/blocks/units/FabricatorTopLeft.png" id="5_mnesk"]
+[ext_resource type="Texture2D" uid="uid://bb5h8bb8xxoh5" path="res://textures/blocks/units/FabricatorTopRight.png" id="6_fswqy"]
+[ext_resource type="Texture2D" uid="uid://ix8wgdsflx0v" path="res://textures/blocks/units/Unit Upgrader/UnitUpgraderComplete.png" id="7_drnsf"]
 
 [resource]
 script = ExtResource("1")
 id = &"unit_upgrader"
 display_name = "Unit Upgrader"
-description = "Applies researched unit upgrades (e.g. Overrun, Plunge) to compatible units."
+description = "Applies unit upgrades to units."
+icon = ExtResource("7_drnsf")
 category = 6
+tags = PackedStringArray("fabricator", "units", "upgrader")
 color = Color(0.5, 0.7, 0.9, 1)
+grid_size = Vector2i(4, 4)
+electrical_power_use = 25.0
+base_sprite = ExtResource("1_7gts3")
+feed_overlay_back = ExtResource("4_1vuf1")
+feed_overlay_left = ExtResource("5_mnesk")
+feed_overlay_right = ExtResource("6_fswqy")
+base_sprite_back = ExtResource("1_7gts3")
+base_sprite_left = ExtResource("2_w1oio")
+base_sprite_right = ExtResource("3_rtseh")
 max_health = 360.0
-grid_size = Vector2i(3, 3)
-build_cost = { "copper": 200, "silicon": 80 }
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
 build_time = 4.0
-power_consumption = 6.0
-tags = PackedStringArray("fabricator", "units")

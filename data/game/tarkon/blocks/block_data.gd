@@ -167,6 +167,26 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## refuses any inputs (matches the Unit Refabricator's "no T2 picked" gate).
 @export var factory_recipes: Array = []
 
+## Random one-of-N output table for casting/sorting factories (e.g. the Slag
+## Caster: 1 slag → one random grain of sand / copper / iron). When non-empty,
+## a finished cycle emits ONE item picked by weight from this list, IN ADDITION
+## to any deterministic `output_items`. Each entry is a Dictionary:
+##   "item":   StringName  item id to emit
+##   "weight": float       relative chance (weights are normalised; equal
+##                         weights = equal odds)
+@export var random_outputs: Array = []
+
+## Data-driven vent extractor (e.g. Fume Extractor on a sulfur vent). When
+## `vent_fluid` is set, a `condenser`-tagged block produces that fluid while
+## any cell of its footprint sits on a `vent_tile` floor tile, at `vent_rate`
+## units/sec — generalising the built-in vent/geyser → water condenser.
+@export var vent_tile: StringName = &""
+## Fluid id this vent extractor produces (empty = use the default water
+## condenser behaviour).
+@export var vent_fluid: StringName = &""
+## Production rate (fluid units / second) on a matching vent tile.
+@export var vent_rate: float = 4.0
+
 
 @export_group("Combat")
 ## Seconds between shots.
@@ -265,6 +285,15 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 
 
 @export_group("Special")
+## For `module`-tagged blocks (unit upgrades): which unit movement layers
+## this upgrade may be applied to. Values are UnitData.MovementLayer ints
+## (0=GROUND, 1=CRAWLER, 2=HOVER, 3=FLYING). EMPTY = applies to any layer.
+## e.g. a Lift Engine sets [2, 3] so it only fits hover / flying units.
+@export var module_unit_layers: Array[int] = []
+## For `module`-tagged blocks: how many copies of THIS module a single unit
+## may hold (independent of the unit's total slot count). e.g. Armor Plate
+## = 3, Cooling System = 2, most others = 1.
+@export var module_max_applies: int = 1
 ## Status effect applied to nearby enemies (StatusEffectData).
 @export var applies_status: Resource
 ## Multiplier applied to neighbors of this category.

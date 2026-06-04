@@ -72,6 +72,13 @@ func _ready() -> void:
 
 
 func _on_tech_state_changed_db(_node_id: StringName, _new_state: int) -> void:
+	refresh_locks()
+
+
+## Re-evaluates the lock state of every database tile in one pass. Public so
+## bulk tech changes (the Unlock-All sandbox toggle, archive reset) can call
+## it ONCE instead of firing per-node signals that each re-scan all tiles.
+func refresh_locks() -> void:
 	for tile in _all_tiles:
 		_refresh_tile_lock(tile)
 	# If the detail overlay is open, refresh it too in case its tile flipped.
@@ -320,7 +327,8 @@ func _build_section(cat_key: String) -> void:
 		var grouped: Dictionary = {}
 		for entry in cat["list"]:
 			if entry is BlockData:
-				if entry.id == &"archive" or entry.id == &"power_source":
+				if entry.id == &"archive" or entry.id == &"power_source" \
+						or entry.id == &"resource_source" or entry.id == &"payload_source":
 					continue
 				var sub_key: int = entry.category
 				if not grouped.has(sub_key):
@@ -1044,6 +1052,8 @@ func _show_unit_details(unit: UnitData) -> void:
 			_add_text("✦ Hovers over terrain", Color(0.3, 0.7, 0.9), 13)
 		UnitData.MovementLayer.FLYING:
 			_add_text("✦ Flies over all obstacles", Color(0.5, 0.8, 1.0), 13)
+		UnitData.MovementLayer.NAVAL:
+			_add_text("✦ Naval — travels only on water", Color(0.4, 0.6, 0.95, 1.0), 13)
 
 	if unit.drops.size() > 0:
 		_add_separator()

@@ -20,6 +20,7 @@ var status_effects: Dictionary = {}
 var tiles: Dictionary = {}
 var sectors: Dictionary = {}
 var planets: Dictionary = {}
+var archives: Dictionary = {}
 
 # --- ORDERED ARRAYS ---
 var items_list: Array[ItemData] = []
@@ -30,6 +31,7 @@ var status_effects_list: Array[StatusEffectData] = []
 var tiles_list: Array[TerrainTileData] = []
 var sectors_list: Array[SectorData] = []
 var planets_list: Array[PlanetData] = []
+var archives_list: Array[ArchiveData] = []
 
 # --- AUDIO CACHE ---
 ## Pre-loaded audio streams. Add paths to _audio_paths to pre-load during startup.
@@ -70,6 +72,7 @@ func _ready() -> void:
 		["res://data/game/tarkon/status_effects/", status_effects, status_effects_list, false],
 		["res://data/game/tarkon/sectors/", sectors, sectors_list, false],
 		["res://data/game/planets/", planets, planets_list, false],
+		["res://data/game/tarkon/archives/", archives, archives_list, false],
 	])
 	# Pre-load audio files (when audio paths are added)
 	_preload_audio()
@@ -85,6 +88,7 @@ const _MANIFEST_GROUP_FOR_PATH := {
 	"res://data/game/tarkon/status_effects/": "status_effects",
 	"res://data/game/tarkon/sectors/":        "sectors",
 	"res://data/game/planets/":               "planets",
+	"res://data/game/tarkon/archives/":       "archives",
 }
 
 ## Loads the prebuilt manifest of every .tres file. The manifest is a plain
@@ -315,6 +319,11 @@ func get_sector(id: StringName) -> SectorData:
 
 func get_planet(id: StringName) -> PlanetData:
 	if planets.has(id): return planets[id]
+	return null
+
+func get_archive(id: StringName) -> ArchiveData:
+	if archives.has(id):
+		return archives[id]
 	return null
 
 

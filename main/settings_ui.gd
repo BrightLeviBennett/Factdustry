@@ -499,6 +499,7 @@ const _DEFAULTS := {
 	"tech_tree_wasd": false,
 	"pause_on_unfocus": true,
 	"show_hitboxes": false,
+	"show_sources": false,
 }
 
 static var _cache: Dictionary = {}
@@ -602,6 +603,8 @@ static func apply_pending_settings() -> void:
 		main_node.enemies_attack = bool(_get_setting("enemies_attack"))
 	if main_node and "show_hitboxes" in main_node:
 		main_node.show_hitboxes = bool(_get_setting("show_hitboxes"))
+	if main_node and "show_sources" in main_node:
+		main_node.show_sources = bool(_get_setting("show_sources"))
 	if main_node and "pause_on_unfocus" in main_node:
 		main_node.pause_on_unfocus = bool(_get_setting("pause_on_unfocus"))
 	var building_sys = main_node.get_node_or_null("BuildingSystem") if main_node else null
@@ -720,6 +723,16 @@ func _build_developer_tab() -> void:
 			if main:
 				main.enemies_attack = v
 	)
+	_add_toggle("Show Sources",
+		bool(_get_setting("show_sources")),
+		func(v):
+			_set_setting("show_sources", bool(v))
+			if main:
+				main.show_sources = v
+			var hud_s = get_node_or_null("/root/Main/HUD")
+			if hud_s and hud_s.has_method("_refresh_block_menu"):
+				hud_s._refresh_block_menu()
+	)
 	_add_toggle("Show Hitboxes",
 		bool(_get_setting("show_hitboxes")),
 		func(v):
@@ -739,11 +752,17 @@ func _build_developer_tab() -> void:
 		func(v):
 			_set_setting("unlock_all_tech", bool(v))
 			TechTree.unlock_all = v
-			for nid in TechTree.nodes:
-				TechTree.node_state_changed.emit(nid, TechTree.get_state(nid))
+			# Unlock-All flips EVERY node at once. Firing node_state_changed
+			# per node (~200x) made each listener rebuild fully every time — the
+			# whole block menu and every database tile (~200^2 work) plus a flood
+			# of "unlocked" popups. get_state reads unlock_all live, so no per-node
+			# signal is needed; just refresh each affected UI ONCE.
 			var hud = get_node_or_null("/root/Main/HUD")
 			if hud and hud.has_method("_refresh_block_menu"):
 				hud._refresh_block_menu()
+			var db_ui = get_node_or_null("/root/Main/DatabaseUI")
+			if db_ui and db_ui.has_method("refresh_locks"):
+				db_ui.refresh_locks()
 			var tree_ui = get_node_or_null("/root/Main/TechTreeUI")
 			if tree_ui:
 				if "tree_canvas" in tree_ui and tree_ui.tree_canvas:

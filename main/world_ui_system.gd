@@ -45,6 +45,11 @@ var dispatcher_pending_anchor: Vector2i = Vector2i.ZERO
 # sub-picker (`landing_pad_slot`) confirms.
 var landing_pad_pick_slot: int = -1
 
+# Payload Source: the unit id chosen in the first menu, awaiting a faction
+# pick in the "payload_source_faction" sub-menu.
+var payload_source_pending_id: StringName = &""
+var payload_source_pending_anchor: Vector2i = Vector2i.ZERO
+
 
 @onready var main: Node2D = get_node_or_null("/root/Main")
 var _bsys: Node2D
@@ -113,6 +118,28 @@ func _build_menu_items(type: String, grid_pos: Vector2i) -> void:
 			if gate_on_research and not TechTree.is_researched(block.id):
 				continue
 			world_menu_items.append({"id": block.id, "icon": block.icon, "name": block.display_name})
+	elif type == "resource_source":
+		# Dev source: every item AND every fluid.
+		world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
+		for item in Registry.items_list:
+			world_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name})
+		for fluid in Registry.fluids_list:
+			world_menu_items.append({"id": fluid.id, "icon": fluid.icon, "name": fluid.display_name})
+	elif type == "payload_source":
+		# Dev source: every block up to 5x5, plus every unit. Units carry a
+		# "kind" flag so apply_selection knows to ask for a faction.
+		world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
+		for block in Registry.blocks_list:
+			if block.id == &"resource_source" or block.id == &"payload_source":
+				continue
+			if block.grid_size.x > 5 or block.grid_size.y > 5:
+				continue
+			world_menu_items.append({"id": block.id, "icon": block.icon, "name": block.display_name, "kind": "block"})
+		for unit in Registry.units_list:
+			world_menu_items.append({"id": unit.id, "icon": unit.icon, "name": unit.display_name, "kind": "unit"})
+	elif type == "payload_source_faction":
+		world_menu_items.append({"id": &"__lumina", "icon": null, "name": "Lumina"})
+		world_menu_items.append({"id": &"__ferox", "icon": null, "name": "Ferox"})
 	elif type == "archive":
 		world_menu_items.append({"id": &"", "icon": null, "name": "Clear"})
 		for aid in TechTree.archive_ids:
@@ -372,6 +399,35 @@ func apply_selection(index: int) -> void:
 					logistics.constructor_state[world_menu_pos]["phase"] = "collecting"
 		elif bsys:
 			bsys.editor_constructor_state[world_menu_pos] = {"selected_block": selected_id}
+	elif world_menu_type == "resource_source":
+		# Store the chosen item/fluid; the logistics tick emits it forever.
+		if logistics:
+			logistics.source_resource[world_menu_pos] = selected_id
+	elif world_menu_type == "payload_source":
+		var kind: String = world_menu_items[index].get("kind", "")
+		if selected_id == &"":
+			if logistics:
+				logistics.source_payload.erase(world_menu_pos)
+		elif kind == "unit":
+			# Units need a faction — chain into the faction sub-menu.
+			payload_source_pending_id = selected_id
+			payload_source_pending_anchor = world_menu_pos
+			close()
+			open("payload_source_faction", payload_source_pending_anchor)
+			return
+		elif logistics:
+			logistics.source_payload[world_menu_pos] = {"id": selected_id, "kind": "block", "team": 0}
+	elif world_menu_type == "payload_source_faction":
+		# 0 = PLAYER/Lumina, 1 = ENEMY/Ferox (UnitData.Team).
+		var team: int = 1 if selected_id == &"__ferox" else 0
+		if logistics and payload_source_pending_id != &"":
+			logistics.source_payload[payload_source_pending_anchor] = {
+				"id": payload_source_pending_id, "kind": "unit", "team": team,
+			}
+		payload_source_pending_id = &""
+		payload_source_pending_anchor = Vector2i.ZERO
+		close()
+		return
 	elif world_menu_type == "archive":
 		if bsys:
 			bsys.archive_holdings[world_menu_pos] = selected_id

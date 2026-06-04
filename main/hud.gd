@@ -74,6 +74,9 @@ var unit_mode_btn_payload: Button
 var unit_mode_btn_rebuild: Button
 var unit_mode_btn_mine: Button
 var unit_mode_btn_assist: Button
+# Dummy test-unit commands (shown only when a dummy enemy is selected).
+var unit_mode_btn_attack_player: Button
+var unit_mode_btn_attack_block: Button
 var _mine_picker_popup: PopupPanel = null
 var category_buttons: Dictionary = {}  # BlockCategory → Button
 var selected_category: int = -1
@@ -2764,6 +2767,8 @@ func _create_unit_mode_panel() -> void:
 	unit_mode_btn_mine.toggle_mode = true
 	unit_mode_btn_assist = _make_unit_cmd_button("Assist Player", _on_unit_cmd_assist)
 	unit_mode_btn_assist.toggle_mode = true
+	unit_mode_btn_attack_player = _make_unit_cmd_button("Attack Player", _on_unit_cmd_attack_player)
+	unit_mode_btn_attack_block = _make_unit_cmd_button("Attack Nearest Block", _on_unit_cmd_attack_block)
 
 
 func _make_unit_cmd_button(label: String, cb: Callable) -> Button:
@@ -2811,6 +2816,16 @@ func _selection_can_mine() -> bool:
 
 func _update_unit_mode_buttons() -> void:
 	var units: Array = _selected_player_units()
+	# Dummy test-unit commands — visible only when a dummy enemy is selected.
+	var has_dummy := false
+	for u in units:
+		if "is_dummy" in u and u.is_dummy:
+			has_dummy = true
+			break
+	if unit_mode_btn_attack_player:
+		unit_mode_btn_attack_player.visible = has_dummy
+	if unit_mode_btn_attack_block:
+		unit_mode_btn_attack_block.visible = has_dummy
 	if unit_mode_btn_rebuild:
 		unit_mode_btn_rebuild.visible = _selection_can_build()
 	if unit_mode_btn_assist:
@@ -2914,6 +2929,18 @@ func _on_unit_cmd_assist() -> void:
 	for u in _selected_player_units():
 		if "assist_player_build" in u:
 			u.assist_player_build = on
+
+
+func _on_unit_cmd_attack_player() -> void:
+	var um = _unit_mgr_ref()
+	if um and um.has_method("command_dummy_attack"):
+		um.command_dummy_attack("attack_player")
+
+
+func _on_unit_cmd_attack_block() -> void:
+	var um = _unit_mgr_ref()
+	if um and um.has_method("command_dummy_attack"):
+		um.command_dummy_attack("attack_block")
 
 
 func _on_unit_cmd_mine() -> void:
@@ -3743,15 +3770,29 @@ func _on_misc_planet_map() -> void:
 ## Returns all blocks belonging to a category, sorted by display name.
 func _get_blocks_for_category(cat: int) -> Array[BlockData]:
 	var result: Array[BlockData] = []
+	var show_sources: bool = "show_sources" in main and main.show_sources
 	for block in Registry.blocks_list:
 		if block.category == cat:
 			# Hide debug-only / map-editor-only blocks from the in-game palette.
 			if block.id == &"power_source" or block.id == &"archive":
 				continue
+			# Developer source blocks only show when "Show Sources" is on.
+			if (block.id == &"resource_source" or block.id == &"payload_source") and not show_sources:
+				continue
+			# Unit modules are constructor/payload-only — never shown in the
+			# build palette (you can't place them directly).
+			if block.tags.has("module"):
+				continue
 			# Only show blocks that are researched in the tech tree
 			if main.require_research and TechTree.nodes.has(block.id) and not TechTree.is_researched(block.id):
 				continue
 			result.append(block)
+	# Resource Source is dual-category: it also appears in the Fluids tab
+	# (its base category is Items) when sources are shown.
+	if cat == BlockData.BlockCategory.FLUIDS and show_sources:
+		var rs := Registry.get_block(&"resource_source")
+		if rs != null and not result.has(rs):
+			result.append(rs)
 	# In the Units category, push payload-handling blocks to the bottom
 	# (after the proper unit-related blocks). Within each group entries
 	# stay alphabetical.

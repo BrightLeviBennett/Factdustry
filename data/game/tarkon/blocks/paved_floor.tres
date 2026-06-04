@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"paved_floor"
+display_name = "Paved Floor"
+description = "Smooth asphalt flooring. Buildings on paving gain defense bonuses."
+category = 5
+tags = PackedStringArray("platform")
+color = Color(0.22, 0.22, 0.24, 1)
+max_health = 90.0
+build_cost = {
+"asphalt": 3
+}
+build_time = 0.5

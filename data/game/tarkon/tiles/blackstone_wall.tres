@@ -1,13 +1,13 @@
 [gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://cvdekvta5fqke"]
 
-[ext_resource type="Texture2D" uid="uid://wdg6fy0kqyek" path="res://textures/terrain/BlackstoneWall.jpeg" id="1_aixmi"]
+[ext_resource type="Texture2D" uid="uid://8qfc3lnf0sed" path="res://textures/terrain/BlackstoneWall.png" id="1_3o4xi"]
 [ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_kkq6a"]
 
 [resource]
 script = ExtResource("2_kkq6a")
 id = &"blackstone_wall"
 display_name = "Blackstone Wall"
-icon = ExtResource("1_aixmi")
+icon = ExtResource("1_3o4xi")
 category = 1
 height = 8.0
 tags = PackedStringArray()

@@ -46,17 +46,37 @@ var building_factions := {}
 ## stub the editor's main (this script) would fall through to the
 ## empty-dict default and stop rendering placed blocks entirely.
 ##
-## Recomputes each call (no cache invalidation hooks in the editor
-## scene); cheap given typical authored maps. Returns a Dictionary
-## keyed by anchor cell with value `true`, matching main.gd's
-## contract.
+## Cached so the per-frame building draw doesn't rebuild an
+## O(placed_buildings) dictionary every redraw. Invalidated by
+## `_invalidate_anchor_cache()` on any structural change (place /
+## erase / clear / transform-move) and, as a backstop, whenever the
+## placed-building count drifts from the cached snapshot. Returns a
+## Dictionary keyed by anchor cell with value `true`, matching
+## main.gd's contract.
+var _anchor_cache: Dictionary = {}
+var _anchor_cache_dirty := true
+var _anchor_cache_count := -1
+
 func get_building_anchors() -> Dictionary:
+	if not _anchor_cache_dirty and placed_buildings.size() == _anchor_cache_count:
+		return _anchor_cache
 	var out: Dictionary = {}
 	for cell in placed_buildings:
 		var origin: Vector2i = building_origins.get(cell, cell)
 		if not out.has(origin):
 			out[origin] = true
-	return out
+	_anchor_cache = out
+	_anchor_cache_dirty = false
+	_anchor_cache_count = placed_buildings.size()
+	return _anchor_cache
+
+
+## Marks the anchor cache stale. Call after any mutation of
+## `placed_buildings` / `building_origins` (including same-count moves
+## the count backstop can't detect, e.g. transform drags).
+func _invalidate_anchor_cache() -> void:
+	_anchor_cache_dirty = true
+	_buildings_changed = true
 ## Authored wave bundle — staged here in the editor, serialized into
 ## the sector .json by SaveManager, and consumed by WaveManager at
 ## runtime. Three pieces:
@@ -125,6 +145,10 @@ var _block_drag_placing := false
 var _block_drag_erasing := false
 var _block_drag_last_cell := Vector2i.ZERO
 var _block_drag_has_last := false
+# True while a block drag-place / drag-erase has an open undo transaction.
+# The whole drag (every block stamped between press and release) commits
+# as a SINGLE undo step so one Ctrl+Z reverses the entire stroke.
+var _block_drag_undo_open := false
 
 # Rectangle tool state. `_rect_erasing` is set when the drag was started
 # with the right mouse button — the rect tool then performs a rect erase
@@ -162,6 +186,18 @@ var _circle_erasing := false
 var _circle_center := Vector2i.ZERO
 var _circle_edge := Vector2i.ZERO
 
+# Last grid cell the cursor hovered, used to draw the pencil brush
+# footprint preview when the brush size is > 1.
+var _hover_cell := Vector2i.ZERO
+
+# Per-frame redraw gating. The building layer only needs a redraw when
+# the camera moves (culling bounds shift) or a building was placed /
+# erased / moved this frame. Tracked here so `_process` can skip the
+# 60 fps full-layer redraw while the editor sits idle.
+var _last_cam_pos := Vector2(INF, INF)
+var _last_cam_zoom := Vector2(INF, INF)
+var _buildings_changed := true
+
 # Undo / redo. Each stack entry is an Array of {cell, before, after}
 # triples capturing the per-cell terrain state before and after a
 # single user-visible operation (one stroke, one rect, one fill, one
@@ -175,6 +211,12 @@ var _redo_stack: Array = []
 var _undo_pending: Dictionary = {}  # Vector2i → captured "before" state
 var _undo_active := false  # True between _undo_begin / _undo_commit
 var _undoing := false      # Suppresses capture while applying undo/redo
+# Snapshots of non-per-cell state taken at `_undo_begin`. Links and the
+# spawn-core pointer aren't keyed by cell, so they're captured whole and
+# rolled back via a single "meta" entry appended to the step when they
+# change during the transaction (e.g. erasing a linked / core block).
+var _undo_links_before: Array = []
+var _undo_core_before := Vector2i.ZERO
 
 # Transform mode state
 enum TransformPhase { SELECTING, SELECTED, DRAGGING }
@@ -224,15 +266,77 @@ func _ready() -> void:
 		bs.set_process_input(false)
 		bs.set_process(false)
 
+	# The in-world config menus (sorter filter / constructor block /
+	# refabricator recipe / archive pick) live on WorldUiSystem, which the
+	# game spawns in main.gd but the editor scene never created — so the
+	# editor's click handler was calling the old, removed BuildingSystem
+	# `_open_world_menu` API and crashing. Spawn the same node here (as a
+	# child of "Main" so BuildingSystem's `/root/Main/WorldUiSystem` lookup
+	# and its popup overlay resolve it). WorldUiSystem is editor-aware: with
+	# no LogisticsSystem present it lists every researched-or-not option so
+	# authors can bake selections into the sector save.
+	if not has_node("WorldUiSystem"):
+		var ui_script = load("res://main/world_ui_system.gd")
+		if ui_script:
+			var ui := Node.new()
+			ui.set_script(ui_script)
+			ui.name = "WorldUiSystem"
+			add_child(ui)
+
 	await get_tree().process_frame
 
 
 func _process(_delta: float) -> void:
-	# BuildingSystem renders walls, ores, and buildings but has viewport culling,
-	# so it must be redrawn every frame as the camera moves.
-	var bs = get_node_or_null("BuildingSystem")
-	if bs:
-		bs.queue_redraw()
+	# BuildingSystem renders walls, ores, and buildings with viewport
+	# culling, so it only needs a redraw when the camera moves (culling
+	# bounds change) or when the placed buildings change. Redrawing the
+	# whole building layer every frame regardless was the editor's main
+	# idle lag source — gate it on actual change instead.
+	var cam = get_node_or_null("Camera2D")
+	var cam_moved := false
+	if cam:
+		if cam.position != _last_cam_pos or cam.zoom != _last_cam_zoom:
+			cam_moved = true
+			_last_cam_pos = cam.position
+			_last_cam_zoom = cam.zoom
+	if cam_moved or _buildings_changed:
+		_buildings_changed = false
+		var bs = get_node_or_null("BuildingSystem")
+		if bs:
+			bs.queue_redraw()
+
+	_process_block_drag()
+
+
+## Poll-driven block drag-place / drag-erase. Runs every frame so a held
+## mouse button keeps placing/erasing blocks along the cursor path even
+## if motion events arrive sparsely. The button state is the authority:
+## if the button is no longer held (e.g. the release fired over a HUD
+## panel and never reached `_unhandled_input`), the drag is cancelled
+## here so it can't run away. Only acts when the cursor enters a NEW
+## cell, so a stationary hold doesn't re-stamp the same tile every frame.
+func _process_block_drag() -> void:
+	# Cancel any drag whose button is no longer physically held.
+	if _block_drag_placing and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_block_drag_placing = false
+	if _block_drag_erasing and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		_block_drag_erasing = false
+	if not _block_drag_placing and not _block_drag_erasing:
+		# Drag ended (incl. a release event we never received) — commit the
+		# single undo step covering everything stamped during the drag.
+		_finish_block_drag()
+		return
+	# Block drag only operates in building mode.
+	if editor_mode != EditorMode.BUILDING:
+		return
+	if not _block_drag_has_last:
+		return
+	var grid_pos := world_to_grid(get_global_mouse_position())
+	if not is_within_bounds(grid_pos):
+		return
+	if grid_pos == _block_drag_last_cell:
+		return  # Same cell — nothing new to stamp (motion handler may have caught it).
+	_block_drag_stroke_to(grid_pos, _block_drag_erasing)
 
 
 # --- COMPATIBILITY HELPERS (same signatures as main.gd) ---
@@ -365,6 +469,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_block_drag_erasing = false
 				if not _block_drag_placing:
 					_block_drag_has_last = false
+			# Close the block-drag undo transaction once no button is held.
+			_finish_block_drag()
 		# Script mode: no terrain/building interaction
 		if editor_mode == EditorMode.SCRIPT:
 			return
@@ -378,7 +484,17 @@ func _unhandled_input(event: InputEvent) -> void:
 			_handle_transform_click(event, grid_pos)
 			return
 
-		if not is_within_bounds(grid_pos):
+		# Out-of-bounds gate applies to button PRESSES only (don't start a
+		# stroke / placement off-map). A RELEASE must still fall through so
+		# the in-progress tool can COMMIT — releasing the mouse off the map
+		# was silently dropping the whole pencil / line / circle / rect
+		# stroke (its `_undo_commit` lives in the release branch below this
+		# guard) and leaving `defer_floor_fade` stuck on. The commit branches
+		# read their end-cell from `_line_end` / `_circle_edge` / `_rect_end`
+		# (set during motion, which is itself bounds-checked), not from this
+		# release `grid_pos`, so letting them run off-map is safe. Bucket
+		# commits on press, so it's unaffected.
+		if event.pressed and not is_within_bounds(grid_pos):
 			return
 
 		# (Click-to-link is handled inside the BUILDING-mode branch below;
@@ -410,13 +526,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				# constructor / refabricator / archive opens its menu so
 				# authors can bake selections into the sector.
 				var bs = get_node_or_null("BuildingSystem")
-				if bs and bs.get("_world_menu_open"):
+				var wui = get_node_or_null("WorldUiSystem")
+				if wui and wui.world_menu_open:
 					var mouse_world = get_global_mouse_position()
-					var hit: int = bs._world_menu_hit_test(mouse_world)
+					var hit: int = wui.hit_test(mouse_world)
 					if hit >= 0:
-						bs._apply_world_menu_selection(hit)
+						wui.apply_selection(hit)
 					else:
-						bs._close_world_menu()
+						wui.close()
 					return
 				# Clicking on an already-placed block opens its in-world UI
 				# (sorter / constructor / refabricator / archive) or starts
@@ -430,20 +547,26 @@ func _unhandled_input(event: InputEvent) -> void:
 					var click_block_id = placed_buildings[grid_pos]
 					var click_data = Registry.get_block(click_block_id)
 					var click_anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
-					if click_data and bs:
+					if click_data and wui:
+						if click_data.id == &"resource_source":
+							wui.open("resource_source", click_anchor)
+							return
+						if click_data.id == &"payload_source":
+							wui.open("payload_source", click_anchor)
+							return
 						if click_data.tags.has("sorter") \
 								or click_data.tags.has("inverted_sorter") \
 								or click_data.tags.has("unloader"):
-							bs._open_world_menu("sorter", click_anchor)
+							wui.open("sorter", click_anchor)
 							return
 						if click_data.tags.has("constructor"):
-							bs._open_world_menu("constructor", click_anchor)
+							wui.open("constructor", click_anchor)
 							return
 						if click_data.tags.has("refabricator"):
-							bs._open_world_menu("refabricator", click_anchor)
+							wui.open("refabricator", click_anchor)
 							return
 						if click_data.id == &"archive":
-							bs._open_world_menu("archive", click_anchor)
+							wui.open("archive", click_anchor)
 							return
 					# Click-to-link (Mindustry-style): clicking a `linkable`
 					# block picks/chains a link.
@@ -454,6 +577,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					if link_source != Vector2i(-1, -1):
 						link_source = Vector2i(-1, -1)
 						_overlay.queue_redraw()
+				# Open one undo transaction for the whole drag, then place.
+				_begin_block_drag_undo()
 				# Center multi-tile buildings on the mouse cursor
 				_place_block_centered(grid_pos)
 				# Begin a drag: subsequent mouse motion fills cells along
@@ -465,12 +590,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
 				_block_drag_placing = false
 				_block_drag_has_last = false
+				_finish_block_drag()
 			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 				# Close an open world menu without erasing the block beneath.
-				var bs_r = get_node_or_null("BuildingSystem")
-				if bs_r and bs_r.get("_world_menu_open"):
-					bs_r._close_world_menu()
+				var wui_r = get_node_or_null("WorldUiSystem")
+				if wui_r and wui_r.world_menu_open:
+					wui_r.close()
 					return
+				# Open one undo transaction for the whole drag, then erase.
+				_begin_block_drag_undo()
 				_erase_block_at(grid_pos)
 				_block_drag_erasing = true
 				_block_drag_last_cell = grid_pos
@@ -478,6 +606,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.button_index == MOUSE_BUTTON_RIGHT and not event.pressed:
 				_block_drag_erasing = false
 				_block_drag_has_last = false
+				_finish_block_drag()
 			return
 
 		# --- Bucket flood-fill (terrain mode) ---
@@ -658,20 +787,71 @@ func _unhandled_input(event: InputEvent) -> void:
 			_paint_stroke_to(grid_pos, false)
 		elif _erasing:
 			_paint_stroke_to(grid_pos, true)
+		elif editor_mode == EditorMode.TERRAIN and current_tool == Tool.PENCIL:
+			# Redraw so the brush-footprint preview tracks the cursor.
+			_hover_cell = grid_pos
+			_overlay.queue_redraw()
 
 
 # --- TERRAIN PAINTING ---
 
+## Pencil paint. Stamps an `line_size`×`line_size` square centered on
+## `grid_pos` (size 1 = single cell), reusing the same brush-size
+## control the line/circle tools use so the pencil thickness is
+## adjustable from the toolbar.
 func _paint_at(grid_pos: Vector2i) -> void:
 	if selected_tile == &"":
 		return
-	_undo_capture(grid_pos)
-	$TerrainSystem.place_tile(grid_pos, selected_tile)
+	var terrain = $TerrainSystem
+	for cell in _brush_cells(grid_pos):
+		_undo_capture(cell)
+		terrain.place_tile(cell, selected_tile)
+	# Only walls/ores live on the building layer. Painting a plain floor
+	# changes nothing BuildingSystem draws, so skip its (full-layer) redraw
+	# entirely — that redundant redraw was the bulk of the remaining
+	# per-frame cost while dragging the pencil across floor tiles.
+	if _tile_on_building_layer(selected_tile):
+		_buildings_changed = true
 
 
 func _erase_at(grid_pos: Vector2i) -> void:
-	_undo_capture(grid_pos)
-	$TerrainSystem.remove_tile(grid_pos)
+	var terrain = $TerrainSystem
+	var touched_building_layer := false
+	for cell in _brush_cells(grid_pos):
+		# Erase only redraws the building layer if it actually removes a
+		# wall or ore (the layers BuildingSystem owns). Erasing bare floor
+		# doesn't, so a floor-only eraser stroke skips the building redraw.
+		if terrain.has_wall(cell) or terrain.ore_tiles.has(cell):
+			touched_building_layer = true
+		_undo_capture(cell)
+		terrain.remove_tile(cell)
+	if touched_building_layer:
+		_buildings_changed = true
+
+
+## True when `tile_id` is a wall or ore — the layers BuildingSystem
+## renders. Floor tiles return false (drawn by TerrainSystem instead).
+func _tile_on_building_layer(tile_id: StringName) -> bool:
+	if tile_id == &"":
+		return false
+	var data = Registry.get_tile(tile_id)
+	return data != null and (data.is_wall() or data.is_ore())
+
+
+## Cells covered by the pencil/eraser brush at `center` — an N×N square
+## where N = `line_size` (clamped ≥ 1). Out-of-bounds cells are dropped.
+func _brush_cells(center: Vector2i) -> Array:
+	var thickness: int = maxi(1, line_size)
+	if thickness == 1:
+		return [center] if is_within_bounds(center) else []
+	var half: int = thickness / 2
+	var cells: Array = []
+	for dx in range(-half, -half + thickness):
+		for dy in range(-half, -half + thickness):
+			var p := Vector2i(center.x + dx, center.y + dy)
+			if is_within_bounds(p):
+				cells.append(p)
+	return cells
 
 
 # =========================
@@ -697,6 +877,13 @@ func _capture_cell_state(cell: Vector2i) -> Dictionary:
 		"floor": t.floor_tiles.get(cell, null),
 		"wall": t.wall_tiles.get(cell, null),
 		"ore": t.ore_tiles.get(cell, null),
+		# Building layer — captured so block drag-place / drag-erase
+		# undoes per cell alongside terrain. null = no building here.
+		"bld": placed_buildings.get(cell, null),
+		"bld_hp": building_health.get(cell, null),
+		"bld_rot": building_rotation.get(cell, null),
+		"bld_origin": building_origins.get(cell, null),
+		"bld_fac": building_factions.get(cell, null),
 	}
 
 
@@ -705,6 +892,17 @@ func _capture_cell_state(cell: Vector2i) -> Dictionary:
 func _undo_begin() -> void:
 	_undo_pending = {}
 	_undo_active = true
+	# Whole-array snapshots for state that isn't keyed by cell.
+	_undo_links_before = linked_pairs.duplicate(true)
+	_undo_core_before = core_position
+	# Defer the expensive floor edge-fade / darkness rebuild until the
+	# stroke commits. For single-frame operations (rect/line/circle/
+	# bucket) begin+commit happen in the same event, so this just skips
+	# one redundant rebuild; for multi-frame pencil/eraser drags it
+	# collapses a per-frame O(floor_tiles) BFS into one rebuild on release.
+	var terrain = get_node_or_null("TerrainSystem")
+	if terrain:
+		terrain.defer_floor_fade = true
 
 
 ## Close the current undo transaction. If anything actually changed,
@@ -712,18 +910,39 @@ func _undo_begin() -> void:
 ## invalidates redo, same as every other editor in the world).
 func _undo_commit() -> void:
 	_undo_active = false
-	if _undo_pending.is_empty():
-		return
+	# Stroke finished — re-enable the floor edge-fade rebuild and force a
+	# redraw so the deferred fade/darkness pass runs once now. Done before
+	# the early-outs so the flag is always cleared even on a no-op stroke.
+	var terrain = get_node_or_null("TerrainSystem")
+	if terrain:
+		terrain.defer_floor_fade = false
+		terrain.queue_redraw()
 	var step: Array = []
 	for cell in _undo_pending:
 		var before: Dictionary = _undo_pending[cell]
 		var after: Dictionary = _capture_cell_state(cell)
 		if before["floor"] == after["floor"] \
 				and before["wall"] == after["wall"] \
-				and before["ore"] == after["ore"]:
+				and before["ore"] == after["ore"] \
+				and before["bld"] == after["bld"] \
+				and before["bld_hp"] == after["bld_hp"] \
+				and before["bld_rot"] == after["bld_rot"] \
+				and before["bld_origin"] == after["bld_origin"] \
+				and before["bld_fac"] == after["bld_fac"]:
 			continue
 		step.append({"cell": cell, "before": before, "after": after})
 	_undo_pending = {}
+	# Links / spawn-core pointer changed during the transaction (e.g. an
+	# erased block dropped its links or the spawn core)? Record a meta
+	# entry so undo/redo restores them too.
+	if _undo_links_before != linked_pairs or _undo_core_before != core_position:
+		step.append({
+			"meta": true,
+			"links_before": _undo_links_before,
+			"links_after": linked_pairs.duplicate(true),
+			"core_before": _undo_core_before,
+			"core_after": core_position,
+		})
 	if step.is_empty():
 		return
 	_undo_stack.append(step)
@@ -741,9 +960,14 @@ func undo() -> void:
 	var step: Array = _undo_stack.pop_back()
 	_undoing = true
 	for entry in step:
-		_restore_cell_state(entry["cell"], entry["before"])
+		if entry.has("meta"):
+			linked_pairs = (entry["links_before"] as Array).duplicate(true)
+			core_position = entry["core_before"]
+		else:
+			_restore_cell_state(entry["cell"], entry["before"])
 	_undoing = false
-	$TerrainSystem.queue_redraw()
+	_invalidate_anchor_cache()
+	_after_terrain_restore()
 	_redo_stack.append(step)
 
 
@@ -754,12 +978,30 @@ func redo() -> void:
 	var step: Array = _redo_stack.pop_back()
 	_undoing = true
 	for entry in step:
-		_restore_cell_state(entry["cell"], entry["after"])
+		if entry.has("meta"):
+			linked_pairs = (entry["links_after"] as Array).duplicate(true)
+			core_position = entry["core_after"]
+		else:
+			_restore_cell_state(entry["cell"], entry["after"])
 	_undoing = false
-	$TerrainSystem.queue_redraw()
+	_invalidate_anchor_cache()
+	_after_terrain_restore()
 	_undo_stack.append(step)
 	if _undo_stack.size() > UNDO_LIMIT:
 		_undo_stack.pop_front()
+
+
+## Refreshes both render layers after an undo/redo restores terrain
+## state directly. The restore bypasses place_tile/remove_tile, so it
+## skips both the terrain redraw and the `walls_changed` signal that
+## tells BuildingSystem to rebuild its wall cache — re-trigger both
+## here, plus flag the gated building-layer redraw.
+func _after_terrain_restore() -> void:
+	var t = $TerrainSystem
+	t.queue_redraw()
+	if t.has_signal("walls_changed"):
+		t.walls_changed.emit()
+	_buildings_changed = true
 
 
 ## Sets a cell's floor/wall/ore dictionaries directly to the captured
@@ -782,6 +1024,40 @@ func _restore_cell_state(cell: Vector2i, state: Dictionary) -> void:
 		t.ore_tiles[cell] = state["ore"]
 	t._floor_edge_dirty = true
 	t._water_depth_dirty = true
+	_restore_building_cell(cell, state)
+
+
+## Restores the building-layer dicts for one cell from a captured
+## snapshot. Mirrors `_restore_cell_state`'s terrain handling. Guards on
+## the `bld` key so a snapshot without building data (shouldn't occur in
+## practice) leaves buildings untouched rather than erasing them.
+func _restore_building_cell(cell: Vector2i, state: Dictionary) -> void:
+	if not state.has("bld"):
+		return
+	if state["bld"] == null:
+		placed_buildings.erase(cell)
+		building_health.erase(cell)
+		building_rotation.erase(cell)
+		building_origins.erase(cell)
+		building_factions.erase(cell)
+		return
+	placed_buildings[cell] = state["bld"]
+	if state["bld_hp"] == null:
+		building_health.erase(cell)
+	else:
+		building_health[cell] = state["bld_hp"]
+	if state["bld_rot"] == null:
+		building_rotation.erase(cell)
+	else:
+		building_rotation[cell] = state["bld_rot"]
+	if state["bld_origin"] == null:
+		building_origins.erase(cell)
+	else:
+		building_origins[cell] = state["bld_origin"]
+	if state["bld_fac"] == null:
+		building_factions.erase(cell)
+	else:
+		building_factions[cell] = state["bld_fac"]
 
 
 ## Continues an in-progress paint/erase stroke to `grid_pos`. Walks a
@@ -861,6 +1137,8 @@ func _apply_rect() -> void:
 				terrain.place_tile(cell, selected_tile)
 
 	terrain.queue_redraw()
+	# Walls / ores render on the building layer — flag it for redraw.
+	_buildings_changed = true
 
 
 ## Stamps the line tool's drag onto the terrain. Walks a Bresenham line
@@ -891,6 +1169,8 @@ func _apply_line() -> void:
 				else:
 					terrain.place_tile(p, selected_tile)
 	terrain.queue_redraw()
+	# Walls / ores render on the building layer — flag it for redraw.
+	_buildings_changed = true
 
 
 ## Stamps the circle tool's drag. Treats `_circle_center` as the
@@ -946,23 +1226,46 @@ func _apply_circle() -> void:
 					else:
 						terrain.place_tile(p, selected_tile)
 	terrain.queue_redraw()
+	# Walls / ores render on the building layer — flag it for redraw.
+	_buildings_changed = true
 
 
-## 4-connected flood fill starting at `start`. Replaces every cell whose
-## current floor tile id matches the start cell's with `selected_tile`.
-## When `selected_tile` is empty, the fill erases instead — useful for
-## carving out a void region without painting it cell-by-cell.
+## Bucket fill dispatcher. The selected tile's layer decides what gets
+## flooded:
+##   • a WALL tile  → floods the connected run of cells sharing the clicked
+##     cell's wall id and writes the selected wall. Clicking an existing wall
+##     recolours that run; clicking EMPTY wall space fills the connected
+##     wall-less region with the wall (bounded by other walls / the map edge).
+##   • anything else (floor / empty-erase) → floods the floor layer.
+## Splitting by layer means a wall bucket never disturbs the floor under
+## it and vice-versa.
+func _flood_fill_at(start: Vector2i) -> void:
+	if not is_within_bounds(start):
+		return
+	var target_tile: StringName = selected_tile
+	var target_data = Registry.get_tile(target_tile) if target_tile != &"" else null
+	if target_data != null and target_data.is_wall():
+		_flood_fill_walls(start, target_tile)
+	else:
+		_flood_fill_floor(start, target_tile)
+	$TerrainSystem.queue_redraw()
+	# Walls / ores render on the building layer — flag it for redraw.
+	_buildings_changed = true
+
+
+## 4-connected flood fill over the FLOOR layer starting at `start`.
+## Replaces every cell whose current floor tile id matches the start
+## cell's with `target_tile`. When `target_tile` is empty, the fill
+## erases instead — useful for carving out a void region without
+## painting it cell-by-cell.
 ##
 ## "Source tile" includes the empty/void state, so clicking on a void cell
 ## with grass selected fills the whole connected void region with grass.
 ## Walls block the spread (you can't fill across a wall) so a closed pen
 ## fills only its interior.
-func _flood_fill_at(start: Vector2i) -> void:
-	if not is_within_bounds(start):
-		return
+func _flood_fill_floor(start: Vector2i, target_tile: StringName) -> void:
 	var terrain = $TerrainSystem
 	var source_tile: StringName = StringName(terrain.floor_tiles.get(start, &""))
-	var target_tile: StringName = selected_tile
 	# No-op if clicking on a cell that already matches the brush — a fill
 	# that paints what's already there has nothing to do.
 	if source_tile == target_tile:
@@ -995,7 +1298,42 @@ func _flood_fill_at(start: Vector2i) -> void:
 				continue
 			visited[nb] = true
 			stack.append(nb)
-	terrain.queue_redraw()
+
+
+## 4-connected flood fill over the WALL layer starting at `start`.
+## Replaces the connected region of cells sharing the start cell's wall id
+## with `target_tile`, preserving the region's exact shape. The "wall id" of a
+## cell includes the EMPTY state (&""), so clicking empty wall space floods the
+## connected run of wall-less cells and fills them with the selected wall —
+## bounded by existing walls and the map edge. No-op only when the start cell
+## already holds the target wall. The floor under each cell is left untouched
+## (place_tile only rewrites the wall layer), so the fill keeps whatever ground
+## it sat on.
+func _flood_fill_walls(start: Vector2i, target_tile: StringName) -> void:
+	var terrain = $TerrainSystem
+	var source_wall: StringName = StringName(terrain.wall_tiles.get(start, &""))
+	if source_wall == target_tile:
+		return
+	var stack: Array[Vector2i] = [start]
+	var visited: Dictionary = {start: true}
+	var max_cells: int = 200000
+	var filled := 0
+	while not stack.is_empty() and filled < max_cells:
+		var cell: Vector2i = stack.pop_back()
+		var here: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+		if here != source_wall:
+			continue
+		_undo_capture(cell)
+		terrain.place_tile(cell, target_tile)
+		filled += 1
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var nb: Vector2i = cell + d
+			if not is_within_bounds(nb):
+				continue
+			if visited.has(nb):
+				continue
+			visited[nb] = true
+			stack.append(nb)
 
 
 # --- TRANSFORM MODE ---
@@ -1235,6 +1573,7 @@ func _apply_transform_move() -> void:
 	_transform_start = dest_min
 	_transform_end = dest_min + size
 
+	_invalidate_anchor_cache()
 	$TerrainSystem.queue_redraw()
 	var bs = get_node_or_null("BuildingSystem")
 	if bs:
@@ -1446,6 +1785,29 @@ func _place_block_centered(grid_pos: Vector2i) -> void:
 	_place_block_at(place_pos)
 
 
+## Opens a single undo transaction for a block drag, if one isn't already
+## open. Called on the press that starts a place/erase drag so every block
+## stamped until release collapses into one undo step.
+func _begin_block_drag_undo() -> void:
+	if _block_drag_undo_open:
+		return
+	_undo_begin()
+	_block_drag_undo_open = true
+
+
+## Commits the block-drag undo transaction once the drag is fully over
+## (no place/erase button still held). Idempotent — safe to call from the
+## explicit release handlers and the poll-driven cancel path alike.
+func _finish_block_drag() -> void:
+	if not _block_drag_undo_open:
+		return
+	if _block_drag_placing or _block_drag_erasing:
+		return  # other button still dragging — keep the transaction open
+	_undo_commit()
+	_block_drag_undo_open = false
+	_block_drag_has_last = false
+
+
 ## Drag-stroke for block placement / erasure. Walks a Bresenham line from
 ## the previous drag cell to `grid_pos` so the operation lands on every
 ## cell the cursor swept over (motion events can skip tiles when the
@@ -1498,6 +1860,7 @@ func _place_block_at(grid_pos: Vector2i) -> void:
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var p = grid_pos + Vector2i(x, y)
+			_undo_capture(p)  # snapshot pre-placement state for undo
 			placed_buildings[p] = selected_block
 			building_health[p] = data.max_health
 			building_rotation[p] = placement_rotation
@@ -1509,6 +1872,7 @@ func _place_block_at(grid_pos: Vector2i) -> void:
 	# Auto-set spawn core if this is the first core placed
 	if data.tags.has("core") and not _has_spawn_core():
 		core_position = grid_pos
+	_invalidate_anchor_cache()
 	_overlay.queue_redraw()
 
 	var bs = get_node_or_null("BuildingSystem")
@@ -1530,12 +1894,14 @@ func _erase_block_at(grid_pos: Vector2i) -> void:
 		for x in range(data.grid_size.x):
 			for y in range(data.grid_size.y):
 				var p = anchor + Vector2i(x, y)
+				_undo_capture(p)  # snapshot pre-erase state for undo
 				placed_buildings.erase(p)
 				building_health.erase(p)
 				building_rotation.erase(p)
 				building_origins.erase(p)
 				building_factions.erase(p)
 	else:
+		_undo_capture(grid_pos)  # snapshot pre-erase state for undo
 		placed_buildings.erase(grid_pos)
 		building_health.erase(grid_pos)
 		building_rotation.erase(grid_pos)
@@ -1550,6 +1916,7 @@ func _erase_block_at(grid_pos: Vector2i) -> void:
 		_pick_next_spawn_core()
 
 	building_destroyed.emit(grid_pos)
+	_invalidate_anchor_cache()
 	_overlay.queue_redraw()
 
 	var bs = get_node_or_null("BuildingSystem")
@@ -1566,6 +1933,7 @@ func clear_buildings() -> void:
 	building_factions.clear()
 	linked_pairs.clear()
 	core_position = Vector2i(-1, -1)
+	_invalidate_anchor_cache()
 	var bs = get_node_or_null("BuildingSystem")
 	if bs:
 		bs.queue_redraw()
@@ -1677,6 +2045,7 @@ func _draw_overlay() -> void:
 	_draw_rect_preview()
 	_draw_line_preview()
 	_draw_circle_preview()
+	_draw_pencil_preview()
 	_draw_transform_preview()
 	_draw_building_preview()
 	_draw_links()
@@ -1760,6 +2129,24 @@ func _draw_rect_preview() -> void:
 
 	_overlay.draw_rect(Rect2(top_left, Vector2(w, h)), color, true)
 	_overlay.draw_rect(Rect2(top_left, Vector2(w, h)), color.lightened(0.3), false, 2.0)
+
+
+## Outlines the pencil brush footprint under the cursor so the player
+## can see how large an N×N stamp will land before clicking. Only shown
+## for the Pencil tool in terrain mode when the brush is larger than a
+## single cell.
+func _draw_pencil_preview() -> void:
+	if editor_mode != EditorMode.TERRAIN or current_tool != Tool.PENCIL:
+		return
+	if line_size <= 1:
+		return
+	var gs: float = float(GRID_SIZE)
+	var color := Color(0.2, 0.8, 0.2, 0.12)
+	var border := color.lightened(0.3)
+	for cell in _brush_cells(_hover_cell):
+		var wp := grid_to_world(cell)
+		_overlay.draw_rect(Rect2(wp, Vector2(gs, gs)), color, true)
+		_overlay.draw_rect(Rect2(wp, Vector2(gs, gs)), border, false, 1.0)
 
 
 func _draw_line_preview() -> void:

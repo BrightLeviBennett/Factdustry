@@ -1,5 +1,9 @@
 extends Node2D
 
+# Preloaded so `EnemyUnit.draw_unit_payload(...)` resolves regardless of
+# global class_name registration timing.
+const EnemyUnit = preload("res://main/enemy_unit.gd")
+
 
 # Sibling overlay that paints fluid puddles at z 49 — UNDER buildings
 # (z 50) but above the world terrain. The puddles dict lives on the
@@ -54,6 +58,7 @@ class PuddleOverlay extends Node2D:
 var _terrain: Node2D
 var _power_sys: Node
 var _sector_script: Node
+var _launch_anim: Node
 var _building_sys: Node
 var _unit_mgr: Node
 
@@ -240,6 +245,21 @@ var constructor_state := {}
 #   "pending_items": Dictionary (item_id -> count remaining to output)
 var deconstructor_state := {}
 
+# --- UNIT UPGRADER STATE ---
+# anchor -> {unit: payload|null, queue: [module payloads], applying: StringName,
+#            timer: float, applied_session: int}
+var upgrader_state := {}
+
+# --- PAYLOAD REFIT BAY STATE ---
+# anchor -> {unit: payload|null, pending: [upgrade ids], timer: float, ejecting: bool}
+var refit_state := {}
+
+# --- DEV SOURCE BLOCKS ---
+# resource_source: anchor -> StringName (item or fluid id) emitted forever.
+var source_resource := {}
+# payload_source: anchor -> {id: StringName, kind: "block"/"unit", team: int}
+var source_payload := {}
+
 # --- REFABRICATOR STATE ---
 # Key = Vector2i (refabricator origin position)
 # Value = Dictionary:
@@ -338,6 +358,11 @@ func _sector_script_ref() -> Node:
 		_sector_script = get_node_or_null("/root/Main/SectorScript")
 	return _sector_script
 
+func _launch_anim_ref() -> Node:
+	if _launch_anim == null or not is_instance_valid(_launch_anim):
+		_launch_anim = get_node_or_null("/root/Main/LaunchAnimation")
+	return _launch_anim
+
 func _building_sys_ref() -> Node:
 	if _building_sys == null:
 		_building_sys = get_node_or_null("/root/Main/BuildingSystem")
@@ -373,15 +398,37 @@ func _ready() -> void:
 	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
 	main.building_placed.connect(_on_building_placed)
 	main.building_destroyed.connect(_on_building_destroyed)
+	# A finished build flips a pipe inactive→active (joins its network), so
+	# the cached pipe partition must rebuild then too.
+	if main.has_signal("building_completed"):
+		main.building_completed.connect(_on_building_completed_for_pipes)
 
 
 func _process(delta: float) -> void:
 	if ("world_paused" in main and main.world_paused):
 		queue_redraw()
 		return
-	_update_drills(delta)
-	_update_pumps(delta)
-	_update_factories(delta)
+	# Slow producers (drills / pumps / factories) are pure delta-timer state
+	# machines: a cycle completes after `production_time` of accumulated
+	# delta, then resets. Running them at ~12 Hz instead of 60 Hz with the
+	# accumulated delta keeps production RATES identical (only the update
+	# granularity coarsens, imperceptible for multi-second recipes) while
+	# cutting their per-frame cost ~5×. The three accumulators start at
+	# staggered offsets so they fire on different frames — spreading the
+	# work rather than spiking it all on one frame every ~83 ms.
+	_accum_drill += delta
+	if _accum_drill >= _SLOW_TICK_INTERVAL:
+		_update_drills(_accum_drill)
+		_accum_drill = 0.0
+	_accum_pump += delta
+	if _accum_pump >= _SLOW_TICK_INTERVAL:
+		_update_pumps(_accum_pump)
+		_accum_pump = 0.0
+	_accum_factory += delta
+	if _accum_factory >= _SLOW_TICK_INTERVAL:
+		_update_factories(_accum_factory)
+		_accum_factory = 0.0
+	# Item / fluid / payload motion stays at full frame rate for smoothness.
 	_update_conveyors(delta)
 	_update_payloads(delta)
 	_update_constructors(delta)
@@ -390,10 +437,156 @@ func _process(delta: float) -> void:
 	_update_loaders(delta)
 	_update_unloaders(delta)
 	_update_mass_drivers(delta)
+	_update_unit_upgraders(delta)
+	_update_refit_bays(delta)
+	_update_resource_sources(delta)
+	_update_payload_sources(delta)
 	_update_pipes(delta)
 	_update_storage_unloading(delta)
 	_update_belt_unloaders(delta)
 	queue_redraw()
+
+
+# =========================
+# CATEGORY-INDEXED BUILDING BUCKETS (perf)
+# =========================
+# Each per-type update used to re-scan EVERY entry of main.placed_buildings
+# once per frame just to find its handful of matching blocks — O(all
+# buildings) × number-of-systems every frame, the dominant lag source on
+# large sectors. Instead we classify every placed cell ONCE per structural
+# change into role buckets, so each update iterates only its own pre-filtered
+# list. Rebuilt lazily when `_buckets_dirty` (set on place/destroy) or when
+# the building count drifts (a bulk load / any path that bypasses the
+# building_placed/destroyed signals). Buckets are keyed by block type only —
+# faction flips, disable/enable, and build progress don't change membership,
+# so those stay handled by the (cheap) per-building checks in each loop body.
+var _buckets: Dictionary = {}
+var _buckets_dirty := true
+var _buckets_count := -1
+
+# --- Slow-producer throttle (perf) ---
+# Drills / pumps / factories tick at ~12 Hz instead of every frame. They're
+# delta-timer driven, so passing the accumulated delta keeps rates exact.
+# Accumulators start staggered (0, 1/3, 2/3 of the interval) so the three
+# batches land on different frames instead of spiking together.
+const _SLOW_TICK_INTERVAL := 1.0 / 12.0
+var _accum_drill := 0.0
+var _accum_pump := _SLOW_TICK_INTERVAL / 3.0
+var _accum_factory := _SLOW_TICK_INTERVAL * 2.0 / 3.0
+
+# --- Pipe network partition cache (perf) ---
+# The per-frame `_find_pipe_network` flood-fill was the single biggest
+# large-map CPU cost: it rebuilt EVERY connected pipe network from scratch
+# every frame (plus a linked_pairs scan per bridge cell). Pipe TOPOLOGY
+# only changes on structural events, so we cache the partition (a list of
+# networks, each an Array[Vector2i]) and reuse it. Fluid equalization still
+# runs every frame on the cached topology, so flow stays perfectly smooth;
+# only the expensive partitioning is throttled.
+#
+# Invalidation is belt-and-suspenders: we set `_pipe_net_dirty` on the
+# structural signals we can hook (place / destroy / build-complete), AND
+# refresh on a low-frequency timer as a safety net for membership changes
+# that don't fire a clean signal (faction flips → derelict, bridge-link
+# toggles, bulk loads). Worst-case staleness is one `_PIPE_NET_REFRESH`
+# window (~125 ms) — imperceptible for fluid, and flow never stops because
+# equalization keeps running on whatever partition is current.
+var _pipe_networks: Array = []        # Array of Array[Vector2i]
+var _pipe_net_dirty := true
+var _pipe_net_refresh_accum := 0.0
+const _PIPE_NET_REFRESH := 1.0 / 8.0  # rebuild partition at most ~8 Hz
+
+## Returns the cached cell list for `role`, rebuilding all buckets first if
+## the cache is stale. The list contains every placed cell matching the
+## role's predicate (anchors and non-anchor tiles of multi-tile blocks
+## alike — same set the old `for grid_pos in placed_buildings` produced,
+## so each loop body's existing anchor-dedup still applies unchanged).
+func _bucket(role: String) -> Array:
+	if _buckets_dirty or main.placed_buildings.size() != _buckets_count:
+		_rebuild_buckets()
+	return _buckets.get(role, [])
+
+
+func _rebuild_buckets() -> void:
+	_buckets_dirty = false
+	_buckets_count = main.placed_buildings.size()
+	var extractor: Array = []
+	var pump: Array = []
+	var pipe: Array = []
+	var junction: Array = []
+	var unloader: Array = []
+	var constructor: Array = []
+	var deconstructor: Array = []
+	var refabricator: Array = []
+	var payload_loader: Array = []
+	var payload_unloader: Array = []
+	var mass_driver: Array = []
+	var factory: Array = []
+	var upgrader: Array = []
+	var refit_bay: Array = []
+	var resource_source: Array = []
+	var payload_source: Array = []
+	for grid_pos in main.placed_buildings:
+		var data = Registry.get_block(main.placed_buildings[grid_pos])
+		if data == null:
+			continue
+		var tags = data.tags
+		if data.category == BlockData.BlockCategory.EXTRACTORS:
+			extractor.append(grid_pos)
+		if tags.has("pump"):
+			pump.append(grid_pos)
+		if tags.has("unloader"):
+			unloader.append(grid_pos)
+		if tags.has("constructor"):
+			constructor.append(grid_pos)
+		if tags.has("deconstructor"):
+			deconstructor.append(grid_pos)
+		if tags.has("refabricator"):
+			refabricator.append(grid_pos)
+		if tags.has("payload_loader") or tags.has("freight_loader"):
+			payload_loader.append(grid_pos)
+		if tags.has("payload_unloader") or tags.has("freight_unloader"):
+			payload_unloader.append(grid_pos)
+		if tags.has("mass_driver"):
+			mass_driver.append(grid_pos)
+		if tags.has("upgrader"):
+			upgrader.append(grid_pos)
+		if tags.has("refit_bay"):
+			refit_bay.append(grid_pos)
+		if tags.has("resource_source"):
+			resource_source.append(grid_pos)
+		if tags.has("payload_source"):
+			payload_source.append(grid_pos)
+		if tags.has("junction"):
+			junction.append(grid_pos)
+		# Pipe cell — mirrors `_is_pipe_cell` exactly.
+		if data.is_transport() and data.transports_fluid and not tags.has("pump"):
+			pipe.append(grid_pos)
+		# Factory — mirrors the structural pre-filter in `_update_factories`
+		# (everything before the per-building anchor/disabled/inactive gates,
+		# which stay in the loop body).
+		if not tags.has("refabricator") \
+				and data.category != BlockData.BlockCategory.EXTRACTORS \
+				and not (data.side_inputs.is_empty() and data.side_outputs.is_empty() \
+					and data.produced_unit == &"" and not tags.has("omnidirectional")):
+			factory.append(grid_pos)
+	_buckets = {
+		"extractor": extractor,
+		"pump": pump,
+		"pipe": pipe,
+		"junction": junction,
+		"unloader": unloader,
+		"constructor": constructor,
+		"deconstructor": deconstructor,
+		"refabricator": refabricator,
+		"payload_loader": payload_loader,
+		"payload_unloader": payload_unloader,
+		"mass_driver": mass_driver,
+		"factory": factory,
+		"upgrader": upgrader,
+		"refit_bay": refit_bay,
+		"resource_source": resource_source,
+		"payload_source": payload_source,
+	}
 
 
 # =========================
@@ -632,7 +825,7 @@ func _ore_is_minable_by(ore_data: TerrainTileData, is_floor_miner: bool, data: B
 func _update_drills(delta: float) -> void:
 	var processed := {}
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("extractor"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null:
@@ -991,7 +1184,7 @@ func _update_pumps(delta: float) -> void:
 	var sector_script = _sector_script_ref()
 	var power_sys = _power_sys_ref()
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("pump"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null:
@@ -1017,7 +1210,23 @@ func _update_pumps(delta: float) -> void:
 		var is_condenser: bool = data.tags.has("condenser")
 		var fluid_id: StringName = &""
 		var rate_per_sec: float = 0.0
-		if is_condenser:
+		if is_condenser and data.vent_fluid != &"":
+			# Data-driven vent extractor (e.g. Fume Extractor on a sulfur vent):
+			# produces `vent_fluid` while any footprint cell sits on `vent_tile`,
+			# at `vent_rate`. Generalises the built-in water condenser below.
+			var on_vent_tile := false
+			for x in range(data.grid_size.x):
+				for y in range(data.grid_size.y):
+					var cp_v: Vector2i = anchor + Vector2i(x, y)
+					if StringName(terrain.floor_tiles.get(cp_v, &"")) == data.vent_tile:
+						on_vent_tile = true
+			if not on_vent_tile:
+				extractor_efficiency[anchor] = 0.0
+				continue
+			fluid_id = data.vent_fluid
+			rate_per_sec = data.vent_rate if data.vent_rate > 0.0 else 4.0
+			extractor_efficiency[anchor] = 1.0
+		elif is_condenser:
 			var on_geyser := false
 			var on_vent := false
 			for x in range(data.grid_size.x):
@@ -1628,6 +1837,20 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	if data == null:
 		return false
 
+	# Core — absorbs items into the resource pool. This is the non-mutating
+	# mirror of `_absorb_item`: FEROX cores always take; LUMINA cores take while
+	# under their storage cap. Without this branch the router picker thought the
+	# core could NEVER accept, so it never routed there (items piled toward a
+	# full belt instead of the core that had room).
+	if _is_core_cell(grid_pos):
+		if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+			return false
+		if main.get_building_faction(grid_pos) == main.Faction.FEROX:
+			return true
+		if main.has_method("can_accept_resource"):
+			return main.can_accept_resource(item_id)
+		return true
+
 	# Launchpad — accepts any item into passenger storage, capped by
 	# max_stored_items. The pod's build cost is now power-only, so the
 	# launchpad no longer special-cases mandatory items.
@@ -1661,11 +1884,13 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	var is_omni: bool = data.tags.has("omnidirectional")
 	var is_unit_fab: bool = data.produced_unit != &""
 	if is_omni or is_unit_fab:
-		var eff_inputs := _get_effective_inputs(data)
+		var anchor = main.get_building_anchor(grid_pos)
+		var origin: Vector2i = anchor if anchor != null else grid_pos
+		# Pass origin so recipe-select factories report their ACTIVE recipe's
+		# ingredients (otherwise routers think they accept nothing).
+		var eff_inputs := _get_effective_inputs(data, origin)
 		for raw_id in eff_inputs:
 			if StringName(raw_id) == item_id:
-				var anchor = main.get_building_anchor(grid_pos)
-				var origin: Vector2i = anchor if anchor != null else grid_pos
 				var cap: int = data.max_stored_items if data.max_stored_items > 0 else int(eff_inputs[raw_id]) * 10
 				var have: int = 0
 				if factory_buffers.has(origin):
@@ -2591,19 +2816,324 @@ func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float,
 	return true
 
 
-## Updates all pipe networks: equalize, leak, and feed factories.
-func _update_pipes(delta: float) -> void:
-	# --- Phase A: Find networks and equalize ---
-	var visited := {}
+# =========================
+# UNIT UPGRADER / PAYLOAD REFIT BAY
+# =========================
 
-	# Also check all placed pipe cells (even empty ones) for equalization.
-	# Skip inactive pipes so they can't equalize fluid through a cell that
-	# isn't finished building yet. Also skip junctions — they're
-	# explicitly NOT part of pipe networks; their per-axis state is
-	# equalized in `_tick_pipe_junctions` below so the two axes never
-	# mix.
+## True if `up_data` (a module block) may be applied to `unit_data`. When the
+## module's `module_unit_layers` is empty it fits any unit; otherwise the
+## unit's movement layer must be in the list (e.g. Lift Engine = [HOVER, FLYING]).
+func _module_fits_unit(up_data: BlockData, unit_data: UnitData) -> bool:
+	var layers: Array = up_data.module_unit_layers
+	if layers.is_empty():
+		return true
+	return layers.has(int(unit_data.movement_layer))
+
+
+## Whether `up_data` can be applied to the held unit right now: layer-
+## compatible, the unit has a free slot, AND it isn't already at this
+## module's per-unit cap (`module_max_applies`, e.g. Armor Plate ×3).
+func _module_can_apply_to(up_data: BlockData, unit_data: UnitData, unit_payload: Dictionary) -> bool:
+	if not _module_fits_unit(up_data, unit_data):
+		return false
+	if _unit_free_slots(unit_payload) < 1:
+		return false
+	var count := 0
+	for u in (unit_payload.get("applied_upgrades", []) as Array):
+		if StringName(u) == up_data.id:
+			count += 1
+	return count < maxi(1, up_data.module_max_applies)
+
+
+## Free upgrade slots left on a unit payload = tier capacity - applied count.
+func _unit_free_slots(unit_payload: Dictionary) -> int:
+	var ud = Registry.get_unit(StringName(unit_payload.get("unit_id", "")))
+	if ud == null:
+		return 0
+	var applied: int = (unit_payload.get("applied_upgrades", []) as Array).size()
+	return maxi(0, ud.upgrade_slots() - applied)
+
+
+## Builds a building payload dict for an upgrade module (so the refit bay can
+## eject it onto a payload conveyor).
+func _build_module_payload(block_id: StringName) -> Dictionary:
+	var bd = Registry.get_block(block_id)
+	if bd == null:
+		return {}
+	return {
+		"type": "building",
+		"block_id": String(block_id),
+		"grid_size_x": bd.grid_size.x,
+		"grid_size_y": bd.grid_size.y,
+		"health": bd.max_health,
+		"rotation": 0,
+	}
+
+
+## Unit Upgrader: holds one unit (accepted only with a free slot), buffers
+## incoming compatible module payloads, and applies each over 4s + 25 power
+## (scaled by power efficiency). Ejects the kitted unit once it has no free
+## slot left, or once ≥1 upgrade was applied and nothing compatible remains
+## queued. Inputs from the front edge, ejects to the other sides.
+func _update_unit_upgraders(delta: float) -> void:
+	for grid_pos in _bucket("upgrader"):
+		var origin: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if origin != grid_pos:
+			continue
+		var data = Registry.get_block(main.placed_buildings.get(origin, &""))
+		if data == null:
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+		if not upgrader_state.has(origin):
+			upgrader_state[origin] = {"unit": null, "queue": [], "applying": &"", "timer": 0.0, "applied_session": 0}
+		var state: Dictionary = upgrader_state[origin]
+		var rot: int = main.building_rotation.get(origin, 0)
+		var front_cells := _get_front_edge(origin, data.grid_size, rot)
+		var output_cells := _get_all_output_cells(origin, data.grid_size, rot)
+
+		# 1. Pull one payload from a front conveyor.
+		for edge in front_cells:
+			var conv: Vector2i = main.building_origins.get(edge, edge)
+			if not payload_items.has(conv):
+				continue
+			if float(payload_items[conv].get("progress", 0.0)) < 1.0:
+				continue
+			var pd: Dictionary = payload_items[conv]["payload_data"]
+			var ptype: String = pd.get("type", "")
+			if ptype == "unit":
+				if state["unit"] == null and _unit_free_slots(pd) >= 1:
+					state["unit"] = pd
+					state["applied_session"] = 0
+					payload_items.erase(conv)
+					break
+			elif ptype == "building":
+				var bd = Registry.get_block(StringName(pd.get("block_id", "")))
+				if bd != null and bd.tags.has("module"):
+					var take := true
+					if state["unit"] != null:
+						var ud = Registry.get_unit(StringName(state["unit"].get("unit_id", "")))
+						take = ud != null and _module_can_apply_to(bd, ud, state["unit"])
+					if take:
+						state["queue"].append(pd)
+						payload_items.erase(conv)
+						break
+
+		if state["unit"] == null:
+			continue
+		var unit_data = Registry.get_unit(StringName(state["unit"].get("unit_id", "")))
+		if unit_data == null:
+			_eject_payload(state, "unit", output_cells)
+			continue
+
+		var power_eff: float = 1.0
+		var ps = _power_sys_ref()
+		if ps and data.electrical_power_use > 0:
+			power_eff = clampf(float(ps.get_electrical_efficiency(origin)), 0.0, 1.0)
+
+		# 2. Apply current upgrade, or pick the next compatible one, or eject.
+		if state["applying"] != &"":
+			if power_eff > 0.0:
+				state["timer"] -= delta * power_eff
+				if state["timer"] <= 0.0:
+					var ups: Array = state["unit"].get("applied_upgrades", [])
+					ups.append(state["applying"])
+					state["unit"]["applied_upgrades"] = ups
+					state["applied_session"] = int(state["applied_session"]) + 1
+					state["applying"] = &""
+		else:
+			var idx: int = -1
+			if _unit_free_slots(state["unit"]) >= 1:
+				for i in range(state["queue"].size()):
+					var qbd = Registry.get_block(StringName(state["queue"][i].get("block_id", "")))
+					if qbd != null and _module_can_apply_to(qbd, unit_data, state["unit"]):
+						idx = i
+						break
+			if idx >= 0:
+				state["applying"] = StringName(state["queue"][idx].get("block_id", ""))
+				state["queue"].remove_at(idx)
+				state["timer"] = 4.0
+			elif _unit_free_slots(state["unit"]) <= 0 or int(state["applied_session"]) > 0:
+				# Full, or done applying everything we had — eject the unit.
+				_eject_payload(state, "unit", output_cells)
+
+
+## Payload Refit Bay: accepts only a unit carrying ≥1 upgrade, ejects each
+## upgrade as its own module payload (4s + 25 power each), then ejects the
+## stripped unit. Inputs from the front edge, ejects to the other sides.
+func _update_refit_bays(delta: float) -> void:
+	for grid_pos in _bucket("refit_bay"):
+		var origin: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if origin != grid_pos:
+			continue
+		var data = Registry.get_block(main.placed_buildings.get(origin, &""))
+		if data == null:
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+		if not refit_state.has(origin):
+			refit_state[origin] = {"unit": null, "pending": [], "timer": 0.0, "ejecting": false}
+		var state: Dictionary = refit_state[origin]
+		var rot: int = main.building_rotation.get(origin, 0)
+		var front_cells := _get_front_edge(origin, data.grid_size, rot)
+		var output_cells := _get_all_output_cells(origin, data.grid_size, rot)
+
+		# 1. Pull a unit WITH upgrades from a front conveyor.
+		if state["unit"] == null:
+			for edge in front_cells:
+				var conv: Vector2i = main.building_origins.get(edge, edge)
+				if not payload_items.has(conv):
+					continue
+				if float(payload_items[conv].get("progress", 0.0)) < 1.0:
+					continue
+				var pd: Dictionary = payload_items[conv]["payload_data"]
+				if pd.get("type", "") != "unit":
+					continue
+				var ups: Array = pd.get("applied_upgrades", [])
+				if ups.is_empty():
+					continue   # refit bay only accepts kitted units
+				state["unit"] = pd
+				state["pending"] = ups.duplicate()
+				state["ejecting"] = false
+				state["timer"] = 0.0
+				payload_items.erase(conv)
+				break
+
+		if state["unit"] == null:
+			continue
+
+		var power_eff: float = 1.0
+		var ps = _power_sys_ref()
+		if ps and data.electrical_power_use > 0:
+			power_eff = clampf(float(ps.get_electrical_efficiency(origin)), 0.0, 1.0)
+
+		# 2. Eject upgrades one at a time, then the stripped unit.
+		if not state["pending"].is_empty():
+			if not state["ejecting"]:
+				state["timer"] = 4.0
+				state["ejecting"] = true
+			if power_eff > 0.0:
+				state["timer"] -= delta * power_eff
+				if state["timer"] <= 0.0:
+					var up_id: StringName = StringName(state["pending"][0])
+					var up_payload := _build_module_payload(up_id)
+					var done := false
+					if up_payload.is_empty():
+						done = true  # unknown module — drop it
+					else:
+						for out in output_cells:
+							if _try_push_payload(out, up_payload):
+								done = true
+								break
+					if done:
+						state["pending"].remove_at(0)
+						(state["unit"]["applied_upgrades"] as Array).erase(up_id)
+						state["ejecting"] = false
+					# else: outputs blocked — retry next frame
+		else:
+			# All upgrades stripped — eject the unit itself.
+			_eject_payload(state, "unit", output_cells)
+
+
+## Pushes `state[key]` (a payload dict) onto the first available output cell,
+## clearing the slot + transient fields on success.
+func _eject_payload(state: Dictionary, key: String, output_cells: Array) -> void:
+	if state.get(key) == null:
+		return
+	for out in output_cells:
+		if _try_push_payload(out, state[key]):
+			state[key] = null
+			state["applying"] = &""
+			state["applied_session"] = 0
+			state["timer"] = 0.0
+			state["ejecting"] = false
+			return
+
+
+# =========================
+# DEV SOURCE BLOCKS
+# =========================
+
+## Resource Source: emits the chosen item/fluid out every side each frame.
+## `_try_push_item` routes items onto conveyors and fluids into pipes, and
+## fails when the target is full — so this is naturally rate-limited.
+func _update_resource_sources(_delta: float) -> void:
+	for grid_pos in _bucket("resource_source"):
+		var origin: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if origin != grid_pos:
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+		var res: StringName = source_resource.get(origin, &"")
+		if res == &"":
+			continue
+		var data = Registry.get_block(main.placed_buildings.get(origin, &""))
+		if data == null:
+			continue
+		var rot: int = main.building_rotation.get(origin, 0)
+		for out in _get_all_output_cells(origin, data.grid_size, rot):
+			var entry_dir := _get_entry_dir_from_building(out, origin, data.grid_size)
+			_try_push_item(out, res, entry_dir)
+
+
+## Payload Source: emits the chosen block/unit as a payload onto an output
+## payload conveyor. `_try_push_payload` fails when the conveyor already holds
+## one, so it streams at belt speed. Units carry the chosen team so they
+## spawn Lumina/Ferox when unpacked.
+func _update_payload_sources(_delta: float) -> void:
+	for grid_pos in _bucket("payload_source"):
+		var origin: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if origin != grid_pos:
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+		var sel: Dictionary = source_payload.get(origin, {})
+		if sel.is_empty():
+			continue
+		var data = Registry.get_block(main.placed_buildings.get(origin, &""))
+		if data == null:
+			continue
+		var sid: StringName = StringName(sel.get("id", ""))
+		var payload: Dictionary = {}
+		if sel.get("kind", "") == "unit":
+			var ud = Registry.get_unit(sid)
+			if ud == null:
+				continue
+			var team_sel: int = int(sel.get("team", 0))
+			payload = {
+				"type": "unit", "unit_id": String(sid), "health": ud.max_health,
+				"team": team_sel, "applied_upgrades": [],
+				# Payload-Source enemies spawn as inert, commandable test dummies.
+				"is_dummy": team_sel == 1,
+			}
+		else:
+			var bd = Registry.get_block(sid)
+			if bd == null:
+				continue
+			payload = {
+				"type": "building", "block_id": String(sid),
+				"grid_size_x": bd.grid_size.x, "grid_size_y": bd.grid_size.y,
+				"health": bd.max_health, "rotation": 0,
+			}
+		# Directional: emit only out the front edge (the facing direction),
+		# not every side. Rotate with Q at placement like other directional
+		# blocks.
+		var rot: int = main.building_rotation.get(origin, 0)
+		for out in _get_front_edge(origin, data.grid_size, rot):
+			if _try_push_payload(out, payload.duplicate(true)):
+				break   # one payload per frame; belt occupancy rate-limits us
+
+
+## Re-derives the pipe network partition: the set of connected-component
+## networks the per-frame equalization runs over. This is the expensive
+## flood-fill (O(active pipe cells), plus a linked_pairs scan per bridge)
+## that used to run EVERY frame — now gated behind the dirty flag + refresh
+## timer in `_update_pipes`. Skips junctions (their per-axis channels are
+## handled in `_tick_pipe_junctions`) and inactive/under-construction pipes.
+func _rebuild_pipe_networks() -> void:
+	_pipe_networks.clear()
 	var all_pipe_cells := {}
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("pipe"):
 		if not _is_pipe_cell(grid_pos):
 			continue
 		if _is_junction_cell(grid_pos):
@@ -2612,15 +3142,33 @@ func _update_pipes(delta: float) -> void:
 			continue
 		all_pipe_cells[grid_pos] = true
 
+	var visited := {}
 	for grid_pos in all_pipe_cells:
 		if visited.has(grid_pos):
 			continue
-
-		# Flood-fill to find connected pipe network
 		var network := _find_pipe_network(grid_pos)
 		for pos in network:
 			visited[pos] = true
+		_pipe_networks.append(network)
 
+
+## Updates all pipe networks: equalize, leak, and feed factories.
+func _update_pipes(delta: float) -> void:
+	# --- Phase A: Find networks and equalize ---
+	# The network PARTITION (which cells flood-fill into which network) is
+	# cached and only re-derived when topology changes (dirty flag) or the
+	# safety-net refresh timer elapses — see `_rebuild_pipe_networks`. Fluid
+	# EQUALIZATION runs every frame on the cached partition, so flow stays
+	# smooth; only the expensive flood-fill is throttled.
+	_pipe_net_refresh_accum += delta
+	if _pipe_net_dirty or _pipe_net_refresh_accum >= _PIPE_NET_REFRESH:
+		_rebuild_pipe_networks()
+		_pipe_net_dirty = false
+		_pipe_net_refresh_accum = 0.0
+
+	for network: Array in _pipe_networks:
+		if network.is_empty():
+			continue
 		# Sum total fluid in the network
 		var total_amount := 0.0
 		var fluid_id := &""
@@ -3365,7 +3913,7 @@ func _tick_pipe_junctions() -> void:
 	for d in dead:
 		pipe_junction_state.erase(d)
 
-	for anchor in main.placed_buildings:
+	for anchor in _bucket("junction"):
 		if not _is_junction_cell(anchor):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
@@ -3389,7 +3937,7 @@ func _tick_pipe_junctions() -> void:
 ## Cheap precheck so `_tick_pipe_junctions` can skip the GC walk + main
 ## loop when there are no junctions placed at all.
 func _any_junction_placed() -> bool:
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("junction"):
 		if _is_junction_cell(grid_pos):
 			return true
 	return false
@@ -3696,11 +4244,43 @@ func _block_produces_items(data: BlockData) -> bool:
 		return true
 	if not data.output_items.is_empty():
 		return true
+	# Random-output factories (Slag Caster) produce items even though their
+	# output table lives in `random_outputs` rather than `output_items`.
+	if data.random_outputs != null and not data.random_outputs.is_empty():
+		return true
 	for k in data.side_outputs:
 		var oid := StringName(data.side_outputs[k])
 		if oid != &"" and Registry.get_fluid(oid) == null:
 			return true
 	return false
+
+
+## Weighted-random pick from a `random_outputs` table (list of
+## {"item": StringName, "weight": float}). Returns &"" if the table is empty
+## or all weights are non-positive.
+func _pick_random_output(table: Array) -> StringName:
+	var total: float = 0.0
+	for entry in table:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		total += maxf(0.0, float(entry.get("weight", 1.0)))
+	if total <= 0.0:
+		return &""
+	var roll: float = randf() * total
+	for entry in table:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var w: float = maxf(0.0, float(entry.get("weight", 1.0)))
+		if w <= 0.0:
+			continue
+		roll -= w
+		if roll <= 0.0:
+			return StringName(entry.get("item", &""))
+	# Floating-point fallthrough — return the last valid entry.
+	for i in range(table.size() - 1, -1, -1):
+		if typeof(table[i]) == TYPE_DICTIONARY:
+			return StringName(table[i].get("item", &""))
+	return &""
 
 
 ## True if this block can produce fluids (pumps, factories with
@@ -3852,7 +4432,7 @@ func _update_storage_unloading(_delta: float) -> void:
 ## Uses round-robin so it distributes pulls across multiple source neighbors.
 func _update_belt_unloaders(_delta: float) -> void:
 	var processed := {}
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("unloader"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.tags.has("unloader"):
@@ -4147,6 +4727,9 @@ func _is_incinerator_cell(grid_pos: Vector2i) -> bool:
 # =========================
 
 func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
+	# Structural change — the role buckets must be rebuilt before next use.
+	_buckets_dirty = true
+	_pipe_net_dirty = true
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return
@@ -4210,6 +4793,9 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 
 
 func _on_building_destroyed(grid_pos: Vector2i) -> void:
+	# Structural change — the role buckets must be rebuilt before next use.
+	_buckets_dirty = true
+	_pipe_net_dirty = true
 	conveyor_items.erase(grid_pos)
 	pipe_contents.erase(grid_pos)
 	drill_timers.erase(grid_pos)
@@ -4226,6 +4812,10 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	constructor_state.erase(grid_pos)
 	deconstructor_state.erase(grid_pos)
 	refabricator_state.erase(grid_pos)
+	upgrader_state.erase(grid_pos)
+	refit_state.erase(grid_pos)
+	source_resource.erase(grid_pos)
+	source_payload.erase(grid_pos)
 	loader_state.erase(grid_pos)
 	unloader_state.erase(grid_pos)
 	mass_driver_state.erase(grid_pos)
@@ -4238,6 +4828,12 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 		var proj: Dictionary = mass_driver_projectiles[i]
 		if proj.get("target_origin") == grid_pos or proj.get("source_origin") == grid_pos:
 			mass_driver_projectiles.remove_at(i)
+
+
+## A finished build flips its cell from inactive to active, which adds it to
+## the live pipe partition — so invalidate the cached networks.
+func _on_building_completed_for_pipes(_block_id: StringName, _grid_pos: Vector2i) -> void:
+	_pipe_net_dirty = true
 
 
 # =========================
@@ -4336,6 +4932,35 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 		lp_storage["fluids"] = lp_fluids
 		block_storage[lp_origin] = lp_storage
 		return true
+	# Turret fluid-ammo intake: a turret whose ammo_types reference this fluid
+	# (Corrosion → acid, Fume → sulfur fumes) draws it straight from an
+	# adjacent pipe into its fluid buffer, capped by liquid_capacity. This is
+	# separate from the booster table below (no passive per-second drain).
+	if data.is_turret() and data.liquid_capacity > 0 and not data.ammo_types.is_empty():
+		var is_ammo_fluid := false
+		for ammo in data.ammo_types:
+			if ammo is AmmoType and (ammo as AmmoType).item_id == fluid_id:
+				is_ammo_fluid = true
+				break
+		if is_ammo_fluid:
+			var t_anchor = main.get_building_anchor(grid_pos)
+			var t_origin: Vector2i = t_anchor if t_anchor != null else grid_pos
+			if not block_storage.has(t_origin):
+				block_storage[t_origin] = {"items": {}, "fluids": {}}
+			var t_storage: Dictionary = block_storage[t_origin]
+			if not t_storage.has("fluids"):
+				t_storage["fluids"] = {}
+			var t_fluids: Dictionary = t_storage["fluids"]
+			var t_total: float = 0.0
+			for k in t_fluids:
+				t_total += float(t_fluids[k])
+			if t_total >= float(data.liquid_capacity):
+				return false
+			t_fluids[fluid_id] = float(t_fluids.get(fluid_id, 0.0)) + 1.0
+			t_storage["fluids"] = t_fluids
+			block_storage[t_origin] = t_storage
+			return true
+
 	if data.liquid_capacity <= 0 or data.boosters.is_empty():
 		return false
 	# Match against the booster table: at least one entry must reference
@@ -4419,7 +5044,7 @@ func _try_accept_turret_ammo(grid_pos: Vector2i, item_id: StringName) -> bool:
 func _update_constructors(delta: float) -> void:
 	var processed := {}
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("constructor"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.tags.has("constructor"):
@@ -4569,10 +5194,21 @@ func _update_constructors(delta: float) -> void:
 # =========================
 
 ## Processes all deconstructors: accept payload → deconstruct → output items.
+## Resolves a build-cost key ("copper") to the Registry item id ("mat_copper").
+## Build-cost dicts use short names; item ids are prefixed.
+func _resolve_refund_key(raw_id) -> StringName:
+	var item_key := StringName(raw_id)
+	if not Registry.get_item(item_key):
+		var prefixed := StringName("mat_" + str(raw_id))
+		if Registry.get_item(prefixed):
+			item_key = prefixed
+	return item_key
+
+
 func _update_deconstructors(delta: float) -> void:
 	var processed := {}
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("deconstructor"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.tags.has("deconstructor"):
@@ -4651,17 +5287,22 @@ func _update_deconstructors(delta: float) -> void:
 					if payload_data.get("type", "") == "unit":
 						var unit_id := StringName(payload_data.get("unit_id", ""))
 						var unit_data: UnitData = Registry.get_unit(unit_id)
-						if unit_data != null and not unit_data.build_cost.is_empty():
-							var pending := {}
+						var pending := {}
+						# Unit's own build cost.
+						if unit_data != null:
 							for raw_id in unit_data.build_cost:
-								# Build-cost keys use short names ("copper"); item
-								# IDs are prefixed ("mat_copper") in the Registry.
-								var item_key := StringName(raw_id)
-								if not Registry.get_item(item_key):
-									var prefixed := StringName("mat_" + str(raw_id))
-									if Registry.get_item(prefixed):
-										item_key = prefixed
-								pending[item_key] = int(unit_data.build_cost[raw_id])
+								var k: StringName = _resolve_refund_key(raw_id)
+								pending[k] = int(pending.get(k, 0)) + int(unit_data.build_cost[raw_id])
+						# PLUS the build cost of every upgrade applied to the unit
+						# — deconstructing a kitted unit returns its modules' cost too.
+						for up_id in payload_data.get("applied_upgrades", []):
+							var up_data = Registry.get_block(StringName(up_id))
+							if up_data == null:
+								continue
+							for raw_id in up_data.build_cost:
+								var k: StringName = _resolve_refund_key(raw_id)
+								pending[k] = int(pending.get(k, 0)) + int(up_data.build_cost[raw_id])
+						if not pending.is_empty():
 							state["pending_items"] = pending
 							state["phase"] = "outputting"
 						else:
@@ -4774,7 +5415,7 @@ func _update_refabricators(delta: float) -> void:
 	var processed := {}
 	var gs: float = main.GRID_SIZE
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("refabricator"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.tags.has("refabricator"):
@@ -5035,15 +5676,37 @@ func _try_spawn_unit_off_conveyor(conv_pos: Vector2i, conv_gs: Vector2i, rot: in
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr == null:
 		return false
+	# Naval units can only deploy onto navigable water (water floor, no
+	# platform). If the cell in front of the fabricator isn't water, HOLD
+	# the unit (don't dump it on dry land) — the player must aim the
+	# fabricator's output at open water, the same way a belt would carry
+	# the payload there. is_world_pos_walkable on the NAVAL layer is exactly
+	# "this is navigable water", so reuse it.
+	if ml == UnitData.MovementLayer.NAVAL:
+		if unit_mgr.has_method("is_world_pos_walkable") \
+				and not unit_mgr.is_world_pos_walkable(spawn_world, ml):
+			return false
+	var spawned_unit: Node2D = null
 	if faction == main.Faction.FEROX:
 		unit_mgr.spawn_enemy(spawn_world, unit_id)
+		if "enemies" in unit_mgr and not unit_mgr.enemies.is_empty():
+			spawned_unit = unit_mgr.enemies[-1]
 	else:
 		unit_mgr.spawn_player_unit(spawn_world, unit_id)
+		if "player_units" in unit_mgr and not unit_mgr.player_units.is_empty():
+			spawned_unit = unit_mgr.player_units[-1]
 		if "stats_units_produced" in main:
 			main.stats_units_produced += 1
 		var sector_script = _sector_script_ref()
 		if sector_script:
 			sector_script.on_unit_produced(unit_id)
+	# Restore the carried unit's full runtime state (pose, turret rotations,
+	# commands) so a unit that travelled a payload belt deploys exactly as it
+	# was captured.
+	if spawned_unit != null and is_instance_valid(spawned_unit) \
+			and spawned_unit.has_method("apply_payload_state") \
+			and payload_data.get("type", "") == "unit":
+		spawned_unit.apply_payload_state(payload_data)
 	return true
 
 
@@ -5064,8 +5727,10 @@ func _spawn_unit_on_free_perimeter(origin: Vector2i, data: BlockData, unit_id: S
 			return false
 	var ml: int = unit_data.movement_layer
 	var is_flying: bool = (ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING)
+	var is_naval: bool = (ml == UnitData.MovementLayer.NAVAL)
 	var terrain = _terrain_ref()
 	var gs: int = main.GRID_SIZE
+	var unit_mgr = _unit_mgr_ref()
 
 	var spawn_world: Vector2 = Vector2.ZERO
 	var found_cell := false
@@ -5083,11 +5748,23 @@ func _spawn_unit_on_free_perimeter(origin: Vector2i, data: BlockData, unit_id: S
 			var tile_data = Registry.get_tile(terrain.wall_tiles[cell])
 			if tile_data and tile_data.blocks_pathfinding:
 				continue
+		# Naval units may ONLY land on navigable water (water floor, no
+		# platform). is_world_pos_walkable on the NAVAL layer encodes exactly
+		# that, so reuse it — a perimeter cell of dry land is rejected.
+		if is_naval:
+			var cw: Vector2 = Vector2(cell.x * gs + gs * 0.5, cell.y * gs + gs * 0.5)
+			if unit_mgr == null or not unit_mgr.is_world_pos_walkable(cw, ml):
+				continue
 		spawn_world = Vector2(cell.x * gs + gs * 0.5, cell.y * gs + gs * 0.5)
 		found_cell = true
 		break
 
 	if not found_cell:
+		# Naval units must never be dumped on dry land — if no perimeter
+		# water cell is open, HOLD the unit (the caller keeps it queued)
+		# rather than spawning it on the building's (land) centre.
+		if is_naval:
+			return false
 		# Every perimeter cell is blocked. Spawn on the building's own
 		# centre so the unit isn't lost. The unit's own pathing will sort
 		# out where it goes from there (ground units can't physically be
@@ -5098,7 +5775,6 @@ func _spawn_unit_on_free_perimeter(origin: Vector2i, data: BlockData, unit_id: S
 			(origin.y + data.grid_size.y * 0.5) * gs
 		)
 
-	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr == null:
 		return false
 	if faction == main.Faction.FEROX:
@@ -5222,7 +5898,7 @@ func _refab_input_key(raw_id) -> StringName:
 func _update_loaders(_delta: float) -> void:
 	var processed := {}
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("payload_loader"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null:
@@ -5366,7 +6042,7 @@ func _update_loaders(_delta: float) -> void:
 func _update_unloaders(_delta: float) -> void:
 	var processed := {}
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("payload_unloader"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null:
@@ -5583,7 +6259,7 @@ func _update_mass_drivers(delta: float) -> void:
 		return
 	var processed := {}
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("mass_driver"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.tags.has("mass_driver"):
@@ -6051,6 +6727,10 @@ func _draw_mass_drivers() -> void:
 func _draw_items() -> void:
 	var building_sys = _building_sys_ref()
 	var _ss_items = _sector_script_ref()
+	# Launch-animation reveal: items on a belt the landing ring hasn't
+	# "built" yet must stay hidden — the belt itself isn't drawn until the
+	# sweep reaches it, so its cargo shouldn't float on bare ground either.
+	var _la_items = _launch_anim_ref()
 
 	# Viewport culling: items off-screen contribute nothing visible but
 	# cost full draw work otherwise. On a large map with thousands of
@@ -6075,6 +6755,9 @@ func _draw_items() -> void:
 			if grid_pos.y < vp_grid_min.y or grid_pos.y > vp_grid_max.y:
 				continue
 		if _ss_items and _ss_items.is_tile_hidden(grid_pos):
+			continue
+		if _la_items and _la_items.has_method("is_block_hidden") \
+				and _la_items.is_block_hidden(main.building_origins.get(grid_pos, grid_pos)):
 			continue
 		# Bridges are visually "underground" — items inside one are
 		# being teleported between the input and output ends and
@@ -6163,6 +6846,9 @@ func _draw_items() -> void:
 	for grid_pos in junction_items:
 		if _ss_items and _ss_items.is_tile_hidden(grid_pos):
 			continue
+		if _la_items and _la_items.has_method("is_block_hidden") \
+				and _la_items.is_block_hidden(main.building_origins.get(grid_pos, grid_pos)):
+			continue
 		var entry = junction_items[grid_pos]
 		var item_id: StringName = entry["item_id"]
 		var progress: float = entry["progress"]
@@ -6204,6 +6890,7 @@ func _draw_items() -> void:
 func _draw_payloads() -> void:
 	var building_sys = _building_sys_ref()
 	var _ss_payload = _sector_script_ref()
+	var _la_payload = _launch_anim_ref()
 	var gs: float = main.GRID_SIZE
 
 	# Same viewport culling as `_draw_items` — payloads off-screen
@@ -6228,6 +6915,9 @@ func _draw_payloads() -> void:
 			if grid_pos.y < vp_grid_min.y or grid_pos.y > vp_grid_max.y:
 				continue
 		if _ss_payload and _ss_payload.is_tile_hidden(grid_pos):
+			continue
+		if _la_payload and _la_payload.has_method("is_block_hidden") \
+				and _la_payload.is_block_hidden(main.building_origins.get(grid_pos, grid_pos)):
 			continue
 		var entry = payload_items[grid_pos]
 		var payload_data: Dictionary = entry["payload_data"]
@@ -6318,6 +7008,17 @@ func _draw_payloads() -> void:
 			var angle: float = lerp_angle(angle_start, angle_end, progress)
 			payload_pos = pivot + Vector2(cos(angle), sin(angle)) * half_dist
 
+		# Unit payloads render through the shared EnemyUnit.draw_unit_payload
+		# so a unit on a payload belt shows EXACTLY like it would in-world —
+		# chassis + rotating head + weapon-mount turret heads at the saved
+		# facing/aim/mount rotations — instead of a static icon.
+		if payload_data.get("type", "") == "unit":
+			var ud_p = Registry.get_unit(StringName(payload_data.get("unit_id", "")))
+			if ud_p != null and (ud_p.base_sprite != null or ud_p.head_sprite != null):
+				# render_scale 1.0 = exact in-world size + mount geometry;
+				# fully opaque (a real unit, not a ghost).
+				EnemyUnit.draw_unit_payload(self, ud_p, payload_data, payload_pos, 1.0, 0.0, 1.0)
+				continue
 		# Draw the payload at full size (draw directly on this canvas, not via building_sys)
 		if icon != null:
 			if payload_data.get("type", "") == "building":
@@ -6409,7 +7110,7 @@ func _draw_pump_progress_bars() -> void:
 	if terrain == null:
 		return
 	var power_sys = _power_sys_ref()
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("pump"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.tags.has("pump"):
@@ -6465,7 +7166,7 @@ func _draw_pump_progress_bars() -> void:
 func _update_factories(delta: float) -> void:
 	var processed := {}
 
-	for grid_pos in main.placed_buildings:
+	for grid_pos in _bucket("factory"):
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null:
@@ -6625,6 +7326,16 @@ func _update_factories(delta: float) -> void:
 									slot += 1
 									if factory_is_lumina:
 										main.item_produced.emit(out_sn)
+							# Random one-of-N output table (Slag Caster etc.):
+							# emit a SINGLE weighted-random pick on top of the
+							# deterministic outputs above.
+							if data.random_outputs != null and not data.random_outputs.is_empty():
+								var rand_sn: StringName = _pick_random_output(data.random_outputs)
+								if rand_sn != &"":
+									pending[str(slot)] = rand_sn
+									slot += 1
+									if factory_is_lumina:
+										main.item_produced.emit(rand_sn)
 						else:
 							for rel_dir_key in data.side_outputs:
 								var out_id := StringName(data.side_outputs[rel_dir_key])
@@ -6982,8 +7693,11 @@ func _try_deliver_fabricated_unit(origin: Vector2i, data: BlockData, payload_dat
 		return false
 	var ml: int = unit_data.movement_layer
 	var is_flying: bool = (ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING)
+	var is_naval: bool = (ml == UnitData.MovementLayer.NAVAL)
 
 	var terrain = _terrain_ref()
+	var unit_mgr_n = _unit_mgr_ref()
+	var gs_n: int = main.GRID_SIZE
 	for cell in front_cells:
 		if main.placed_buildings.has(cell) and not is_flying:
 			# Passable transport blocks (plain belts, ducts) let the unit
@@ -6997,6 +7711,12 @@ func _try_deliver_fabricated_unit(origin: Vector2i, data: BlockData, payload_dat
 		if not is_flying and terrain != null and terrain.wall_tiles.has(cell):
 			var tile_data = Registry.get_tile(terrain.wall_tiles[cell])
 			if tile_data and tile_data.blocks_pathfinding:
+				return false
+		# Naval units may only deploy onto navigable water. If any front cell
+		# isn't water, HOLD (return false) rather than dumping on dry land.
+		if is_naval:
+			var cw: Vector2 = Vector2(cell.x * gs_n + gs_n * 0.5, cell.y * gs_n + gs_n * 0.5)
+			if unit_mgr_n == null or not unit_mgr_n.is_world_pos_walkable(cw, ml):
 				return false
 
 	_spawn_unit_at_building_front(origin, data, unit_id)
@@ -7245,7 +7965,11 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	# amount so the factory can keep running for a while without a belt
 	# refilling every cycle).
 	if is_omni or is_unit_fab_early:
-		var effective_inputs := _get_effective_inputs(data)
+		# Pass `origin` so recipe-select factories (Rod Shapper, Compound Mixer,
+		# Water Centrifuge) resolve the ACTIVE recipe's inputs. Without the
+		# anchor this returned {} for any recipe-select factory and the omni
+		# path rejected every ingredient.
+		var effective_inputs := _get_effective_inputs(data, origin)
 		var recipe_amt: int = -1
 		for raw_id in effective_inputs:
 			if StringName(raw_id) == item_id:

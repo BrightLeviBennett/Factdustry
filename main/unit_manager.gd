@@ -24,8 +24,9 @@ var enemy_script = preload("res://main/enemy_unit.gd")
 var astar: AStarGrid2D              # GROUND layer pathfinding (main thread — WASD only)
 var astar_crawler: AStarGrid2D      # CRAWLER layer pathfinding (main thread — WASD only)
 var astar_hover: AStarGrid2D        # HOVER layer pathfinding (blocked only by large terrain walls)
-var _crawler_passable_walls: Dictionary = {}  # Vector2i -> true (small wall segments, < 4)
-var _hover_passable_walls: Dictionary = {}    # Vector2i -> true (wall segments <= 8)
+var astar_naval: AStarGrid2D        # NAVAL layer pathfinding (ONLY navigable water is non-solid)
+var _crawler_passable_walls: Dictionary = {}  # Vector2i -> true (wall groups <= 8 thick)
+var _hover_passable_walls: Dictionary = {}    # Vector2i -> true (wall groups <= 8 thick)
 var _path_worker: PathfindingWorker  # Background thread for enemy/unit pathfinding
 
 # --- WATER-PLATFORM RESERVATIONS ---
@@ -143,6 +144,26 @@ const _PRESSURE_SOFT_CAP: float = 10.0
 const SEPARATION_STRENGTH := 150.0
 ## Minimum distance to avoid division-by-zero; units closer than this get a random nudge
 const MIN_SEPARATION_DIST := 0.5
+
+# --- Unit spatial hash (perf) ---
+# Both `_resolve_unit_collisions` (here) and `enemy_unit._compute_separation_force`
+# used to scan EVERY same-layer unit per unit — O(n²) every frame, the main
+# large-battle cost. This is a uniform-grid spatial hash: units are bucketed
+# by (movement_layer, cellX, cellY) once per frame, and a neighbour query
+# returns only the units in the 3×3 block of cells around a position. Since
+# all separation/collision radii are a small multiple of a tile, a unit only
+# ever interacts with units in adjacent cells, so the 3×3 query returns a
+# superset of every unit the old full scan would have considered — identical
+# results, O(n) instead of O(n²).
+#
+# `_spatial_cell` is sized to comfortably exceed the largest interaction
+# radius (collision min_dist and separation sep_radius are both ~2× a unit's
+# size). Rebuilt lazily via `_ensure_spatial_hash()`, frame-stamped on
+# Engine.get_process_frames() so it's correct regardless of which node
+# (UnitManager vs an individual unit) touches it first this frame.
+var _spatial_hash: Dictionary = {}     # Vector3i(layer, cx, cy) -> Array[Node2D]
+var _spatial_hash_frame: int = -1
+var _spatial_cell_size: float = 0.0    # px; derived from GRID_SIZE on first build
 
 # --- SELECTION ---
 var selected_units: Array[Node2D] = []
@@ -361,6 +382,12 @@ func _input(event: InputEvent) -> void:
 			if core_d and core_d.tags.has("core") \
 					and main.get_building_faction(grid_pos) == main.Faction.LUMINA:
 				var core_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+				# If currently driving a unit/turret/crane, hand control back to
+				# the drone FIRST — otherwise `respawn_at_core` would teleport
+				# the (hidden) drone to the core while the player stayed locked
+				# to the controlled entity, so nothing appeared to happen.
+				if controlled_entity != null:
+					_release_control()
 				var drone = main.get_node_or_null("PlayerDrone")
 				if drone and drone.has_method("respawn_at_core"):
 					drone.respawn_at_core(core_anchor)
@@ -463,15 +490,21 @@ func _input(event: InputEvent) -> void:
 func _get_player_unit_at(world_pos: Vector2) -> Node2D:
 	var best: Node2D = null
 	var best_dist := INF
-	for unit in player_units:
-		if not is_instance_valid(unit) or unit.is_dead:
-			continue
-		var dist := world_pos.distance_to(unit.position)
-		# Use generous click radius (at least 16px) so units are easy to click
-		var click_radius := maxf(unit.unit_size * 2.0, 16.0)
-		if dist <= click_radius and dist < best_dist:
-			best_dist = dist
-			best = unit
+	# Player units, plus dummy test enemies (selectable for testing).
+	var pools: Array = [player_units, enemies]
+	for pool in pools:
+		for unit in pool:
+			if not is_instance_valid(unit) or unit.is_dead:
+				continue
+			# From the enemies pool, only dummy units are selectable.
+			if pool == enemies and not ("is_dummy" in unit and unit.is_dummy):
+				continue
+			var dist := world_pos.distance_to(unit.position)
+			# Use generous click radius (at least 16px) so units are easy to click
+			var click_radius := maxf(unit.unit_size * 2.0, 16.0)
+			if dist <= click_radius and dist < best_dist:
+				best_dist = dist
+				best = unit
 	return best
 
 
@@ -494,9 +527,17 @@ func _finish_box_select() -> void:
 		if is_instance_valid(unit):
 			unit.is_selected = false
 	selected_units.clear()
-	# Select units inside the box
+	# Select units inside the box (player units + dummy test enemies).
 	for unit in player_units:
 		if not is_instance_valid(unit) or unit.is_dead:
+			continue
+		if rect.has_point(unit.position):
+			unit.is_selected = true
+			selected_units.append(unit)
+	for unit in enemies:
+		if not is_instance_valid(unit) or unit.is_dead:
+			continue
+		if not ("is_dummy" in unit and unit.is_dummy):
 			continue
 		if rect.has_point(unit.position):
 			unit.is_selected = true
@@ -649,6 +690,26 @@ func _command_attack_building(bldg_anchor: Vector2i) -> void:
 		unit.path_index = 0
 		if "payload_target_anchor" in unit:
 			unit.payload_target_anchor = Vector2i(-9999, -9999)
+
+
+## Sets the attack command on every selected dummy unit. `mode` is
+## "attack_block" or "attack_player" (see enemy_unit._dummy_update).
+func command_dummy_attack(mode: String) -> void:
+	for u in selected_units:
+		if is_instance_valid(u) and "is_dummy" in u and u.is_dummy:
+			u.dummy_mode = mode
+			u.target_building = null
+			u.move_target = null
+			u.path = PackedVector2Array()
+			u.path_index = 0
+
+
+## True if any currently-selected unit is a dummy test enemy.
+func has_selected_dummy() -> bool:
+	for u in selected_units:
+		if is_instance_valid(u) and "is_dummy" in u and u.is_dummy:
+			return true
+	return false
 
 
 func _command_move(world_pos: Vector2) -> void:
@@ -1047,12 +1108,21 @@ func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2,
 		# Try to pick up a player unit
 		var clicked_unit = _get_player_unit_at(grabber_world)
 		if clicked_unit and is_instance_valid(clicked_unit):
-			var unit_payload := {
-				"type": "unit",
-				"unit_id": str(clicked_unit.data.id) if clicked_unit.data else "",
-				"health": clicked_unit.health,
-				"team": clicked_unit.team if "team" in clicked_unit else 0,
-			}
+			# Capture the FULL runtime pose (facing/aim/mount rotations +
+			# command state) so the carried unit renders at its real
+			# rotation and resumes its orders on drop — same path the
+			# autonomous crane (crane_system) uses. The old partial dict
+			# dropped facing_angle, so a picked-up unit snapped to 0°.
+			var unit_payload := {}
+			if clicked_unit.has_method("capture_payload_state"):
+				clicked_unit.capture_payload_state(unit_payload)
+			else:
+				unit_payload = {
+					"type": "unit",
+					"unit_id": str(clicked_unit.data.id) if clicked_unit.data else "",
+					"health": clicked_unit.health,
+					"team": clicked_unit.team if "team" in clicked_unit else 0,
+				}
 			# Remove unit from scene
 			player_units.erase(clicked_unit)
 			clicked_unit.queue_free()
@@ -1101,12 +1171,33 @@ func _crane_interact(anchor: Vector2i, state: Dictionary, crane_center: Vector2,
 			# Drop unit at exact position (no grid snap)
 			var unit_id := StringName(payload.get("unit_id", ""))
 			if unit_id != &"":
-				spawn_player_unit(grabber_world, unit_id)
-				# Restore health
-				if not player_units.is_empty():
-					var spawned = player_units[-1]
-					if is_instance_valid(spawned):
+				# Naval units can only be dropped onto navigable water. If the
+				# grabber isn't over water, KEEP holding the payload (don't
+				# spawn it on land) until the crane is over a valid cell.
+				var pud = Registry.get_unit(unit_id)
+				var p_ml: int = pud.movement_layer if pud else 0
+				if p_ml == UnitData.MovementLayer.NAVAL \
+						and not is_world_pos_walkable(grabber_world, p_ml):
+					return
+				# Honour the payload team (Payload-Source Ferox spawns as enemy).
+				var team := int(payload.get("team", 0))
+				var spawned = spawn_unit_with_team(grabber_world, unit_id, team)
+				if is_instance_valid(spawned):
+					# Restore the FULL captured pose (facing/aim/mount rotations +
+					# commands) so the redeployed unit faces exactly where it was
+					# picked up instead of snapping to 0°.
+					if spawned.has_method("apply_payload_state"):
+						spawned.apply_payload_state(payload)
+					else:
 						spawned.health = float(payload.get("health", spawned.health))
+						if "applied_upgrades" in spawned:
+							spawned.applied_upgrades.clear()
+							for _up in payload.get("applied_upgrades", []):
+								spawned.applied_upgrades.append(StringName(_up))
+							if spawned.has_method("recompute_module_stats"):
+								spawned.recompute_module_stats()
+					if "is_dummy" in spawned:
+						spawned.is_dummy = bool(payload.get("is_dummy", false))
 				state["held_payload"] = null
 				state["grabber_open"] = true
 
@@ -1173,49 +1264,20 @@ func _update_controlled_unit(delta: float) -> void:
 			new_pos.y = clampf(new_pos.y, 0.0, map_h)
 			unit.position = new_pos
 		else:
-			# Ground/Crawler/Hover: blocked by solid cells in their respective grid
-			var grid: AStarGrid2D = _get_grid_for_unit(unit)
-
+			# Ground/Crawler/Hover/Naval: radius-aware, axis-separated
+			# resolution via the shared `resolve_move` (same model the AI
+			# path-follower uses), so manual driving slides along walls and
+			# can't clip the unit's flank into a solid cell. Uses the unit's
+			# real collision half-extent (`unit_size`) rather than a fixed
+			# fraction of the tile.
 			var map_w: float = main.GRID_SIZE * main.GRID_WIDTH
 			var map_h: float = main.GRID_SIZE * main.GRID_HEIGHT
-			var gs: float = main.GRID_SIZE
-
-			# Unit radius for collision
-			var radius: float = gs * 0.4
-
-			# Check if a position is blocked, testing center + specific edge offsets
-			var _check_solid = func(pos: Vector2, offsets: Array) -> bool:
-				var cg: Vector2i = main.world_to_grid(pos)
-				cg.x = clampi(cg.x, 0, main.GRID_WIDTH - 1)
-				cg.y = clampi(cg.y, 0, main.GRID_HEIGHT - 1)
-				if grid.is_point_solid(cg):
-					return true
-				for off in offsets:
-					var eg: Vector2i = main.world_to_grid(pos + off)
-					eg.x = clampi(eg.x, 0, main.GRID_WIDTH - 1)
-					eg.y = clampi(eg.y, 0, main.GRID_HEIGHT - 1)
-					if grid.is_point_solid(eg):
-						return true
-				return false
-
-			var all_edges: Array = [Vector2(radius, 0), Vector2(-radius, 0), Vector2(0, radius), Vector2(0, -radius)]
-			var x_edges: Array = [Vector2(radius, 0), Vector2(-radius, 0)]
-			var y_edges: Array = [Vector2(0, radius), Vector2(0, -radius)]
-
-			# Try full movement (check all edges)
-			if not _check_solid.call(new_pos, all_edges):
-				new_pos.x = clampf(new_pos.x, 0.0, map_w)
-				new_pos.y = clampf(new_pos.y, 0.0, map_h)
-				unit.position = new_pos
-			else:
-				# Wall-slide: try each axis with only its relevant edges
-				var pos_x := Vector2(new_pos.x, unit.position.y)
-				if not _check_solid.call(pos_x, x_edges):
-					unit.position.x = clampf(new_pos.x, 0.0, map_w)
-
-				var pos_y := Vector2(unit.position.x, new_pos.y)
-				if not _check_solid.call(pos_y, y_edges):
-					unit.position.y = clampf(new_pos.y, 0.0, map_h)
+			var ml_ctrl: int = unit.data.movement_layer if unit.data else 0
+			var radius_ctrl: float = unit.unit_size if "unit_size" in unit else main.GRID_SIZE * 0.4
+			var resolved: Vector2 = resolve_move(unit.position, new_pos - unit.position, radius_ctrl, ml_ctrl, unit.team)
+			resolved.x = clampf(resolved.x, 0.0, map_w)
+			resolved.y = clampf(resolved.y, 0.0, map_h)
+			unit.position = resolved
 
 		# Clear any auto-combat targets while manually moving
 		unit.path = PackedVector2Array()
@@ -1226,11 +1288,20 @@ func _update_controlled_unit(delta: float) -> void:
 
 	# --- Fire on left mouse held (like the player drone does) ---
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &"":
-		if _control_attack_timer <= 0:
+		var mouse_pos: Vector2 = get_global_mouse_position()
+		# Mount-equipped units (e.g. Wade) fire through their weapon mounts —
+		# each ready head shoots from its own muzzle toward the cursor, so the
+		# mirrored pair alternates and bullets come out the barrels, not the
+		# unit centre. The mounts were already aimed this frame in the unit's
+		# `is_controlled` _process branch (aim_only). Per-mount reload paces
+		# the fire, so no global `_control_attack_timer` gate is needed here.
+		if unit.has_method("has_weapon_mounts") and unit.has_weapon_mounts():
+			if unit.has_method("fire_weapon_mounts_at"):
+				unit.fire_weapon_mounts_at(mouse_pos)
+		elif _control_attack_timer <= 0:
 			var combat = _combat_sys_ref()
 			if combat and unit.data:
 				_control_attack_timer = unit.attack_cooldown
-				var mouse_pos: Vector2 = get_global_mouse_position()
 				var direction: Vector2 = (mouse_pos - unit.position).normalized()
 				var fire_range: float = unit.data.detection_range
 				var target_pos: Vector2 = unit.position + direction * fire_range
@@ -1282,6 +1353,20 @@ func _update_controlled_turret(_delta: float) -> void:
 
 	# Fire on left mouse held
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &"":
+		# Fume emitter: hold-to-spray a corroding cloud in front of the turret.
+		# No projectiles and no cooldown gate — it vents continuously while held.
+		var fume_blk = Registry.get_block(main.placed_buildings[grid_pos])
+		if fume_blk and fume_blk.tags.has("fume_emitter") and combat.has_method("_update_fume_emitter"):
+			combat._update_fume_emitter(grid_pos, fume_blk, turret_world, 1.0, _delta)
+			return
+		# Flame emitter (Flarecaster): hold-to-spray a fire jet at the cursor —
+		# the flame is the weapon, so it damages + ignites without projectiles.
+		if fume_blk and fume_blk.tags.has("flame_emitter") and combat.has_method("_update_flame_emitter"):
+			var flame_range_px: float = fume_blk.attack_range * float(main.GRID_SIZE)
+			combat._update_flame_emitter(grid_pos, fume_blk, turret_world,
+				combat.turret_angles.get(grid_pos, target_angle), flame_range_px,
+				main.Faction.LUMINA, 1.0, _delta)
+			return
 		if _control_attack_timer <= 0:
 			var block_id = main.placed_buildings[grid_pos]
 			var bdata = Registry.get_block(block_id)
@@ -1294,75 +1379,18 @@ func _update_controlled_turret(_delta: float) -> void:
 					return
 				var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 				var logistics = _logistics_ref()
-				# Pull every relevant field off the AmmoType so manual-fire
-				# behaves identically to auto-fire — including pellet count,
-				# inaccuracy spread, knockback, lifetime, pierce, status, and
-				# trail/colour. Otherwise scattershot turrets like the Diffuse
-				# only fire a single bullet under manual control.
-				# Damage lives on AmmoType — overwritten in the ammo
-				# branch below; the no-ammo path returns earlier.
-				var fire_damage: float = 0.0
-				var fire_color: Color = bdata.color.lightened(0.3)
-				var fire_reload_mult: float = 1.0
-				var fire_speed: float = combat.default_projectile_speed
-				var fire_lifetime: float = 2.0
-				var fire_radius: float = 4.0
-				var fire_pierce: int = 0
-				var fire_homing: float = 0.0
-				var fire_knockback: float = 0.0
-				var fire_inaccuracy: float = 0.0
-				var fire_pellets: int = 1
-				var fire_range_bonus: float = 0.0
-				var fire_status: Resource = null
-				var fire_trail_color: Color = fire_color
-				var fire_collides_air: bool = true
-				var fire_collides_ground: bool = true
-				var fire_bldg_mult: float = 1.0
-				var fire_unit_mult: float = 1.0
-				var fire_aoe: bool = bdata.is_aoe
-				var fire_aoe_radius: float = bdata.aoe_radius
-				var fire_splash_mult: float = 1.0
-				var ammo_found := false
-				for ammo in bdata.ammo_types:
-					if ammo == null or not (ammo is AmmoType):
-						continue
-					var ammo_data: AmmoType = ammo as AmmoType
-					if logistics and logistics.has_method("get_stored_item_count"):
-						var stored: int = logistics.get_stored_item_count(anchor, ammo_data.item_id)
-						var amt: int = maxi(ammo_data.amount_per_shot, 1)
-						if stored >= amt:
-							logistics.remove_from_storage(anchor, ammo_data.item_id, amt)
-							fire_damage = ammo_data.damage
-							fire_color = ammo_data.projectile_color
-							fire_reload_mult = ammo_data.reload_multiplier
-							fire_speed = ammo_data.projectile_speed
-							fire_lifetime = ammo_data.projectile_lifetime
-							fire_radius = ammo_data.projectile_radius
-							fire_pierce = ammo_data.pierce_count
-							fire_homing = ammo_data.homing
-							fire_knockback = ammo_data.knockback
-							fire_inaccuracy = ammo_data.inaccuracy
-							fire_pellets = ammo_data.projectiles_per_shot
-							fire_range_bonus = ammo_data.range_bonus
-							fire_status = ammo_data.status_effect
-							fire_trail_color = ammo_data.get_trail_color()
-							fire_collides_air = ammo_data.collides_air
-							fire_collides_ground = ammo_data.collides_ground
-							fire_bldg_mult = ammo_data.building_damage_mult
-							fire_unit_mult = ammo_data.unit_damage_mult
-							if ammo_data.is_splash:
-								fire_aoe = true
-								fire_aoe_radius = ammo_data.splash_radius
-								fire_splash_mult = ammo_data.splash_damage_mult
-							ammo_found = true
-							break
-				if not ammo_found:
-					return  # Out of ammo — can't fire even when manually controlled
+				# Read + consume ammo via the shared CombatSystem helper so manual
+				# fire matches auto-fire exactly (pellet count, spread, lifetime,
+				# liquid ballistics) with no separate field-plumbing to keep in sync.
+				# No ammo means it cannot fire.
+				var profile: Dictionary = combat.read_ammo_profile(bdata, logistics, anchor)
+				if not profile["found"]:
+					return  # Out of ammo
 
 				var booster_mult: float = 1.0
 				if combat.has_method("_get_active_booster_multiplier"):
 					booster_mult = combat._get_active_booster_multiplier(grid_pos, bdata, "Fire Rate")
-				_control_attack_timer = (bdata.attack_speed * fire_reload_mult) / maxf(booster_mult, 0.0001)
+				_control_attack_timer = (bdata.attack_speed * float(profile["reload_mult"])) / maxf(booster_mult, 0.0001)
 				# Match the auto-fire math in combat_system: derive barrel
 				# length from the head texture so bullets spawn at the
 				# visible muzzle, and offset perpendicular to the aim axis
@@ -1404,71 +1432,21 @@ func _update_controlled_turret(_delta: float) -> void:
 					if combat.turret_barrel_cooldowns.has(grid_pos):
 						var bcd: Array = combat.turret_barrel_cooldowns[grid_pos]
 						if fire_barrel_idx < bcd.size():
-							bcd[fire_barrel_idx] = bdata.attack_speed * fire_reload_mult
+							bcd[fire_barrel_idx] = bdata.attack_speed * float(profile["reload_mult"])
 					_control_barrel_idx[grid_pos] = (fire_barrel_idx + 1) % bcount
 				var fire_pos: Vector2 = turret_world + aim_dir_ctrl * barrel_length + aim_perp_ctrl * lateral_ctrl
-				var fire_max_range: float = bdata.attack_range * main.GRID_SIZE + fire_range_bonus
-				# Always travel along the head's aim axis so bullets visibly
-				# exit the muzzle in the direction the head is pointing,
-				# regardless of where the mouse is (especially when the
-				# cursor is close to the turret, where mouse-aim from the
-				# offset muzzle would skew the shot line).
+				# Range cap matches auto-fire: bullets fly the turret range along the
+				# aim axis (ammo range_bonus intentionally ignored).
+				var fire_max_range: float = bdata.attack_range * main.GRID_SIZE
+				# Travel along the head's aim axis so bullets exit the muzzle in the
+				# direction the head points, aiming PAST the cursor to full range.
 				var shot_dir: Vector2 = aim_dir_ctrl
-				# Projectiles travel toward `target_pos` and detonate when
-				# they arrive — so we have to aim PAST the mouse to the
-				# turret's full range. Using mouse-distance directly made
-				# bullets vanish the moment they crossed the cursor even
-				# though their `max_range` was higher.
-				var shot_distance: float = maxf(fire_max_range, 1.0)
-				# One projectile per pellet, with per-pellet random spread
-				# inside the AmmoType's inaccuracy cone. Mirrors the auto-
-				# fire loop in CombatSystem (including the even-fan
-				# distribution) so multi-pellet turrets behave the same
-				# when manually controlled.
-				var pellet_total: int = maxi(fire_pellets, 1)
-				# Multi-pellet salvos share a shot_id so repeat hits on the
-				# same target halve damage per extra pellet (matches the
-				# auto-fire diminishing rule in CombatSystem).
-				var salvo_shot_id: int = combat._next_shot_id() if pellet_total > 1 else 0
-				for pellet_i in range(pellet_total):
-					var spread_rad: float = 0.0
-					if fire_inaccuracy > 0.0 and pellet_total > 1:
-						var t: float = float(pellet_i) / float(pellet_total - 1)
-						var slot_w: float = (2.0 * fire_inaccuracy) / float(pellet_total)
-						var center_deg: float = lerp(-fire_inaccuracy, fire_inaccuracy, t)
-						var jitter_deg: float = randf_range(-slot_w * 0.5, slot_w * 0.5)
-						spread_rad = deg_to_rad(center_deg + jitter_deg)
-					elif fire_inaccuracy > 0.0:
-						spread_rad = deg_to_rad(randf_range(-fire_inaccuracy, fire_inaccuracy))
-					var pellet_angle: float = shot_dir.angle() + spread_rad
-					var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * shot_distance
-					combat._spawn_projectile(
-						fire_pos,
-						null,
-						pellet_target,
-						"none",
-						fire_speed,
-						fire_damage * fire_unit_mult,
-						fire_color,
-						"turret",
-						fire_aoe,
-						fire_aoe_radius,
-						main.Faction.LUMINA,
-						{
-							"lifetime": fire_lifetime,
-							"radius": fire_radius,
-							"pierce": fire_pierce,
-							"homing": fire_homing,
-							"knockback": fire_knockback,
-							"trail_color": fire_trail_color,
-							"collides_air": fire_collides_air,
-							"collides_ground": fire_collides_ground,
-							"status": fire_status,
-							"splash_mult": fire_splash_mult,
-							"max_range": fire_max_range,
-							"shot_id": salvo_shot_id,
-						},
-					)
+				# Free-aim manual shot (target_type "none", no locked target). The
+				# shared emitter applies spread, liquid launch speed and extras.
+				combat.emit_fire_pellets(fire_pos, shot_dir.angle(), fire_max_range, fire_max_range, profile, null, "none", float(profile["damage"]) * float(profile["unit_mult"]), main.Faction.LUMINA)
+				# Muzzle flame cone (Flarecaster), aimed where the head points.
+				if bool(profile["muzzle_flame"]) and combat.has_method("spawn_muzzle_flame"):
+					combat.spawn_muzzle_flame(fire_pos, shot_dir.angle())
 
 
 # =========================
@@ -1493,6 +1471,8 @@ func is_world_pos_walkable(world_pos: Vector2, ml: int, team: int = -1) -> bool:
 			astar_grid = astar_crawler
 		UnitData.MovementLayer.HOVER:
 			astar_grid = astar_hover
+		UnitData.MovementLayer.NAVAL:
+			astar_grid = astar_naval
 	if astar_grid != null and astar_grid.is_point_solid(grid):
 		return false
 	# Hostile unit-blocking shields count as solid for the asking
@@ -1504,6 +1484,64 @@ func is_world_pos_walkable(world_pos: Vector2, ml: int, team: int = -1) -> bool:
 			if shield_sys.is_unit_blocked_at(world_pos, team):
 				return false
 	return true
+
+
+## Radius-aware walkability: true only if a unit of half-extent `radius`
+## centred at `world_pos` clears solids on every side. Tests the centre
+## plus the four cardinal edge points (the unit's bounding-box faces), so a
+## unit's flank can't clip into an adjacent solid cell the way a pure
+## centre-point test allowed. `edges` lets callers restrict which faces are
+## checked (e.g. only the horizontal pair when resolving an X-axis slide),
+## mirroring Mindustry's per-axis push-out. Default = all four.
+func is_circle_walkable(world_pos: Vector2, radius: float, ml: int, team: int = -1, edges: int = 0xF) -> bool:
+	if ml == UnitData.MovementLayer.FLYING:
+		return true
+	if not is_world_pos_walkable(world_pos, ml, team):
+		return false
+	# Cap the collision half-extent just under half a tile. A face point at
+	# centre ± radius must stay inside the unit's own (open) cell for a
+	# 1-tile-wide corridor to remain passable; clamping below GRID_SIZE/2
+	# guarantees units never wedge in a legal single-tile gap even when
+	# their sprite-derived `unit_size` is large.
+	radius = minf(radius, float(main.GRID_SIZE) * 0.45)
+	if radius <= 0.0:
+		return true
+	# 0x1=+X, 0x2=-X, 0x4=+Y, 0x8=-Y
+	if (edges & 0x1) and not is_world_pos_walkable(world_pos + Vector2(radius, 0.0), ml, team):
+		return false
+	if (edges & 0x2) and not is_world_pos_walkable(world_pos + Vector2(-radius, 0.0), ml, team):
+		return false
+	if (edges & 0x4) and not is_world_pos_walkable(world_pos + Vector2(0.0, radius), ml, team):
+		return false
+	if (edges & 0x8) and not is_world_pos_walkable(world_pos + Vector2(0.0, -radius), ml, team):
+		return false
+	return true
+
+
+## Mindustry-style axis-separated, radius-aware move resolver. Given a unit
+## at `from` wanting to reach `from + delta`, returns the furthest position
+## it can legally occupy: it resolves the X displacement first (testing only
+## the horizontal faces), then Y (vertical faces), so a diagonal move into a
+## wall cancels only the blocked component and the unit SLIDES along the wall
+## face instead of snagging on the cell corner. `radius` is the unit's
+## collision half-extent (≈ unit_size). Pure-axis callers still work since a
+## zero component just resolves to itself.
+func resolve_move(from: Vector2, delta: Vector2, radius: float, ml: int, team: int = -1) -> Vector2:
+	if ml == UnitData.MovementLayer.FLYING:
+		return from + delta
+	var pos: Vector2 = from
+	# --- X axis: only the leading/trailing horizontal faces matter ---
+	if absf(delta.x) > 0.0001:
+		var try_x: Vector2 = Vector2(pos.x + delta.x, pos.y)
+		if is_circle_walkable(try_x, radius, ml, team, 0x1 | 0x2):
+			pos.x = try_x.x
+	# --- Y axis: only the vertical faces matter (using the possibly-
+	# already-advanced X so we slide along, not through, the corner) ---
+	if absf(delta.y) > 0.0001:
+		var try_y: Vector2 = Vector2(pos.x, pos.y + delta.y)
+		if is_circle_walkable(try_y, radius, ml, team, 0x4 | 0x8):
+			pos.y = try_y.y
+	return pos
 
 
 ## True if the cell is a platform sitting over water — the kind that
@@ -1575,6 +1613,13 @@ func _build_solidity_sets() -> Dictionary:
 	var ground_set: Dictionary = {}
 	var crawler_set: Dictionary = {}
 	var hover_set: Dictionary = {}
+	# NAVAL is the inverse of the others: every cell is solid UNLESS it's
+	# navigable water (water floor with no platform / building covering it).
+	# We start with nothing solid here and ADD every non-navigable cell in
+	# the whole-grid sweep below — water-only movement falls out for free,
+	# and the unit's own walkability check makes it treat the shoreline like
+	# a wall (no special steering code needed).
+	var naval_set: Dictionary = {}
 	var ground_weights: Dictionary = {}  # grid_pos -> float, deduped
 	var floor_dict: Dictionary = terrain_sys.floor_tiles if terrain_sys else {}
 	var wall_dict: Dictionary = terrain_sys.wall_tiles if terrain_sys else {}
@@ -1592,6 +1637,11 @@ func _build_solidity_sets() -> Dictionary:
 			hover_set[grid_pos] = true
 		if _is_building_wall(grid_pos):
 			crawler_set[grid_pos] = true
+		# ANY building over a cell blocks naval movement — including
+		# platforms (a platform turns water into "dry boards" the naval
+		# unit can't float on) and floating transport. Naval only ever
+		# occupies bare water.
+		naval_set[grid_pos] = true
 
 	# --- Terrain walls (single pass) ---
 	# Only walls flagged as `blocks_pathfinding` count as obstacles for
@@ -1607,6 +1657,7 @@ func _build_solidity_sets() -> Dictionary:
 				ground_set[grid_pos] = true
 				crawler_set[grid_pos] = true
 				hover_set[grid_pos] = true
+				naval_set[grid_pos] = true
 
 	# --- Whole-grid sweep: void + hidden + water (one walk) ---
 	# Was three separate GRID_WIDTH × GRID_HEIGHT loops before. Each
@@ -1622,6 +1673,7 @@ func _build_solidity_sets() -> Dictionary:
 				ground_set[gp] = true
 				crawler_set[gp] = true
 				hover_set[gp] = true
+				naval_set[gp] = true
 				continue
 			# Sector-script hidden tiles are an impassable barrier for
 			# every layer.
@@ -1629,21 +1681,30 @@ func _build_solidity_sets() -> Dictionary:
 				ground_set[gp] = true
 				crawler_set[gp] = true
 				hover_set[gp] = true
+				naval_set[gp] = true
 				continue
-			# WATER bias — only for cells that have a water floor and
-			# no covering building (a platform / floating transport
-			# overrides the bias and lands them on dry land).
-			if has_floor and not main.placed_buildings.has(gp):
+			# Naval navigability + water bias for ground/crawler. A cell is
+			# navigable for naval ONLY if it has a water floor and nothing
+			# built on it; anything else (dry land, covered water) is solid
+			# for naval. The building pass already marked covered cells.
+			var is_navigable_water := false
+			if has_floor:
 				var td: TerrainTileData = Registry.get_tile(floor_dict[gp])
 				if td and td.is_liquid and td.tags.has("water"):
-					var w: float = _water_cell_weight(gp)
-					if w > 1.0:
-						ground_weights[gp] = w
+					is_navigable_water = not main.placed_buildings.has(gp)
+					# Water bias steers ground/crawler around lakes.
+					if not main.placed_buildings.has(gp):
+						var w: float = _water_cell_weight(gp)
+						if w > 1.0:
+							ground_weights[gp] = w
+			if not is_navigable_water:
+				naval_set[gp] = true
 
 	return {
 		"ground": ground_set,
 		"crawler": crawler_set,
 		"hover": hover_set,
+		"naval": naval_set,
 		"ground_weights": ground_weights,
 	}
 
@@ -1657,6 +1718,7 @@ func _setup_astar() -> void:
 	var ground_set: Dictionary = sets["ground"]
 	var crawler_set: Dictionary = sets["crawler"]
 	var hover_set: Dictionary = sets["hover"]
+	var naval_set: Dictionary = sets["naval"]
 	var ground_weights: Dictionary = sets["ground_weights"]
 
 	# --- GROUND AStar ---
@@ -1690,6 +1752,17 @@ func _setup_astar() -> void:
 	for gp in hover_set:
 		astar_hover.set_point_solid(gp, true)
 
+	# --- NAVAL AStar ---
+	# Only navigable water is non-solid; `naval_set` already holds every
+	# other cell, so this is a plain solid-set apply (no wall pruning).
+	astar_naval = AStarGrid2D.new()
+	astar_naval.region = Rect2i(0, 0, main.GRID_WIDTH, main.GRID_HEIGHT)
+	astar_naval.cell_size = Vector2(main.GRID_SIZE, main.GRID_SIZE)
+	astar_naval.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+	astar_naval.update()
+	for gp in naval_set:
+		astar_naval.set_point_solid(gp, true)
+
 	# Analyze terrain wall segments for crawler / hover passability.
 	# Mutates astar_crawler and astar_hover in place: small wall segments
 	# get flipped back to non-solid for crawlers, medium ones for hover.
@@ -1708,11 +1781,13 @@ func _setup_path_worker() -> void:
 	var ground_set: Dictionary = sets["ground"]
 	var crawler_set: Dictionary = sets["crawler"]
 	var hover_set: Dictionary = sets["hover"]
+	var naval_set: Dictionary = sets["naval"]
 	var ground_weights_dict: Dictionary = sets["ground_weights"]
 
 	# Crawler wall passability already pruned small segments from
 	# `astar_crawler`; mirror those exclusions into the worker's set so
-	# the background grid agrees with the main-thread grid.
+	# the background grid agrees with the main-thread grid. (Naval doesn't
+	# participate in wall pruning — walls are always solid for it.)
 	for gp in _crawler_passable_walls:
 		crawler_set.erase(gp)
 	for gp in _hover_passable_walls:
@@ -1722,9 +1797,11 @@ func _setup_path_worker() -> void:
 	var ground_solids: Array[Vector2i] = []
 	var crawler_solids: Array[Vector2i] = []
 	var hover_solids: Array[Vector2i] = []
+	var naval_solids: Array[Vector2i] = []
 	for gp in ground_set: ground_solids.append(gp)
 	for gp in crawler_set: crawler_solids.append(gp)
 	for gp in hover_set: hover_solids.append(gp)
+	for gp in naval_set: naval_solids.append(gp)
 	var ground_weights: Array = []
 	var crawler_weights: Array = []
 	for gp in ground_weights_dict:
@@ -1742,7 +1819,7 @@ func _setup_path_worker() -> void:
 	_path_worker = PathfindingWorker.new()
 	_path_worker.start(main.GRID_WIDTH, main.GRID_HEIGHT, main.GRID_SIZE,
 		ground_solids, crawler_solids, hover_solids,
-		ground_weights, crawler_weights)
+		ground_weights, crawler_weights, naval_solids)
 
 
 func _poll_path_results() -> void:
@@ -2056,6 +2133,18 @@ func spawn_player_unit(spawn_position: Vector2, unit_id: StringName) -> void:
 	# Player units don't pathfind to buildings — they idle at spawn
 
 
+## Spawns a unit for the given team (UnitData.Team — PLAYER/Lumina or
+## ENEMY/Ferox) and returns the node, so payload unpack (crane drop) can
+## honour the Payload Source faction choice and then restore per-instance
+## state. Falls back to the player path for any non-ENEMY team.
+func spawn_unit_with_team(spawn_position: Vector2, unit_id: StringName, team: int) -> Node2D:
+	if team == UnitData.Team.ENEMY:
+		spawn_enemy(spawn_position, unit_id)
+		return enemies[-1] if not enemies.is_empty() else null
+	spawn_player_unit(spawn_position, unit_id)
+	return player_units[-1] if not player_units.is_empty() else null
+
+
 ## Returns the requested position if it's walkable for `ml`, otherwise
 ## scans a small ring (up to 4 tiles) for the nearest walkable cell and
 ## snaps to its centre. Returns `null` when nothing nearby is legal —
@@ -2153,7 +2242,7 @@ func _find_nearest_building(from: Vector2i, target_faction: int = -1) -> Variant
 		# pathing on a platform that can't be damaged anyway.
 		var bid: StringName = main.placed_buildings[grid_pos]
 		var bdata = Registry.get_block(bid)
-		if bdata and bdata.tags.has("platform"):
+		if bdata and (bdata.tags.has("platform") or bdata.tags.has("no_pathfinding")):
 			continue
 		var dx = abs(grid_pos.x - from.x)
 		var dy = abs(grid_pos.y - from.y)
@@ -2184,7 +2273,7 @@ func _find_priority_building_target(from: Vector2i, target_faction: int = -1) ->
 			continue
 		var bid: StringName = main.placed_buildings[grid_pos]
 		var bdata = Registry.get_block(bid)
-		if bdata == null or bdata.tags.has("platform"):
+		if bdata == null or bdata.tags.has("platform") or bdata.tags.has("no_pathfinding"):
 			continue
 		var score: float = _score_building_for_attack(grid_pos, bdata, from, aggression)
 		if score > best_score:
@@ -2519,11 +2608,12 @@ func _flow_key(target: Vector2i, ml: int) -> String:
 ## solidity. FLYING returns null (always passable).
 func _astar_for_layer(ml: int) -> AStarGrid2D:
 	# Layer enum mirrors UnitData.MovementLayer: 0=GROUND, 1=CRAWLER,
-	# 2=HOVER, 3=FLYING.
+	# 2=HOVER, 3=FLYING, 4=NAVAL.
 	match ml:
 		1: return astar_crawler
 		2: return astar_hover
 		3: return null
+		4: return astar_naval
 		_: return astar
 
 
@@ -3083,6 +3173,70 @@ func _has_line_of_sight(a: Vector2, b: Vector2, grid: AStarGrid2D) -> bool:
 # UNIT COLLISION
 # =========================
 
+## (Re)builds the per-frame spatial hash if it hasn't been built this frame.
+## Buckets every live unit by (movement_layer, cellX, cellY). Cell size is
+## chosen to exceed twice the largest unit's size, so any two units close
+## enough to interact (collision min_dist or separation sep_radius, both
+## ≤ 2× a unit's size) land in the same or an adjacent cell — making a 3×3
+## neighbour query a guaranteed superset of the old full same-layer scan.
+func _ensure_spatial_hash() -> void:
+	var frame: int = Engine.get_process_frames()
+	if frame == _spatial_hash_frame:
+		return
+	_spatial_hash_frame = frame
+	_spatial_hash.clear()
+	# Largest interaction radius across all live units → cell size. Start
+	# from one tile so a map with tiny units still uses sane buckets.
+	var max_unit_size: float = float(main.GRID_SIZE) * 0.5
+	var both: Array = [enemies, player_units]
+	for arr in both:
+		for u in arr:
+			if u == null or not is_instance_valid(u) or u.is_dead:
+				continue
+			if "unit_size" in u and float(u.unit_size) > max_unit_size:
+				max_unit_size = float(u.unit_size)
+	# Cell size must cover the interaction reach (≤ 2× the largest unit's
+	# size: sep_radius = size×2, collision min_dist = size×1.6) PLUS the
+	# largest per-frame displacement — because units move/shove each other
+	# AFTER the hash is built, so a queried unit's bucketed position can be
+	# up to one frame's step stale. With cell ≥ reach + step, any two units
+	# close enough to interact differ by at most one cell per axis, so the
+	# 3×3 neighbour query is guaranteed to find them (identical results to
+	# the old full scan). The +64px margin absorbs steps up to ~3840 px/s
+	# at 60 fps — well above any unit's speed.
+	_spatial_cell_size = maxf(float(main.GRID_SIZE), max_unit_size * 2.0 + 64.0)
+	for arr in both:
+		for u in arr:
+			if u == null or not is_instance_valid(u) or u.is_dead:
+				continue
+			var layer: int = u.data.movement_layer if u.data else 0
+			var key := Vector3i(
+				layer,
+				int(floor(u.position.x / _spatial_cell_size)),
+				int(floor(u.position.y / _spatial_cell_size)),
+			)
+			if not _spatial_hash.has(key):
+				_spatial_hash[key] = []
+			_spatial_hash[key].append(u)
+
+
+## Returns the units on `layer` within the 3×3 block of spatial-hash cells
+## around `world_pos` — the candidate set for separation / collision. Builds
+## the hash for this frame on first call. The caller still does its own exact
+## distance check; this just prunes the n² down to local neighbours.
+func get_nearby_units(world_pos: Vector2, layer: int) -> Array:
+	_ensure_spatial_hash()
+	var out: Array = []
+	var cx: int = int(floor(world_pos.x / _spatial_cell_size))
+	var cy: int = int(floor(world_pos.y / _spatial_cell_size))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var bucket = _spatial_hash.get(Vector3i(layer, cx + dx, cy + dy), null)
+			if bucket != null:
+				out.append_array(bucket)
+	return out
+
+
 func _resolve_unit_collisions(delta: float) -> void:
 	# Group units by movement layer — only same-layer units push apart
 	var layer_units: Dictionary = {}  # int -> Array of Node2D
@@ -3113,14 +3267,30 @@ func _resolve_unit_collisions(delta: float) -> void:
 		offsets.resize(count)
 		for i in range(count):
 			offsets[i] = Vector2.ZERO
+		# Map each unit to its layer-array index so a spatial-hash neighbour
+		# (returned as a Node2D) can update the right `offsets[j]`.
+		var idx_of: Dictionary = {}
+		for i in range(count):
+			idx_of[units_in_layer[i].get_instance_id()] = i
 
 		for i in range(count):
 			var a: Node2D = units_in_layer[i]
 			# Use 60% of visual size for collision so units don't lock as easily
 			var radius_a: float = a.unit_size
 			var a_moving: bool = a.path.size() > 0 and a.path_index < a.path.size()
-			for j in range(i + 1, count):
-				var b: Node2D = units_in_layer[j]
+			# Only test local neighbours instead of every unit in the layer.
+			# The 3×3 cell query is a superset of all units within interaction
+			# range, so results match the old full O(n²) scan exactly — we
+			# still enforce the i<j rule below so each pair resolves once with
+			# the same radius/ordering semantics as before.
+			var neighbours: Array = get_nearby_units(a.position, layer)
+			for b: Node2D in neighbours:
+				var j_v: int = idx_of.get(b.get_instance_id(), -1)
+				if j_v <= i:
+					# Skip self (j == i) and pairs already handled when the
+					# lower-indexed unit was `a` (j < i).
+					continue
+				var j: int = j_v
 				var radius_b: float = b.unit_size * 0.6
 				var b_moving: bool = b.path.size() > 0 and b.path_index < b.path.size()
 				var min_dist := radius_a + radius_b
@@ -3282,6 +3452,8 @@ func _get_grid_for_unit(unit: Node2D) -> AStarGrid2D:
 			return astar_crawler
 		UnitData.MovementLayer.HOVER:
 			return astar_hover
+		UnitData.MovementLayer.NAVAL:
+			return astar_naval
 		_:
 			return astar
 
@@ -3291,9 +3463,61 @@ func _get_grid_for_unit(unit: Node2D) -> AStarGrid2D:
 # =========================
 
 ## Recomputes which terrain wall cells are passable for crawlers and hover units.
-## BFS flood-fill finds contiguous terrain wall segments.
-## Crawlers: segments < 4 cells are passable. Hover: segments <= 8 cells are passable.
-## Note: Building blocks never block crawlers — only terrain walls >= 4 cells do.
+## Building blocks never block crawlers — only terrain walls do.
+## LOCAL thickness of one wall cell = the smallest of its four contiguous
+## wall runs through that cell: horizontal, vertical, and both diagonals.
+## A unit crosses via the thinnest axis, so including the diagonals lets it
+## clip the tip of a convex corner (short diagonal run) even where the H/V
+## runs are thick. `wall_set` is the set of all wall cells. Runs are capped
+## at 9 so this stays cheap and returns >8 to mean "too thick to cross here".
+## Because it's purely local, a thin arm (or a corner notch) reads as thin
+## even where it abuts a thick blob — Mindustry's per-tile "crawl over thin
+## walls" behaviour.
+func _wall_cell_thickness(cell: Vector2i, wall_set: Dictionary) -> int:
+	# Horizontal run (← →)
+	var h: int = 1
+	var x: int = cell.x - 1
+	while h <= 8 and wall_set.has(Vector2i(x, cell.y)):
+		h += 1
+		x -= 1
+	x = cell.x + 1
+	while h <= 8 and wall_set.has(Vector2i(x, cell.y)):
+		h += 1
+		x += 1
+	var v: int = 1
+	var y: int = cell.y - 1
+	while v <= 8 and wall_set.has(Vector2i(cell.x, y)):
+		v += 1
+		y -= 1
+	y = cell.y + 1
+	while v <= 8 and wall_set.has(Vector2i(cell.x, y)):
+		v += 1
+		y += 1
+	# Diagonal runs (↖↘ and ↗↙). A unit can also cut a wall by crossing it
+	# diagonally — e.g. clipping the tip of a convex corner. At such a corner
+	# one diagonal run is short even when both H and V runs are thick, so this
+	# carves a triangular notch (≤ 8 cells deep) the crawler can slice through.
+	var d1: int = 1
+	var p := Vector2i(cell.x - 1, cell.y - 1)
+	while d1 <= 8 and wall_set.has(p):
+		d1 += 1
+		p += Vector2i(-1, -1)
+	p = Vector2i(cell.x + 1, cell.y + 1)
+	while d1 <= 8 and wall_set.has(p):
+		d1 += 1
+		p += Vector2i(1, 1)
+	var d2: int = 1
+	p = Vector2i(cell.x + 1, cell.y - 1)
+	while d2 <= 8 and wall_set.has(p):
+		d2 += 1
+		p += Vector2i(1, -1)
+	p = Vector2i(cell.x - 1, cell.y + 1)
+	while d2 <= 8 and wall_set.has(p):
+		d2 += 1
+		p += Vector2i(-1, 1)
+	return mini(mini(h, v), mini(d1, d2))
+
+
 func _recompute_crawler_wall_passability() -> void:
 	# Step 1: Collect terrain wall positions that block pathfinding
 	var all_wall_positions: Dictionary = {}
@@ -3305,48 +3529,39 @@ func _recompute_crawler_wall_passability() -> void:
 			if tile_data and tile_data.blocks_pathfinding:
 				all_wall_positions[grid_pos] = true
 
-	# Step 2: BFS to find contiguous wall segments
-	var visited: Dictionary = {}
-	var segments: Array = []  # Array of Array[Vector2i]
-
-	for wall_pos in all_wall_positions:
-		if visited.has(wall_pos):
-			continue
-		var segment: Array[Vector2i] = []
-		var queue: Array[Vector2i] = [wall_pos]
-		visited[wall_pos] = true
-		while queue.size() > 0:
-			var current: Vector2i = queue.pop_front()
-			segment.append(current)
-			for offset in [Vector2i(0, -1), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(1, 0)]:
-				var neighbor: Vector2i = current + offset
-				if all_wall_positions.has(neighbor) and not visited.has(neighbor):
-					visited[neighbor] = true
-					queue.append(neighbor)
-		segments.append(segment)
-
-	# Step 3: Update astar_crawler and astar_hover based on segment sizes
+	# Step 2: per-cell LOCAL thickness. A wall cell is crossable when the
+	# wall is <= 8 thick AT THAT CELL — i.e. the smallest of its horizontal,
+	# vertical, and two diagonal contiguous runs. This is a local check, NOT
+	# a whole-group one: a thin arm stays crossable even where it joins a
+	# thick blob, and a convex corner exposes a thin diagonal run so the
+	# crawler can slice across the corner tip (you cross the thin slice, you
+	# don't care about the blob behind it). Mirrors Mindustry's "crawl over
+	# thin walls" rule, which is per-tile. Reset everything solid first, then
+	# carve out thin cells.
 	_crawler_passable_walls.clear()
 	_hover_passable_walls.clear()
-
-	# Reset all wall positions to solid in crawler and hover grids
 	for wall_pos in all_wall_positions:
 		astar_crawler.set_point_solid(wall_pos, true)
 		if astar_hover:
 			astar_hover.set_point_solid(wall_pos, true)
 
-	for segment in segments:
-		var seg_size: int = segment.size()
-		# Crawlers: segments < 4 cells are passable
-		if seg_size < 4:
-			for wall_pos in segment:
-				astar_crawler.set_point_solid(wall_pos, false)
-				_crawler_passable_walls[wall_pos] = true
-		# Hover: segments <= 8 cells are passable
-		if seg_size <= 8 and astar_hover:
-			for wall_pos in segment:
+	for wall_pos in all_wall_positions:
+		if _wall_cell_thickness(wall_pos, all_wall_positions) <= 8:
+			astar_crawler.set_point_solid(wall_pos, false)
+			_crawler_passable_walls[wall_pos] = true
+			if astar_hover:
 				astar_hover.set_point_solid(wall_pos, false)
 				_hover_passable_walls[wall_pos] = true
+
+	# Also recompute the NAVAL grid's solids in lockstep (terrain edits can
+	# add/remove water and walls). Naval is the inverse of the others, so
+	# rebuild it from the full solidity sets rather than the wall-only delta.
+	var naval_sets: Dictionary = _build_solidity_sets()
+	var naval_set: Dictionary = naval_sets["naval"]
+	if astar_naval:
+		astar_naval.fill_solid_region(Rect2i(0, 0, main.GRID_WIDTH, main.GRID_HEIGHT), false)
+		for gp in naval_set:
+			astar_naval.set_point_solid(gp, true)
 
 	# Sync worker thread grids — full rebuild for crawler + hover walls
 	if _path_worker:
@@ -3371,7 +3586,11 @@ func _recompute_crawler_wall_passability() -> void:
 			if not _hover_passable_walls.has(wall_pos):
 				hover_solids.append(wall_pos)
 
-		_path_worker.queue_rebuild(ground_solids, crawler_solids, hover_solids)
+		var naval_solids: Array[Vector2i] = []
+		for gp in naval_set:
+			naval_solids.append(gp)
+
+		_path_worker.queue_rebuild(ground_solids, crawler_solids, hover_solids, naval_solids)
 
 
 # =========================
@@ -3559,6 +3778,10 @@ func _paint_ctrl_overlay_for_unit(unit: Node2D, alpha: float) -> void:
 		var scale_f: float = (udata.sprite_scale if udata.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
 		var face_angle: float = float(unit.facing_angle) if "facing_angle" in unit else 0.0
 		var aim_angle: float = float(unit.aim_angle) if "aim_angle" in unit else face_angle
+		# Match the live draw's per-unit art-orientation correction so the
+		# silhouette lines up with the visible chassis / head (was missing,
+		# leaving the overlay un-rotated relative to flipped art like Wade's).
+		var spr_off: float = udata.sprite_angle_offset if "sprite_angle_offset" in udata else 0.0
 		var sprite_max: float = 0.0
 		if udata.base_sprite:
 			var b_size: Vector2 = udata.base_sprite.get_size() * scale_f
@@ -3566,7 +3789,7 @@ func _paint_ctrl_overlay_for_unit(unit: Node2D, alpha: float) -> void:
 			_silhouette_targets.append({
 				"tex": udata.base_sprite,
 				"pos": unit.position,
-				"angle": face_angle + PI * 0.5,
+				"angle": face_angle + PI * 0.5 + spr_off,
 				"size": b_size,
 			})
 		if udata.head_sprite:
@@ -3575,7 +3798,7 @@ func _paint_ctrl_overlay_for_unit(unit: Node2D, alpha: float) -> void:
 			_silhouette_targets.append({
 				"tex": udata.head_sprite,
 				"pos": unit.position,
-				"angle": aim_angle + PI * 0.5,
+				"angle": aim_angle + PI * 0.5 + spr_off,
 				"size": h_size,
 			})
 		u_radius = maxf(u_radius, sprite_max * 0.5)

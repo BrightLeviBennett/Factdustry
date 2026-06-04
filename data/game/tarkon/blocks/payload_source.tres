@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cwtb33ybhvbpq"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"payload_source"
+display_name = "Payload Source"
+description = "Developer block. Click to pick any block (up to 5x5) or unit; emits it infinitely as a payload. Units can be set to spawn Lumina or Ferox."
+category = 6
+tags = PackedStringArray("payload_source", "no_pathfinding")
+color = Color(0.2, 0.85, 0.95, 1)
+grid_size = Vector2i(5, 5)
+max_health = 1000.0
+max_payload_size = 5

@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_asphalt"
+display_name = "Asphalt"
+description = "Petroleum-bound aggregate. Poured into paved flooring."
+max_stack = 200
+category = 1
+color = Color(0.16, 0.16, 0.18, 1)
+base_value = 1.5

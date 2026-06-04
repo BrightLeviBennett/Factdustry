@@ -19,6 +19,7 @@ var _running: bool = true
 var _astar: AStarGrid2D
 var _astar_crawler: AStarGrid2D
 var _astar_hover: AStarGrid2D
+var _astar_naval: AStarGrid2D
 
 # --- GRID CONFIG (set once at init) ---
 var _grid_width: int
@@ -36,7 +37,8 @@ var _rebuild_data: Dictionary = {}
 func start(grid_width: int, grid_height: int, grid_size: float,
 		ground_solids: Array[Vector2i], crawler_solids: Array[Vector2i],
 		hover_solids: Array[Vector2i] = [],
-		ground_weights: Array = [], crawler_weights: Array = []) -> void:
+		ground_weights: Array = [], crawler_weights: Array = [],
+		naval_solids: Array[Vector2i] = []) -> void:
 	_grid_width = grid_width
 	_grid_height = grid_height
 	_grid_size = grid_size
@@ -63,12 +65,20 @@ func start(grid_width: int, grid_height: int, grid_size: float,
 	_astar_hover.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
 	_astar_hover.update()
 
+	_astar_naval = AStarGrid2D.new()
+	_astar_naval.region = Rect2i(0, 0, grid_width, grid_height)
+	_astar_naval.cell_size = Vector2(grid_size, grid_size)
+	_astar_naval.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+	_astar_naval.update()
+
 	for pos in ground_solids:
 		_astar.set_point_solid(pos, true)
 	for pos in crawler_solids:
 		_astar_crawler.set_point_solid(pos, true)
 	for pos in hover_solids:
 		_astar_hover.set_point_solid(pos, true)
+	for pos in naval_solids:
+		_astar_naval.set_point_solid(pos, true)
 	# Per-cell weight scales (water bias). Each entry: [Vector2i, float].
 	for w in ground_weights:
 		_astar.set_point_weight_scale(w[0], float(w[1]))
@@ -119,10 +129,10 @@ func queue_set_weight(pos: Vector2i, weight: float, grid_name: String = "ground"
 
 
 func queue_rebuild(ground_solids: Array[Vector2i], crawler_solids: Array[Vector2i],
-		hover_solids: Array[Vector2i] = []) -> void:
+		hover_solids: Array[Vector2i] = [], naval_solids: Array[Vector2i] = []) -> void:
 	_mutex.lock()
 	_rebuild_pending = true
-	_rebuild_data = {"ground": ground_solids, "crawler": crawler_solids, "hover": hover_solids}
+	_rebuild_data = {"ground": ground_solids, "crawler": crawler_solids, "hover": hover_solids, "naval": naval_solids}
 	_mutex.unlock()
 
 
@@ -196,6 +206,7 @@ func _do_rebuild(rb_data: Dictionary) -> void:
 	_astar.fill_solid_region(Rect2i(0, 0, _grid_width, _grid_height), false)
 	_astar_crawler.fill_solid_region(Rect2i(0, 0, _grid_width, _grid_height), false)
 	_astar_hover.fill_solid_region(Rect2i(0, 0, _grid_width, _grid_height), false)
+	_astar_naval.fill_solid_region(Rect2i(0, 0, _grid_width, _grid_height), false)
 
 	for pos in rb_data["ground"]:
 		_astar.set_point_solid(pos, true)
@@ -203,6 +214,8 @@ func _do_rebuild(rb_data: Dictionary) -> void:
 		_astar_crawler.set_point_solid(pos, true)
 	for pos in rb_data.get("hover", []):
 		_astar_hover.set_point_solid(pos, true)
+	for pos in rb_data.get("naval", []):
+		_astar_naval.set_point_solid(pos, true)
 
 	# Water bias: per-cell weight overrides so A* prefers dry routes
 	# but still treats water as crossable. Keyed by grid → array of
@@ -224,13 +237,15 @@ func _compute_path(req: Dictionary) -> Dictionary:
 	var target_bldg_id: int = req["target_building_id"]
 
 	# Select grid based on movement layer
-	# 0 = GROUND, 1 = CRAWLER, 2 = HOVER, 3 = FLYING
+	# 0 = GROUND, 1 = CRAWLER, 2 = HOVER, 3 = FLYING, 4 = NAVAL
 	var grid: AStarGrid2D
 	match movement_layer:
 		1:
 			grid = _astar_crawler
 		2:
 			grid = _astar_hover
+		4:
+			grid = _astar_naval
 		_:
 			grid = _astar
 	var half := Vector2(_grid_size / 2.0, _grid_size / 2.0)

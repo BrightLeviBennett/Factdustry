@@ -110,9 +110,11 @@ void fragment() {
 	// ripples / breathes side-to-side without the whole band swaying
 	// off-axis. Matches the user spec: pattern goes straight down-
 	// right; the white bits jiggle.
+	// Use `anim_time` (not Godot's built-in TIME) so this overlay wobble
+	// freezes on pause like the rest of the water animation.
 	vec2 c_wobble = vec2(
-		sin(TIME * overlay_wobble_speed)            * overlay_wobble_amp,
-		cos(TIME * overlay_wobble_speed * 0.73)     * overlay_wobble_amp * 0.6
+		sin(anim_time * overlay_wobble_speed)            * overlay_wobble_amp,
+		cos(anim_time * overlay_wobble_speed * 0.73)     * overlay_wobble_amp * 0.6
 	);
 	vec2 cc = coords + c_wobble;
 	float tester = mod(

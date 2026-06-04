@@ -15,3 +15,5 @@ attack_damage = 14.0
 immunities = PackedStringArray()
 spawn_count = 1
 threat_value = 3.0
+
+tier = 2

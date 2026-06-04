@@ -1,14 +1,13 @@
-[gd_resource type="Resource" script_class="ItemData" format=3]
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://0v8qndhyssoh"]
 
-[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://2s37hckqn46q" path="res://textures/resources/refinedUranium.png" id="1_achb1"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_refined_uranium"
 display_name = "Refined Uranium"
-description = "Enriched uranium pellets. Reactor-grade fuel."
-max_stack = 100
-category = 0
-color = Color(0.6, 1.0, 0.3, 1)
+description = "Enriched uranium disc. Reactor-grade fuel."
+icon = ExtResource("1_achb1")
+color = Color(0.6, 1, 0.3, 1)
 base_value = 18.0
-conveyable = true

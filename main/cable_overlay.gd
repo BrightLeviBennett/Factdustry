@@ -22,3 +22,8 @@ func _process(_delta: float) -> void:
 func _draw() -> void:
 	if building_sys and building_sys.has_method("_draw_cable_links"):
 		building_sys._draw_cable_links(self)
+	# Bridge link strips draw AFTER (on top of) the cables, on the same
+	# z=52 canvas, so a belt/duct bridge visualizer sits over any copper
+	# cable it crosses.
+	if building_sys and building_sys.has_method("_draw_bridge_links"):
+		building_sys._draw_bridge_links(self)

@@ -13,6 +13,8 @@ visual_size = 8.0
 sprite_scale = 0.55
 head_turn_speed = 4.0
 move_speed = 1.6
+movement_layer = 4
+tank_steering = true
 turn_radius = 3.0
 max_health = 580.0
 attack_damage = 75.0
@@ -24,3 +26,5 @@ build_cost = {
 "silicon": 90,
 "steel": 80
 }
+
+tier = 4

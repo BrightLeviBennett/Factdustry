@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://cgqulp7aq0bh2"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://duoxpkjpncoj5" path="res://textures/sectors/SulfurSprings.png" id="1_lkmmi"]
+
+[resource]
+script = ExtResource("1")
+id = &"sulfur_springs"
+display_name = "Sulfur Springs"
+description = "Bubbling sulfur springs and venting fumaroles. Mine the sulfur and tap the vents — but mind the corroding clouds."
+icon = ExtResource("1_lkmmi")
+planet_id = &"Tarkon"
+hex_q = -13
+hex_r = 4
+available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_sulfur")
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray("aluminum_mountains")
+required_sectors = PackedStringArray("zinc_deposits")
+tags = PackedStringArray("campaign", "sector")

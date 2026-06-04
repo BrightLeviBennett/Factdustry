@@ -62,6 +62,9 @@ var fog_darkness_mult := 1.0
 ## hitbox so combat geometry is visible. Wired up from the Developer
 ## settings tab and from apply_pending_settings on scene load.
 var show_hitboxes := false
+## Developer toggle ("Show Sources" in settings): when true the
+## resource_source / payload_source dev blocks appear in the build menu.
+var show_sources := false
 
 ## Tracks player buildings destroyed by enemies for potential rebuild.
 ## Key = Vector2i (anchor), Value = { "block_id": StringName, "rotation": int }
@@ -228,6 +231,20 @@ func _power_sys_ref() -> Node:
 	if _power_sys == null:
 		_power_sys = get_node_or_null("PowerSystem")
 	return _power_sys
+# Cached refs for the two nodes consulted by the per-item/per-building hot
+# gates (is_building_inactive / is_belt_conveyance_blocked). These were
+# resolved via get_node_or_null on EVERY call — thousands of string-path
+# scene lookups per frame on a busy map. Cache + revalidate instead.
+var _launch_anim_cache: Node = null
+var _logistic_control_cache: Node = null
+func _launch_anim_ref() -> Node:
+	if _launch_anim_cache == null or not is_instance_valid(_launch_anim_cache):
+		_launch_anim_cache = get_node_or_null("LaunchAnimation")
+	return _launch_anim_cache
+func _logistic_control_ref() -> Node:
+	if _logistic_control_cache == null or not is_instance_valid(_logistic_control_cache):
+		_logistic_control_cache = get_node_or_null("LogisticControlSystem")
+	return _logistic_control_cache
 
 
 ## Returns true if a blocking UI is open (pause menu, tech tree, database, loss screen).
@@ -491,6 +508,12 @@ func _ready() -> void:
 		la.set_script(launch_script)
 		la.name = "LaunchAnimation"
 		add_child(la)
+	var fire_script = load("res://main/fire_system.gd")
+	if fire_script:
+		var fire = Node2D.new()
+		fire.set_script(fire_script)
+		fire.name = "FireSystem"
+		add_child(fire)
 
 	# Initialize resources from item .tres files
 	_init_resources()
@@ -1393,6 +1416,45 @@ func is_building_constructing(grid_pos: Vector2i) -> bool:
 	return building_build_progress.has(anchor)
 
 
+## Re-establishes a freshly-rebuilt FEROX block's links to whichever
+## captured partners are alive again. `entry` is a ferox_rebuild_queue
+## record carrying `links_out` (this→partner) and `links_in`
+## (partner→this) partner anchors. A partner that hasn't been rebuilt yet
+## is skipped — it'll re-link from its OWN rebuild (its captured links
+## point back here), so either rebuild order reconnects the pair exactly
+## once. Directed links are preserved (belt/duct bridges and mass drivers
+## care about source vs destination).
+func ferox_relink_after_rebuild(entry: Dictionary) -> void:
+	var anchor: Vector2i = entry.get("grid_pos", Vector2i(-9999, -9999))
+	if not placed_buildings.has(anchor):
+		return
+	var ps = get_node_or_null("PowerSystem")
+	if ps == null or not ps.has_method("link_blocks"):
+		return
+	var existing_out: Array = ps.get_links_as_source_all(anchor) if ps.has_method("get_links_as_source_all") else []
+	var existing_in: Array = ps.get_links_as_destination_all(anchor) if ps.has_method("get_links_as_destination_all") else []
+	# this -> partner
+	for partner in entry.get("links_out", []):
+		var pa: Vector2i = partner
+		if pa == anchor or not placed_buildings.has(pa):
+			continue
+		if get_building_faction(pa) != Faction.FEROX:
+			continue
+		if existing_out.has(pa):
+			continue
+		ps.link_blocks(anchor, pa)
+	# partner -> this
+	for partner2 in entry.get("links_in", []):
+		var pb: Vector2i = partner2
+		if pb == anchor or not placed_buildings.has(pb):
+			continue
+		if get_building_faction(pb) != Faction.FEROX:
+			continue
+		if existing_in.has(pb):
+			continue
+		ps.link_blocks(pb, anchor)
+
+
 ## Returns true if the building should not function (under construction,
 ## being deconstructed, or derelict). **Every** block type is inactive while
 ## its construction progress is advancing — including transport (conveyors,
@@ -1412,7 +1474,7 @@ func is_building_inactive(grid_pos: Vector2i) -> bool:
 	# ring hasn't crossed them) are inert — they don't tick logistics,
 	# don't draw power, don't fire turrets. They flip to active the
 	# instant the ring sweeps past them.
-	var la = get_node_or_null("LaunchAnimation")
+	var la = _launch_anim_ref()
 	if la and la.has_method("is_block_hidden") and la.is_block_hidden(anchor_check):
 		return true
 	# Blocks shut off by a Logistical Dispatcher are reported as inactive
@@ -1421,7 +1483,7 @@ func is_building_inactive(grid_pos: Vector2i) -> bool:
 	# without each of them needing to know about the dispatcher feature.
 	# The whitelist of WHAT can be disabled lives on the control system —
 	# this check just consults the resulting set.
-	var lc = get_node_or_null("LogisticControlSystem")
+	var lc = _logistic_control_ref()
 	if lc and lc.has_method("is_block_disabled") and lc.is_block_disabled(anchor_check):
 		return true
 	return false
@@ -1443,13 +1505,13 @@ func is_belt_conveyance_blocked(grid_pos: Vector2i) -> bool:
 	var dprog = building_deconstruct_progress.get(anchor_check, null)
 	if dprog != null and float(dprog.get("progress", 0.0)) > 0.0:
 		return true
-	var la = get_node_or_null("LaunchAnimation")
+	var la = _launch_anim_ref()
 	if la and la.has_method("is_block_hidden") and la.is_block_hidden(anchor_check):
 		return true
 	# Dispatcher-disabled belts freeze items on them the same way a
 	# deconstructing belt does — consistent with the rest of the
 	# logistic-control effect being applied via is_building_inactive.
-	var lc = get_node_or_null("LogisticControlSystem")
+	var lc = _logistic_control_ref()
 	if lc and lc.has_method("is_block_disabled") and lc.is_block_disabled(anchor_check):
 		return true
 	return false
@@ -2428,6 +2490,13 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return false
+	# Unit modules can ride the payload network (and sit on payload blocks)
+	# but can never be set down on the ground as a real building. This is the
+	# ground-drop path (crane "ground" drop / manual payload placement), so
+	# refuse module-tagged blocks here; the payload-block handoff path
+	# (`_try_push_payload`) is separate and stays allowed.
+	if data.tags.has("module"):
+		return false
 
 	# Check all tiles are available
 	var terrain = _terrain_ref()
@@ -2638,10 +2707,28 @@ func destroy_building(grid_pos: Vector2i, by_enemy: bool = false) -> void:
 	if faction == Faction.FEROX and data and anchor == grid_pos:
 		# Don't queue cores for rebuild
 		if data.category != BlockData.BlockCategory.CORE:
+			# Capture this block's links BEFORE the building_destroyed emit
+			# below (PowerSystem strips them on that signal). Stored as
+			# partner anchors so the rebuild can re-link to whichever
+			# partner is alive once both ends exist again — `links_out` are
+			# partners this block fed (this→partner), `links_in` are
+			# partners that fed this block (partner→this).
+			var links_out: Array = []
+			var links_in: Array = []
+			var ps_link = get_node_or_null("PowerSystem")
+			if ps_link:
+				if ps_link.has_method("get_links_as_source_all"):
+					for p in ps_link.get_links_as_source_all(anchor):
+						links_out.append(p)
+				if ps_link.has_method("get_links_as_destination_all"):
+					for p in ps_link.get_links_as_destination_all(anchor):
+						links_in.append(p)
 			ferox_rebuild_queue.append({
 				"block_id": block_id,
 				"grid_pos": anchor,
 				"rotation": rot,
+				"links_out": links_out,
+				"links_in": links_in,
 			})
 
 	# Track destroyed player buildings for rebuild mode — only when the
@@ -2895,25 +2982,39 @@ func convert_derelict_in_rect(from: Vector2i, to: Vector2i) -> void:
 	for x in range(min_pos.x, max_pos.x + 1):
 		for y in range(min_pos.y, max_pos.y + 1):
 			var pos := Vector2i(x, y)
-			if building_factions.get(pos, -1) == Faction.DERELICT:
+			if building_factions.get(pos, -1) != Faction.DERELICT:
+				continue
+			# Resolve the building's anchor and convert its ENTIRE footprint,
+			# not just the cell(s) that happen to fall inside the rect. A
+			# single-click capture passes a 1×1 rect, so without this a
+			# multi-tile block would flip only its anchor tile to LUMINA and
+			# leave the rest DERELICT — the block then reads as half-friendly,
+			# half-enemy and behaves erratically (per-cell faction checks see
+			# the non-anchor tiles as inactive / hostile). Mirrors
+			# `_convert_anchor_to_derelict` in the opposite direction.
+			var anchor: Vector2i = building_origins.get(pos, pos)
+			if seen_anchors.has(anchor):
+				continue
+			seen_anchors[anchor] = true
+			var bdata = Registry.get_block(placed_buildings.get(anchor, &""))
+			if bdata != null:
+				for fx in range(bdata.grid_size.x):
+					for fy in range(bdata.grid_size.y):
+						var cell: Vector2i = anchor + Vector2i(fx, fy)
+						if building_factions.has(cell):
+							building_factions[cell] = Faction.LUMINA
+			else:
 				building_factions[pos] = Faction.LUMINA
-				# Trigger the conversion flash on each captured block's
-				# anchor exactly once — same yellow flash the launch
-				# animation paints on pre-built LUMINA blocks, minus the
-				# white kicker.
-				if building_sys and building_sys.has_method("register_conversion_flash"):
-					var anchor: Vector2i = building_origins.get(pos, pos)
-					if not seen_anchors.has(anchor):
-						seen_anchors[anchor] = true
-						building_sys.register_conversion_flash(anchor)
-						# Also fire the build-pulse outline so converting
-						# a derelict block looks identical to finishing a
-						# fresh construction.
-						var po = get_node_or_null("ParticleOverlay")
-						if po and po.has_method("spawn_build_pulse"):
-							var bdata = Registry.get_block(placed_buildings.get(anchor, &""))
-							if bdata:
-								po.spawn_build_pulse(anchor, bdata.grid_size)
+			# Trigger the conversion flash on the captured block's anchor
+			# exactly once — same yellow flash the launch animation paints on
+			# pre-built LUMINA blocks, minus the white kicker.
+			if building_sys and building_sys.has_method("register_conversion_flash"):
+				building_sys.register_conversion_flash(anchor)
+				# Also fire the build-pulse outline so converting a derelict
+				# block looks identical to finishing a fresh construction.
+				var po = get_node_or_null("ParticleOverlay")
+				if po and po.has_method("spawn_build_pulse") and bdata:
+					po.spawn_build_pulse(anchor, bdata.grid_size)
 
 
 ## Queue destroyed player buildings in a rect for rebuild.
@@ -3206,11 +3307,13 @@ func _on_building_destroyed_for_home_core(grid_pos: Vector2i) -> void:
 			continue
 		if building_home_core.has(cell_anchor):
 			continue   # already bound to a (still-alive) core
-		# Closest core to this orphan in its own faction. If it's the
-		# core that just died, the block belonged to it.
+		# Closest core to this orphan in its own faction. The signal fires
+		# BEFORE the dying core is erased from placed_buildings, so it's
+		# still a candidate here — meaning when it comes back as the
+		# nearest, this block belonged to it and goes derelict too. (A
+		# closer surviving core means the block stays with that core.)
 		var nearest: Vector2i = _find_nearest_core_of_faction(cell_anchor, core_faction)
-		if nearest == Vector2i(-1, -1):
-			# No surviving core in this faction — sweep everything.
+		if nearest == anchor:
 			orphans.append(cell_anchor)
 			seen[cell_anchor] = true
 		# Otherwise the block has a different (still-alive) home; skip.

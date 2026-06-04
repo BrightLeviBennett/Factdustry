@@ -126,6 +126,12 @@ var launch_btn: Button
 var launch_overlay: ColorRect
 var launch_overlay_panel: PanelContainer
 var launch_overlay_title: Label
+## "Launching From: <sector>" line under the title. The launch cost is
+## paid out of the source sector's stockpile (the sector you're
+## currently parked in, `SaveManager.active_sector_id`), so when there
+## is no source sector this reads "<no sector selected>" and the
+## resource picker is hidden entirely — there's nothing to launch with.
+var launch_overlay_source_label: Label
 var launch_overlay_requirements: VBoxContainer
 var launch_overlay_confirm: Button
 var launch_overlay_cancel: Button
@@ -1750,6 +1756,15 @@ func _build_launch_overlay() -> void:
 	launch_overlay_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(launch_overlay_title)
 
+	# "Launching From: <sector>" — or "<no sector selected>" when there's
+	# no source sector to draw resources from. Text + the resource
+	# picker's visibility are set in `_open_launch_overlay`.
+	launch_overlay_source_label = Label.new()
+	launch_overlay_source_label.add_theme_font_size_override("font_size", 14)
+	launch_overlay_source_label.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+	launch_overlay_source_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(launch_overlay_source_label)
+
 	# Combined cost / additional rows. Each entry shows
 	# "[have]/[required] + [additional]" so the player sees both the
 	# launch requirement and whatever they've dialed in to seed the
@@ -1827,11 +1842,29 @@ func _open_launch_overlay(sector) -> void:
 	_build_launch_overlay()
 	launch_overlay_sector = sector
 	launch_overlay_title.text = "Launch to %s" % sector.display_name
+	# Resolve the source sector (where the launch cost is paid from). With
+	# no source there's nothing to launch with, so swap the whole resource
+	# picker for a "<no sector selected>" notice and disable confirm.
+	var src_id: StringName = SaveManager.active_sector_id
+	var has_source: bool = src_id != &"" and src_id != &"_default"
+	if has_source:
+		var src_sec = Registry.get_sector(src_id)
+		var src_name: String = src_sec.display_name if src_sec else String(src_id)
+		launch_overlay_source_label.text = "Launching From: %s" % src_name
+		launch_overlay_source_label.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+	else:
+		launch_overlay_source_label.text = "<no sector selected>"
+		launch_overlay_source_label.add_theme_color_override("font_color", Color(0.95, 0.7, 0.4))
+	# Show the resource picker only when there's a source sector to draw from.
+	launch_overlay_requirements.visible = has_source
+	launch_overlay_seed_container.visible = has_source
+	launch_overlay_confirm.visible = has_source
 	# Always start sliders at zero so the previous launch's setup
 	# doesn't carry over.
 	for slider in _launch_seed_sliders.values():
 		slider.value = 0
-	_refresh_launch_overlay_requirements()
+	if has_source:
+		_refresh_launch_overlay_requirements()
 	launch_overlay.visible = true
 
 

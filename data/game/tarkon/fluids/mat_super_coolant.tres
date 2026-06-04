@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="FluidData" format=3]
+
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_super_coolant"
+display_name = "Super Coolant"
+description = "High-grade coolant brewed from water, copper, and aluminum. Bleeds heat fast."
+color = Color(0.35, 0.85, 1, 1)
+highlight_color = Color(0.7, 0.95, 1, 1)
+viscosity = 0.8

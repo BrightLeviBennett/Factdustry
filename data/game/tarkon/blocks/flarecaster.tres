@@ -1,0 +1,50 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="2"]
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="6"]
+[ext_resource type="Texture2D" uid="uid://cnr74cpaunr6q" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="4"]
+[ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="5"]
+
+[sub_resource type="Resource" id="StatusEffectData_burn"]
+script = ExtResource("6")
+id = &"burning"
+duration = 5.0
+stackable = true
+max_stacks = 5
+refresh_on_reapply = true
+effect_type = 2
+tick_damage = 4.0
+tick_interval = 0.5
+
+[sub_resource type="Resource" id="AmmoType_fuel"]
+script = ExtResource("2")
+item_id = &"mat_simple_fuel"
+amount_per_shot = 1
+damage = 30.0
+status_effect = SubResource("StatusEffectData_burn")
+projectile_color = Color(1, 0.55, 0.15, 1)
+
+[resource]
+script = ExtResource("1")
+id = &"flarecaster"
+display_name = "Flarecaster"
+description = "Sprays a continuous jet of fire 8 tiles down its facing. The flame itself burns and ignites everything caught in the cone — no shells, just fuel."
+icon = ExtResource("5")
+category = 4
+tags = PackedStringArray("turret", "defense", "flame_emitter")
+color = Color(1, 0.5, 0.2, 1)
+base_sprite = ExtResource("3")
+turret_head_sprite = ExtResource("4")
+max_health = 200.0
+build_cost = {
+"copper": 110,
+"silicon": 40,
+"steel": 25
+}
+build_time = 3.0
+attack_speed = 0.35
+attack_range = 8.0
+ammo_types = Array[Resource]([SubResource("AmmoType_fuel")])
+max_stored_items = 30

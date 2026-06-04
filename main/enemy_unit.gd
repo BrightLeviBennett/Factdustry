@@ -1,4 +1,5 @@
 extends Node2D
+class_name EnemyUnit
 
 # ============================================================
 # ENEMY_UNIT.GD - Basic Enemy Unit
@@ -101,6 +102,21 @@ var enter_payload_when_able: bool = false
 ## on successful ingestion, on death, on a new move/attack order, or
 ## when the building disappears.
 var payload_target_anchor: Vector2i = Vector2i(-9999, -9999)
+## Upgrade modules applied to this unit instance (block ids). Slot capacity
+## comes from `data.upgrade_slots()`; free slots = capacity - this size.
+## Carried through unit payloads (crane / refit / upgrader) and restored on
+## re-spawn. A Payload Refit Bay strips these back out; the Deconstructor
+## refunds each one's build cost on top of the unit's.
+var applied_upgrades: Array[StringName] = []
+## Dummy test unit (spawned ENEMY/Ferox by a Payload Source). Runs NO
+## autonomous AI — it sits inert until the player selects it and issues a
+## command. `dummy_mode`: "idle" (obey move orders only), "attack_block"
+## (path to + attack the nearest Lumina building), or "attack_player"
+## (path to + attack the Lumina core). Attacks use the normal Ferox
+## projectile path so they actually damage Lumina blocks.
+var is_dummy := false
+var dummy_mode := "idle"
+var _dummy_repath_accum := 0.0
 ## Toggle: while true, the unit pulls from main.work_order — paths to
 ## the nearest in-flight build plan and stays in range so the build
 ## tick can keep progressing. Only meaningful for units whose data.id
@@ -165,6 +181,22 @@ var _rebuild_arrived := false  # True when unit is at the rebuild location
 var aim_angle: float = 0.0
 var _has_aim_target: bool = false
 
+# --- WEAPON MOUNTS (Mindustry-style) ---
+# Per-instance live state for each mounted weapon, built from
+# `data.weapons` at spawn (see `_setup_weapon_mounts`). Each entry is a
+# Dictionary:
+#   weapon: WeaponData    the stateless definition
+#   offset: Vector2       local mount offset (mirror copies have x negated)
+#   muzzle: Vector2       local muzzle offset (mirror copies have x negated)
+#   flip:   bool          sprite drawn mirrored
+#   side:   bool          fire-alternation side flag
+#   other:  int           index of the mirror partner (or -1)
+#   reload: float         seconds until ready (counts down)
+#   rotation: float       current mount aim angle (radians, world space)
+#   recoil: float         current recoil amount (px, decays to 0)
+# Empty when the unit's .tres lists no weapons → legacy attack path.
+var _weapon_mounts: Array = []
+
 # --- FACING ANGLE (body/chassis rotation) ---
 # Smoothly tracks the unit's movement direction, mirroring how the shardling
 # rotates its sprite to face where it's going. Used to rotate base_sprite.
@@ -178,6 +210,41 @@ var _facing_initialized: bool = false
 var _water_time: float = 0.0
 ## Seconds a ground/crawler unit can spend in water before it drowns and dies.
 const WATER_DROWN_TIME := 8.0
+
+# --- NAVAL WATER WAKE (faithful port of Mindustry's WaterMoveComp + Trail) ---
+# Two tapering trail ribbons, one per side. Each ribbon is a flat history
+# buffer of (x, y, w) triples — w is 1 while that side is over liquid and the
+# unit is on the water, 0 otherwise (a 0-width point makes that segment
+# invisible, so a hull half on land gets an asymmetric wake, exactly like
+# Mindustry). New points are spawned at ±waveTrailX (rotated by the hull
+# heading) so the ribbon BENDS as the unit turns. Drawn on a low-z child
+# canvas so the wake sits in the water UNDER the hull (Mindustry: Layer.debris).
+# Trail math mirrors mindustry/graphics/Trail.java verbatim (update + draw).
+var _wake_left: PackedFloat32Array = PackedFloat32Array()   # [x,y,w, x,y,w, ...]
+var _wake_right: PackedFloat32Array = PackedFloat32Array()
+# Per-trail "last" state used by the counter-based point insertion + the
+# end-cap segment, matching Trail.java's lastX/lastY/lastW/lastAngle/counter.
+var _wl_last := Vector3(-1.0, -1.0, 0.0)   # (lastX, lastY, lastW)
+var _wr_last := Vector3(-1.0, -1.0, 0.0)
+var _wl_lastangle: float = -1.0
+var _wr_lastangle: float = -1.0
+var _wl_counter: float = 0.0
+var _wr_counter: float = 0.0
+# Wake colour — fixed foam tint (HEX 7b91ad @ 0.65 alpha).
+var _wake_color := Color("7b91ad", 0.65)
+var _wake_enabled: bool = false
+# Foam ring puffs trailing the stern (drawn as expanding circle OUTLINES).
+# Each: {pos: Vector2, age: float, r: float}. Stored in world space.
+var _wake_foam: Array = []
+var _wake_foam_accum: float = 0.0
+# Smoothed heading used for the wake origin, so a jittery chassis facing
+# doesn't carve a zig-zag trail. -999 = uninitialised (seed to live facing).
+var _wake_angle: float = -999.0
+const _WAKE_FOAM_LIFE := 0.7        # seconds a foam ring lives
+const _WAKE_FOAM_INTERVAL := 0.10   # seconds between foam rings while moving
+## Mindustry advances the trail counter by Time.delta (ticks at 60 fps), so a
+## point is added roughly once per 60 fps frame. We feed delta×60 to match.
+const _MINDUSTRY_TPS := 60.0
 
 # --- STUCK DETECTION ---
 # When a unit has a destination but stays nearly stationary for STUCK_TIME seconds,
@@ -209,6 +276,17 @@ const REPATH_COOLDOWN := 1.0 # Per-unit floor on repath spam
 # placement is a rare event.
 var _wall_check_timer: float = 0.0
 const WALL_CHECK_INTERVAL := 0.5
+# Sub-cell "wedge" rescue. A crane can drop a unit so its CENTRE sits on a
+# legal cell but its BODY overlaps an adjacent solid (a water edge for a naval
+# unit, a wall face for a ground unit). The centre-point walkability test
+# passes, so the normal wall-overlap rescue never fires — yet `resolve_move`
+# blocks every step that would push the overlapping face deeper, so the unit
+# can't walk out. We detect this with the radius-aware circle test and, once
+# the unit has been wedged (and stationary) for WEDGE_RESCUE_TIME, snap it back
+# into open space. The short delay avoids yanking a unit that's merely grazing
+# a wall corner for a frame mid-move.
+var _wedge_timer: float = 0.0
+const WEDGE_RESCUE_TIME := 0.5
 
 # --- REFERENCES (set by UnitManager) ---
 var main: Node2D
@@ -232,6 +310,11 @@ func _combat_sys_ref() -> Node:
 
 func _is_valid_attack_target(grid_pos: Vector2i) -> bool:
 	if main == null or not main.placed_buildings.has(grid_pos):
+		return false
+	# `no_pathfinding` blocks (sources, archive, …) are never targeted by
+	# any unit — they're invisible to combat/target selection.
+	var bdata = Registry.get_block(main.placed_buildings[grid_pos])
+	if bdata != null and bdata.tags.has("no_pathfinding"):
 		return false
 	var bfaction: int = main.get_building_faction(grid_pos)
 	match team:
@@ -303,15 +386,71 @@ func _ready() -> void:
 		unit_size = 8.0
 
 	health = max_health
+	# Fold in any module upgrades this unit was spawned with (no-op when the
+	# list is empty; re-run by the spawn/restore paths after upgrades load).
+	recompute_module_stats()
+	# Build the live weapon mounts from the unit's weapon list (no-op when
+	# the .tres lists none — those units use the legacy single-shot path).
+	_setup_weapon_mounts()
+	# Naval wake: enabled flag only — the trail is painted directly in the
+	# unit's own `_draw()` (the proven path the flying shadow uses), so no
+	# separate canvas node is needed.
+	if data and data.movement_layer == UnitData.MovementLayer.NAVAL and data.trail_length > 0:
+		_wake_enabled = true
+
+
+## Recomputes the cached, per-instance stats (move speed, fire-rate cooldown,
+## max health) from the base UnitData plus `applied_upgrades`. Idempotent —
+## always derives from `data`, so it can be re-run whenever the upgrade list
+## changes. Stats that the game reads straight off the shared `data` resource
+## (attack_range, armor, turn speeds, knockback) and behaviour-based modules
+## (afterburner boost, shields, healing drones, cloaking, missiles, siege
+## lock) are NOT handled here — they need per-instance stat overrides / new
+## subsystems and are wired separately.
+func recompute_module_stats() -> void:
+	if data == null:
+		return
+	var spd_mult := 1.0
+	var fire_rate_mult := 1.0
+	var hp_mult := 1.0
+	var ml: int = data.movement_layer
+	var has_armor_plate := false
+	for up in applied_upgrades:
+		match up:
+			&"thruster":
+				# +125% speed for hover/flying units (ground "boost" is a
+				# behaviour handled elsewhere).
+				if ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING:
+					spd_mult *= 2.25
+			&"lift_engine":
+				spd_mult *= 0.75            # -25% speed
+			&"healing_turret_head":
+				spd_mult *= 0.5             # 2× slower
+			&"cooling_system":
+				fire_rate_mult += 1.25      # +125% fire rate per apply
+			&"armor_plate":
+				has_armor_plate = true
+	if has_armor_plate:
+		hp_mult *= 1.25                     # +25% max HP (first apply only)
+	move_speed = data.move_speed * float(main.GRID_SIZE) * spd_mult
+	attack_cooldown = data.attack_speed / maxf(0.01, fire_rate_mult)
+	var new_max: float = data.max_health * hp_mult
+	if not is_equal_approx(new_max, max_health):
+		max_health = new_max
+		if health > max_health:
+			health = max_health
 
 
 ## Applies a status effect to this unit, honouring opposites
 ## (canceling both effects) and affinities (boosting both effects'
 ## modifier magnitudes). If neither relation applies, the effect is
 ## just added/refreshed.
-func apply_status_effect(effect: StatusEffectData) -> void:
+func apply_status_effect(effect: StatusEffectData, duration_override: float = -1.0) -> void:
 	if effect == null or effect.id == &"":
 		return
+	# Source-specific duration (e.g. corroding lasts 8s from an acid blob but
+	# 6s from a fume cloud). Falls back to the resource's own `duration`.
+	var dur: float = duration_override if duration_override > 0.0 else effect.duration
 	# OPPOSITES: applying an effect that this unit already has an
 	# opposite of cancels both (matches the user's default rule).
 	for existing_id in active_statuses.keys():
@@ -338,23 +477,24 @@ func apply_status_effect(effect: StatusEffectData) -> void:
 			active_statuses[existing_id2]["boost"] = 2.0
 	# Add or refresh the effect.
 	if active_statuses.has(effect.id) and effect.refresh_on_reapply:
-		active_statuses[effect.id]["time_left"] = effect.duration
+		active_statuses[effect.id]["time_left"] = dur
 		if effect.stackable:
 			active_statuses[effect.id]["stacks"] = mini(int(active_statuses[effect.id]["stacks"]) + 1, effect.max_stacks)
 	else:
 		active_statuses[effect.id] = {
 			"effect": effect,
-			"time_left": effect.duration,
+			"time_left": dur,
 			"stacks": 1,
 			"boost": boost_new,
+			"dot_acc": 0.0,
 		}
 
 
 func _tick_status_effects(delta: float) -> void:
 	if active_statuses.is_empty():
 		return
-	_status_tick_acc += delta
 	var expire: Array = []
+	var dot_total: float = 0.0
 	for sid in active_statuses:
 		var ent: Dictionary = active_statuses[sid]
 		ent["time_left"] = float(ent["time_left"]) - delta
@@ -362,15 +502,26 @@ func _tick_status_effects(delta: float) -> void:
 			expire.append(sid)
 			continue
 		var se: StatusEffectData = ent["effect"]
-		# DoT tick — tick_damage > 0 dealt every tick_interval.
+		# DoT tick — `tick_damage` dealt once every `tick_interval` seconds.
+		# Per-status accumulator so arbitrary intervals work (a shared 0.5s
+		# accumulator silently dropped any interval longer than 0.5s).
 		if se != null and se.tick_damage > 0.0 and se.tick_interval > 0.0:
-			if _status_tick_acc >= se.tick_interval:
-				var dmg: float = se.tick_damage * float(ent.get("stacks", 1)) * float(ent.get("boost", 1.0))
-				health -= dmg
-	if _status_tick_acc >= 0.5:
-		_status_tick_acc = 0.0
+			var acc: float = float(ent.get("dot_acc", 0.0)) + delta
+			while acc >= se.tick_interval:
+				acc -= se.tick_interval
+				dot_total += se.tick_damage * float(ent.get("stacks", 1)) * float(ent.get("boost", 1.0))
+			ent["dot_acc"] = acc
 	for sid in expire:
 		active_statuses.erase(sid)
+	# DoT bypasses armor (it's already inside the unit) but must still kill.
+	if dot_total > 0.0 and not is_dead:
+		health -= dot_total
+		if health <= 0.0:
+			is_dead = true
+			var asys = main.get_node_or_null("AudioSystem")
+			if asys:
+				asys.play("unit_die", position)
+			_on_death()
 
 
 func _process(delta: float) -> void:
@@ -410,11 +561,23 @@ func _process(delta: float) -> void:
 		_skip_repath_on_unstick = false
 		_tick_water(delta)
 		_tick_aim_angle(delta)
+		# Wake BEFORE facing tick (which consumes the movement delta via
+		# `_prev_position`).
+		_tick_water_wake(delta)
 		_tick_facing_angle(delta)
+		# Mounted weapons track the mouse cursor while the player drives the
+		# unit (that's where its shots will land). aim_only = true: the heads
+		# rotate + reload but DON'T auto-fire — the player's fire input
+		# (handled in unit_manager._update_controlled_unit) pulls the trigger.
+		if has_weapon_mounts():
+			_tick_weapon_mounts(delta, get_global_mouse_position(), true)
 		queue_redraw()
 		return
 	if data and team == UnitData.Team.PLAYER:
 		_player_update(delta)
+	elif is_dummy:
+		# Inert test unit — only acts on explicit player commands.
+		_dummy_update(delta)
 	else:
 		# In-flight engagement: a FEROX unit walking past a vulnerable
 		# player unit shouldn't just keep marching while taking fire.
@@ -447,8 +610,37 @@ func _process(delta: float) -> void:
 	_check_wall_overlap(delta)
 	_tick_water(delta)
 	_tick_aim_angle(delta)
+	# Wake BEFORE facing tick (which consumes the movement delta via
+	# `_prev_position`).
+	_tick_water_wake(delta)
 	_tick_facing_angle(delta)
+	# Mount-driven combat: units with weapons fire through their mounts
+	# each frame, aiming at whatever target the AI above already resolved.
+	# (The legacy single-shot path is suppressed for these units — see
+	# `_try_attack` / `_try_player_combat`.)
+	if has_weapon_mounts():
+		_tick_weapon_mounts(delta, _current_aim_world())
 	queue_redraw()
+
+
+## The world-space point the weapon mounts should aim at this frame, or null
+## when the unit has nothing to shoot. Prefers a live unit target, then a
+## targeted building. Reuses the same target fields the AI / targeting
+## worker already populate, so mounts shoot whatever the unit is engaging.
+func _current_aim_world() -> Variant:
+	if target_unit != null and is_instance_valid(target_unit) and not target_unit.is_dead:
+		return target_unit.position
+	if target_building != null and main.placed_buildings.has(target_building):
+		return main.grid_to_world(target_building) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+	# Repair / point-defense weapons act on their own scan, not a combat
+	# target — give them a sentinel aim (the unit's own position) so their
+	# fire gate (reload only) still triggers. Pure-turret units return null
+	# and simply hold fire.
+	for m in _weapon_mounts:
+		var w: WeaponData = m["weapon"]
+		if w.behavior != WeaponData.Behavior.TURRET:
+			return position
+	return null
 
 
 ## Smoothly rotates `facing_angle` toward the unit's current movement direction.
@@ -525,97 +717,89 @@ func _rotate_toward(from: float, to: float, max_step: float) -> float:
 	return wrapf(from + signf(diff) * max_step, -PI, PI)
 
 
-## One step of tank-style locomotion.
+## One step of tank-style locomotion (Mindustry `rotateMove` model).
 ##
 ## `desired_face` is the world-space angle we want to drive toward.
 ## `forward_step` is the distance the tank can cover this frame (pixels).
 ## `waypoint` / `dist_to_waypoint` are optional: when dist_to_waypoint > 0,
-## the helper will honor path-waypoint snapping/advancement. Pass 0 when
-## there is no path (manual control).
+## the helper honors path-waypoint snapping/advancement. Pass 0 when there
+## is no path (manual control).
 ##
-## Behavior:
-## - When turn_radius > 0, the tank arcs around a pivot offset perpendicular
-##   to its current facing. Rotation and translation happen together at a
-##   rate determined by forward_step / turn_radius, so the chassis traces a
-##   real curve (matches the labeled sketch the player drew).
-## - When turn_radius <= 0, the tank pivots in place at body_turn_speed
-##   until aligned, then drives forward. Same fallback as the old model.
+## Behaviour — copied from Mindustry's `UnitComp.rotateMove`:
+##   The tank ALWAYS thrusts along its CURRENT facing (never the target
+##   direction), while simultaneously rotating its facing toward
+##   `desired_face` at `body_turn_speed`. Because thrust points along the
+##   body and the body sweeps toward the goal, the path is a smooth ARC —
+##   the unit never stops to pivot in place. When the heading error is
+##   large the forward thrust is scaled down (so a tank facing ~backwards
+##   barely creeps while it swings around) but never fully stops, matching
+##   the emergent `cos(error)`-ish slowdown Mindustry gets from drag.
+##   `turn_radius` is no longer used (the arc emerges from the turn rate vs
+##   forward speed); it's kept on the data model for authoring back-compat.
 func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector2, dist_to_waypoint: float) -> void:
-	var angle_err: float = wrapf(desired_face - facing_angle, -PI, PI)
-	var turn_radius: float = data.turn_radius if data else 0.0
 	var turn_speed: float = data.body_turn_speed if data and data.body_turn_speed > 0.0 else 2.0
-	# Mindustry-style anti-stuck guards apply here too — tank-steering
-	# units share the same blocked-frames → fast repath escalation as
-	# omnidirectional units. Tanks can't perpendicular-slide (they're
-	# locked to their facing axis), so the rescue is just "reject the
-	# step + bump the counter". The wider `_check_stuck` / wall-overlap
-	# rescue further down catches the cases the fast repath misses.
 	var ml_walk: int = data.movement_layer if data else 0
+	# Radius-aware face test (matches the omni resolver) so a tank's flank
+	# can't clip into a wall. Tanks are locked to their facing axis (no free
+	# slide), so a blocked step is simply rejected while rotation continues.
 	var step_walkable := func(p: Vector2) -> bool:
 		return unit_manager == null \
-			or unit_manager.is_world_pos_walkable(p, ml_walk, team)
+			or unit_manager.is_circle_walkable(p, unit_size, ml_walk, team)
+
+	# 1) Rotate the chassis toward the desired heading (always, every frame).
+	facing_angle = _rotate_toward(facing_angle, desired_face, turn_speed * get_process_delta_time())
+
+	# 2) Thrust at FULL speed along the current (post-rotation) facing — NOT
+	#    scaled by how aligned we are. This is the load-bearing line from
+	#    Mindustry's `rotateMove`: the tank always drives forward, and the
+	#    arc emerges because the heading sweeps toward the goal while the
+	#    body keeps rolling. The radius of that arc is `speed / turn_rate`,
+	#    so a WIDER arc comes from a LOWER `body_turn_speed` (a higher turn
+	#    speed pins the tank into a tight spin — the bug you saw). The old
+	#    cos(err) scaling zeroed thrust past 90°, which is exactly the
+	#    "one side pinned, spinning in place" feel; removed.
+	var err: float = absf(wrapf(desired_face - facing_angle, -PI, PI))
 	var moved: bool = false
 
-	# Already aligned (or close enough): drive straight forward.
-	if absf(angle_err) < 0.01 or forward_step <= 0.0:
-		var straight_dir: Vector2 = Vector2.RIGHT.rotated(facing_angle)
-		if dist_to_waypoint > 0.0 and forward_step >= dist_to_waypoint:
-			if step_walkable.call(waypoint):
-				position = waypoint
-				path_index += 1
-				moved = true
-		else:
-			var cand: Vector2 = position + straight_dir * forward_step
-			if step_walkable.call(cand):
-				position = cand
-				moved = true
-		_tank_track_blocked(moved)
+	if forward_step <= 0.0:
+		# No forward budget this frame (e.g. paused movement) — rotation only.
+		_tank_track_blocked(false)
 		return
 
-	if turn_radius > 0.0:
-		# Arc around a pivot perpendicular to the chassis. `signf(angle_err)`
-		# picks which side the pivot sits on so the tank curves toward the
-		# desired heading rather than away from it.
-		var side_dir: Vector2 = Vector2.RIGHT.rotated(facing_angle + signf(angle_err) * PI / 2.0)
-		var pivot: Vector2 = position + side_dir * turn_radius
-		# Angular step from arc length; clamp to remaining error AND to the
-		# configured body turn speed so the unit can't out-spin its authored
-		# rotation limit on tight curves.
-		var arc_step: float = forward_step / turn_radius
-		var limit_step: float = turn_speed * get_process_delta_time() if turn_speed > 0.0 else arc_step
-		var step_size: float = minf(absf(angle_err), minf(arc_step, limit_step))
-		var d_angle: float = step_size * signf(angle_err)
-		var arc_pos: Vector2 = pivot + (position - pivot).rotated(d_angle)
-		if step_walkable.call(arc_pos):
-			position = arc_pos
-			facing_angle = wrapf(facing_angle + d_angle, -PI, PI)
+	# Anti-orbit waypoint advance. A tank thrusting at full speed while
+	# turning at `turn_speed` has a minimum turning-circle radius of
+	# `move_speed / turn_speed`. If a waypoint is closer than that, the tank
+	# physically CAN'T curve tight enough to land on it and would orbit it
+	# forever (the "spins in circles for ages" bug). So once we're within a
+	# generous proximity (≈ the turning radius), consider the waypoint
+	# reached and advance to the next — the tank then re-aims further down
+	# the path and gets pulled along instead of circling. This is normal
+	# path-following lookahead; corner-cutting on open water is fine.
+	if dist_to_waypoint > 0.0:
+		var arc_radius: float = move_speed / maxf(turn_speed, 0.05)
+		var advance_tol: float = maxf(unit_size, arc_radius * 0.85)
+		# Don't skip the FINAL waypoint by proximity — the arrival check in
+		# `_follow_path` handles stopping there; skipping it would leave the
+		# unit drifting past its destination.
+		var is_final: bool = path_index >= path.size() - 1
+		if not is_final and dist_to_waypoint <= advance_tol:
+			path_index += 1
+			moved = true   # progress — re-aim next frame
+		elif forward_step >= dist_to_waypoint and step_walkable.call(waypoint):
+			position = waypoint
+			path_index += 1
 			moved = true
-		else:
-			# Walls along the arc — still rotate in place so the tank's
-			# heading converges toward the desired direction, but don't
-			# translate. Lets the unit pivot away from a wall it just
-			# drove into instead of locking up.
-			facing_angle = wrapf(facing_angle + d_angle, -PI, PI)
-		_tank_track_blocked(moved)
-		return
 
-	# turn_radius == 0: pivot in place until aligned, then drive.
-	facing_angle = _rotate_toward(facing_angle, desired_face, turn_speed * get_process_delta_time())
-	var err_after: float = absf(wrapf(desired_face - facing_angle, -PI, PI))
-	if err_after < deg_to_rad(10.0):
+	if not moved:
 		var fwd: Vector2 = Vector2.RIGHT.rotated(facing_angle)
-		if dist_to_waypoint > 0.0 and forward_step >= dist_to_waypoint:
-			if step_walkable.call(waypoint):
-				position = waypoint
-				path_index += 1
-				moved = true
-		else:
-			var cand2: Vector2 = position + fwd * forward_step
-			if step_walkable.call(cand2):
-				position = cand2
-				moved = true
-	else:
-		# Still rotating into alignment — not "blocked", just pivoting.
+		var cand: Vector2 = position + fwd * forward_step
+		if step_walkable.call(cand):
+			position = cand
+			moved = true
+
+	# Rotating-toward-goal still counts as progress (not stuck) so a tank
+	# swinging around a corner doesn't trigger the repath timer.
+	if not moved and err > deg_to_rad(8.0):
 		moved = true
 	_tank_track_blocked(moved)
 
@@ -675,9 +859,11 @@ func _find_nearest_hostile_pos() -> Variant:
 func _tick_water(delta: float) -> void:
 	if is_dead or data == null:
 		return
-	# Hover (2) and Flying (3) ignore water entirely.
+	# Hover (2) and Flying (3) ignore water entirely. Naval (4) LIVES in
+	# water — it never drowns (and can't leave the water anyway).
 	var ml: int = data.movement_layer
-	if ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING:
+	if ml == UnitData.MovementLayer.HOVER or ml == UnitData.MovementLayer.FLYING \
+			or ml == UnitData.MovementLayer.NAVAL:
 		_water_time = 0.0
 		return
 	var terrain = _terrain_ref()
@@ -703,6 +889,215 @@ func _tick_water(delta: float) -> void:
 	_water_time += delta
 	if _water_time >= WATER_DROWN_TIME:
 		take_damage(max_health)  # Fatal — drowned.
+
+
+## Per-frame naval wake update — faithful port of Mindustry's
+## `WaterMoveComp.update`. For each side: compute the spawn point at
+## (±waveTrailX, waveTrailY) rotated by the hull heading (so the ribbon
+## curves on turns), and feed it to that side's trail with width 1 when
+## that exact point is over navigable water (else 0). No-op for non-naval.
+## True when the unit (plus a generous trail-length margin) is within the
+## camera view — used to skip the expensive wake DRAW for off-screen units.
+## The tick keeps running regardless so the ribbon stays continuous when the
+## unit scrolls back into view.
+func _wake_on_screen() -> bool:
+	var cam := get_viewport().get_camera_2d() if is_inside_tree() else null
+	if cam == null:
+		return true
+	var vp: Vector2 = get_viewport_rect().size
+	var zoom: Vector2 = cam.zoom if cam.zoom != Vector2.ZERO else Vector2.ONE
+	var half: Vector2 = vp / (2.0 * zoom)
+	var c: Vector2 = cam.get_screen_center_position()
+	# Margin = trail span + a tile, so a long wake trailing onto screen from
+	# an off-screen unit still draws.
+	var margin: float = float(data.trail_length) * 4.0 + main.GRID_SIZE
+	var d: Vector2 = (position - c).abs()
+	return d.x <= half.x + margin and d.y <= half.y + margin
+
+
+func _tick_water_wake(delta: float) -> void:
+	if not _wake_enabled or data == null or data.trail_length <= 0:
+		return
+	var wtx: float = data.wave_trail_x
+	var wty: float = data.wave_trail_y
+	# Smooth the heading used for the trail origin so a jittery (tank-steered)
+	# chassis that rapidly wobbles its facing doesn't carve a zig-zag wake.
+	# Ease the wake's reference angle toward the live facing.
+	if _wake_angle == -999.0:
+		_wake_angle = facing_angle
+	_wake_angle = _rotate_toward(_wake_angle, facing_angle, 6.0 * delta)
+	var rot_off: float = _wake_angle - PI / 2.0   # local +y = forward
+	for side in range(2):
+		var sgn: float = -1.0 if side == 0 else 1.0
+		var p: Vector2 = position + Vector2(wtx * sgn, wty).rotated(rot_off)
+		# Naval units are always on water, so the trail is always live
+		# (width 1). No per-point water gate — that's only meaningful for
+		# amphibious units that leave the water, which these can't.
+		_trail_update(side, p.x, p.y, 1.0, delta)
+	# Stern foam rings — expanding circle OUTLINES emitted on a timer while the
+	# unit is actually moving. Sized to the unit.
+	var moving: bool = position.distance_to(_prev_position) > 0.5
+	if moving:
+		_wake_foam_accum += delta
+		while _wake_foam_accum >= _WAKE_FOAM_INTERVAL:
+			_wake_foam_accum -= _WAKE_FOAM_INTERVAL
+			var stern: Vector2 = position + Vector2(0.0, wty).rotated(rot_off)
+			_wake_foam.push_back({
+				"pos": stern + Vector2(randf_range(-unit_size * 0.4, unit_size * 0.4),
+					randf_range(-unit_size * 0.3, unit_size * 0.3)).rotated(rot_off),
+				"age": 0.0,
+				"r": unit_size * randf_range(0.25, 0.45),
+			})
+	else:
+		_wake_foam_accum = 0.0
+	for fi in range(_wake_foam.size() - 1, -1, -1):
+		_wake_foam[fi]["age"] += delta
+		if float(_wake_foam[fi]["age"]) >= _WAKE_FOAM_LIFE:
+			_wake_foam.remove_at(fi)
+	# Wake colour is a fixed foam tint (see `_wake_color`); no per-frame
+	# water-tile recolour.
+	queue_redraw()
+
+
+## Port of Mindustry `Trail.update(x, y, width)`: appends points to the
+## side's flat (x,y,w) history on a Time.delta counter, trimming to
+## `trail_length`, interpolating intermediate points across skipped frames.
+func _trail_update(side: int, x: float, y: float, w: float, delta: float) -> void:
+	var length: int = data.trail_length
+	var pts: PackedFloat32Array = _wake_left if side == 0 else _wake_right
+	var last: Vector3 = _wl_last if side == 0 else _wr_last
+	var counter: float = _wl_counter if side == 0 else _wr_counter
+
+	counter += delta * _MINDUSTRY_TPS
+	var count: int = int(counter)
+	counter -= float(count)
+
+	if count > 0:
+		# Trim old points so the buffer holds at most `length` triples.
+		var to_remove: int = pts.size() + (count - 1 - length) * 3
+		if to_remove > 0 and pts.size() > 0:
+			var rm: int = mini(to_remove, pts.size())
+			pts = pts.slice(rm)
+		if count == 1 or last.x == -1.0:
+			pts.append_array(PackedFloat32Array([x, y, w]))
+		else:
+			for i in range(count):
+				var f: float = float(i + 1) / float(count)
+				pts.append_array(PackedFloat32Array([
+					lerpf(last.x, x, f), lerpf(last.y, y, f), lerpf(last.z, w, f),
+				]))
+
+	# Update last-state regardless (so the end-cap joins at the live point).
+	var new_lastangle: float = -_angle_rad(x, y, last.x, last.y)
+	if side == 0:
+		_wake_left = pts
+		_wl_last = Vector3(x, y, w)
+		_wl_lastangle = new_lastangle
+		_wl_counter = counter
+	else:
+		_wake_right = pts
+		_wr_last = Vector3(x, y, w)
+		_wr_lastangle = new_lastangle
+		_wr_counter = counter
+
+
+## atan2(y2-y1, x2-x1) — matches Arc's `Angles.angleRad(x,y,x2,y2)`.
+func _angle_rad(x1: float, y1: float, x2: float, y2: float) -> float:
+	return atan2(y2 - y1, x2 - x1)
+
+
+## Paints both side ribbons + stern foam rings on the unit's own canvas
+## (called from `_draw`). Foam rings draw under the ribbons.
+func _draw_water_wake() -> void:
+	if not _wake_enabled or data == null:
+		return
+	# Stern foam — small circle OUTLINES (rings) that grow only slightly as
+	# they age out, so they read as little dissipating ripples rather than
+	# big expanding bubbles.
+	var o: Vector2 = position
+	var ring_w: float = maxf(1.0, unit_size * 0.08)
+	for f in _wake_foam:
+		var t: float = clampf(float(f["age"]) / _WAKE_FOAM_LIFE, 0.0, 1.0)
+		var r: float = float(f["r"]) * (1.0 + t * 0.5)   # gentle growth
+		var a: float = (1.0 - t) * _wake_color.a * 0.8
+		if a > 0.01 and r > 1.0:
+			draw_arc((f["pos"] as Vector2) - o, r, 0.0, TAU, 20,
+				Color(_wake_color.r, _wake_color.g, _wake_color.b, a), ring_w, true)
+	var width: float = data.trail_scl
+	_trail_draw(0, _wake_color, width)
+	_trail_draw(1, _wake_color, width)
+
+
+## Draws one side ribbon. Builds a centreline of history points (tail →
+## hull), gives each point a BISECTOR normal (averaged from its adjacent
+## segment directions) so consecutive quads share their edge vertices —
+## this is what kills the bow-tie / disconnected-segment artefact on sharp
+## turns that a per-segment perpendicular produces. Width is MONOTONIC:
+## widest at the hull (newest point), tapering smoothly to a point at the
+## tail, so the ribbon never bulges wider than where it leaves the unit.
+func _trail_draw(side: int, color: Color, width: float) -> void:
+	var pts: PackedFloat32Array = _wake_left if side == 0 else _wake_right
+	var last: Vector3 = _wl_last if side == 0 else _wr_last
+	var counter: float = _wl_counter if side == 0 else _wr_counter
+	var length: int = data.trail_length
+	var n: int = pts.size()
+	if n < 6:
+		return
+	var o: Vector2 = position
+
+	# 1) Build the local-space centreline (tail → hull), appending the live
+	#    `last` head point so the ribbon reaches the unit.
+	var cl: PackedVector2Array = PackedVector2Array()
+	var m: int = n / 3
+	for j in range(m):
+		var px: float = pts[j * 3]
+		var py: float = pts[j * 3 + 1]
+		# Slide the tail point forward by `counter` so it doesn't pop a whole
+		# point each frame (matches Mindustry's end-cap lerp).
+		if j == 0 and m >= length - 1 and m >= 2:
+			px = lerpf(px, pts[3], counter)
+			py = lerpf(py, pts[4], counter)
+		cl.append(Vector2(px, py) - o)
+	cl.append(Vector2(last.x, last.y) - o)
+	var c: int = cl.size()
+	if c < 2:
+		return
+
+	# 2) Build a single interleaved vertex strip (left0, right0, left1, ...)
+	#    with per-point bisector normals (shared edges = no gaps on turns)
+	#    and monotonic half-width (0 at tail → max at hull). The WHOLE ribbon
+	#    is then submitted as ONE triangle array — a single draw call per side
+	#    instead of one per segment (the old ~140-calls-per-side was the lag).
+	var verts: PackedVector2Array = PackedVector2Array()
+	verts.resize(c * 2)
+	for k in range(c):
+		var frac: float = float(k) / float(c - 1)   # 0 tail → 1 hull
+		var hw: float = width * frac
+		var tdir: Vector2 = Vector2.ZERO
+		if k > 0:
+			tdir += (cl[k] - cl[k - 1]).normalized()
+		if k < c - 1:
+			tdir += (cl[k + 1] - cl[k]).normalized()
+		if tdir.length_squared() < 0.0001:
+			tdir = Vector2.RIGHT
+		tdir = tdir.normalized()
+		var nrm: Vector2 = Vector2(-tdir.y, tdir.x) * hw
+		verts[k * 2] = cl[k] + nrm
+		verts[k * 2 + 1] = cl[k] - nrm
+
+	# 3) Index the strip as two triangles per segment, one batched submission.
+	var idx: PackedInt32Array = PackedInt32Array()
+	idx.resize((c - 1) * 6)
+	var ii: int = 0
+	for k in range(c - 1):
+		var b: int = k * 2
+		idx[ii] = b;       idx[ii + 1] = b + 1; idx[ii + 2] = b + 2
+		idx[ii + 3] = b + 1; idx[ii + 4] = b + 3; idx[ii + 5] = b + 2
+		ii += 6
+	var cols: PackedColorArray = PackedColorArray()
+	cols.resize(verts.size())
+	cols.fill(color)
+	RenderingServer.canvas_item_add_triangle_array(get_canvas_item(), idx, verts, cols)
 
 
 ## Player-unit combined movement + combat tick.
@@ -1022,49 +1417,23 @@ func _follow_path(delta: float) -> void:
 		_blocked_frames = 0
 	else:
 		var ml_walk: int = data.movement_layer if data else 0
-		var moved_this_frame: bool = false
-		# Helper closure: ground-truth walkability for a candidate pos
-		# (shield-aware via `team`). Repeated below for the original
-		# direction, the separation-modified direction, and the two
-		# perpendicular slide attempts.
-		var step_walkable := func(p: Vector2) -> bool:
-			return unit_manager == null \
-				or unit_manager.is_world_pos_walkable(p, ml_walk, team)
-		var candidate: Vector2 = position + move_dir * step
-		if move_dir == direction or step_walkable.call(candidate):
-			if step_walkable.call(candidate):
-				position = candidate
-				moved_this_frame = true
+		# Mindustry-style radius-aware, axis-separated collision. We hand
+		# the desired step (separation-modified) to `resolve_move`, which
+		# tries the X displacement then the Y displacement against the
+		# unit's bounding-box faces — so a diagonal move into a wall keeps
+		# only the unblocked axis and the unit SLIDES along the wall face
+		# instead of snagging its corner on the cell edge or freezing nose-
+		# first. `unit_size` is the collision half-extent. The separate
+		# perpendicular-slide hack is no longer needed — sliding is now
+		# intrinsic to the resolver.
+		var desired: Vector2 = move_dir * step
+		var resolved: Vector2 = position
+		if unit_manager != null:
+			resolved = unit_manager.resolve_move(position, desired, unit_size, ml_walk, team)
 		else:
-			# Separation-modified step would land on a wall — fall back
-			# to the unmodified path step, gated on the same team-
-			# aware walkability so hostile shields still block.
-			var fallback: Vector2 = position + direction * step
-			if step_walkable.call(fallback):
-				position = fallback
-				moved_this_frame = true
-		# Mindustry-style wall slide. When the chosen step couldn't be
-		# taken (wall placed mid-path, blocked by hostile shield, an
-		# obstructing unit), try sliding along the perpendicular axis
-		# at half speed before giving up. This is what stops a unit
-		# from freezing nose-against-the-wall for 1.5 s waiting on the
-		# stuck timer to fire — it scoots sideways and the next path
-		# tick finds an open lane.
-		if not moved_this_frame and step > 0.0:
-			var perp := Vector2(-direction.y, direction.x)
-			# Pick the perpendicular side closer to the next waypoint so
-			# we slide TOWARD progress rather than away from it.
-			var lookahead: Vector2 = target_pos
-			if path_index + 1 < path.size():
-				lookahead = path[path_index + 1]
-			if perp.dot(lookahead - position) < 0.0:
-				perp = -perp
-			for side in [perp, -perp]:
-				var slide: Vector2 = position + side * (step * 0.5)
-				if step_walkable.call(slide):
-					position = slide
-					moved_this_frame = true
-					break
+			resolved = position + desired
+		var moved_this_frame: bool = resolved.distance_squared_to(position) > 0.0001
+		position = resolved
 		# Track the "actually got nowhere this frame" run for fast
 		# repath escalation, separate from the spatial stuck timer.
 		if moved_this_frame:
@@ -1118,7 +1487,16 @@ func _compute_separation_force() -> Vector2:
 	# Distance to our own final goal — used to break ties when two units
 	# in a same-direction race need to decide who yields.
 	var my_goal_dist: float = _goal_distance()
-	var all_units: Array = unit_manager.enemies + unit_manager.player_units
+	# Only consider units in the local neighbourhood (spatial hash) instead
+	# of every unit on the map. The 3×3-cell query is a superset of every
+	# unit within `sep_radius`, so behaviour is identical to the old full
+	# scan — just O(local) instead of O(n²). Falls back to the full list if
+	# the manager lacks the hash (older builds / safety).
+	var all_units: Array
+	if unit_manager.has_method("get_nearby_units"):
+		all_units = unit_manager.get_nearby_units(position, ml)
+	else:
+		all_units = unit_manager.enemies + unit_manager.player_units
 	for other in all_units:
 		if other == self or not is_instance_valid(other) or other.is_dead:
 			continue
@@ -1257,6 +1635,89 @@ func _register_pushback() -> void:
 		_pushback_window = 0.0
 
 
+# =========================
+# DUMMY TEST UNIT
+# =========================
+
+## Per-frame update for a dummy (Payload-Source enemy). Does nothing unless
+## commanded. "idle" obeys r-click move orders only; "attack_block" /
+## "attack_player" path to a target and fire Ferox projectiles via the
+## normal `_try_attack` path.
+func _dummy_update(delta: float) -> void:
+	if dummy_mode != "attack_block" and dummy_mode != "attack_player":
+		# Idle: follow an active move order, otherwise stand still.
+		if move_target != null and path.size() > 0 and path_index < path.size():
+			_follow_path(delta)
+		elif move_target != null:
+			move_target = null
+		return
+	move_target = null
+	# (Re)acquire a target when we have none / it's gone or no longer hostile.
+	if target_building == null or not main.placed_buildings.has(target_building) \
+			or not _is_valid_attack_target(target_building):
+		target_building = _dummy_pick_target()
+		path = PackedVector2Array()
+		path_index = 0
+		_dummy_repath_accum = 1.0
+	if target_building == null:
+		return
+	var bworld: Vector2 = main.grid_to_world(target_building) \
+		+ Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+	var atk_range: float = maxf(data.attack_range if data else main.GRID_SIZE * 0.5, main.GRID_SIZE * 1.5)
+	if position.distance_to(bworld) > atk_range:
+		_dummy_repath_accum += delta
+		if (path.size() == 0 or path_index >= path.size()) and _dummy_repath_accum >= 0.5:
+			_dummy_repath_accum = 0.0
+			unit_manager.request_path_to_position_async_with_target(self, bworld, target_building)
+		if path.size() > 0 and path_index < path.size():
+			_follow_path(delta)
+	else:
+		if path.size() > 0:
+			path = PackedVector2Array()
+			path_index = 0
+		# In range — fire FEROX-faction projectiles on the attack cooldown.
+		# Bypasses the global `enemies_attack` gate (this is a commanded test
+		# unit) and never re-targets, unlike `_try_attack`.
+		attack_timer -= delta
+		if attack_timer <= 0.0:
+			attack_timer = attack_cooldown
+			var combat = _combat_sys_ref()
+			if data and data.attack_range > 0 and combat:
+				combat.enemy_ranged_attack(self, target_building, damage, 300.0, unit_color.lightened(0.3))
+			else:
+				main.damage_building(target_building, damage)
+
+
+## Picks the dummy's attack target: the nearest Lumina core for
+## "attack_player", otherwise the nearest Lumina building of any kind.
+func _dummy_pick_target() -> Variant:
+	if dummy_mode == "attack_player" and main.has_method("get_lumina_core_anchors"):
+		var best_core: Variant = null
+		var best_cd := INF
+		for c in main.get_lumina_core_anchors():
+			var cw: Vector2 = main.grid_to_world(c)
+			var d := position.distance_to(cw)
+			if d < best_cd:
+				best_cd = d
+				best_core = c
+		if best_core != null:
+			return best_core
+	# Nearest Lumina building fallback / "attack_block".
+	var best: Variant = null
+	var best_d := INF
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if anchor != cell:
+			continue
+		if not _is_valid_attack_target(anchor):
+			continue
+		var d := position.distance_to(main.grid_to_world(anchor))
+		if d < best_d:
+			best_d = d
+			best = anchor
+	return best
+
+
 func _try_attack(delta: float) -> void:
 	if not main.enemies_attack:
 		return
@@ -1290,6 +1751,12 @@ func _try_attack(delta: float) -> void:
 
 	attack_timer = attack_cooldown
 
+	# Mount-equipped units fire through their weapon mounts (ticked in
+	# _process) — skip the legacy single-shot here so we don't double-fire.
+	# The target gate above still runs so the unit stops + holds at range.
+	if has_weapon_mounts():
+		return
+
 	# Check if this enemy has ranged attacks
 	# attack_range > 0 in the .tres means it shoots projectiles
 	if data and data.attack_range > 0:
@@ -1308,6 +1775,393 @@ func _try_attack(delta: float) -> void:
 	else:
 		# MELEE ATTACK: Direct damage (the old punch behavior)
 		main.damage_building(target_building, damage)
+
+
+# =========================
+# WEAPON MOUNTS (Mindustry-style multi-weapon system)
+# =========================
+
+## True if this unit drives its combat through the mount system rather than
+## the legacy single-shot attack path. Set when the .tres lists weapons.
+func has_weapon_mounts() -> bool:
+	return not _weapon_mounts.is_empty()
+
+
+## Builds `_weapon_mounts` from `data.weapons`. Each weapon yields one mount,
+## or two cross-linked mirror mounts (offset.x negated, sprite flipped, reload
+## doubled so the pair keeps the single-weapon cadence) — exactly Mindustry's
+## data-time mirror expansion. Live state starts ready-to-fire.
+func _setup_weapon_mounts() -> void:
+	_weapon_mounts.clear()
+	if data == null or data.weapons.is_empty():
+		return
+	for w in data.weapons:
+		if w == null:
+			continue
+		var base_reload: float = w.effective_reload(attack_cooldown)
+		var barrels: int = maxi(1, w.barrel_count)
+		if w.mirror:
+			# Two mounts. Each runs on a DOUBLED reload, but the second
+			# starts half a cycle ahead — so they fire on alternating beats
+			# and the pair's combined cadence equals the single-weapon
+			# `base_reload`. This needs no runtime "whose turn" bookkeeping:
+			# each mount just fires whenever its own reload hits zero.
+			_weapon_mounts.append({
+				"weapon": w, "offset": w.offset, "muzzle": w.muzzle_offset,
+				"flip": false, "rotation": facing_angle, "recoil": 0.0,
+				"reload": 0.0, "reload_max": base_reload * 2.0,
+				"barrels": barrels, "barrel_spacing": w.barrel_spacing, "barrel_idx": 0,
+			})
+			_weapon_mounts.append({
+				"weapon": w,
+				"offset": Vector2(-w.offset.x, w.offset.y),
+				"muzzle": Vector2(-w.muzzle_offset.x, w.muzzle_offset.y),
+				"flip": true, "rotation": facing_angle, "recoil": 0.0,
+				"reload": base_reload, "reload_max": base_reload * 2.0,
+				"barrels": barrels, "barrel_spacing": w.barrel_spacing, "barrel_idx": 0,
+			})
+		else:
+			_weapon_mounts.append({
+				"weapon": w, "offset": w.offset, "muzzle": w.muzzle_offset,
+				"flip": false, "rotation": facing_angle, "recoil": 0.0,
+				"reload": 0.0, "reload_max": base_reload,
+				"barrels": barrels, "barrel_spacing": w.barrel_spacing, "barrel_idx": 0,
+			})
+
+
+## World position of a mount given its local offset and the unit's facing.
+## `facing_angle` is the chassis "up" direction; local +y points forward
+## (toward the sprite top), local +x is the chassis's right, matching the
+## authoring convention. We rotate by (facing_angle - PI/2) so local +y maps
+## onto the chassis forward vector.
+func _mount_world_pos(local: Vector2) -> Vector2:
+	return position + local.rotated(facing_angle - PI / 2.0)
+
+
+# =========================
+# PAYLOAD STATE CAPTURE / RESTORE
+# =========================
+# A unit that becomes a payload (entered a fabricator / refabricator /
+# upgrader / reconstructor / assembler / mass driver / picked up by a crane)
+# must round-trip ALL of its runtime pose + command state so it (a) renders
+# in-building exactly as it would in the world and (b) resumes its orders
+# when redeployed — and survives a save/load while held. These two helpers
+# are the single source of truth for that; every capture/restore site calls
+# them instead of hand-building partial dicts.
+
+## Serialises this unit's full runtime state into the given payload dict
+## (creating the JSON-safe fields). Stores pose (facing/aim), per-mount
+## turret rotations, and command/target state. Vector/grid targets are
+## stored as plain arrays so they survive JSON save.
+func capture_payload_state(payload: Dictionary) -> void:
+	payload["type"] = "unit"
+	payload["unit_id"] = String(data.id) if data else ""
+	payload["health"] = health
+	payload["team"] = int(team)
+	payload["applied_upgrades"] = applied_upgrades.duplicate()
+	payload["facing_angle"] = facing_angle
+	payload["aim_angle"] = aim_angle
+	payload["hold_fire"] = hold_fire
+	payload["is_rallying"] = is_rallying
+	payload["assist_player_build"] = assist_player_build
+	payload["mining_request_id"] = String(mining_request_id)
+	payload["manual_target_building_block_id"] = String(manual_target_building_block_id)
+	# Per-mount turret rotations (and recoil) so the heads keep their aim.
+	var mr: Array = []
+	for m in _weapon_mounts:
+		mr.append({"rotation": float(m.get("rotation", facing_angle)),
+			"recoil": float(m.get("recoil", 0.0))})
+	payload["mount_rotations"] = mr
+	# Command / target state. Live-unit refs can't serialise, so store the
+	# stable handles: a building target as its grid cell, a move target as
+	# [x, y]. Unit refs are dropped (they may not exist on redeploy) — the
+	# unit re-acquires via auto-combat.
+	if move_target is Vector2:
+		payload["move_target"] = [move_target.x, move_target.y]
+	if target_building is Vector2i:
+		payload["target_building"] = [target_building.x, target_building.y]
+	if manual_target_building is Vector2i:
+		payload["manual_target_building"] = [manual_target_building.x, manual_target_building.y]
+
+
+## Restores runtime state previously captured by `capture_payload_state`
+## onto this (freshly-spawned) unit. Safe against missing keys (older saves
+## / partial payloads). Call AFTER the unit's `_ready` + `_setup_weapon_mounts`.
+func apply_payload_state(payload: Dictionary) -> void:
+	if payload.has("health"):
+		health = float(payload["health"])
+	if payload.has("applied_upgrades"):
+		applied_upgrades.clear()
+		for up in payload["applied_upgrades"]:
+			applied_upgrades.append(StringName(up))
+		if has_method("recompute_module_stats"):
+			recompute_module_stats()
+	if payload.has("facing_angle"):
+		facing_angle = float(payload["facing_angle"])
+		# Mark facing as already seeded so `_tick_facing_angle` doesn't
+		# reset it to a default on the unit's first frame.
+		_facing_initialized = true
+	if payload.has("aim_angle"):
+		aim_angle = float(payload["aim_angle"])
+	hold_fire = bool(payload.get("hold_fire", false))
+	is_rallying = bool(payload.get("is_rallying", false))
+	assist_player_build = bool(payload.get("assist_player_build", false))
+	mining_request_id = StringName(payload.get("mining_request_id", ""))
+	manual_target_building_block_id = StringName(payload.get("manual_target_building_block_id", ""))
+	# Restore per-mount turret rotations onto the rebuilt mounts (index-matched).
+	var mr: Array = payload.get("mount_rotations", [])
+	for i in range(mini(mr.size(), _weapon_mounts.size())):
+		var e: Dictionary = mr[i]
+		_weapon_mounts[i]["rotation"] = float(e.get("rotation", facing_angle))
+		_weapon_mounts[i]["recoil"] = float(e.get("recoil", 0.0))
+	# Command / target state.
+	if payload.has("move_target"):
+		var mv: Array = payload["move_target"]
+		if mv.size() == 2:
+			move_target = Vector2(float(mv[0]), float(mv[1]))
+	if payload.has("target_building"):
+		var tb: Array = payload["target_building"]
+		if tb.size() == 2:
+			target_building = Vector2i(int(tb[0]), int(tb[1]))
+	if payload.has("manual_target_building"):
+		var mtb: Array = payload["manual_target_building"]
+		if mtb.size() == 2:
+			manual_target_building = Vector2i(int(mtb[0]), int(mtb[1]))
+
+
+## Per-frame mount tick: aim, decay reload/recoil, and fire when ready and
+## on-target. Called from `_process` for units that have mounts (replacing
+## the legacy attack call for those units). `aim_world` is the current
+## combat target point (or null when there's nothing to shoot).
+## `aim_only` keeps the heads tracking + reloading WITHOUT auto-firing —
+## used under manual control, where the player's fire button drives shots
+## (see `fire_weapon_mounts_at`).
+func _tick_weapon_mounts(delta: float, aim_world: Variant, aim_only: bool = false) -> void:
+	if _weapon_mounts.is_empty():
+		return
+	var rot_step: float = deg_to_rad(0.0)
+	for i in range(_weapon_mounts.size()):
+		var m: Dictionary = _weapon_mounts[i]
+		var w: WeaponData = m["weapon"]
+		# Decay reload + recoil.
+		m["reload"] = maxf(0.0, float(m["reload"]) - delta)
+		if float(m["recoil"]) > 0.0:
+			m["recoil"] = maxf(0.0, float(m["recoil"]) - delta * (w.recoil * 6.0))
+		var mount_world: Vector2 = _mount_world_pos(m["offset"])
+		# Desired aim angle for this mount.
+		var has_target: bool = aim_world is Vector2
+		var desired: float = float(m["rotation"])
+		if w.rotate and has_target:
+			desired = (aim_world - mount_world).angle()
+		elif not w.rotate:
+			# Locked to chassis: forward + base_rotation.
+			desired = (facing_angle - PI / 2.0) + w.base_rotation
+		# Rotate the mount toward the desired angle at rotate_speed.
+		if w.rotate:
+			rot_step = deg_to_rad(w.rotate_speed) * delta
+			m["rotation"] = _rotate_toward(float(m["rotation"]), desired, rot_step)
+		else:
+			m["rotation"] = desired
+		_weapon_mounts[i] = m
+		# Fire?  (Manual control aims only — the player's input fires.)
+		if aim_only:
+			continue
+		if not has_target:
+			continue
+		if float(m["reload"]) > 0.0001:
+			continue
+		# On-target gate.
+		var aim_err: float = absf(wrapf(desired - float(m["rotation"]), -PI, PI))
+		if aim_err > deg_to_rad(w.shoot_cone):
+			continue
+		# Range gate.
+		var rng: float = w.effective_range(data.attack_range if data else 0.0)
+		if mount_world.distance_to(aim_world) > rng:
+			continue
+		_fire_weapon_mount(i, mount_world, aim_world)
+
+
+## Player-driven fire: fires every ready mount toward `aim_world` (the mouse
+## under manual control). Honors each mount's own reload + aim cone, so the
+## mirrored pair still alternates and the heads must be roughly on-target.
+## Returns true if at least one mount fired. The mounts must already have
+## been aimed this frame via `_tick_weapon_mounts(..., aim_only=true)`.
+func fire_weapon_mounts_at(aim_world: Vector2) -> bool:
+	if _weapon_mounts.is_empty():
+		return false
+	var fired := false
+	for i in range(_weapon_mounts.size()):
+		var m: Dictionary = _weapon_mounts[i]
+		var w: WeaponData = m["weapon"]
+		if float(m["reload"]) > 0.0001:
+			continue
+		var mount_world: Vector2 = _mount_world_pos(m["offset"])
+		var desired: float = (aim_world - mount_world).angle()
+		var aim_err: float = absf(wrapf(desired - float(m["rotation"]), -PI, PI))
+		if aim_err > deg_to_rad(w.shoot_cone):
+			continue
+		_fire_weapon_mount(i, mount_world, aim_world)
+		fired = true
+	return fired
+
+
+## Executes one mount's behavior and resets its reload + recoil. Mirror
+## alternation is handled purely by the staggered reloads set at spawn, so
+## there's no per-shot side bookkeeping here.
+func _fire_weapon_mount(idx: int, mount_world: Vector2, aim_world: Vector2) -> void:
+	var m: Dictionary = _weapon_mounts[idx]
+	var w: WeaponData = m["weapon"]
+	# Multi-barrel mounts (double-barrel head, etc.): fire ONE barrel per shot,
+	# cycling through them, with the mount's reload split evenly so N barrels
+	# fire N× as often and visibly alternate between the divots. The barrel's
+	# perpendicular offset rides on the sprite-local x, so it rotates with the
+	# head and lands on the correct divot.
+	var barrels: int = maxi(1, int(m.get("barrels", 1)))
+	var b_idx: int = int(m.get("barrel_idx", 0)) % barrels
+	var perp: float = 0.0
+	if barrels > 1:
+		perp = (float(b_idx) - float(barrels - 1) * 0.5) * float(m.get("barrel_spacing", 0.0))
+	# Muzzle offset is sprite-local (+Y = out the barrel, +X = across the divots);
+	# convert with (rot - PI/2) to match the mount/recoil convention so bullets
+	# spawn at the barrel tip, not 90° off to the side.
+	var muzzle_local: Vector2 = (m["muzzle"] as Vector2) + Vector2(perp, 0.0)
+	var muzzle: Vector2 = mount_world + muzzle_local.rotated(float(m["rotation"]) - PI / 2.0)
+	match w.behavior:
+		WeaponData.Behavior.TURRET:
+			_fire_turret_weapon(w, muzzle, aim_world)
+		WeaponData.Behavior.REPAIR_BEAM:
+			_fire_repair_weapon(w, mount_world)
+		WeaponData.Behavior.POINT_DEFENSE:
+			_fire_point_defense_weapon(w, mount_world)
+	m["barrel_idx"] = (b_idx + 1) % barrels
+	m["reload"] = float(m["reload_max"]) / float(barrels)
+	m["recoil"] = w.recoil
+	_weapon_mounts[idx] = m
+
+
+## TURRET behavior: spawn a projectile from the muzzle toward the target,
+## using the unit's faction. Reuses CombatSystem's projectile pipeline so
+## ammo / pierce / status all flow through the existing path.
+func _fire_turret_weapon(w: WeaponData, muzzle: Vector2, aim_world: Vector2) -> void:
+	var combat = _combat_sys_ref()
+	if combat == null:
+		return
+	var dmg: float = w.effective_damage(damage)
+	var spd: float = w.ammo.projectile_speed if w.ammo != null else w.projectile_speed
+	var col: Color = w.ammo.projectile_color if w.ammo != null else unit_color.lightened(0.3)
+	var is_enemy: bool = team == UnitData.Team.ENEMY
+	var src_faction: int = main.Faction.FEROX if is_enemy else main.Faction.LUMINA
+	var source_str: String = "enemy" if is_enemy else "player_unit"
+	# Bullets fly out to the weapon's full range along the aim direction and
+	# despawn there if they hit nothing — like turrets/the drone. `aim_world`
+	# is only a DIRECTION hint (the target or the mouse): we extend it to the
+	# end-of-range point so the shot doesn't stop short at the cursor/target.
+	var rng: float = w.effective_range(data.attack_range if data else 0.0)
+	var aim_dir: Vector2 = (aim_world - muzzle)
+	if aim_dir.length_squared() < 0.0001:
+		aim_dir = Vector2.RIGHT.rotated(facing_angle - PI / 2.0)  # fallback: forward
+	aim_dir = aim_dir.normalized()
+	var end_pos: Vector2 = muzzle + aim_dir * rng
+	var extras: Dictionary = {"max_range": rng}
+	if w.ammo != null:
+		extras = {
+			"max_range": rng,
+			"lifetime": w.ammo.projectile_lifetime,
+			"radius": w.ammo.projectile_radius,
+			"pierce": w.ammo.pierce_count,
+			"knockback": w.ammo.knockback,
+			"homing": w.ammo.homing,
+			"trail_color": w.ammo.get_trail_color(),
+			"collides_air": w.ammo.collides_air,
+			"collides_ground": w.ammo.collides_ground,
+		}
+	combat._spawn_projectile(
+		muzzle, null, end_pos, "none", spd, dmg, col, source_str,
+		(w.ammo.is_splash if w.ammo != null else (data.is_aoe if data else false)),
+		(w.ammo.splash_radius if w.ammo != null else (data.aoe_radius if data else 0.0)),
+		src_faction, extras,
+	)
+
+
+## REPAIR_BEAM behavior: heal the nearest same-team damaged building in
+## range. Lightweight per-fire pulse (not a sustained beam) so it reuses the
+## reload cadence; the heal amount scales by reload so DPS stays consistent.
+func _fire_repair_weapon(w: WeaponData, mount_world: Vector2) -> void:
+	if team != UnitData.Team.PLAYER:
+		return  # repair is a friendly-only behaviour for now
+	var rng: float = w.effective_range(data.attack_range if data else 0.0)
+	var best: Vector2i = Vector2i(-99999, -99999)
+	var best_d: float = rng
+	for gp in main.placed_buildings:
+		if main.get_building_faction(gp) != main.Faction.LUMINA:
+			continue
+		if not main.is_building_anchor(gp):
+			continue
+		var bw: Vector2 = main.grid_to_world(gp) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+		var d: float = mount_world.distance_to(bw)
+		if d <= best_d:
+			var bd = Registry.get_block(main.placed_buildings[gp])
+			var maxh: float = bd.max_health if bd else 0.0
+			if maxh > 0.0 and float(main.building_health.get(gp, maxh)) < maxh:
+				best_d = d
+				best = gp
+	if best.x == -99999:
+		return
+	# Heal per fire = rate × reload interval, so HP/sec stays at
+	# `repair_per_second` regardless of how fast the mount cycles.
+	var interval: float = w.reload if w.reload > 0.0 else maxf(0.05, attack_cooldown)
+	var heal: float = w.repair_per_second * interval
+	var bd2 = Registry.get_block(main.placed_buildings[best])
+	var maxh2: float = bd2.max_health if bd2 else 0.0
+	main.building_health[best] = minf(float(main.building_health.get(best, maxh2)) + heal, maxh2)
+
+
+## POINT_DEFENSE behavior: damage / remove the nearest hostile projectile in
+## range. Consults CombatSystem's live projectile list.
+func _fire_point_defense_weapon(w: WeaponData, mount_world: Vector2) -> void:
+	var combat = _combat_sys_ref()
+	if combat == null or not ("projectiles" in combat):
+		return
+	var rng: float = w.effective_range(data.attack_range if data else 0.0)
+	var my_faction: int = main.Faction.FEROX if team == UnitData.Team.ENEMY else main.Faction.LUMINA
+	for proj in combat.projectiles:
+		if not (proj is Dictionary):
+			continue
+		if int(proj.get("source_faction", 0)) == my_faction:
+			continue
+		var pp: Vector2 = proj.get("pos", mount_world)
+		if mount_world.distance_to(pp) <= rng:
+			proj["damage"] = float(proj.get("damage", 0.0)) - w.point_defense_damage
+			if float(proj["damage"]) <= 0.0:
+				proj["dead"] = true
+			return
+
+
+## Draws every weapon mount sprite at its transformed world position,
+## rotated to the mount's aim and pulled back by recoil. Called from `_draw`
+## (which is unit-local space, so positions are converted back to local).
+func _draw_weapon_mounts() -> void:
+	if _weapon_mounts.is_empty():
+		return
+	for m in _weapon_mounts:
+		var w: WeaponData = m["weapon"]
+		if w.sprite == null:
+			continue
+		var mount_world: Vector2 = _mount_world_pos(m["offset"])
+		# Recoil pulls the sprite straight BACK along the barrel (away from
+		# the target). `m["rotation"]` is a standard angle (0 = +X) while the
+		# offset is in sprite-local space (+Y = forward / out the barrel), so
+		# convert with (rot - PI/2) — the same convention as `_mount_world_pos`.
+		# Using bare `.rotated(rot)` here was the bug: it pushed the head 90°
+		# off, i.e. sideways instead of backward.
+		var rot: float = float(m["rotation"])
+		var recoil_off: Vector2 = Vector2(0.0, -float(m["recoil"])).rotated(rot - PI / 2.0)
+		var local: Vector2 = (mount_world + recoil_off) - position
+		var scale_f: float = (w.sprite_scale if w.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
+		var sz: Vector2 = w.sprite.get_size() * scale_f
+		draw_set_transform(local, rot + PI / 2.0 + w.sprite_angle_offset, Vector2(-1.0 if m["flip"] else 1.0, 1.0))
+		draw_texture_rect(w.sprite, Rect2(-sz * 0.5, sz), false)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 # =========================
@@ -1413,6 +2267,9 @@ func _find_player_target() -> void:
 			continue
 		if not main.is_building_anchor(grid_pos):
 			continue
+		var bd_pt = Registry.get_block(main.placed_buildings[grid_pos])
+		if bd_pt != null and bd_pt.tags.has("no_pathfinding"):
+			continue
 		var bldg_world: Vector2 = main.grid_to_world(grid_pos) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 		var dist_sq := position.distance_squared_to(bldg_world)
 		if dist_sq < best_dist_sq:
@@ -1425,6 +2282,10 @@ func _find_player_target() -> void:
 
 ## Fire a projectile at the targeted enemy unit.
 func _attack_enemy_unit() -> void:
+	# Mount-equipped units fire through their mounts (ticked in _process);
+	# suppress the legacy single-shot so they don't double-fire.
+	if has_weapon_mounts():
+		return
 	var combat = _combat_sys_ref()
 	if combat:
 		var proj_speed := 300.0
@@ -1512,6 +2373,9 @@ func _ferox_engage_unit(target: Node2D, delta: float) -> void:
 
 ## Fire a projectile at the targeted FEROX building.
 func _attack_ferox_building() -> void:
+	# Mount-equipped units fire through their mounts (ticked in _process).
+	if has_weapon_mounts():
+		return
 	var combat = _combat_sys_ref()
 	if combat:
 		var proj_speed := 300.0
@@ -1604,10 +2468,14 @@ func _finish_rebuild() -> void:
 			break
 
 	if not can_build:
-		# Can't afford — put it back in the queue for later
-		main.ferox_rebuild_queue.append(rebuild_target)
-		rebuild_target = null
-		_rebuild_arrived = false
+		# Not enough ferox resources yet — DON'T abandon the plan. Re-queuing it
+		# and clearing the target makes _try_rebuild pop a different site next
+		# frame and path to it, so the unit bounces between build sites. Instead
+		# hold position at this site and keep "building", retrying every frame so
+		# it finishes the instant the resources arrive. Timer is clamped at the
+		# completion threshold so the retry fires each frame without overflowing.
+		rebuild_timer = REBUILD_TIME
+		_rebuild_arrived = true
 		return
 
 	# Check if space is clear
@@ -1636,6 +2504,12 @@ func _finish_rebuild() -> void:
 			main.building_factions[tile_pos] = main.Faction.FEROX
 
 	main.building_placed.emit(block_id, grid_pos)
+
+	# Re-establish any links this block carried before destruction, to
+	# whichever captured partners exist again (the other end re-links from
+	# its own rebuild if still pending).
+	if main.has_method("ferox_relink_after_rebuild"):
+		main.ferox_relink_after_rebuild(rebuild_target)
 
 	rebuild_target = null
 	_rebuild_arrived = false
@@ -1736,7 +2610,25 @@ func _check_wall_overlap(delta: float) -> void:
 		if not unit_manager.is_world_pos_walkable(next_wp, data.movement_layer):
 			_request_repath()
 	if unit_manager.is_world_pos_walkable(position, data.movement_layer):
+		# Centre is on a legal cell — but the unit may still be WEDGED, with
+		# its body straddling a cell boundary into an adjacent solid (the
+		# crane-drop-on-an-edge case). The radius-aware test catches that;
+		# `is_circle_walkable` clamps the half-extent below GRID_SIZE/2 so a
+		# unit travelling down a legal 1-tile lane never reads as wedged.
+		# Skip under manual control (the player owns the unit's position).
+		if not is_controlled and not unit_manager.is_circle_walkable(position, unit_size, data.movement_layer):
+			_wedge_timer += WALL_CHECK_INTERVAL
+			if _wedge_timer >= WEDGE_RESCUE_TIME:
+				_wedge_timer = 0.0
+				var safe: Vector2 = _find_nearest_circle_walkable(position, unit_size, data.movement_layer)
+				if safe != Vector2.INF:
+					position = safe
+					if not _skip_repath_on_unstick:
+						_request_repath()
+		else:
+			_wedge_timer = 0.0
 		return
+	_wedge_timer = 0.0
 	# Unit ended up on a wall / void / building cell that its movement
 	# layer can't legally occupy — usually because they nicked the
 	# corner of a newly-placed block while moving past it, NOT because
@@ -1778,6 +2670,28 @@ func _find_nearest_walkable(from: Vector2, ml: int) -> Vector2:
 			var ang: float = float(i) * TAU / float(_RESCUE_ANGLE_STEPS)
 			var c: Vector2 = from + Vector2(cos(ang), sin(ang)) * step
 			if unit_manager.is_world_pos_walkable(c, ml):
+				return c
+	return Vector2.INF
+
+
+## Like `_find_nearest_walkable`, but every candidate must clear the unit's
+## full body (centre + cardinal faces) via `is_circle_walkable`, so a wedged
+## unit isn't rescued into another boundary it can't move off of. Prefers the
+## current cell's centre first — the smallest, most natural nudge that pulls a
+## boundary-straddling unit back into open space.
+func _find_nearest_circle_walkable(from: Vector2, radius: float, ml: int) -> Vector2:
+	if unit_manager == null:
+		return Vector2.INF
+	var gs: float = float(main.GRID_SIZE)
+	var cell_center: Vector2 = main.grid_to_world(main.world_to_grid(from)) + Vector2(gs * 0.5, gs * 0.5)
+	if unit_manager.is_circle_walkable(cell_center, radius, ml):
+		return cell_center
+	for r in range(1, _RESCUE_MAX_TILES + 1):
+		var step: float = float(r) * gs * 0.75
+		for i in range(_RESCUE_ANGLE_STEPS):
+			var ang: float = float(i) * TAU / float(_RESCUE_ANGLE_STEPS)
+			var c: Vector2 = from + Vector2(cos(ang), sin(ang)) * step
+			if unit_manager.is_circle_walkable(c, radius, ml):
 				return c
 	return Vector2.INF
 
@@ -1848,6 +2762,16 @@ func take_damage(amount: float) -> void:
 	var actual_damage = amount
 	if data:
 		actual_damage = data.calc_damage_taken(amount)
+	# Status-effect vulnerability: a status's `defense_modifier` scales ALL
+	# incoming damage (corroding = 1.3× more, freezing = 1.4×, etc.). Modifiers
+	# from multiple active statuses multiply together.
+	if not active_statuses.is_empty():
+		var dmg_mult: float = 1.0
+		for sid in active_statuses:
+			var se: StatusEffectData = active_statuses[sid]["effect"]
+			if se != null and se.defense_modifier != 1.0:
+				dmg_mult *= se.defense_modifier
+		actual_damage *= dmg_mult
 	health -= actual_damage
 	# Hit-flash intentionally disabled — the white tint on damage was
 	# noisy when many units were taking fire at once. Damage feedback
@@ -1875,16 +2799,14 @@ func _on_death() -> void:
 				main.resources[item_id] += data.drops[item_id]
 		main.resources_changed.emit(main.resources)
 
-	# Ring + shrapnel-line burst at the unit's last position, plus a
-	# ruin decal afterward. Routed through ExplosionSystem so the
-	# visual matches the new building-explosion style.
+	# Mindustry-style unit death blast (Fx.dynamicExplosion port), sized
+	# off the unit's visual radius, plus a ruin decal afterward.
+	var vis_size: float = data.visual_size if data else 12.0
 	var expl_u = main.get_node_or_null("ExplosionSystem") if main else null
-	if expl_u and expl_u.has_method("explode"):
-		# Small ring for unit-scale blasts.
-		expl_u.explode(position, 2.0)
+	if expl_u and expl_u.has_method("unit_death"):
+		expl_u.unit_death(position, vis_size * 0.5)
 	var overlay = main.get_node_or_null("ParticleOverlay") if main else null
 	if overlay and overlay.has_method("spawn_unit_ruins"):
-		var vis_size: float = data.visual_size if data else 12.0
 		overlay.spawn_unit_ruins(position, vis_size)
 
 	if data and team == UnitData.Team.PLAYER:
@@ -1907,6 +2829,9 @@ func move_to_position(world_pos: Vector2) -> void:
 	target_building = null
 	target_unit = null
 	_stuck_timer = 0.0
+	# A plain move order cancels a dummy's attack command.
+	if is_dummy:
+		dummy_mode = "idle"
 	unit_manager.assign_path_to_position(self, world_pos)
 
 
@@ -1923,6 +2848,9 @@ func clear_all_orders() -> void:
 	path = PackedVector2Array()
 	path_index = 0
 	_stuck_timer = 0.0
+	# A dummy goes back to inert when its orders are cancelled.
+	if is_dummy:
+		dummy_mode = "idle"
 
 
 # --- ENTER PAYLOAD BLOCK ---
@@ -1940,7 +2868,8 @@ func _payload_block_at(cell: Vector2i) -> Vector2i:
 	if main.get_building_faction(anchor) != main.Faction.LUMINA:
 		return Vector2i(-9999, -9999)
 	var tags: PackedStringArray = bdata.tags
-	var ok := tags.has("payload") or tags.has("freight") or tags.has("mass_driver") or tags.has("deconstructor")
+	var ok := tags.has("payload") or tags.has("freight") or tags.has("mass_driver") \
+		or tags.has("deconstructor") or tags.has("upgrader") or tags.has("refit_bay")
 	return anchor if ok else Vector2i(-9999, -9999)
 
 
@@ -1970,15 +2899,8 @@ func _try_enter_payload_block() -> bool:
 	var bs = main.get_node_or_null("BuildingSystem")
 	if bs == null or not bs.has_method("inject_unit_as_payload"):
 		return false
-	var payload := {
-		"type": "unit",
-		"unit_id": String(data.id) if data else "",
-		"health": health,
-	}
-	if "facing_angle" in self:
-		payload["facing_angle"] = facing_angle
-	if "aim_angle" in self:
-		payload["aim_angle"] = aim_angle
+	var payload := {}
+	capture_payload_state(payload)
 	if bs.inject_unit_as_payload(anchor, payload):
 		# We've handed our state off — leave the world. Erase the unit
 		# from the UnitManager's player_units / selected_units arrays
@@ -2236,6 +3158,13 @@ func _draw() -> void:
 	if is_flying:
 		_draw_flying_shadow()
 
+	# Naval wake — two tapering trail ribbons, painted FIRST so the hull
+	# covers their origin. Drawn on the unit's OWN canvas (the proven path
+	# the flying shadow uses) rather than a separate node. Skipped when the
+	# unit is off-screen (the batched ribbon is still hundreds of verts).
+	if _wake_enabled and _wake_on_screen():
+		_draw_water_wake()
+
 	# Textured rendering (turret-style: base + rotating head) takes precedence
 	# over the primitive-shape fallbacks whenever the .tres supplies sprites.
 	var drew_textured: bool = false
@@ -2254,6 +3183,10 @@ func _draw() -> void:
 				_draw_triangle_shape()
 			UnitData.UnitShape.HEXAGON:
 				_draw_hexagon_shape()
+
+	# Mounted weapon sprites render over the chassis at their transformed
+	# positions (no-op for units without weapons / without sprites).
+	_draw_weapon_mounts()
 
 	_draw_rebuild_progress()
 	_draw_health_bar()
@@ -2367,12 +3300,16 @@ func _draw_textured_unit() -> void:
 		base_tint = tint
 	var scale_f: float = (data.sprite_scale if data and data.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
 
+	# Per-unit art-orientation correction (PI for down-facing art, etc).
+	var spr_off: float = data.sprite_angle_offset if data else 0.0
+
 	if data.base_sprite:
 		var b_size: Vector2 = data.base_sprite.get_size() * scale_f
 		# Base rotates to face the unit's current movement direction (the
 		# shardling-style chassis rotation). Source art faces UP, so the
-		# usual +PI/2 offset converts facing_angle into a texture angle.
-		draw_set_transform(Vector2.ZERO, facing_angle + PI / 2.0)
+		# usual +PI/2 offset converts facing_angle into a texture angle;
+		# `sprite_angle_offset` corrects art that faces a different way.
+		draw_set_transform(Vector2.ZERO, facing_angle + PI / 2.0 + spr_off)
 		draw_texture_rect(
 			data.base_sprite,
 			Rect2(-b_size * 0.5, b_size),
@@ -2383,7 +3320,7 @@ func _draw_textured_unit() -> void:
 
 	if data.head_sprite:
 		var h_size: Vector2 = data.head_sprite.get_size() * scale_f
-		var h_angle: float = aim_angle + PI / 2.0
+		var h_angle: float = aim_angle + PI / 2.0 + spr_off
 		draw_set_transform(Vector2.ZERO, h_angle)
 		draw_texture_rect(
 			data.head_sprite,
@@ -2392,6 +3329,87 @@ func _draw_textured_unit() -> void:
 			base_tint
 		)
 		draw_set_transform(Vector2.ZERO, 0.0)
+
+
+## Renders a UNIT PAYLOAD exactly like a live in-world unit — chassis sprite
+## + rotating head + weapon-mount turret heads — at the rotations stored in
+## the payload dict (facing_angle / aim_angle / mount_rotations). Shared by
+## every place a held/in-building unit is drawn (fabricators, refabricators,
+## upgraders, reconstructors, assemblers, payload conveyors, cranes) so they
+## all match the world render instead of drawing a static icon.
+##
+##   canvas         — CanvasItem to draw onto.
+##   udata        — UnitData of the payload unit.
+##   payload      — the payload dict (reads facing_angle/aim_angle/mount_rotations).
+##   center       — world/canvas position to centre the unit on.
+##   render_scale — multiplier RELATIVE to the unit's true in-world size.
+##                  1.0 = identical to in-world (use this for fabricators /
+##                  payload belts / cranes so size + mount geometry match
+##                  exactly). <1 shrinks the whole unit uniformly.
+##   extra_rot    — added to every layer's rotation (crane carry spin); 0 normally.
+##   alpha        — overall opacity (e.g. dimmed while under construction).
+##
+## CRITICAL: every quantity scales by the SAME factor `s` (the unit's live
+## world scale × render_scale) — chassis size, head size, mount OFFSET, and
+## mount sprite size — exactly as `_draw_textured_unit` + `_draw_weapon_mounts`
+## do. The earlier bug scaled the mount offset by a different factor than the
+## sprites, so turret heads landed in the wrong spot at non-1× draw scales.
+static func draw_unit_payload(canvas: CanvasItem, udata: UnitData, payload: Dictionary,
+		center: Vector2, render_scale: float = 1.0, extra_rot: float = 0.0, alpha: float = 1.0) -> void:
+	if canvas == null or udata == null:
+		return
+	# The single scale used for EVERYTHING — matches enemy_unit's live draw
+	# (`sprite_scale * SPRITE_SCALE_FACTOR`), then × render_scale.
+	var ssf: float = 2.0
+	var mref = Engine.get_main_loop()
+	if mref is SceneTree and (mref as SceneTree).root.has_node("Main"):
+		var mn = (mref as SceneTree).root.get_node("Main")
+		if "SPRITE_SCALE_FACTOR" in mn:
+			ssf = float(mn.SPRITE_SCALE_FACTOR)
+	var base_scale: float = (udata.sprite_scale if udata.sprite_scale > 0.0 else 1.0) * ssf
+	var s: float = base_scale * render_scale
+	var spr_off: float = udata.sprite_angle_offset
+	var facing: float = float(payload.get("facing_angle", 0.0)) + extra_rot
+	var aim: float = float(payload.get("aim_angle", facing)) + extra_rot
+	var tint := Color(1, 1, 1, alpha)
+	# Chassis.
+	if udata.base_sprite:
+		var b_size: Vector2 = udata.base_sprite.get_size() * s
+		canvas.draw_set_transform(center, facing + PI / 2.0 + spr_off)
+		canvas.draw_texture_rect(udata.base_sprite, Rect2(-b_size * 0.5, b_size), false, tint)
+		canvas.draw_set_transform(Vector2.ZERO, 0.0)
+	# Rotating head.
+	if udata.head_sprite:
+		var h_size: Vector2 = udata.head_sprite.get_size() * s
+		canvas.draw_set_transform(center, aim + PI / 2.0 + spr_off)
+		canvas.draw_texture_rect(udata.head_sprite, Rect2(-h_size * 0.5, h_size), false, tint)
+		canvas.draw_set_transform(Vector2.ZERO, 0.0)
+	# Weapon-mount turret heads — mirror `_draw_weapon_mounts` exactly. The
+	# mount OFFSET and the mount SPRITE both use the SAME scale `s`, and the
+	# offset rotates by (facing - PI/2) like `_mount_world_pos`.
+	var mount_rot: Array = payload.get("mount_rotations", [])
+	var mi: int = 0
+	for w in udata.weapons:
+		if w == null:
+			continue
+		var sides: Array = [false]
+		if w.mirror:
+			sides = [false, true]
+		for flip in sides:
+			# Live setup: first mount uses +offset, mirror uses -offset.x.
+			var local_off: Vector2 = w.offset if not flip else Vector2(-w.offset.x, w.offset.y)
+			var rot: float = facing
+			if mi < mount_rot.size():
+				rot = float((mount_rot[mi] as Dictionary).get("rotation", facing)) + extra_rot
+			mi += 1
+			if w.sprite == null:
+				continue
+			var mount_pos: Vector2 = center + (local_off * s).rotated(facing - PI / 2.0)
+			var msz: Vector2 = w.sprite.get_size() * (w.sprite_scale if w.sprite_scale > 0.0 else 1.0) * ssf * render_scale
+			canvas.draw_set_transform(mount_pos, rot + PI / 2.0 + w.sprite_angle_offset,
+				Vector2(-1.0 if flip else 1.0, 1.0))
+			canvas.draw_texture_rect(w.sprite, Rect2(-msz * 0.5, msz), false, tint)
+			canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 ## Returns the current body color, blended toward deep blue based on how long

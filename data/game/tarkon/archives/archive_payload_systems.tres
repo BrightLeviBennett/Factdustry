@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="ArchiveData" format=3 uid="uid://bcclu45q37dm8"]
+
+[ext_resource type="Script" uid="uid://d0yon0msrif8h" path="res://data/game/tarkon/archives/archive_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cwbemuv7013ke" path="res://textures/archives/PayloadSystems.png" id="1_i1s68"]
+
+[resource]
+script = ExtResource("1")
+id = &"archive_payload_systems"
+display_name = "Archive: Payload Systems"
+icon = ExtResource("1_i1s68")
+description = "Huge blocks designed for moving heavy payloads left behind by The Primatives... 
+
+No one knows why they were created or what they were used for..."

@@ -13,7 +13,7 @@
 script = ExtResource("1")
 id = &"unit_refabricator"
 display_name = "Unit Refabricator"
-description = "Consumes a tier-1 unit and materials to produce its tier-2 successor. Accepts the unit as a payload on any side."
+description = "Upgrades tier 1 units into tier 2 units."
 icon = ExtResource("7_vjqcj")
 category = 6
 tags = PackedStringArray("fabricator", "units", "refabricator")
@@ -33,8 +33,5 @@ build_cost = {
 }
 build_time = 4.0
 production_time = 6.0
-factory_recipes = null
 electrical_power_use = 25.0
 max_stored_items = 60
-mend_radius = null
-mend_amount = null

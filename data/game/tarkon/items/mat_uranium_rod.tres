@@ -1,14 +1,14 @@
-[gd_resource type="Resource" script_class="ItemData" format=3]
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://doaipfqw61h5n"]
 
-[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://4lx7mwnrgel0" path="res://textures/resources/uraniumRod.png" id="1_3nq08"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_uranium_rod"
 display_name = "Uranium Rod"
 description = "Sealed fuel rod assembly. Ready for the reactor core."
+icon = ExtResource("1_3nq08")
 max_stack = 50
-category = 0
-color = Color(0.75, 1.0, 0.4, 1)
+color = Color(0.75, 1, 0.4, 1)
 base_value = 40.0
-conveyable = true

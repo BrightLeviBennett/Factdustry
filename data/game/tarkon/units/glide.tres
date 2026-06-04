@@ -20,3 +20,5 @@ movement_layer = 3
 detection_range = 500.0
 spawn_count = 1
 threat_value = 4.0
+
+tier = 2

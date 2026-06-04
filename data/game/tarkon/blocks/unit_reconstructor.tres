@@ -1,17 +1,34 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bjvrswrsvhca1"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b4i1ttwmmwht1" path="res://textures/blocks/units/Unit Reconstructor/UnitReconstructorStraight.png" id="1_2in01"]
+[ext_resource type="Texture2D" uid="uid://buh4rj4l1epql" path="res://textures/blocks/units/Unit Reconstructor/UnitReconstructorLeft.png" id="2_32fib"]
+[ext_resource type="Texture2D" uid="uid://dxvnwlvs6bhog" path="res://textures/blocks/units/Unit Reconstructor/UnitReconstructorRight.png" id="3_w0glt"]
+[ext_resource type="Texture2D" uid="uid://dmjccepyvtpin" path="res://textures/blocks/units/FabricatorTopBottom.png" id="4_eu13t"]
+[ext_resource type="Texture2D" uid="uid://borsu0j7t23np" path="res://textures/blocks/units/FabricatorTopLeft.png" id="5_kqpde"]
+[ext_resource type="Texture2D" uid="uid://bb5h8bb8xxoh5" path="res://textures/blocks/units/FabricatorTopRight.png" id="6_g41ky"]
+[ext_resource type="Texture2D" uid="uid://dqv1fgcrvoly0" path="res://textures/blocks/units/Unit Reconstructor/UnitReconstructorComplete.png" id="7_3lrqr"]
 
 [resource]
 script = ExtResource("1")
 id = &"unit_reconstructor"
 display_name = "Unit Reconstructor"
-description = "Rebuilds T1 units into the next tier in the unit progression chain."
+description = "Upgrades tier 2 units into tier 3 units."
+icon = ExtResource("7_3lrqr")
 category = 6
-color = Color(0.7, 0.5, 0.8, 1)
-max_health = 360.0
-grid_size = Vector2i(3, 3)
-build_cost = { "copper": 200, "silicon": 80 }
-build_time = 4.0
-power_consumption = 6.0
 tags = PackedStringArray("fabricator", "units")
+color = Color(0.7, 0.5, 0.8, 1)
+grid_size = Vector2i(4, 4)
+base_sprite = ExtResource("1_2in01")
+feed_overlay_back = ExtResource("4_eu13t")
+feed_overlay_left = ExtResource("5_kqpde")
+feed_overlay_right = ExtResource("6_g41ky")
+base_sprite_back = ExtResource("1_2in01")
+base_sprite_left = ExtResource("2_32fib")
+base_sprite_right = ExtResource("3_w0glt")
+max_health = 360.0
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
+build_time = 4.0

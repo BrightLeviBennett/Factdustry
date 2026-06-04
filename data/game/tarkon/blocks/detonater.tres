@@ -1,0 +1,46 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="2"]
+[ext_resource type="Texture2D" uid="uid://cnr74cpaunr6q" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="3"]
+[ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="4"]
+[ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="5"]
+
+[sub_resource type="Resource" id="AmmoType_blast"]
+script = ExtResource("2")
+item_id = &"mat_blast_compound"
+amount_per_shot = 2
+damage = 30.0
+projectile_speed = 300.0
+projectile_lifetime = 3.0
+projectile_radius = 9.0
+frag_count = 6
+frag_damage = 10.0
+frag_speed = 240.0
+frag_radius = 4.0
+frag_range = 170.0
+projectile_color = Color(1, 0.55, 0.1, 1)
+trail_color = Color(1, 0.4, 0.05, 1)
+
+[resource]
+script = ExtResource("1")
+id = &"detonater"
+display_name = "Detonater"
+description = "Lobs a blast-compound shell that bursts on impact, dealing heavy damage and scattering six smaller orbs."
+icon = ExtResource("5")
+category = 4
+tags = PackedStringArray("turret", "defense")
+color = Color(1, 0.5, 0.15, 1)
+base_sprite = ExtResource("3")
+turret_head_sprite = ExtResource("4")
+max_health = 260.0
+build_cost = {
+"copper": 200,
+"silicon": 70,
+"steel": 60
+}
+build_time = 3.0
+attack_speed = 1.5
+attack_range = 7.0
+ammo_types = Array[Resource]([SubResource("AmmoType_blast")])
+max_stored_items = 20

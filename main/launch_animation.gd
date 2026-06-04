@@ -153,6 +153,14 @@ var _flap_thruster_phase: float = 0.0
 #       needed — and no need to fight unit z layering.
 var _underlay: Node2D = null
 var _flap_overlay: Node2D = null
+#   _core_overlay (z=4092) — the animation core sprite + wind streaks,
+#       drawn ABOVE the flap overlay (4091) so the core hides the
+#       tucked-in inner portion of the flaps while they extend out from
+#       behind it (launch) or slide back in under it (retract). Without
+#       this the flaps render on top of the core during launch extension,
+#       since the core used to share the main node's z (4090) which sits
+#       UNDER the flap overlay.
+var _core_overlay: Node2D = null
 # Dedicated low-z child for pods that have already touched down on a
 # landing pad. Draws at z=50 (block layer) so units render OVER it,
 # matching how units walk over other ground blocks. Launch + descent
@@ -261,6 +269,16 @@ func _ready() -> void:
 	add_child(_landed_pod_overlay)
 	_landed_pod_overlay.draw.connect(_draw_landed_pods_on_overlay)
 	_flap_overlay.draw.connect(_paint_flaps.bind(_flap_overlay))
+	# Core overlay: sits ABOVE the flap overlay so the core sprite covers
+	# the inner (tucked-in) span of the flaps. This makes the flaps read
+	# as sliding out from BEHIND the core while extending, instead of
+	# being painted on top of it.
+	_core_overlay = Node2D.new()
+	_core_overlay.z_index = 4092
+	_core_overlay.z_as_relative = false
+	_core_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(_core_overlay)
+	_core_overlay.draw.connect(_paint_core_overlay.bind(_core_overlay))
 	_build_banner()
 
 
@@ -377,6 +395,8 @@ func _process(delta: float) -> void:
 	if _flap_overlay != null:
 		_update_flap_z()
 		_flap_overlay.queue_redraw()
+	if _core_overlay != null:
+		_core_overlay.queue_redraw()
 
 
 # ----- Wind lines -----
@@ -1256,22 +1276,32 @@ func _draw() -> void:
 	elif state == State.LANDED_PAUSE:
 		cloud_alpha = 0.0
 	_draw_sky(cloud_alpha)
-	# Dust + retracting flaps paint on _underlay at z=30 (under blocks)
-	# so the placed core building covers them as flaps slide in.
-	# Spinning oversized core: shrinks during landing, grows during
-	# launching. Spin direction is opposite between the two phases.
-	if state == State.LANDING or state == State.LAUNCHING or state == State.LANDED_PAUSE:
-		_draw_core(land_p, launch_p)
-	# During RING_SWEEP the placed core building (z=50) is unhidden and
-	# naturally covers the retracting flaps (z=49) — no overlay needed.
-	# Wind streaks paint OVER the core for the speed-line feel.
-	_draw_wind_lines()
+	# The animation core + wind streaks now paint on `_core_overlay`
+	# (z=4092, ABOVE the flap overlay at 4091) via `_paint_core_overlay`,
+	# so the core covers the tucked-in inner span of the flaps as they
+	# extend / retract. Kept out of this main-node draw (z=4090, below
+	# the flaps) where the flaps would otherwise render on top of the core.
 	# Ring during sweep.
 	if state == State.RING_SWEEP:
 		_draw_ring()
 
 
-func _draw_wind_lines() -> void:
+## Draws the core sprite + wind streaks onto `_core_overlay` (z=4092),
+## above the flap overlay so the core hides the tucked-in flap span.
+func _paint_core_overlay(canvas: Node2D) -> void:
+	if state == State.IDLE:
+		return
+	var land_p: float = clampf(_t / LAND_DURATION, 0.0, 1.0) if state == State.LANDING else 0.0
+	var launch_p: float = clampf((_t - LAUNCH_HOLD) / LAUNCH_DURATION, 0.0, 1.0) if state == State.LAUNCHING else 0.0
+	# Spinning oversized core: shrinks during landing, grows during
+	# launching. Spin direction is opposite between the two phases.
+	if state == State.LANDING or state == State.LAUNCHING or state == State.LANDED_PAUSE:
+		_draw_core(canvas, land_p, launch_p)
+	# Wind streaks paint OVER the core for the speed-line feel.
+	_draw_wind_lines(canvas)
+
+
+func _draw_wind_lines(canvas: Node2D) -> void:
 	if _wind_lines.is_empty():
 		return
 	# Wind streaks are in screen space, so we project them through the
@@ -1300,7 +1330,7 @@ func _draw_wind_lines() -> void:
 		var screen_pos: Vector2 = Vector2(wl["x"], wl["y"])
 		var world_pos: Vector2 = tl + screen_pos / zoom
 		var top: Vector2 = world_pos + Vector2(0, -draw_len / zoom.y)
-		draw_line(world_pos, top, Color(1, 1, 1, alpha), 2.0 / zoom.x, true)
+		canvas.draw_line(world_pos, top, Color(1, 1, 1, alpha), 2.0 / zoom.x, true)
 
 
 func _paint_underlay(canvas: Node2D) -> void:
@@ -1505,7 +1535,7 @@ func _update_flap_z() -> void:
 	_flap_overlay.z_index = 4091 if lifted else 49
 
 
-func _draw_core(land_p: float, launch_p: float) -> void:
+func _draw_core(canvas: Node2D, land_p: float, launch_p: float) -> void:
 	if _core_data == null:
 		return
 	# Mirror BuildingSystem's faction-layered render: base sprite + LUMINA
@@ -1569,12 +1599,12 @@ func _draw_core(land_p: float, launch_p: float) -> void:
 	# the player's saved zoom (which only kicks in after _restore_camera).
 	var anchor_factor: float = (ZOOM_IN_FACTOR / maxf(cur_zoom, 0.0001)) * scale_factor
 	var draw_size: float = size * s * anchor_factor
-	draw_set_transform(_core_world, rot, Vector2.ONE)
-	draw_texture_rect(base_tex, Rect2(-draw_size * 0.5, -draw_size * 0.5, draw_size, draw_size), false, Color(1, 1, 1, 1))
+	canvas.draw_set_transform(_core_world, rot, Vector2.ONE)
+	canvas.draw_texture_rect(base_tex, Rect2(-draw_size * 0.5, -draw_size * 0.5, draw_size, draw_size), false, Color(1, 1, 1, 1))
 	if overlay_tex != null:
 		var overlay_size: float = draw_size * 0.7
-		draw_texture_rect(overlay_tex, Rect2(-overlay_size * 0.5, -overlay_size * 0.5, overlay_size, overlay_size), false, Color(1, 1, 1, 1))
-	draw_set_transform(Vector2.ZERO, 0.0)
+		canvas.draw_texture_rect(overlay_tex, Rect2(-overlay_size * 0.5, -overlay_size * 0.5, overlay_size, overlay_size), false, Color(1, 1, 1, 1))
+	canvas.draw_set_transform(Vector2.ZERO, 0.0)
 
 
 func _draw_ring() -> void:

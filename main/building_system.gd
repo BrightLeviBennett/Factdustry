@@ -1,5 +1,10 @@
 extends Node2D
 
+# Preloaded so `EnemyUnit.draw_unit_payload(...)` resolves regardless of
+# global class_name registration timing (the editor may not have reimported
+# enemy_unit.gd's class_name yet when this script first parses).
+const EnemyUnit = preload("res://main/enemy_unit.gd")
+
 
 # Overlay child Node2D used to draw the in-world menu / storage popup.
 # Sits at a very high z_index so popups always render above units and
@@ -315,6 +320,11 @@ const _ARCHIVE_SCAN_FADE_RATE: float = 4.0  # alpha units / second
 
 # --- CABLE WIRE TEXTURE ---
 var _wire_texture: Texture2D
+
+# --- BRIDGE LINK VISUALIZER TEXTURE ---
+# Tiled along belt / duct bridge links (Mindustry-style) instead of a
+# dashed line. Repeated end-to-end and clipped to the exact span length.
+var _bridge_visualizer_texture: Texture2D
 
 # --- CACHED REFERENCES ---
 # SectorScript is created by Main._ready AFTER its Registry await, which can
@@ -874,6 +884,7 @@ const _PIPE_TEX_PATHS := {
 }
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
+const _BRIDGE_VISUALIZER_TEX_PATH := "res://textures/blocks/item transportation/BridgeVisualizer.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
 const _GRINDER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallGrinder/GrinderHead.png"
 const _SCRAPER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/Ground Scraper/GroundScraperHead.png"
@@ -917,6 +928,7 @@ func _queue_texture_loads() -> void:
 		ResourceLoader.load_threaded_request(_PIPE_TEX_PATHS[key])
 	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
+	ResourceLoader.load_threaded_request(_BRIDGE_VISUALIZER_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_GRINDER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_SCRAPER_HEAD_TEX_PATH)
@@ -956,6 +968,7 @@ func _ensure_textures_loaded() -> void:
 		_pipe_textures[key] = ResourceLoader.load_threaded_get(_PIPE_TEX_PATHS[key])
 	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
 	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
+	_bridge_visualizer_texture = ResourceLoader.load_threaded_get(_BRIDGE_VISUALIZER_TEX_PATH)
 	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
 	_grinder_head_texture = ResourceLoader.load_threaded_get(_GRINDER_HEAD_TEX_PATH)
 	_scraper_head_texture = ResourceLoader.load_threaded_get(_SCRAPER_HEAD_TEX_PATH)
@@ -2952,7 +2965,37 @@ func _count_builders_in_range_of(anchor: Vector2i) -> int:
 ## along with their facing angle so the beam can root at the front
 ## of each unit's sprite. Returned as
 ##   [{"pos": Vector2, "facing": float}, ...]
+## FEROX shardlings (ferox_controlled drones) currently rebuilding the
+## block at `anchor` — i.e. they've broken ground (`_ferox_rebuild_placed`)
+## and their target's grid_pos matches. Returns the same {pos, facing}
+## shape as `_builders_with_facing_for` so the work-laser can root at the
+## shardling's sprite front.
+func _ferox_builders_with_facing_for(anchor: Vector2i) -> Array:
+	var out: Array = []
+	if main == null:
+		return out
+	for child in main.get_children():
+		if child == null or not is_instance_valid(child):
+			continue
+		if not ("ferox_controlled" in child) or not bool(child.get("ferox_controlled")):
+			continue
+		if not ("_ferox_rebuild_placed" in child) or not bool(child.get("_ferox_rebuild_placed")):
+			continue
+		var tgt = child.get("_ferox_rebuild_target") if "_ferox_rebuild_target" in child else null
+		if tgt == null or typeof(tgt) != TYPE_DICTIONARY:
+			continue
+		if Vector2i(tgt.get("grid_pos", Vector2i(-9999, -9999))) != anchor:
+			continue
+		var fa: float = float(child.get("facing_angle")) if "facing_angle" in child else 0.0
+		out.append({"pos": child.position, "facing": fa})
+	return out
+
+
 func _builders_with_facing_for(anchor: Vector2i) -> Array:
+	# FEROX rebuilds are carried out by FEROX shardlings, not player drones;
+	# route the beam's root points to whichever shardling is on the job.
+	if main != null and main.get_building_faction(anchor) == main.Faction.FEROX:
+		return _ferox_builders_with_facing_for(anchor)
 	var out: Array = []
 	for d in _all_player_drones():
 		if not d.is_in_build_range(anchor):
@@ -3905,7 +3948,15 @@ func _unhandled_input(event: InputEvent) -> void:
 							if link_changed:
 								get_viewport().set_input_as_handled()
 								return
-							if click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader"):
+							if click_data.id == &"resource_source":
+								if _world_ui: _world_ui.open("resource_source", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.id == &"payload_source":
+								if _world_ui: _world_ui.open("payload_source", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
+							elif click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader"):
 								if _world_ui: _world_ui.open("sorter", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
@@ -5039,6 +5090,10 @@ func _withdraw_block_to_drone(anchor: Vector2i, item_id: StringName) -> int:
 	var drone = get_node_or_null("/root/Main/PlayerDrone")
 	if drone == null:
 		return 0
+	# One resource type at a time — refuse the withdrawal if the drone is
+	# already carrying a different item.
+	if drone.has_method("can_hold_item") and not drone.can_hold_item(item_id):
+		return 0
 	var max_inv: int = int(drone.MAX_INVENTORY) if "MAX_INVENTORY" in drone else 60
 	var current_total: int = 0
 	if drone.has_method("_get_inventory_total"):
@@ -5330,7 +5385,9 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 			var bt: float = unit_data.build_time if unit_data.build_time > 0 else 1.0
 			var timer: float = float(state.get("timer", 0.0))
 			reveal_pct = clampf(1.0 - timer / bt, 0.0, 1.0)
-			alpha_mul = 0.4 + 0.6 * reveal_pct
+			# Unit stays fully opaque; the construction-reveal overlay (dark
+			# rect + progress line) below conveys build progress instead.
+			alpha_mul = 1.0
 			unit_pos = center
 		"ejecting":
 			var ep: float = clampf(float(state.get("eject_progress", 0.0)), 0.0, 1.0)
@@ -5338,30 +5395,60 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 		"holding":
 			unit_pos = center + dir_vec * front_dist
 
-	# Draw layered (base + head) if the unit has them; else fall back to icon.
+	# Draw layered (base + head + weapon mounts) via the shared unit-payload
+	# renderer so the in-fabricator unit looks EXACTLY like it will in-world
+	# — chassis + rotating head + turret heads — facing the build/output
+	# direction. The fabricator builds a fresh unit (no captured pose), so we
+	# synthesise a payload facing `unit_angle`; any held payload that carried
+	# a real pose (refabricator etc.) is handled by its own draw path.
+	# During "processing" the unit is mid-construction: only the already-built
+	# (revealed) LEFT portion should be visible. The reveal box is the unit's
+	# on-screen footprint, but CLAMPED to the fabricator's own footprint so the
+	# build-front line never spills outside the building. The reveal sweeps
+	# left→right as `reveal_pct` grows to 1.
+	#
+	# NOTE: we cannot use RenderingServer.canvas_item_set_clip here — that flag
+	# is per-canvas-item state evaluated at render time, not a queued command,
+	# so toggling it on/off inside one _draw() pass clips nothing (and would
+	# clip the WHOLE block-draw item if it stuck). Instead we draw the unit in
+	# full, then re-paint the fabricator's own base_sprite over the unbuilt
+	# (right) portion to hide it — the unit is sandwiched base→unit→top, so the
+	# re-painted base restores the empty-chamber look and the caller's top
+	# sprite covers the seam.
+	var box_w: float = minf(base_sz * 2.2, width)
+	var box_h: float = minf(base_sz * 2.2, height)
+	var reveal_active: bool = (phase == "processing" and reveal_pct < 1.0)
+	var edge_x: float = center.x - box_w * 0.5 + box_w * reveal_pct
+
+	# On-screen half-extents of the unit's body, so the build-front line can
+	# hug the unit's silhouette — only as tall as the unit is wide at the line's
+	# x — instead of spanning the whole reveal box. The chassis sprite's rotated
+	# axis-aligned bounding box gives a good ellipse to approximate the outline.
+	var uh_x: float = box_w * 0.5
+	var uh_y: float = box_h * 0.5
+	var body_tex: Texture2D = unit_data.base_sprite if unit_data.base_sprite != null else unit_data.head_sprite
+	if body_tex != null:
+		var ssf: float = float(main.SPRITE_SCALE_FACTOR)
+		var b_scale: float = (unit_data.sprite_scale if unit_data.sprite_scale > 0.0 else 1.0) * ssf
+		var bsz: Vector2 = body_tex.get_size() * b_scale
+		var phi: float = unit_angle + PI / 2.0 + unit_data.sprite_angle_offset
+		var ca: float = absf(cos(phi))
+		var sa: float = absf(sin(phi))
+		uh_x = (bsz.x * 0.5) * ca + (bsz.y * 0.5) * sa
+		uh_y = (bsz.x * 0.5) * sa + (bsz.y * 0.5) * ca
+	# Keep the line inside the reveal box (and thus the building footprint).
+	uh_x = minf(uh_x, box_w * 0.5)
+	uh_y = minf(uh_y, box_h * 0.5)
+
 	var drew_layered: bool = false
 	if unit_data.base_sprite != null or unit_data.head_sprite != null:
 		drew_layered = true
-		if unit_data.base_sprite:
-			var bt_size: Vector2 = _fit_texture_size(unit_data.base_sprite, base_sz)
-			draw_set_transform(unit_pos, 0.0)
-			draw_texture_rect(
-				unit_data.base_sprite,
-				Rect2(-bt_size * 0.5, bt_size),
-				false,
-				Color(1, 1, 1, alpha_mul)
-			)
-			draw_set_transform(Vector2.ZERO, 0.0)
-		if unit_data.head_sprite:
-			var h_size: Vector2 = _fit_texture_size(unit_data.head_sprite, base_sz)
-			draw_set_transform(unit_pos, unit_angle + PI / 2.0)
-			draw_texture_rect(
-				unit_data.head_sprite,
-				Rect2(-h_size * 0.5, h_size),
-				false,
-				Color(1, 1, 1, alpha_mul)
-			)
-			draw_set_transform(Vector2.ZERO, 0.0)
+		# render_scale 1.0 = exactly the unit's in-world size + mount geometry.
+		var synth := {
+			"facing_angle": unit_angle, "aim_angle": unit_angle,
+			"unit_id": String(unit_data.id),
+		}
+		EnemyUnit.draw_unit_payload(self, unit_data, synth, unit_pos, 1.0, 0.0, alpha_mul)
 	elif unit_data.icon != null:
 		var i_size: Vector2 = _fit_texture_size(unit_data.icon, base_sz)
 		draw_set_transform(unit_pos, unit_angle + PI / 2.0)
@@ -5379,21 +5466,63 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 			true
 		)
 
-	# Construction reveal overlay (dark rectangle + progress line) drawn
-	# axis-aligned over the unit center during the processing phase.
-	if phase == "processing":
-		var rect_sz: float = base_sz
-		var rect_pos: Vector2 = center - Vector2(rect_sz * 0.5, rect_sz * 0.5)
-		var reveal_x: float = rect_sz * reveal_pct
-		draw_rect(
-			Rect2(rect_pos.x + reveal_x, rect_pos.y, rect_sz - reveal_x, rect_sz),
-			Color(0, 0, 0, 0.6),
-			true
-		)
-		if reveal_pct < 1.0:
+	# Cover the not-yet-built (right of edge_x) portion with the fabricator's
+	# base sprite so the unbuilt side of the unit is hidden rather than visible.
+	if reveal_active and data.base_sprite != null:
+		var cover_left: float = edge_x
+		var cover_right: float = center.x + box_w * 0.5
+		var cover_top: float = center.y - box_h * 0.5
+		var cover_bot: float = center.y + box_h * 0.5
+		if cover_right > cover_left:
+			# Re-paint the base sprite using the SAME rotated transform the
+			# caller used, restricted (in the base's local frame) to the screen
+			# strip we want to hide. The block's draw angle matches
+			# `_draw_block_texture`: directional blocks rotate rot*90+90.
+			var b_is_dir: bool = _is_directional(data.id)
+			var b_angle: float = (float(rot) * PI / 2.0 + PI / 2.0) if b_is_dir else 0.0
+			var b_origin: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
+			var inv := Transform2D(b_angle, b_origin).affine_inverse()
+			# Screen cover-rect corners → base-local coords (axis-aligned for
+			# the 90° multiples fabricators rotate by).
+			var corners := [
+				inv * Vector2(cover_left, cover_top),
+				inv * Vector2(cover_right, cover_top),
+				inv * Vector2(cover_right, cover_bot),
+				inv * Vector2(cover_left, cover_bot),
+			]
+			var lmin := Vector2(INF, INF)
+			var lmax := Vector2(-INF, -INF)
+			for cp in corners:
+				lmin.x = minf(lmin.x, cp.x); lmin.y = minf(lmin.y, cp.y)
+				lmax.x = maxf(lmax.x, cp.x); lmax.y = maxf(lmax.y, cp.y)
+			# Clamp to the sprite's local footprint and map to texture pixels.
+			var half := Vector2(width / 2.0, height / 2.0)
+			lmin.x = clampf(lmin.x, -half.x, half.x); lmin.y = clampf(lmin.y, -half.y, half.y)
+			lmax.x = clampf(lmax.x, -half.x, half.x); lmax.y = clampf(lmax.y, -half.y, half.y)
+			var tex_size: Vector2 = data.base_sprite.get_size()
+			var src := Rect2(
+				((lmin + half) / Vector2(width, height)) * tex_size,
+				((lmax - lmin) / Vector2(width, height)) * tex_size
+			)
+			var dst := Rect2(lmin, lmax - lmin)
+			if dst.size.x > 0.0 and dst.size.y > 0.0:
+				draw_set_transform(b_origin, b_angle)
+				draw_texture_rect_region(data.base_sprite, dst, src)
+				draw_set_transform(Vector2.ZERO, 0.0)
+
+	# Yellow build-front line at the construction edge (the boundary between the
+	# revealed unit and the freshly-covered unbuilt side). Its half-length is the
+	# unit's silhouette half-height at the line's x (ellipse chord), so the line
+	# only spans the unit's actual width at the build front rather than the full
+	# reveal box — and vanishes in the margins where the unit doesn't reach.
+	if reveal_active:
+		var dx: float = edge_x - center.x
+		var t: float = (dx / uh_x) if uh_x > 0.0 else 2.0
+		var chord_half: float = (uh_y * sqrt(maxf(0.0, 1.0 - t * t))) if absf(t) <= 1.0 else 0.0
+		if chord_half > 0.5:
 			draw_line(
-				Vector2(rect_pos.x + reveal_x, rect_pos.y),
-				Vector2(rect_pos.x + reveal_x, rect_pos.y + rect_sz),
+				Vector2(edge_x, center.y - chord_half),
+				Vector2(edge_x, center.y + chord_half),
 				Color(1.0, 0.9, 0.2, 0.9), 1.5
 			)
 	# Silence the unused-local warning from `drew_layered` while keeping the
@@ -5597,6 +5726,8 @@ func _compute_is_directional(block_id: StringName) -> bool:
 		or data.tags.has("payload_unloader") or data.tags.has("freight_unloader") \
 		or data.tags.has("archive_scanner") \
 		or data.tags.has("fabricator") \
+		or data.tags.has("payload_source") \
+		or data.tags.has("refit_bay") \
 		or data.tags.has("logistic_dispatcher") \
 		or data.tags.has("logistic_requestor") \
 		or data.shield_shape != "" \
@@ -6828,7 +6959,15 @@ func _draw_placed_buildings() -> void:
 			var b_height: float = gs * b_block_size.y
 			var b_top_pos: Vector2 = b_world_pos + b_offset
 
-			var is_active_build: bool = has_active_work and active_work_anchor == grid_pos
+			# A block draws the moving reveal line + builder beams when it's
+			# the player's active work anchor, OR when a FEROX shardling is
+			# actively rebuilding it (FEROX rebuilds run outside the player
+			# work_order, so they never set active_work_anchor — but they
+			# should show the same construction laser).
+			var is_ferox_build: bool = main.get_building_faction(grid_pos) == main.Faction.FEROX \
+				and not _ferox_builders_with_facing_for(grid_pos).is_empty()
+			var is_active_build: bool = (has_active_work and active_work_anchor == grid_pos) \
+				or is_ferox_build
 			if build_pct > 0.0:
 				# Active build — pass 2 rendered the block at full opacity
 				# already. The dim wash over the unbuilt portion AND the
@@ -8465,46 +8604,37 @@ func _draw_crane_payload(payload: Dictionary, pos: Vector2, angle: float, gs: fl
 				_draw_crane_pose(inner_state, block_data, pos, gs, angle)
 	elif ptype == "unit":
 		var unit_data = Registry.get_unit(StringName(payload.get("unit_id", "")))
-		# Held units render slightly smaller than their on-foot footprint so
-		# they visibly read as "cargo" inside the grabber instead of bumping
-		# up against the block icon they're nested with.
-		var held_unit_scale: float = 0.85
-		var unit_visual: float = gs * scale * held_unit_scale
+		# Crane-held units render at their full in-world size (no shrink), so
+		# a carried unit looks identical to the same unit on the ground.
+		var unit_visual: float = gs * scale
 		# Saved poses from the moment of pickup. `facing_angle` is the
 		# chassis/body rotation, `aim_angle` is the head rotation —
 		# both world-space at pickup time. Held draw rotates them with
 		# the outer grabber so the unit reads as being carried in its
 		# original pose.
 		var saved_facing: float = float(payload.get("facing_angle", 0.0))
-		var saved_aim: float = float(payload.get("aim_angle", saved_facing))
-		var head_offset_u: float = wrapf(saved_aim - saved_facing, -PI, PI)
-		var body_world: float = angle
-		var head_world: float = body_world + head_offset_u
+		var body_world: float = saved_facing   # carried unit keeps its own facing
 		if unit_data:
 			if unit_data.base_sprite or unit_data.head_sprite:
-				if unit_data.base_sprite:
-					var bt_size: Vector2 = _fit_texture_size(unit_data.base_sprite, unit_visual)
-					c.draw_set_transform(pos, body_world + PI / 2.0)
-					c.draw_texture_rect(unit_data.base_sprite, Rect2(-bt_size * 0.5, bt_size), false, Color(1, 1, 1, 1.0))
-					c.draw_set_transform(Vector2.ZERO, 0.0)
-				if unit_data.head_sprite:
-					var h_size: Vector2 = _fit_texture_size(unit_data.head_sprite, unit_visual)
-					c.draw_set_transform(pos, head_world + PI / 2.0)
-					c.draw_texture_rect(unit_data.head_sprite, Rect2(-h_size * 0.5, h_size), false, Color(1, 1, 1, 1.0))
-					c.draw_set_transform(Vector2.ZERO, 0.0)
+				# Render via the shared unit-payload path so the carried unit
+				# shows chassis + head + turret heads exactly like in-world,
+				# at ITS OWN saved facing/aim/mount rotations (extra_rot = 0) —
+				# the unit keeps its pickup pose rather than aligning to the
+				# grabber. render_scale 1.0 = exact in-world size + geometry.
+				EnemyUnit.draw_unit_payload(c, unit_data, payload, pos, 1.0, 0.0, 1.0)
 			elif unit_data.icon:
 				var tex_size: Vector2 = _fit_texture_size(unit_data.icon, unit_visual)
 				c.draw_set_transform(pos, body_world + PI / 2.0)
 				c.draw_texture_rect(unit_data.icon, Rect2(-tex_size * 0.5, tex_size), false, Color(1, 1, 1, 1.0))
 				c.draw_set_transform(Vector2.ZERO, 0.0)
 			else:
-				var us: float = (unit_data.visual_size if unit_data.visual_size > 0 else 8.0) * scale * held_unit_scale
+				var us: float = (unit_data.visual_size if unit_data.visual_size > 0 else 8.0) * scale
 				var uc: Color = unit_data.color if unit_data.color != Color() else Color(0.5, 0.8, 0.3)
 				uc.a = 1.0
 				c.draw_circle(pos, us, uc)
 				c.draw_arc(pos, us, 0, TAU, 24, uc.lightened(0.3), 1.5)
 		else:
-			c.draw_circle(pos, 8.0 * scale * held_unit_scale, Color(0.3, 0.5, 0.9, 1.0))
+			c.draw_circle(pos, 8.0 * scale, Color(0.3, 0.5, 0.9, 1.0))
 
 
 ## Draws every active cable-node / cable-tower connection onto
@@ -8599,35 +8729,141 @@ func _draw_cable_links(canvas: CanvasItem) -> void:
 			canvas.draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Draws every belt / duct bridge link's tiled visualizer strip onto
+## `canvas`. Hosted on the cable overlay (z=52) so the strips render OVER
+## copper cables instead of under them. Each strip runs from the EDGE of
+## the start bridge's footprint to the EDGE of the end bridge's footprint
+## (the segment is clipped at each block's boundary along the link line),
+## so at an angle the part that would lie over a bridge is removed and the
+## strip still reaches the bridge edge on both ends.
+func _draw_bridge_links(canvas: CanvasItem) -> void:
+	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	if power_sys == null or not ("linked_pairs" in power_sys):
+		return
+	if _bridge_visualizer_texture == null:
+		return
+	var _ss_link = get_node_or_null("/root/Main/SectorScript")
+	var gs: float = main.GRID_SIZE
+	for pair in power_sys.linked_pairs:
+		var pos_a: Vector2i = pair[0]
+		var pos_b: Vector2i = pair[1]
+		if not main.placed_buildings.has(pos_a) or not main.placed_buildings.has(pos_b):
+			continue
+		if _ss_link and (_ss_link.is_tile_hidden(pos_a) or _ss_link.is_tile_hidden(pos_b)):
+			continue
+		var data_a = Registry.get_block(main.placed_buildings[pos_a])
+		var data_b = Registry.get_block(main.placed_buildings[pos_b])
+		# Belt/duct bridge pair only: both ends carry the bridge tag AND the
+		# same belt or duct transport tag.
+		var is_belt_bridge: bool = data_a != null and data_b != null \
+			and data_a.tags.has("bridge") and data_b.tags.has("bridge") \
+			and data_a.tags.has("belt") and data_b.tags.has("belt")
+		var is_duct_bridge: bool = data_a != null and data_b != null \
+			and data_a.tags.has("bridge") and data_b.tags.has("bridge") \
+			and data_a.tags.has("duct") and data_b.tags.has("duct")
+		if not (is_belt_bridge or is_duct_bridge):
+			continue
+		var size_a: Vector2 = Vector2(data_a.grid_size) * gs
+		var size_b: Vector2 = Vector2(data_b.grid_size) * gs
+		var off_a: Vector2 = _get_top_offset(main.grid_to_world(pos_a))
+		var off_b: Vector2 = _get_top_offset(main.grid_to_world(pos_b))
+		var center_a: Vector2 = main.grid_to_world(pos_a) + size_a / 2.0 + off_a
+		var center_b: Vector2 = main.grid_to_world(pos_b) + size_b / 2.0 + off_b
+		var dir: Vector2 = center_b - center_a
+		if dir.length_squared() < 0.01:
+			continue
+		var fwd: Vector2 = dir.normalized()
+		# Clip each endpoint to where the center-to-center line exits that
+		# block's footprint rect, so the strip begins/ends exactly at the
+		# bridge edges (the span over each bridge body is removed). At an
+		# angle this lands on the correct edge automatically.
+		var rect_a := Rect2(main.grid_to_world(pos_a) + off_a, size_a)
+		var rect_b := Rect2(main.grid_to_world(pos_b) + off_b, size_b)
+		var edge_a: Vector2 = _ray_exit_point(center_a, fwd, rect_a)
+		var edge_b: Vector2 = _ray_exit_point(center_b, -fwd, rect_b)
+		# Degenerate (bridges overlapping / adjacent): nothing to draw.
+		if (edge_b - edge_a).dot(fwd) <= 0.0:
+			continue
+		_draw_bridge_visualizer(canvas, edge_a, edge_b)
+
+
+## Returns the point where a ray from `origin` along unit vector `d` leaves
+## axis-aligned `rect`. If the origin is inside (the normal case — block
+## centers), this is the boundary crossing in the +d direction. Falls back
+## to `origin` if the direction is degenerate.
+func _ray_exit_point(origin: Vector2, d: Vector2, rect: Rect2) -> Vector2:
+	var t_max: float = INF
+	if absf(d.x) > 1e-6:
+		var tx1: float = (rect.position.x - origin.x) / d.x
+		var tx2: float = (rect.position.x + rect.size.x - origin.x) / d.x
+		t_max = minf(t_max, maxf(tx1, tx2))
+	if absf(d.y) > 1e-6:
+		var ty1: float = (rect.position.y - origin.y) / d.y
+		var ty2: float = (rect.position.y + rect.size.y - origin.y) / d.y
+		t_max = minf(t_max, maxf(ty1, ty2))
+	if t_max == INF or t_max <= 0.0:
+		return origin
+	return origin + d * t_max
+
+
+## Mindustry-style bridge link visual: tiles `_bridge_visualizer_texture`
+## end-to-end from `world_a` to `world_b`, clipping the final partial tile
+## so the strip is exactly the span length (no stretch). Mirrors the cable
+## tiling in `_draw_cable_links`: source rect matches destination 1:1 so
+## nothing is squashed, the texture just repeats along the run.
+## Visual scale for the tiled strip. The texture is drawn at this fraction
+## of its native pixel size (kept uniform so the art isn't distorted), then
+## tiled+clipped along the span. Lower = smaller / thinner.
+const _BRIDGE_VISUALIZER_SCALE := 0.28
+func _draw_bridge_visualizer(canvas: CanvasItem, world_a: Vector2, world_b: Vector2) -> void:
+	if _bridge_visualizer_texture == null:
+		return
+	var dir: Vector2 = world_b - world_a
+	var length: float = dir.length()
+	if length < 0.01:
+		return
+	var forward: Vector2 = dir / length
+	# +PI/2 (instead of -PI/2) flips the strip 180° so the texture's arrows
+	# point the opposite way along the span.
+	var angle: float = forward.angle() + PI / 2.0
+	var s: float = _BRIDGE_VISUALIZER_SCALE
+	# On-screen size = native × scale, so the strip is much smaller than the
+	# full-resolution texture while keeping its aspect ratio undistorted.
+	var native_w: float = _bridge_visualizer_texture.get_width()
+	var native_h: float = _bridge_visualizer_texture.get_height()
+	if native_h < 1.0 or native_w < 1.0:
+		return
+	var draw_w: float = native_w * s
+	var hw: float = draw_w / 2.0
+	var tile_world_h: float = native_h * s   # one tile's on-screen length
+	var tint := Color(1, 1, 1, 1)
+	var segments: int = ceili(length / tile_world_h)
+	for i in range(segments):
+		var t0: float = i * tile_world_h
+		var this_world_h: float = minf(tile_world_h, length - t0)
+		var center: Vector2 = world_a + forward * (t0 + this_world_h / 2.0)
+		canvas.draw_set_transform(center, angle)
+		# Source samples the proportional region from the texture top so the
+		# final partial tile is CLIPPED (not scaled): dest_h / scale texels.
+		var src := Rect2(0, 0, native_w, this_world_h / s)
+		canvas.draw_texture_rect_region(
+			_bridge_visualizer_texture,
+			Rect2(-hw, -this_world_h / 2.0, draw_w, this_world_h),
+			src, tint,
+		)
+		canvas.draw_set_transform(Vector2.ZERO, 0.0)
+
+
 func _draw_links() -> void:
 	var power_sys = get_node_or_null("/root/Main/PowerSystem")
 	if power_sys == null:
 		return
 
-	# Draw existing links as dashed lines
-	var _ss_link = get_node_or_null("/root/Main/SectorScript")
-	var link_color := Color(0.3, 0.8, 1.0, 0.6)
+	# Belt / duct bridge link strips are NOT drawn here — they render on the
+	# cable overlay (z=52) via `_draw_bridge_links(canvas)` so they sit OVER
+	# cables instead of under them (BuildingSystem itself is z=50). All other
+	# link types (mass drivers, etc.) draw no line at all.
 	var gs: float = main.GRID_SIZE
-	for pair in power_sys.linked_pairs:
-		var pos_a: Vector2i = pair[0]
-		var pos_b: Vector2i = pair[1]
-		# Skip links to destroyed buildings
-		if not main.placed_buildings.has(pos_a) or not main.placed_buildings.has(pos_b):
-			continue
-		if _ss_link and (_ss_link.is_tile_hidden(pos_a) or _ss_link.is_tile_hidden(pos_b)):
-			continue
-		# Get block center for multi-tile buildings
-		var data_a = Registry.get_block(main.placed_buildings[pos_a])
-		var data_b = Registry.get_block(main.placed_buildings[pos_b])
-		var size_a: Vector2 = Vector2(data_a.grid_size) * gs if data_a else Vector2(gs, gs)
-		var size_b: Vector2 = Vector2(data_b.grid_size) * gs if data_b else Vector2(gs, gs)
-		var world_a: Vector2 = main.grid_to_world(pos_a) + size_a / 2.0
-		var world_b: Vector2 = main.grid_to_world(pos_b) + size_b / 2.0
-		world_a += _get_top_offset(main.grid_to_world(pos_a))
-		world_b += _get_top_offset(main.grid_to_world(pos_b))
-		_draw_dashed_line(world_a, world_b, link_color, 2.0, 8.0)
-		draw_circle(world_a, 4.0, link_color)
-		draw_circle(world_b, 4.0, link_color)
 
 	# Cable wires are now drawn by `_cable_overlay` (z 52, above the
 	# LogisticsSystem layer at 51) so items running on conveyors
@@ -8636,15 +8872,13 @@ func _draw_links() -> void:
 	# overlay calls it with itself as the target canvas.
 
 	# --- Mindustry-style linking highlights ---
-	# Color encodes the role(s) the block plays across its CURRENT
-	# pair memberships, so the player can see at a glance which side
-	# of every link a bridge sits on. Independent of which side the
-	# player clicked — the same coloring shows on both ends.
-	#   BLUE   = source / input only (block sends, doesn't receive)
-	#   YELLOW = destination / output only (block receives, doesn't send)
-	#   GREEN  = both roles (at least one outgoing AND one incoming)
-	# Bridges support multi-link (duct: 3+3), so this set walks EVERY
-	# pair touching `link_source` rather than just the first.
+	# An OUTLINE (no fill) around each relevant block, colored by its role
+	# relative to `link_source`. Bridges support multi-link (duct: 3+3), so
+	# this walks EVERY pair touching the source, not just the first.
+	#   BLUE   = input only  (block sends to source / is an incoming end)
+	#   YELLOW = output only (block receives from source / outgoing end)
+	#   GREEN  = both (has at least one incoming AND one outgoing link)
+	#   RED    = a valid link candidate in range, but NOT connected yet
 	if link_source == Vector2i(-1, -1):
 		return
 
@@ -8652,14 +8886,12 @@ func _draw_links() -> void:
 	if src_data == null:
 		return
 
-	var blue_fill := Color(0.3, 0.7, 1.0, 0.35)
-	var blue_outline := Color(0.5, 0.85, 1.0, 0.9)
-	var yellow_fill := Color(1.0, 0.85, 0.2, 0.35)
-	var yellow_outline := Color(1.0, 0.95, 0.4, 0.9)
-	var green_fill := Color(0.35, 0.95, 0.45, 0.35)
-	var green_outline := Color(0.55, 1.0, 0.6, 0.9)
+	var blue_outline := Color(0.4, 0.75, 1.0, 0.95)
+	var yellow_outline := Color(1.0, 0.9, 0.3, 0.95)
+	var green_outline := Color(0.45, 1.0, 0.55, 0.95)
+	var red_outline := Color(1.0, 0.35, 0.35, 0.95)
 
-	var draw_block_highlight := func(a: Vector2i, fill: Color, outline: Color):
+	var draw_block_outline := func(a: Vector2i, outline: Color):
 		var bd: BlockData = Registry.get_block(main.placed_buildings.get(a, &""))
 		if bd == null:
 			return
@@ -8668,34 +8900,36 @@ func _draw_links() -> void:
 		var rp: Vector2 = wp + off
 		var bw: float = bd.grid_size.x * gs
 		var bh: float = bd.grid_size.y * gs
-		draw_rect(Rect2(rp, Vector2(bw, bh)), fill, true)
-		draw_rect(Rect2(rp, Vector2(bw, bh)), outline, false, 2.0)
+		draw_rect(Rect2(rp, Vector2(bw, bh)), outline, false, 2.5)
 
-	# Resolve role colors for one anchor. Walks linked_pairs ONCE per
-	# anchor — cheap given bridges cap at 6 links each.
-	var role_color_for := func(anchor: Vector2i) -> Array:
-		var has_out := false
-		var has_in := false
+	# Role color for one anchor by its link membership. In a linked_pair,
+	# pair[0] is the SOURCE (sends items across the link → that end is an
+	# OUTPUT) and pair[1] is the DESTINATION (receives → that end is an
+	# INPUT). So: pair[1] member → input (BLUE), pair[0] member → output
+	# (YELLOW), both → GREEN. Walks linked_pairs ONCE per anchor — cheap
+	# given bridges cap at 6 links each.
+	var role_outline_for := func(anchor: Vector2i) -> Color:
+		var has_output := false   # anchor is a source end (pair[0])
+		var has_input := false    # anchor is a destination end (pair[1])
 		if power_sys and "linked_pairs" in power_sys:
 			for pair in power_sys.linked_pairs:
 				if pair[0] == anchor:
-					has_out = true
+					has_output = true
 				elif pair[1] == anchor:
-					has_in = true
-				if has_out and has_in:
+					has_input = true
+				if has_output and has_input:
 					break
-		if has_out and has_in:
-			return [green_fill, green_outline]
-		if has_out:
-			return [blue_fill, blue_outline]
-		if has_in:
-			return [yellow_fill, yellow_outline]
-		# Brand-new selection with no links yet — paint as a
-		# pending-source so the player sees what they just clicked.
-		return [blue_fill, blue_outline]
+		if has_output and has_input:
+			return green_outline
+		if has_input:
+			return blue_outline
+		if has_output:
+			return yellow_outline
+		# Brand-new selection with no links yet — show as a pending source.
+		return blue_outline
 
-	# Collect every anchor connected to link_source (plus link_source
-	# itself) and paint each with its own role-derived color.
+	# Collect every anchor connected to link_source (plus link_source itself)
+	# and outline each with its own role color.
 	var to_highlight: Dictionary = {link_source: true}
 	if power_sys and "linked_pairs" in power_sys:
 		for pair in power_sys.linked_pairs:
@@ -8705,26 +8939,41 @@ func _draw_links() -> void:
 				to_highlight[pb] = true
 			elif pb == link_source:
 				to_highlight[pa] = true
+
+	# RED outlines: blocks that COULD legally link to the source (same
+	# bridge / mass-driver kind, within range) but aren't connected yet.
+	# Mirrors the validity gate in `_handle_link_click_on_anchor`.
+	var src_is_bridge: bool = src_data.tags.has("bridge")
+	var src_is_md: bool = src_data.tags.has("mass_driver")
+	var anchors: Dictionary = main.get_building_anchors()
+	for cand in anchors:
+		if cand == link_source or to_highlight.has(cand):
+			continue
+		var cdata: BlockData = Registry.get_block(main.placed_buildings.get(cand, &""))
+		if cdata == null:
+			continue
+		# Same link family (bridge↔bridge or mass-driver↔mass-driver).
+		if cdata.tags.has("bridge") != src_is_bridge:
+			continue
+		if cdata.tags.has("mass_driver") != src_is_md:
+			continue
+		if not (src_is_bridge or src_is_md):
+			continue
+		var max_range: float = maxf(src_data.link_range, cdata.link_range)
+		if max_range <= 0.0:
+			continue
+		var dx: float = float(cand.x - link_source.x)
+		var dy: float = float(cand.y - link_source.y)
+		if sqrt(dx * dx + dy * dy) > max_range:
+			continue
+		draw_block_outline.call(cand, red_outline)
+
+	# Connected + source outlines drawn last so they sit over any red ones.
 	for a in to_highlight:
-		var colors: Array = role_color_for.call(a)
-		draw_block_highlight.call(a, colors[0], colors[1])
+		draw_block_outline.call(a, role_outline_for.call(a))
 
-	# Dashed yellow line from source to the mouse so the player can see
-	# where their next click will go.
-	var src_world: Vector2 = main.grid_to_world(link_source) \
-		+ Vector2(src_data.grid_size.x * gs / 2.0, src_data.grid_size.y * gs / 2.0)
-	src_world += _get_top_offset(main.grid_to_world(link_source))
-	_draw_dashed_line(src_world, get_global_mouse_position(),
-		Color(1.0, 0.9, 0.3, 0.6), 2.0, 6.0)
-
-	# Range circle: shows the block's `link_range` (in tiles) as a faint
-	# disc the player can use to gauge where a partner is reachable.
-	# Mass drivers are excluded — their range is shown by the hover
-	# overlay (`_draw_hovered_turret_range`) instead so we don't draw
-	# two competing rings.
-	if src_data.link_range > 0.0 and not src_data.tags.has("mass_driver"):
-		draw_arc(src_world, src_data.link_range * gs, 0.0, TAU, 96,
-			Color(1.0, 0.9, 0.3, 0.5), 1.5)
+	# (No extending source→mouse line and no link-range circle — the block
+	# outlines above already show what's selectable / connected.)
 
 
 ## Draws a dashed line between two points.
@@ -8826,6 +9075,39 @@ func inject_unit_as_payload(anchor: Vector2i, payload: Dictionary) -> bool:
 		dst["payload"] = payload
 		dst["phase"] = "deconstructing"
 		dst["timer"] = decon_time
+		return true
+
+	# Unit Upgrader: only takes a unit payload, and only if it still has a
+	# free upgrade slot. Goes into the upgrader's `unit` slot.
+	if bdata.tags.has("upgrader"):
+		if payload.get("type", "") != "unit":
+			return false
+		if not _logistics.upgrader_state.has(anchor):
+			_logistics.upgrader_state[anchor] = {"unit": null, "queue": [], "applying": &"", "timer": 0.0, "applied_session": 0}
+		var ust: Dictionary = _logistics.upgrader_state[anchor]
+		if ust.get("unit") != null:
+			return false
+		if _logistics.has_method("_unit_free_slots") and _logistics._unit_free_slots(payload) < 1:
+			return false
+		ust["unit"] = payload
+		ust["applied_session"] = 0
+		return true
+
+	# Payload Refit Bay: only takes a unit payload that carries ≥1 upgrade.
+	if bdata.tags.has("refit_bay"):
+		if payload.get("type", "") != "unit":
+			return false
+		if (payload.get("applied_upgrades", []) as Array).is_empty():
+			return false
+		if not _logistics.refit_state.has(anchor):
+			_logistics.refit_state[anchor] = {"unit": null, "pending": [], "timer": 0.0, "ejecting": false}
+		var rst: Dictionary = _logistics.refit_state[anchor]
+		if rst.get("unit") != null:
+			return false
+		rst["unit"] = payload
+		rst["pending"] = (payload.get("applied_upgrades", []) as Array).duplicate()
+		rst["ejecting"] = false
+		rst["timer"] = 0.0
 		return true
 
 	# Mass driver: park the payload in `mass_driver_state[anchor].payload`

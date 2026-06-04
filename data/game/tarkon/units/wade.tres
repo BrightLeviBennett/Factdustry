@@ -1,6 +1,25 @@
-[gd_resource type="Resource" script_class="UnitData" format=3]
+[gd_resource type="Resource" script_class="UnitData" format=3 uid="uid://dt5135f3q70bm"]
 
 [ext_resource type="Script" uid="uid://b42323t1lhy2q" path="res://data/game/tarkon/units/unit_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://chw1vfc5bun0q" path="res://data/game/tarkon/units/weapon_data.gd" id="2"]
+[ext_resource type="Texture2D" uid="uid://5d2b4p2gfxbl" path="res://textures/units/wade/wadeBase.png" id="3"]
+
+[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_gr8rr"]
+load_path = "res://.godot/imported/WadeHead.png-001a424cf53d560dfe0e7cc425e9fc3d.ctex"
+
+[sub_resource type="Resource" id="WeaponData_wade_turret"]
+script = ExtResource("2")
+sprite = SubResource("CompressedTexture2D_gr8rr")
+sprite_scale = 0.18
+sprite_angle_offset = 3.14159265
+offset = Vector2(64, 0)
+muzzle_offset = Vector2(0, 24)
+reload = 0.8
+shoot_cone = 10.0
+range_px = 832.0
+barrel_count = 2
+barrel_spacing = 48.0
+projectile_speed = 320.0
 
 [resource]
 script = ExtResource("1")
@@ -11,15 +30,28 @@ team = 0
 color = Color(0.4, 0.6, 0.85, 1)
 visual_size = 5.0
 sprite_scale = 0.35
+base_sprite = ExtResource("3")
 head_turn_speed = 6.0
+body_turn_speed = 2.4
+sprite_angle_offset = 3.14159265
+movement_layer = 4
 move_speed = 1.6
-turn_radius = 2.0
+tank_steering = true
+turn_radius = 12.0
+trail_length = 90
+wave_trail_x = 55.0
+wave_trail_y = -150.0
+trail_scl = 26.0
 max_health = 140.0
 attack_damage = 18.0
+attack_range = 832.0
+weapons = Array[ExtResource("2")]([SubResource("WeaponData_wade_turret")])
+immunities = PackedStringArray()
 spawn_count = 1
 threat_value = 2.5
 build_time = 12.0
 build_cost = {
 "copper": 30,
-"silicon": 20
+"silicon": 25,
+"steel": 15
 }

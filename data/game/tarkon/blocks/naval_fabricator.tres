@@ -1,9 +1,9 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d4mpat21o7f0t"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://brbut8o4oc78a" path="res://textures/blocks/units/NavalFabricator/NavalFabricatorBase.png" id="1_pv6ed"]
-[ext_resource type="Texture2D" uid="uid://bp6016x4iews8" path="res://textures/blocks/units/NavalFabricator/NavalFabricatorComplete.png" id="2_4qffy"]
-[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_4qffy"]
+[ext_resource type="Texture2D" uid="uid://c3cgxdd7m7asi" path="res://textures/blocks/units/NavalFabricator/NavalFabricatorBase.png" id="1_pv6ed"]
+[ext_resource type="Texture2D" uid="uid://jwj3natm6lna" path="res://textures/blocks/units/NavalFabricator/NavalFabricatorComplete.png" id="2_4qffy"]
+[ext_resource type="Texture2D" uid="uid://uhhvwyue44gg" path="res://textures/blocks/units/FabricatorTop.png" id="4_4qffy"]
 
 [resource]
 script = ExtResource("1")
@@ -23,4 +23,6 @@ build_cost = {
 "silicon": 30
 }
 build_time = 4.0
-power_consumption = 5.0
+electrical_power_use = 30.0
+max_stored_items = 40
+produced_unit = &"wade"

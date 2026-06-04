@@ -27,6 +27,7 @@ var _drone: Node2D
 var _terrain: Node2D
 var _building_sys: Node
 var _sector_script: Node
+var _launch_anim: Node
 var _logistics: Node2D
 var _watchtower_sys: Node
 
@@ -45,9 +46,48 @@ var _watchtower_sys: Node
 #   "aoe_radius": float    — explosion radius in pixels
 var projectiles: Array[Dictionary] = []
 
+# --- GAS CLOUDS (Fume turret + sulfur vents) ---
+# key -> {center: Vector2, radius: float, target_radius: float, t_last: float,
+#         type: "fume"|"vent"}. A cloud grows toward target_radius and applies
+# the corroding status to enemies inside. Fume turrets key by "fume:x,y" and
+# refresh each frame they have fumes; sulfur vents key by "vent:x,y".
+var gas_clouds: Dictionary = {}
+var _cloud_time: float = 0.0
+var _vent_cloud_scan_timer: float = 0.0
+var _cloud_damage_timer: float = 0.0
+
+# --- MUZZLE FLAME (Flarecaster) ---
+# Replicates Mindustry's Fx.shootSmallFlame: each shot spits a short cone of
+# fire particles that fan out, shrink, and fade lightFlame→darkFlame→gray.
+# Each entry: {pos0: Vector2, ang: float, reach: float, age: float, life: float}.
+# Liquid-bullet puddle splats (Corrosion). Each: {pos, color, radius, age, life}.
+var _liquid_splashes: Array = []
+
+var _flame_particles: Array = []
+const _FLAME_LIGHT := Color(1.0, 0.867, 0.333)   # Pal.lightFlame
+const _FLAME_DARK := Color(1.0, 0.408, 0.251)    # Pal.darkFlame
+const _FLAME_GRAY := Color(0.5, 0.5, 0.5)
+const _FLAME_COUNT := 8
+const _FLAME_SPREAD_DEG := 12.0
+# Half-angle of the Flarecaster's damaging flame cone.
+const _FLAME_CONE_DEG := 14.0
+# Per-flame-turret fuel meter: anchor -> seconds since last fuel was burned.
+var _flame_fuel_acc: Dictionary = {}
+
 # --- TURRET STATE ---
 # Key = Vector2i grid pos of a turret, Value = float (cooldown remaining)
 var turret_cooldowns := {}
+
+# --- Structural combat caches (perf) ---
+# The targeting snapshot + turret update used to scan ALL placed_buildings
+# (with a Registry.get_block per cell) every frame. Both the turret-anchor
+# list and the "targetable buildings" set depend only on which block sits
+# where (structural), so we rebuild them once per place/destroy instead.
+# Rebuilt lazily when `_combat_cache_dirty` or the building count drifts.
+var _turret_anchors: Array = []          # Array[Vector2i] — anchor cells of turrets
+var _filtered_buildings_cache: Dictionary = {}  # cell -> block_id, minus platforms / no_pathfinding
+var _combat_cache_dirty := true
+var _combat_cache_count := -1
 
 # Key = Vector2i grid pos of a turret, Value = float (current angle in radians)
 var turret_angles := {}
@@ -235,6 +275,12 @@ func _terrain_ref() -> Node2D:
 		_terrain = get_node_or_null("/root/Main/TerrainSystem")
 	return _terrain
 
+var _fire_sys: Node = null
+func _fire_sys_ref() -> Node:
+	if _fire_sys == null:
+		_fire_sys = get_node_or_null("/root/Main/FireSystem")
+	return _fire_sys
+
 func _building_sys_ref() -> Node:
 	if _building_sys == null:
 		_building_sys = get_node_or_null("/root/Main/BuildingSystem")
@@ -244,6 +290,11 @@ func _sector_script_ref() -> Node:
 	if _sector_script == null:
 		_sector_script = get_node_or_null("/root/Main/SectorScript")
 	return _sector_script
+
+func _launch_anim_ref() -> Node:
+	if _launch_anim == null or not is_instance_valid(_launch_anim):
+		_launch_anim = get_node_or_null("/root/Main/LaunchAnimation")
+	return _launch_anim
 
 func _logistics_ref() -> Node2D:
 	if _logistics == null:
@@ -307,6 +358,9 @@ func _process(delta: float) -> void:
 	_poll_targeting_results()
 	_push_targeting_snapshot()
 	_update_turrets(delta)
+	_update_gas_clouds(delta)
+	_update_liquid_splashes(delta)
+	_update_flame_particles(delta)
 	_update_held_turrets(delta)
 	_update_held_units(delta)
 	_update_drone_combat(delta)
@@ -327,6 +381,34 @@ func _poll_targeting_results() -> void:
 		unit_target_results.clear()
 		for r in unit_results:
 			unit_target_results[r["unit_id"]] = r
+
+
+## Rebuilds the turret-anchor list and the targetable-buildings set in one
+## pass. Cheap to call (guarded), runs only when structure changes.
+func _ensure_combat_cache() -> void:
+	if not _combat_cache_dirty and main.placed_buildings.size() == _combat_cache_count:
+		return
+	_combat_cache_dirty = false
+	_combat_cache_count = main.placed_buildings.size()
+	var turrets: Array = []
+	var seen: Dictionary = {}
+	var filtered: Dictionary = {}
+	for cell in main.placed_buildings:
+		var bid: StringName = main.placed_buildings[cell]
+		var data = Registry.get_block(bid)
+		if data == null:
+			continue
+		# Targetable-buildings set (platforms / no_pathfinding excluded).
+		if not (data.tags.has("platform") or data.tags.has("no_pathfinding")):
+			filtered[cell] = bid
+		# Turret anchor list (deduped to the anchor cell).
+		if data.is_turret():
+			var anchor: Vector2i = main.building_origins.get(cell, cell)
+			if not seen.has(anchor):
+				seen[anchor] = true
+				turrets.append(anchor)
+	_turret_anchors = turrets
+	_filtered_buildings_cache = filtered
 
 
 func _push_targeting_snapshot() -> void:
@@ -367,21 +449,18 @@ func _push_targeting_snapshot() -> void:
 	# its fire rate), and non-anchor cells can hold stale/default
 	# faction values after a conversion pass, flipping a captured turret
 	# back to acting Lumina for a frame.
+	_ensure_combat_cache()
 	var turrets_snap: Array = []
-	var seen_anchors: Dictionary = {}
-	for grid_pos in main.placed_buildings:
-		var block_id = main.placed_buildings[grid_pos]
-		var data = Registry.get_block(block_id)
+	var sector_script = _sector_script_ref()
+	for anchor in _turret_anchors:
+		if not main.placed_buildings.has(anchor):
+			continue
+		var data = Registry.get_block(main.placed_buildings[anchor])
 		if data == null or not data.is_turret():
 			continue
-		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-		if seen_anchors.has(anchor):
-			continue
-		seen_anchors[anchor] = true
 		if anchor == manually_controlled_turret:
 			continue
 		# Skip disabled or under-construction buildings
-		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(anchor):
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
@@ -392,7 +471,7 @@ func _push_targeting_snapshot() -> void:
 			"grid_pos": anchor,
 			"faction": turret_faction,
 			"range_pixels": range_tiles * main.GRID_SIZE,
-			"block_id": block_id,
+			"block_id": main.placed_buildings[anchor],
 			"targets_air": data.targets_air,
 			"targets_ground": data.targets_ground,
 		})
@@ -417,13 +496,9 @@ func _push_targeting_snapshot() -> void:
 	# worker (which feeds both turret AI and idle player-unit auto-shoot)
 	# never even considers them as targets. Platforms are damage-immune
 	# anyway, but filtering here saves wasted shot-arc rotations.
-	var filtered_buildings: Dictionary = {}
-	for cell in main.placed_buildings:
-		var bid_f: StringName = main.placed_buildings[cell]
-		var bd_f = Registry.get_block(bid_f)
-		if bd_f and bd_f.tags.has("platform"):
-			continue
-		filtered_buildings[cell] = bid_f
+	# Cached set (rebuilt only on structural change) — platforms and
+	# `no_pathfinding` blocks are already excluded.
+	var filtered_buildings: Dictionary = _filtered_buildings_cache
 	# Held entities: every crane state with a held payload contributes a
 	# world-positioned target. Held LUMINA pieces sit in the player_units-
 	# equivalent slot (FEROX turrets shoot at them); held FEROX pieces
@@ -479,7 +554,13 @@ func _update_turrets(delta: float) -> void:
 	if unit_mgr == null:
 		return
 
-	for grid_pos in main.placed_buildings:
+	_ensure_combat_cache()
+	# Iterate only turret anchors (cached). Turret state, targeting, and head
+	# drawing are all keyed by anchor, so per-cell iteration only ever did
+	# real work at the anchor anyway.
+	for grid_pos in _turret_anchors:
+		if not main.placed_buildings.has(grid_pos):
+			continue
 		var block_id = main.placed_buildings[grid_pos]
 		var data = Registry.get_block(block_id)
 		if data == null or not data.is_turret():
@@ -670,6 +751,21 @@ func _update_turrets(delta: float) -> void:
 		# chassis angle so the heads can converge on a close target.
 		_update_barrel_toe_in(grid_pos, data, turret_world, target_world, delta)
 
+		# Fume emitter: continuously vents a corroding gas cloud in front of
+		# itself while fed sulfur fumes — no discrete projectiles, no cooldown.
+		if data.tags.has("fume_emitter"):
+			_update_fume_emitter(grid_pos, data, turret_world, turret_power_eff, delta)
+			continue
+
+		# Flame emitter (Flarecaster): the flame cone IS the weapon. We only
+		# reach here with a live in-range target, so spray a fire jet out to
+		# full range and burn every enemy caught in the cone. No projectiles.
+		if data.tags.has("flame_emitter"):
+			_update_flame_emitter(grid_pos, data, turret_world,
+				turret_angles[grid_pos], live_range_px, turret_faction,
+				turret_power_eff, delta)
+			continue
+
 		# Multi-barrel: any barrel with a cooldown <= 0 is ready to fire.
 		# Single-barrel falls back to the original scalar cooldown.
 		var ready_barrel: int = -1
@@ -689,77 +785,14 @@ func _update_turrets(delta: float) -> void:
 			# bookkeeping that assumes a non-negative index).
 			ready_barrel = 0
 
-		# --- Ammo check: if turret has ammo_types, it needs resources to fire ---
-		# Damage now lives on AmmoType. The block-level field was removed,
-		# so seed with 0 — the ammo branch below overwrites this before
-		# any shot fires (and the no-ammo path returns early).
-		var fire_damage: float = 0.0
-		var fire_reload_mult: float = 1.0
-		var fire_color: Color = data.color.lightened(0.3)
-		var fire_speed: float = default_projectile_speed
-		var fire_aoe: bool = data.is_aoe
-		var fire_aoe_radius: float = data.aoe_radius
-		var fire_lifetime: float = 2.0
-		var fire_radius: float = 4.0
-		var fire_pierce: int = 0
-		var fire_homing: float = 0.0
-		var fire_knockback: float = 0.0
-		var fire_inaccuracy: float = 0.0
-		var fire_pellets: int = 1
-		var fire_range_bonus: float = 0.0
-		var fire_status: Resource = null
-		var fire_trail_color: Color = fire_color
-		var fire_collides_air: bool = true
-		var fire_collides_ground: bool = true
-		var fire_bldg_mult: float = 1.0
-		var fire_unit_mult: float = 1.0
-		var fire_splash_mult: float = 1.0
-
-		if data.ammo_types.size() > 0:
-			var log_ref: Node2D = _logistics
-			var ammo_found := false
-			var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-			for ammo in data.ammo_types:
-				if ammo == null or not (ammo is AmmoType):
-					continue
-				var ammo_data: AmmoType = ammo as AmmoType
-				if log_ref and log_ref.has_method("get_stored_item_count"):
-					var stored: int = log_ref.get_stored_item_count(anchor, ammo_data.item_id)
-					var amt: int = maxi(ammo_data.amount_per_shot, 1)
-					if stored >= amt:
-						log_ref.remove_from_storage(anchor, ammo_data.item_id, amt)
-						fire_damage = ammo_data.damage
-						fire_reload_mult = ammo_data.reload_multiplier
-						fire_color = ammo_data.projectile_color
-						fire_status = ammo_data.status_effect
-						fire_speed = ammo_data.projectile_speed
-						fire_lifetime = ammo_data.projectile_lifetime
-						fire_radius = ammo_data.projectile_radius
-						fire_pierce = ammo_data.pierce_count
-						fire_homing = ammo_data.homing
-						fire_knockback = ammo_data.knockback
-						# Turret's bullet_spread + ammo bullet_spread = visual cone.
-						fire_inaccuracy = ammo_data.bullet_spread + data.bullet_spread
-						fire_pellets = ammo_data.projectiles_per_shot
-						fire_range_bonus = ammo_data.range_bonus
-						fire_trail_color = ammo_data.get_trail_color()
-						fire_collides_air = ammo_data.collides_air
-						fire_collides_ground = ammo_data.collides_ground
-						fire_bldg_mult = ammo_data.building_damage_mult
-						fire_unit_mult = ammo_data.unit_damage_mult
-						# Splash overrides the block-level AoE if the ammo opts in
-						if ammo_data.is_splash:
-							fire_aoe = true
-							fire_aoe_radius = ammo_data.splash_radius
-							fire_splash_mult = ammo_data.splash_damage_mult
-						ammo_found = true
-						break
-			if not ammo_found:
-				continue  # No ammo available — can't fire
-		# When the turret has NO ammo_types configured at all, it CANNOT fire.
-		# (Mindustry-style: every turret must be loaded.)
-		else:
+		# --- Ammo: read + consume one shot's worth via the shared profile helper
+		# (the same path the manual-control fire uses, so ballistics stay in one
+		# place). No ammo_types or can't afford → can't fire.
+		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		var profile: Dictionary = read_ammo_profile(data, _logistics, anchor)
+		if not profile["found"]:
 			continue
+		var fire_reload_mult: float = float(profile["reload_mult"])
 
 		# Fire! Apply any active booster (Fire Rate boost from consumed
 		# fluid/item) by dividing the cooldown — 250% fire rate cuts
@@ -811,153 +844,40 @@ func _update_turrets(delta: float) -> void:
 			lateral_offset = (float(ready_barrel) - (float(barrel_count) - 1.0) * 0.5) * data.barrel_spacing
 		var fire_pos = turret_world + chassis_perp * lateral_offset + aim_dir * barrel_length
 
-		# Spawn one projectile per pellet, applying inaccuracy spread.
-		# Shot direction starts along the aim axis from the firing barrel's
-		# muzzle, not "fire_pos toward target_world". With a lateral barrel
-		# offset (multi-barrel turrets), targeting the absolute target
-		# position would make each bullet veer diagonally back toward the
-		# turret's centre the instant it spawned, which visually reads as
-		# "all bullets come from the middle". Travelling along aim_dir
-		# keeps each bullet in a straight line out of its own barrel.
-		# Bullets always travel along the turret's aim axis for the
-		# full attack_range, regardless of how close the target is.
-		# A target hit registers when the projectile reaches its
-		# `target_pos` (handled by `_on_projectile_hit`) or via
-		# along-path collision (walls / direct-fire path).
-		# Apply turret `inaccuracy` (miss-target angle) as a one-time
-		# rotation on the aim direction for THIS shot — independent of
-		# the per-pellet bullet_spread cone below. 0 inaccuracy = always
-		# hits where it aimed; higher values randomly miss left/right.
+		# Apply turret `inaccuracy` (miss-target angle) as a one-time rotation on
+		# the aim direction for THIS shot — independent of the per-pellet
+		# bullet_spread cone the emitter applies. 0 = always hits where aimed.
+		# Bullets travel along the aim axis (not fire_pos→target) so a laterally
+		# offset multi-barrel muzzle doesn't veer its rounds back to centre.
 		var base_shot_dir: Vector2 = aim_dir
 		if data.inaccuracy > 0.0:
 			var miss_deg: float = randf_range(-data.inaccuracy, data.inaccuracy)
 			base_shot_dir = base_shot_dir.rotated(deg_to_rad(miss_deg))
+		# Bullets fly to the end of the turret's range; ammo `range_bonus` is
+		# intentionally ignored so the visible travel matches the turret stat.
 		var effective_range_tiles: float = data.attack_range + _watchtower_range_bonus(grid_pos)
 		var shot_distance: float = effective_range_tiles * main.GRID_SIZE
-		var pellet_total: int = maxi(fire_pellets, 1)
-		# Multi-pellet salvos share a shot_id so repeat hits on the same
-		# target halve damage per extra pellet.
-		var salvo_shot_id: int = _next_shot_id() if pellet_total > 1 else 0
-		for pellet_i in range(pellet_total):
-			# Evenly distribute pellets across the inaccuracy cone instead
-			# of pure random spread. Each pellet gets its own slot of the
-			# cone (1/N of the total width) and we only jitter inside that
-			# slot, so 6 pellets always come out as a fan rather than
-			# clustering near the centre by chance.
-			var spread_rad: float = 0.0
-			if fire_inaccuracy > 0.0 and pellet_total > 1:
-				var t: float = float(pellet_i) / float(pellet_total - 1)  # 0..1
-				var slot_w: float = (2.0 * fire_inaccuracy) / float(pellet_total)
-				var center_deg: float = lerp(-fire_inaccuracy, fire_inaccuracy, t)
-				var jitter_deg: float = randf_range(-slot_w * 0.5, slot_w * 0.5)
-				spread_rad = deg_to_rad(center_deg + jitter_deg)
-			elif fire_inaccuracy > 0.0:
-				spread_rad = deg_to_rad(randf_range(-fire_inaccuracy, fire_inaccuracy))
-			var pellet_angle: float = base_shot_dir.angle() + spread_rad
-			var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * shot_distance
-
-			# Bullets fly to the end of the turret's range; ammo's
-			# `range_bonus` is intentionally ignored so the visible
-			# travel distance matches the turret stat the player sees.
-			var fire_max_range: float = effective_range_tiles * main.GRID_SIZE
-
-			if shoot_at_unit:
-				# Always fly the full range along the aim axis — every
-				# bullet's `target_pos` is the end-of-range point, and
-				# damage to `nearest_unit` is delivered when the
-				# projectile reaches that point (or via along-path
-				# collision for walls / direct-fire bullets).
-				var proj_target: Vector2 = pellet_target
-				_spawn_projectile(
-					fire_pos,
-					nearest_unit,
-					proj_target,
-					"enemy",
-					fire_speed,
-					fire_damage * fire_unit_mult,
-					fire_color,
-					"turret",
-					fire_aoe,
-					fire_aoe_radius,
-					turret_faction,
-					{
-						"lifetime": fire_lifetime,
-						"radius": fire_radius,
-						"pierce": fire_pierce,
-						"homing": fire_homing,
-						"knockback": fire_knockback,
-						"trail_color": fire_trail_color,
-						"collides_air": fire_collides_air,
-						"collides_ground": fire_collides_ground,
-						"status": fire_status,
-						"splash_mult": fire_splash_mult,
-						"max_range": fire_max_range,
-						"shot_id": salvo_shot_id,
-					},
-				)
-			elif shoot_at_held:
-				# Held entity at a SPECIFIC layer of the cargo chain.
-				# `target_ref` carries both the holding crane's anchor
-				# and the depth so damage routes only to that layer —
-				# a hit on the held crane shouldn't destroy the block
-				# at the tip and vice versa.
-				var proj_target_h: Vector2 = pellet_target
-				_spawn_projectile(
-					fire_pos,
-					{"anchor": held_target_anchor, "depth": held_target_depth},
-					proj_target_h,
-					"held",
-					fire_speed,
-					fire_damage * fire_unit_mult,
-					fire_color,
-					"turret",
-					fire_aoe,
-					fire_aoe_radius,
-					turret_faction,
-					{
-						"lifetime": fire_lifetime,
-						"radius": fire_radius,
-						"pierce": fire_pierce,
-						"homing": fire_homing,
-						"knockback": fire_knockback,
-						"trail_color": fire_trail_color,
-						"collides_air": fire_collides_air,
-						"collides_ground": fire_collides_ground,
-						"status": fire_status,
-						"splash_mult": fire_splash_mult,
-						"max_range": fire_max_range,
-						"shot_id": salvo_shot_id,
-					},
-				)
-			else:
-				var proj_target_b: Vector2 = pellet_target
-				_spawn_projectile(
-					fire_pos,
-					nearest_bldg,
-					proj_target_b,
-					"building",
-					fire_speed,
-					fire_damage * fire_bldg_mult,
-					fire_color,
-					"turret",
-					fire_aoe,
-					fire_aoe_radius,
-					turret_faction,
-					{
-						"lifetime": fire_lifetime,
-						"radius": fire_radius,
-						"pierce": fire_pierce,
-						"homing": fire_homing,
-						"knockback": fire_knockback,
-						"trail_color": fire_trail_color,
-						"collides_air": fire_collides_air,
-						"collides_ground": fire_collides_ground,
-						"status": fire_status,
-						"splash_mult": fire_splash_mult,
-						"max_range": fire_max_range,
-						"shot_id": salvo_shot_id,
-					},
-				)
+		# Pick this shot's target ref / type / damage modifier, then hand off to
+		# the shared pellet emitter — the same path the manual-control fire uses,
+		# so spread, liquid ballistics and projectile extras live in one place.
+		var tgt_ref: Variant = nearest_bldg
+		var tgt_type: String = "building"
+		var tgt_damage: float = float(profile["damage"]) * float(profile["bldg_mult"])
+		if shoot_at_unit:
+			tgt_ref = nearest_unit
+			tgt_type = "enemy"
+			tgt_damage = float(profile["damage"]) * float(profile["unit_mult"])
+		elif shoot_at_held:
+			# Held entity at a SPECIFIC layer of the cargo chain — target_ref
+			# carries the holding crane's anchor + depth so damage routes only
+			# to that layer.
+			tgt_ref = {"anchor": held_target_anchor, "depth": held_target_depth}
+			tgt_type = "held"
+			tgt_damage = float(profile["damage"]) * float(profile["unit_mult"])
+		emit_fire_pellets(fire_pos, base_shot_dir.angle(), shot_distance, shot_distance, profile, tgt_ref, tgt_type, tgt_damage, turret_faction)
+		# Muzzle flame cone (Flarecaster) — emitted once per shot along the aim axis.
+		if bool(profile["muzzle_flame"]):
+			spawn_muzzle_flame(fire_pos, base_shot_dir.angle())
 
 
 ## Springs every barrel angle back toward the chassis angle. Called each
@@ -1361,6 +1281,18 @@ func _spawn_projectile(
 		"status": extras.get("status", null),
 		"splash_mult": float(extras.get("splash_mult", 1.0)),
 		"shot_id": int(extras.get("shot_id", 0)),
+		# Fragmentation: on impact spawn N child orbs (Detonater). Frags
+		# themselves carry frag_count 0 so they never chain.
+		"frag_count": int(extras.get("frag_count", 0)),
+		"frag_damage": float(extras.get("frag_damage", 0.0)),
+		"frag_speed": float(extras.get("frag_speed", 250.0)),
+		"frag_radius": float(extras.get("frag_radius", 4.0)),
+		"frag_range": float(extras.get("frag_range", 160.0)),
+		"is_frag": bool(extras.get("is_frag", false)),
+		# Liquid bullet (Corrosion): rendered as a fluid orb, decelerates via
+		# `drag`, and leaves a puddle splat on despawn.
+		"liquid": bool(extras.get("liquid", false)),
+		"drag": float(extras.get("drag", 0.0)),
 	}
 	var sid: int = int(proj["shot_id"])
 	if sid != 0:
@@ -1378,12 +1310,202 @@ func _spawn_projectile(
 			asys.play("shoot", start_pos, -6.0, 1.0, 0.05)
 
 
+## Initial launch speed for a drag-decelerated liquid bullet so that, summed
+## over its `lifetime` at ~60 fps, it travels `range_px` before expiring.
+## _update_projectiles multiplies speed by (1 - drag) each frame and then
+## advances speed/60 px, so the travelled distance is a geometric series:
+##   range = v0 * (1/60) * (1 - (1-drag)^N) / drag,   N = lifetime * 60
+## Solving for v0 yields the launch speed that lands the blob at max range
+## right as its lifetime runs out.
+func _liquid_launch_speed(range_px: float, drag: float, lifetime: float) -> float:
+	var d: float = clampf(drag, 0.0001, 0.9999)
+	var n: float = maxf(lifetime * 60.0, 1.0)
+	var reach_factor: float = (1.0 / 60.0) * (1.0 - pow(1.0 - d, n)) / d
+	if reach_factor <= 0.0001:
+		return range_px / maxf(lifetime, 0.0001)
+	return range_px / reach_factor
+
+
+## Reads the first affordable AmmoType off `bdata`, consuming one shot's worth
+## of its resource from `log_ref` at `anchor`, and returns a "fire profile"
+## dictionary describing the resulting projectile. Shared by the auto-fire
+## (CombatSystem) and manual-control (UnitManager) paths so both behave
+## identically — add a new AmmoType-driven field here once and both inherit it.
+## Returns a profile with "found" = false when the turret has no ammo_types or
+## can't afford any of them (the caller should then skip firing).
+func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
+	var p: Dictionary = {
+		"found": false,
+		"damage": 0.0,
+		"color": bdata.color.lightened(0.3),
+		"reload_mult": 1.0,
+		"speed": default_projectile_speed,
+		"lifetime": 2.0,
+		"radius": 4.0,
+		"pierce": 0,
+		"homing": 0.0,
+		"knockback": 0.0,
+		"inaccuracy": 0.0,
+		"pellets": 1,
+		"range_bonus": 0.0,
+		"status": null,
+		"trail_color": bdata.color.lightened(0.3),
+		"collides_air": true,
+		"collides_ground": true,
+		"bldg_mult": 1.0,
+		"unit_mult": 1.0,
+		"aoe": bdata.is_aoe,
+		"aoe_radius": bdata.aoe_radius,
+		"splash_mult": 1.0,
+		"frag_count": 0,
+		"frag_damage": 0.0,
+		"frag_speed": 250.0,
+		"frag_radius": 4.0,
+		"frag_range": 160.0,
+		"liquid": false,
+		"drag": 0.0,
+		"velocity_rnd": 0.0,
+		"muzzle_flame": false,
+	}
+	# A turret with NO ammo_types configured cannot fire (Mindustry-style: every
+	# turret must be loaded).
+	if bdata.ammo_types.is_empty() or log_ref == null:
+		return p
+	for ammo in bdata.ammo_types:
+		if ammo == null or not (ammo is AmmoType):
+			continue
+		var ammo_data: AmmoType = ammo as AmmoType
+		var amt: int = maxi(ammo_data.amount_per_shot, 1)
+		if not _consume_turret_ammo(log_ref, anchor, ammo_data.item_id, amt):
+			continue
+		p["damage"] = ammo_data.damage
+		p["reload_mult"] = ammo_data.reload_multiplier
+		p["color"] = ammo_data.projectile_color
+		p["status"] = ammo_data.status_effect
+		p["speed"] = ammo_data.projectile_speed
+		p["lifetime"] = ammo_data.projectile_lifetime
+		p["radius"] = ammo_data.projectile_radius
+		p["pierce"] = ammo_data.pierce_count
+		p["homing"] = ammo_data.homing
+		p["knockback"] = ammo_data.knockback
+		# Turret bullet_spread + ammo bullet_spread = visible cone.
+		p["inaccuracy"] = ammo_data.bullet_spread + bdata.bullet_spread
+		p["pellets"] = ammo_data.projectiles_per_shot
+		p["range_bonus"] = ammo_data.range_bonus
+		p["trail_color"] = ammo_data.get_trail_color()
+		p["collides_air"] = ammo_data.collides_air
+		p["collides_ground"] = ammo_data.collides_ground
+		p["bldg_mult"] = ammo_data.building_damage_mult
+		p["unit_mult"] = ammo_data.unit_damage_mult
+		# Splash overrides the block-level AoE if the ammo opts in.
+		if ammo_data.is_splash:
+			p["aoe"] = true
+			p["aoe_radius"] = ammo_data.splash_radius
+			p["splash_mult"] = ammo_data.splash_damage_mult
+		p["frag_count"] = ammo_data.frag_count
+		p["frag_damage"] = ammo_data.frag_damage
+		p["frag_speed"] = ammo_data.frag_speed
+		p["frag_radius"] = ammo_data.frag_radius
+		p["frag_range"] = ammo_data.frag_range
+		p["liquid"] = ammo_data.liquid_bullet
+		p["drag"] = ammo_data.drag
+		p["velocity_rnd"] = ammo_data.velocity_rnd
+		p["muzzle_flame"] = ammo_data.muzzle_flame
+		p["found"] = true
+		break
+	return p
+
+
+## Spawns one projectile per pellet for a turret shot: applies the AmmoType's
+## inaccuracy cone (even-fan distribution), derives the liquid-bullet launch
+## speed, and builds the projectile extras from `profile`. Shared by auto-fire
+## and manual control so the ballistics stay identical. `aim_angle` is the base
+## shot direction (radians), `shot_distance` how far each pellet aims, and
+## `max_range` the despawn cap. `damage` is the final per-hit damage (already
+## multiplied by the unit/building modifier the caller chose).
+func emit_fire_pellets(fire_pos: Vector2, aim_angle: float, shot_distance: float, max_range: float, profile: Dictionary, target_ref, target_type: String, damage: float, source_faction: int) -> void:
+	var speed: float = float(profile["speed"])
+	var drag: float = float(profile["drag"])
+	var lifetime: float = float(profile["lifetime"])
+	# Liquid bullets decelerate via `drag`; derive the launch speed so the blob
+	# lobs the full range and expires at the end of its arc instead of stalling.
+	if bool(profile["liquid"]) and drag > 0.0 and lifetime > 0.0:
+		speed = _liquid_launch_speed(max_range, drag, lifetime)
+	var inaccuracy: float = float(profile["inaccuracy"])
+	var velocity_rnd: float = float(profile["velocity_rnd"])
+	var pellet_total: int = maxi(int(profile["pellets"]), 1)
+	# Multi-pellet salvos share a shot_id so repeat hits on the same target
+	# halve damage per extra pellet.
+	var salvo_shot_id: int = _next_shot_id() if pellet_total > 1 else 0
+	for pellet_i in range(pellet_total):
+		# Evenly distribute pellets across the inaccuracy cone — each gets its
+		# own 1/N slot and we only jitter inside it, so the salvo fans out
+		# instead of clustering near the centre by chance.
+		var spread_rad: float = 0.0
+		if inaccuracy > 0.0 and pellet_total > 1:
+			var t: float = float(pellet_i) / float(pellet_total - 1)
+			var slot_w: float = (2.0 * inaccuracy) / float(pellet_total)
+			var center_deg: float = lerp(-inaccuracy, inaccuracy, t)
+			var jitter_deg: float = randf_range(-slot_w * 0.5, slot_w * 0.5)
+			spread_rad = deg_to_rad(center_deg + jitter_deg)
+		elif inaccuracy > 0.0:
+			spread_rad = deg_to_rad(randf_range(-inaccuracy, inaccuracy))
+		var pellet_angle: float = aim_angle + spread_rad
+		var pellet_target: Vector2 = fire_pos + Vector2.from_angle(pellet_angle) * shot_distance
+		# Per-glob launch-speed jitter (velocityRnd): each shot leaves at
+		# speed × (1 ± velocity_rnd) so a liquid spray's globs scatter to
+		# different distances instead of all landing on the same spot.
+		var pellet_speed: float = speed
+		if velocity_rnd > 0.0:
+			pellet_speed *= 1.0 + randf_range(-velocity_rnd, velocity_rnd)
+		_spawn_projectile(
+			fire_pos,
+			target_ref,
+			pellet_target,
+			target_type,
+			pellet_speed,
+			damage,
+			profile["color"],
+			"turret",
+			bool(profile["aoe"]),
+			float(profile["aoe_radius"]),
+			source_faction,
+			{
+				"lifetime": lifetime,
+				"radius": float(profile["radius"]),
+				"pierce": int(profile["pierce"]),
+				"homing": float(profile["homing"]),
+				"knockback": float(profile["knockback"]),
+				"trail_color": profile["trail_color"],
+				"collides_air": bool(profile["collides_air"]),
+				"collides_ground": bool(profile["collides_ground"]),
+				"status": profile["status"],
+				"splash_mult": float(profile["splash_mult"]),
+				"max_range": max_range,
+				"shot_id": salvo_shot_id,
+				"frag_count": int(profile["frag_count"]),
+				"frag_damage": float(profile["frag_damage"]),
+				"frag_speed": float(profile["frag_speed"]),
+				"frag_radius": float(profile["frag_radius"]),
+				"frag_range": float(profile["frag_range"]),
+				"liquid": bool(profile["liquid"]),
+				"drag": drag,
+			},
+		)
+
+
 func _update_projectiles(delta: float) -> void:
 	var unit_mgr = _unit_mgr_ref()
 	var to_remove: Array[int] = []
 
 	for i in range(projectiles.size()):
 		var proj = projectiles[i]
+
+		# Externally-killed projectiles (e.g. shot down by a unit's
+		# POINT_DEFENSE weapon mount) are flagged `dead` and despawned here.
+		if proj.get("dead", false):
+			to_remove.append(i)
+			continue
 
 		# Lifetime is no longer the despawn driver — bullets always
 		# fly the turret's `attack_range` and die there (or sooner on
@@ -1392,12 +1514,34 @@ func _update_projectiles(delta: float) -> void:
 		# keeps working.
 		proj["age"] = proj.get("age", 0.0) + delta
 
+		var is_liquid: bool = bool(proj.get("liquid", false))
+
+		# Liquid bullets (Corrosion / Tsunami) despawn on their lifetime, like
+		# Mindustry. A drag-decelerated blob bleeds off speed and converges on a
+		# fixed maximum reach, so it can crawl to a near-stop well before it ever
+		# travels `max_range` — the distance check below would then never fire and
+		# the orb would hang frozen in mid-air forever. Lifetime expiry ends it;
+		# splash ammo detonates at the landing point and the removal loop drops
+		# the fading puddle splat.
+		if is_liquid:
+			var life: float = float(proj.get("lifetime", 0.0))
+			if life > 0.0 and proj["age"] >= life:
+				if bool(proj.get("aoe", false)):
+					proj["target_pos"] = proj["pos"]
+					_on_projectile_hit(proj, unit_mgr)
+				to_remove.append(i)
+				continue
+
 		# Max-range despawn — stop the projectile once it has travelled further
 		# than the turret's effective range from where it was fired.
 		var max_range: float = float(proj.get("max_range", 0.0))
 		if max_range > 0.0:
 			var spawn_pos: Vector2 = proj.get("spawn_pos", proj["pos"])
 			if proj["pos"].distance_to(spawn_pos) >= max_range:
+				# Liquid splash ammo detonates where it lands at the end of its arc.
+				if is_liquid and bool(proj.get("aoe", false)):
+					proj["target_pos"] = proj["pos"]
+					_on_projectile_hit(proj, unit_mgr)
 				to_remove.append(i)
 				continue
 
@@ -1422,6 +1566,11 @@ func _update_projectiles(delta: float) -> void:
 
 		# Move toward target
 		var direction = (proj["target_pos"] - proj["pos"]).normalized()
+		# Liquid drag: bleed off `drag` of the speed per 1/60s so a fluid blob
+		# decelerates into a lobbed arc instead of flying flat.
+		var pdrag: float = float(proj.get("drag", 0.0))
+		if pdrag > 0.0:
+			proj["speed"] = float(proj["speed"]) * pow(maxf(1.0 - pdrag, 0.0), delta * 60.0)
 		var distance = proj["pos"].distance_to(proj["target_pos"])
 		var step = proj["speed"] * delta
 
@@ -1436,6 +1585,7 @@ func _update_projectiles(delta: float) -> void:
 		var wall_hit: Vector2i = _check_bullet_hit_wall(move_pos, proj["pos"], int(proj.get("source_faction", -1)))
 		if wall_hit != Vector2i(-1, -1):
 			main.damage_building(wall_hit, _shot_damage(proj, wall_hit, proj["damage"]))
+			_spawn_frags(proj, proj["pos"])
 			to_remove.append(i)
 			continue
 
@@ -1489,11 +1639,18 @@ func _update_projectiles(delta: float) -> void:
 					hit_unit.take_damage(_shot_damage(proj, hit_unit.get_instance_id(), proj["damage"]))
 					_apply_knockback(hit_unit, proj["pos"], float(proj.get("knockback", 0.0)))
 					_apply_status(hit_unit, proj.get("status"))
+					# Burst on a unit struck mid-flight (Detonater) — spawn from
+					# the shot's own position so the orbs fan out from where the
+					# shell was, letting the rear-facing ones fly clear instead
+					# of all re-detonating inside the struck unit. The aoe-target
+					# case above already frags via _on_projectile_hit.
+					_spawn_frags(proj, proj["pos"])
 				to_remove.append(i)
 				continue
 			var hit_bldg: Vector2i = _check_bullet_hit_building(move_pos, proj["pos"], src_faction)
 			if hit_bldg != Vector2i(-1, -1):
 				main.damage_building(hit_bldg, _shot_damage(proj, hit_bldg, proj["damage"]))
+				_spawn_frags(proj, proj["pos"])
 				to_remove.append(i)
 				continue
 
@@ -1507,6 +1664,15 @@ func _update_projectiles(delta: float) -> void:
 	# Remove hit projectiles (iterate in reverse to keep indices valid)
 	for i in range(to_remove.size() - 1, -1, -1):
 		var dead_proj: Dictionary = projectiles[to_remove[i]]
+		# Liquid bullets leave a fading puddle splat wherever they land.
+		if bool(dead_proj.get("liquid", false)):
+			var dc: Color = dead_proj["color"]
+			_liquid_splashes.append({
+				"pos": dead_proj["pos"],
+				"color": Color(dc.r, dc.g, dc.b, 0.45),
+				"radius": float(dead_proj.get("radius", 6.0)) * 1.7,
+				"age": 0.0, "life": 0.55,
+			})
 		_release_shot_id(int(dead_proj.get("shot_id", 0)))
 		projectiles.remove_at(to_remove[i])
 
@@ -1554,10 +1720,37 @@ func _update_target_pos(proj: Dictionary) -> void:
 							proj["target_pos"] = bsys_p.held_entity_world_at_depth(anchor_h, depth_h)
 
 
+## Scatters a projectile's `frag_count` child orbs from `impact` (Detonater).
+## Frags carry frag_count 0 so they never chain. No-op for ordinary shots.
+## Called from EVERY impact path (target arrival, in-path unit/building, wall)
+## so the burst fires the instant the shell hits anything, not only when it
+## reaches the end of its range.
+func _spawn_frags(proj: Dictionary, impact: Vector2) -> void:
+	var fcount: int = int(proj.get("frag_count", 0))
+	if fcount <= 0:
+		return
+	var fdmg: float = float(proj.get("frag_damage", 0.0))
+	var fspd: float = float(proj.get("frag_speed", 250.0))
+	var frad: float = float(proj.get("frag_radius", 4.0))
+	var frng: float = float(proj.get("frag_range", 160.0))
+	var fcol: Color = proj.get("color", Color.WHITE)
+	var ffac: int = int(proj.get("source_faction", 0))
+	var base_ang: float = randf() * TAU
+	for fi in range(fcount):
+		var ang: float = base_ang + (TAU / float(fcount)) * float(fi) + randf_range(-0.25, 0.25)
+		var fdir: Vector2 = Vector2.from_angle(ang)
+		_spawn_projectile(impact, null, impact + fdir * frng, "enemy", fspd, fdmg,
+			fcol, "turret", false, 0.0, ffac,
+			{"radius": frad, "max_range": frng,
+			"lifetime": frng / maxf(fspd, 1.0) + 0.15, "is_frag": true})
+
+
 func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 	var splash_mult: float = float(proj.get("splash_mult", 1.0))
 	var knockback: float = float(proj.get("knockback", 0.0))
 	var status: Resource = proj.get("status")
+
+	_spawn_frags(proj, proj["pos"])
 
 	match proj["target_type"]:
 		"enemy":
@@ -1671,6 +1864,7 @@ func _apply_knockback(unit: Node2D, origin: Vector2, amount: float) -> void:
 			0: astar = unit_mgr.astar if "astar" in unit_mgr else null
 			1: astar = unit_mgr.astar_crawler if "astar_crawler" in unit_mgr else null
 			2: astar = unit_mgr.astar_hover if "astar_hover" in unit_mgr else null
+			4: astar = unit_mgr.astar_naval if "astar_naval" in unit_mgr else null
 			_: astar = null  # FLYING
 	if astar == null or main == null:
 		unit.position += dir * travel
@@ -2092,7 +2286,331 @@ func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, sourc
 	return Vector2i(-1, -1)
 
 
+# =========================
+# TURRET AMMO (items + fluids)
+# =========================
+
+## Consumes `amount` of a turret's ammo from its buffer. Items pull from
+## block_storage items via logistics; fluids pull from the block_storage fluids
+## bucket (fed by an adjacent pipe — see logistics _try_accept_booster_fluid).
+## Returns true only if the full amount was available and removed.
+func _consume_turret_ammo(log_ref: Node2D, anchor: Vector2i, item_id: StringName, amount: int) -> bool:
+	if Registry.get_fluid(item_id) != null:
+		var st: Dictionary = log_ref.block_storage.get(anchor, {})
+		var fl: Dictionary = st.get("fluids", {})
+		if float(fl.get(item_id, 0.0)) >= float(amount):
+			fl[item_id] = float(fl[item_id]) - float(amount)
+			if fl[item_id] <= 0.0001:
+				fl.erase(item_id)
+			return true
+		return false
+	# Item ammo.
+	if not log_ref.has_method("get_stored_item_count"):
+		return false
+	if log_ref.get_stored_item_count(anchor, item_id) >= amount:
+		log_ref.remove_from_storage(anchor, item_id, amount)
+		return true
+	return false
+
+
+# =========================
+# GAS CLOUDS (Fume turret + sulfur vents)
+# =========================
+
+## Per-frame update for a single fume turret: consumes sulfur fumes from its
+## fluid buffer and grows a corroding cloud in front of it, sized by throughput
+## (full supply → 7-tile cloud, none → fades away).
+const _FUME_MAX_RATE := 6.0   # sulfur fumes/sec for a full-size cloud
+func _update_fume_emitter(grid_pos: Vector2i, data: BlockData, turret_world: Vector2, power_eff: float, delta: float) -> void:
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var key: String = "fume:%d,%d" % [anchor.x, anchor.y]
+	var log_ref: Node2D = _logistics
+	var avail: float = 0.0
+	var st: Dictionary = {}
+	if log_ref != null:
+		st = log_ref.block_storage.get(anchor, {})
+		avail = float(st.get("fluids", {}).get(&"mat_sulfur_fumes", 0.0))
+	var desired: float = _FUME_MAX_RATE * delta * maxf(power_eff, 0.0)
+	var consumed: float = minf(avail, desired)
+	if consumed <= 0.0001 or desired <= 0.0:
+		# Starved — let any existing cloud decay.
+		if gas_clouds.has(key):
+			gas_clouds[key]["target_radius"] = 0.0
+			gas_clouds[key]["t_last"] = _cloud_time
+		return
+	# Burn the fumes.
+	var fl: Dictionary = st.get("fluids", {})
+	fl[&"mat_sulfur_fumes"] = avail - consumed
+	st["fluids"] = fl
+	log_ref.block_storage[anchor] = st
+	# Cloud sits in front along the turret's current facing; radius scales with
+	# how close we are to max throughput (7-tile diameter → 3.5-tile radius).
+	var ratio: float = clampf(consumed / desired, 0.0, 1.0)
+	var ang: float = float(turret_angles.get(grid_pos, 0.0))
+	var reach: float = (data.attack_range * 0.5) * float(main.GRID_SIZE)
+	var center: Vector2 = turret_world + Vector2.from_angle(ang) * reach
+	var target_r: float = lerpf(1.5, 3.5, ratio) * float(main.GRID_SIZE)
+	_assert_cloud(key, center, target_r, "fume")
+
+
+## Asserts (creates or refreshes) a gas cloud entry.
+func _assert_cloud(key: String, center: Vector2, target_radius: float, kind: String) -> void:
+	if gas_clouds.has(key):
+		var c: Dictionary = gas_clouds[key]
+		c["center"] = center
+		c["target_radius"] = target_radius
+		c["t_last"] = _cloud_time
+	else:
+		gas_clouds[key] = {
+			"center": center, "radius": 0.0, "target_radius": target_radius,
+			"t_last": _cloud_time, "type": kind,
+		}
+
+
+func _update_gas_clouds(delta: float) -> void:
+	_cloud_time += delta
+	# Re-assert sulfur-vent clouds (always-on, 4-tile) once a second.
+	_vent_cloud_scan_timer -= delta
+	if _vent_cloud_scan_timer <= 0.0:
+		_vent_cloud_scan_timer = 1.0
+		_refresh_vent_clouds()
+	# Grow/shrink toward target; cull faded clouds.
+	var to_erase: Array = []
+	for key in gas_clouds:
+		var c: Dictionary = gas_clouds[key]
+		# Fume clouds decay if their turret stopped refreshing them.
+		if c["type"] == "fume" and (_cloud_time - float(c["t_last"])) > 0.3:
+			c["target_radius"] = 0.0
+		var tr: float = float(c["target_radius"])
+		var r: float = float(c["radius"])
+		r += (tr - r) * minf(1.0, delta * 4.0)
+		c["radius"] = r
+		if r < 3.0 and tr <= 0.0:
+			to_erase.append(key)
+	for k in to_erase:
+		gas_clouds.erase(k)
+	# Apply the corroding status to enemies inside any cloud, a few times/sec.
+	_cloud_damage_timer -= delta
+	if _cloud_damage_timer <= 0.0:
+		_cloud_damage_timer = 0.4
+		_apply_cloud_effects()
+
+
+func _refresh_vent_clouds() -> void:
+	var terrain := _terrain_ref()
+	if terrain == null or not ("floor_tiles" in terrain):
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var seen: Dictionary = {}
+	for cell in terrain.floor_tiles:
+		if StringName(terrain.floor_tiles[cell]) != &"sulfur_vent":
+			continue
+		var key: String = "vent:%d,%d" % [cell.x, cell.y]
+		var center: Vector2 = main.grid_to_world(cell) + Vector2(gs * 0.5, gs * 0.5)
+		_assert_cloud(key, center, 2.0 * gs, "vent")  # 4-tile diameter
+		seen[key] = true
+	# Vent gone (tile repainted) → let its cloud fade out.
+	for key in gas_clouds:
+		if gas_clouds[key]["type"] == "vent" and not seen.has(key):
+			gas_clouds[key]["target_radius"] = 0.0
+
+
+func _apply_cloud_effects() -> void:
+	if gas_clouds.is_empty():
+		return
+	var unit_mgr := _unit_mgr_ref()
+	if unit_mgr == null:
+		return
+	var corr: StatusEffectData = Registry.get_status_effect(&"corroding")
+	if corr == null:
+		return
+	for key in gas_clouds:
+		var c: Dictionary = gas_clouds[key]
+		var r: float = float(c["radius"])
+		if r < 6.0:
+			continue
+		var enemies: Array = unit_mgr.get_enemies_in_range(c["center"], r)
+		for u in enemies:
+			if not is_instance_valid(u) or u.is_dead:
+				continue
+			if u.has_method("apply_status_effect"):
+				u.apply_status_effect(corr, 6.0)  # fume/vent cloud → 6s corroding
+
+
+func _update_liquid_splashes(delta: float) -> void:
+	if _liquid_splashes.is_empty():
+		return
+	if "world_paused" in main and main.world_paused:
+		return
+	for i in range(_liquid_splashes.size() - 1, -1, -1):
+		var sp: Dictionary = _liquid_splashes[i]
+		sp["age"] = float(sp["age"]) + delta
+		if float(sp["age"]) >= float(sp["life"]):
+			_liquid_splashes.remove_at(i)
+
+
+func _draw_liquid_splashes() -> void:
+	for sp in _liquid_splashes:
+		var t: float = clampf(float(sp["age"]) / maxf(float(sp["life"]), 0.0001), 0.0, 1.0)
+		# Splat spreads out a touch and fades — a quick wet puddle.
+		var r: float = float(sp["radius"]) * (0.6 + 0.4 * t)
+		var base: Color = sp["color"]
+		var col := Color(base.r, base.g, base.b, base.a * (1.0 - t))
+		draw_circle(sp["pos"], r, col)
+
+
+func _draw_gas_clouds() -> void:
+	for key in gas_clouds:
+		var c: Dictionary = gas_clouds[key]
+		var r: float = float(c["radius"])
+		if r < 2.0:
+			continue
+		var center: Vector2 = c["center"]
+		# Layered translucent yellow-green puff.
+		draw_circle(center, r, Color(0.72, 0.82, 0.25, 0.15))
+		draw_circle(center, r * 0.72, Color(0.78, 0.86, 0.3, 0.13))
+		draw_circle(center, r * 0.42, Color(0.85, 0.9, 0.35, 0.12))
+
+
+# =========================
+# MUZZLE FLAME (Flarecaster — Mindustry Fx.shootSmallFlame)
+# =========================
+
+## Spits a short cone of flame particles out the muzzle at `pos`, fanning
+## within ±_FLAME_SPREAD_DEG of `aim`. Mirrors Scorch's shootSmallFlame:
+## 8 particles, random reach, that fan out, shrink, and recolour over ~0.5s.
+func spawn_muzzle_flame(pos: Vector2, aim: float, reach: float = -1.0,
+		count: int = _FLAME_COUNT, size_mult: float = 1.0) -> void:
+	var max_reach: float = reach if reach > 0.0 else float(main.GRID_SIZE) * 1.2
+	for i in range(count):
+		var ang: float = aim + deg_to_rad(randf_range(-_FLAME_SPREAD_DEG, _FLAME_SPREAD_DEG))
+		_flame_particles.append({
+			"pos0": pos,
+			"ang": ang,
+			"reach": max_reach * randf(),   # randLenVectors: random length per particle
+			"age": 0.0,
+			"life": 0.5 * randf_range(0.85, 1.15),
+			"size": size_mult,
+		})
+
+
+## Flarecaster weapon tick: burns metered fuel and, while fuelled, sprays a
+## flame jet out to `range_px` that damages + ignites every opposing unit
+## inside the cone. The flame itself is the damage — no projectiles are fired.
+func _update_flame_emitter(grid_pos: Vector2i, data: BlockData, turret_world: Vector2,
+		aim: float, range_px: float, faction: int, power_eff: float, delta: float) -> void:
+	if power_eff <= 0.0 or range_px <= 0.0:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var ammo: AmmoType = null
+	for a in data.ammo_types:
+		if a is AmmoType:
+			ammo = a
+			break
+	if ammo == null:
+		return
+	# Fuel meter: burn `amount_per_shot` fuel every `attack_speed` seconds of
+	# sustained firing. Between burns the flame runs on the already-paid tick.
+	var interval: float = maxf(data.attack_speed, 0.05)
+	var acc: float = float(_flame_fuel_acc.get(grid_pos, interval)) + delta * power_eff
+	if acc >= interval:
+		if _logistics and _consume_turret_ammo(_logistics, anchor, ammo.item_id, maxi(ammo.amount_per_shot, 1)):
+			acc -= interval
+		else:
+			# Out of fuel — no flame this frame; stay "due" so it relights the
+			# instant fuel arrives.
+			_flame_fuel_acc[grid_pos] = interval
+			return
+	_flame_fuel_acc[grid_pos] = acc
+
+	# Spray the visible jet from the muzzle out to full range.
+	var muzzle: Vector2 = turret_world + Vector2.from_angle(aim) * (float(main.GRID_SIZE) * 0.5)
+	spawn_muzzle_flame(muzzle, aim, range_px, 6, 2.4)
+
+	# The flame deals the damage: hit every opposing unit within range + cone.
+	var unit_mgr := _unit_mgr_ref()
+	if unit_mgr == null:
+		return
+	var src_team: int = UnitData.Team.PLAYER if faction == main.Faction.LUMINA else UnitData.Team.ENEMY
+	var cone: float = deg_to_rad(_FLAME_CONE_DEG)
+	var dps: float = ammo.damage
+	var burn: Resource = ammo.status_effect
+	for lst in [unit_mgr.enemies, unit_mgr.player_units]:
+		for u in lst:
+			if not is_instance_valid(u) or u.is_dead:
+				continue
+			if "team" in u and u.team == src_team:
+				continue
+			var to: Vector2 = u.position - muzzle
+			var d: float = to.length()
+			if d > range_px + u.unit_size:
+				continue
+			if d > 1.0 and absf(wrapf(to.angle() - aim, -PI, PI)) > cone:
+				continue
+			u.take_damage(dps * delta)
+			if burn != null and u.has_method("apply_status_effect"):
+				u.apply_status_effect(burn)
+
+	# Set opposing buildings the flame sweeps over alight (block-on-fire). We
+	# sample a few rays through the cone rather than scanning every building.
+	var fire_sys := _fire_sys_ref()
+	if fire_sys != null and fire_sys.has_method("ignite_building"):
+		var gs: float = float(main.GRID_SIZE)
+		var seen: Dictionary = {}
+		for ray_off in [-cone * 0.7, 0.0, cone * 0.7]:
+			var rdir: Vector2 = Vector2.from_angle(aim + ray_off)
+			var dist: float = gs * 0.5
+			while dist <= range_px:
+				var cell: Vector2i = main.world_to_grid(muzzle + rdir * dist)
+				if main.placed_buildings.has(cell):
+					var b_anchor: Vector2i = main.building_origins.get(cell, cell)
+					if not seen.has(b_anchor):
+						seen[b_anchor] = true
+						if main.get_building_faction(b_anchor) != faction:
+							# force = true so the flame jet ignites walls too (a
+							# flamethrower vs a wall); fireproof blocks still resist.
+							fire_sys.ignite_building(b_anchor, true)
+				dist += gs * 0.5
+
+
+func _update_flame_particles(delta: float) -> void:
+	if _flame_particles.is_empty():
+		return
+	var write := 0
+	for read in range(_flame_particles.size()):
+		var p: Dictionary = _flame_particles[read]
+		p["age"] = float(p["age"]) + delta
+		if float(p["age"]) < float(p["life"]):
+			if write != read:
+				_flame_particles[write] = p
+			write += 1
+	if write != _flame_particles.size():
+		_flame_particles.resize(write)
+
+
+func _draw_flame_particles() -> void:
+	if _flame_particles.is_empty():
+		return
+	var sz_scale: float = float(main.GRID_SIZE) * 0.035
+	for p in _flame_particles:
+		var t: float = clampf(float(p["age"]) / maxf(float(p["life"]), 0.0001), 0.0, 1.0)
+		# Outward motion eases out (fast then slow), like finpow().
+		var dist: float = float(p["reach"]) * sqrt(t)
+		var pos: Vector2 = p["pos0"] + Vector2.from_angle(float(p["ang"])) * dist
+		var fout: float = 1.0 - t
+		var radius: float = (0.65 + fout * 1.6) * sz_scale * float(p.get("size", 1.0))
+		# lightFlame → darkFlame → gray over the particle's life.
+		var col: Color
+		if t < 0.5:
+			col = _FLAME_LIGHT.lerp(_FLAME_DARK, t * 2.0)
+		else:
+			col = _FLAME_DARK.lerp(_FLAME_GRAY, (t - 0.5) * 2.0)
+		col.a = fout
+		draw_circle(pos, radius, col)
+
+
 func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
+	_combat_cache_dirty = true
 	var data = Registry.get_block(block_id)
 	if data and data.is_turret():
 		turret_cooldowns[grid_pos] = 0.0
@@ -2107,6 +2625,7 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 
 
 func _on_building_destroyed(grid_pos: Vector2i) -> void:
+	_combat_cache_dirty = true
 	turret_cooldowns.erase(grid_pos)
 	turret_angles.erase(grid_pos)
 	turret_barrel_cooldowns.erase(grid_pos)
@@ -2120,7 +2639,10 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 # =========================
 
 func _draw() -> void:
+	_draw_liquid_splashes()
+	_draw_gas_clouds()
 	_draw_turret_heads()
+	_draw_flame_particles()
 	# Projectiles render on `_projectile_overlay` (z_index 4095) so
 	# they always sit above the chassis / buildings / terrain overlay,
 	# regardless of how those siblings configure their own z_indices.
@@ -2133,16 +2655,41 @@ func _draw_turret_heads() -> void:
 	var building_sys = _building_sys_ref()
 
 	var _ss_turret = _sector_script_ref()
-	# Walk all placed turret anchors so derelict / under-construction
-	# turrets still draw their heads. `turret_angles` only gets
-	# populated for active LUMINA turrets in `_update_turrets`, so
-	# iterating it alone would skip every dead/derelict turret on the
-	# map.
-	for grid_pos in main.placed_buildings:
+	# Launch-animation reveal: turrets the landing ring hasn't "built" yet
+	# are hidden (their base isn't drawn either), so their heads must not
+	# show floating over empty ground until the sweep reaches them.
+	var _la_turret = _launch_anim_ref()
+	# Iterate the cached turret-anchor list instead of scanning every placed
+	# building each frame — on a large base that scan was O(all buildings)
+	# with a Registry lookup per cell purely to discard non-turrets. The
+	# cache already dedupes to anchors (derelict / under-construction
+	# turrets included), and turret state + drawing are all anchor-keyed.
+	_ensure_combat_cache()
+	# Viewport cull: only heads near the camera can be seen. Mirrors the
+	# building/item draw culling so off-screen turrets cost nothing.
+	var vp_min: Vector2i = Vector2i(-2147483648, -2147483648)
+	var vp_max: Vector2i = Vector2i(2147483647, 2147483647)
+	var cam := get_viewport().get_camera_2d() if is_inside_tree() else null
+	if cam != null:
+		var cam_center: Vector2 = cam.get_screen_center_position()
+		var vp_size: Vector2 = get_viewport_rect().size
+		var cam_zoom: Vector2 = cam.zoom if cam.zoom != Vector2.ZERO else Vector2.ONE
+		var half_view: Vector2 = vp_size / (2.0 * cam_zoom)
+		# Generous margin so a large multi-tile turret whose anchor is just
+		# off-screen still draws its head.
+		vp_min = main.world_to_grid(cam_center - half_view) - Vector2i(4, 4)
+		vp_max = main.world_to_grid(cam_center + half_view) + Vector2i(4, 4)
+
+	for grid_pos in _turret_anchors:
+		if grid_pos.x < vp_min.x or grid_pos.x > vp_max.x \
+				or grid_pos.y < vp_min.y or grid_pos.y > vp_max.y:
+			continue
 		if _ss_turret and _ss_turret.is_tile_hidden(grid_pos):
 			continue
+		if _la_turret and _la_turret.has_method("is_block_hidden") and _la_turret.is_block_hidden(grid_pos):
+			continue
 
-		var block_id = main.placed_buildings[grid_pos]
+		var block_id = main.placed_buildings.get(grid_pos, &"")
 		var data = Registry.get_block(block_id)
 		if data == null or not data.is_turret():
 			continue
@@ -2270,10 +2817,19 @@ func _draw_projectiles(canvas: CanvasItem) -> void:
 			var trail_color = Color(color.r, color.g, color.b, 0.5)
 			canvas.draw_line(trail[trail.size() - 1], pos, trail_color, radius * 0.8)
 
-		# Draw the projectile itself — bright glowing circle
-		canvas.draw_circle(pos, radius + 1.0, Color(color.r, color.g, color.b, 0.3))
-		canvas.draw_circle(pos, radius, color)
-		canvas.draw_circle(pos, radius * 0.5, color.lightened(0.5))
+		if bool(proj.get("liquid", false)):
+			# Liquid-bullet orb: a flat fluid blob, the liquid's colour blended
+			# a touch toward white over its life (no energy-glow core). A soft
+			# translucent rim sells the wet, rounded look.
+			var fout: float = clampf(1.0 - float(proj.get("age", 0.0)) / maxf(float(proj.get("lifetime", 1.0)), 0.0001), 0.0, 1.0)
+			var orb: Color = color.lerp(Color.WHITE, fout * 0.18)
+			canvas.draw_circle(pos, radius + 1.5, Color(color.r, color.g, color.b, 0.25))
+			canvas.draw_circle(pos, radius, orb)
+		else:
+			# Draw the projectile itself — bright glowing circle
+			canvas.draw_circle(pos, radius + 1.0, Color(color.r, color.g, color.b, 0.3))
+			canvas.draw_circle(pos, radius, color)
+			canvas.draw_circle(pos, radius * 0.5, color.lightened(0.5))
 
 		if main and main.show_hitboxes:
 			canvas.draw_arc(pos, radius, 0, TAU, 24, Color(1.0, 0.2, 0.9, 0.9), 1.5)

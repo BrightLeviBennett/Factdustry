@@ -865,12 +865,19 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 	if unit_mgr:
 		for unit in unit_mgr.player_units:
 			if unit and is_instance_valid(unit) and unit.data:
-				units_save.append({
+				# Base fields + full runtime pose/command state via the shared
+				# capture (facing/aim, turret-mount rotations, move/build
+				# targets, hold-fire, mining/assist, upgrades) so a saved unit
+				# reloads exactly as it was, not at a default heading.
+				var u_entry := {
 					"unit_id": str(unit.data.id),
 					"x": unit.position.x,
 					"y": unit.position.y,
 					"health": unit.health,
-				})
+				}
+				if unit.has_method("capture_payload_state"):
+					unit.capture_payload_state(u_entry)
+				units_save.append(u_entry)
 
 	# Save logistics state (block storage, conveyor items, factory buffers)
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
@@ -1214,6 +1221,10 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"build_progress": build_progress_save,
 		"build_order": build_order_save,
 		"work_order": work_order_save,
+		# Destroyed FEROX blocks awaiting a shardling rebuild — persisted so
+		# the enemy base resumes self-repairing after a close/reopen.
+		"ferox_rebuild_queue": _serialize_ferox_rebuild_queue(
+			main.ferox_rebuild_queue if "ferox_rebuild_queue" in main else []),
 		"building_resources_consumed": resources_consumed_save,
 		"building_resources_refunded": resources_refunded_save,
 		"player_units": units_save,
@@ -1589,6 +1600,12 @@ func load_sector_from_path(path: String) -> bool:
 			# Migrate old build_order into work_order
 			for anchor in main.build_order:
 				main.work_order.append(anchor)
+
+	# --- Restore FEROX rebuild queue ---
+	# Runs after buildings are deserialized so the stale-cell check (drop
+	# entries whose crater was already re-occupied) sees the live grid.
+	_deserialize_ferox_rebuild_queue(main, data.get("ferox_rebuild_queue", []))
+
 	if "building_resources_consumed" in main:
 		main.building_resources_consumed.clear()
 		if data.has("building_resources_consumed") and data["building_resources_consumed"] is Dictionary:
@@ -1636,10 +1653,15 @@ func load_sector_from_path(path: String) -> bool:
 			var uhp: float = float(unit_entry.get("health", -1))
 			if uid != &"":
 				unit_mgr.spawn_player_unit(Vector2(ux, uy), uid)
-				if uhp >= 0 and not unit_mgr.player_units.is_empty():
+				if not unit_mgr.player_units.is_empty():
 					var spawned = unit_mgr.player_units[-1]
 					if spawned and is_instance_valid(spawned):
-						spawned.health = uhp
+						if uhp >= 0:
+							spawned.health = uhp
+						# Restore the full saved runtime state (pose, turret
+						# rotations, commands) so units reload exactly as left.
+						if spawned.has_method("apply_payload_state"):
+							spawned.apply_payload_state(unit_entry)
 
 	# --- Restore logistics state (block storage, conveyor items, factory buffers) ---
 	var load_logistics = get_node_or_null("/root/Main/LogisticsSystem")
@@ -1959,6 +1981,12 @@ func load_sector_from_path(path: String) -> bool:
 	# gradient meshes against the real tile set.
 	terrain._water_depth_dirty = true
 	terrain._floor_edge_dirty = true
+	# Also re-arm the floor-geometry mesh flag — it's a separate dirty bit
+	# from the edge-fade pass, and a bulk load bypasses the place_tile hook
+	# that normally sets it, so without this the floor tiles wouldn't render
+	# until the first manual placement.
+	if "_floor_geom_dirty" in terrain:
+		terrain._floor_geom_dirty = true
 	terrain.walls_changed.emit()
 	terrain.queue_redraw()
 	if building_sys:
@@ -2325,6 +2353,60 @@ func _deserialize_links(main: Node2D, links_data: Array) -> void:
 	for pair in links_data:
 		if pair is Array and pair.size() == 2:
 			main.linked_pairs.append([_str_to_vec2i(pair[0]), _str_to_vec2i(pair[1])])
+
+
+## FEROX rebuild queue: destroyed FEROX blocks awaiting a shardling
+## rebuild. Each entry is {block_id: StringName, grid_pos: Vector2i,
+## rotation: int}; serialize to JSON-safe primitives so the queue survives
+## a close/reopen and the base keeps self-repairing on the next session.
+func _serialize_ferox_rebuild_queue(queue: Array) -> Array:
+	var result := []
+	for entry in queue:
+		if entry is Dictionary and entry.has("block_id") and entry.has("grid_pos"):
+			var lo: Array = []
+			for p in entry.get("links_out", []):
+				lo.append(_vec2i_to_str(p))
+			var li: Array = []
+			for p in entry.get("links_in", []):
+				li.append(_vec2i_to_str(p))
+			result.append({
+				"block_id": str(entry["block_id"]),
+				"grid_pos": _vec2i_to_str(entry["grid_pos"]),
+				"rotation": int(entry.get("rotation", 0)),
+				"links_out": lo,
+				"links_in": li,
+			})
+	return result
+
+
+func _deserialize_ferox_rebuild_queue(main: Node2D, raw) -> void:
+	if not ("ferox_rebuild_queue" in main):
+		return
+	main.ferox_rebuild_queue.clear()
+	if not (raw is Array):
+		return
+	for entry in raw:
+		if not (entry is Dictionary) or not entry.has("block_id") or not entry.has("grid_pos"):
+			continue
+		var bid := StringName(str(entry["block_id"]))
+		# Drop stale entries whose cell got re-occupied (e.g. the player
+		# built over the crater) — a rebuild there would silently fail.
+		var gp: Vector2i = _str_to_vec2i(str(entry["grid_pos"]))
+		if main.placed_buildings.has(gp):
+			continue
+		var lo: Array = []
+		for p in entry.get("links_out", []):
+			lo.append(_str_to_vec2i(str(p)))
+		var li: Array = []
+		for p in entry.get("links_in", []):
+			li.append(_str_to_vec2i(str(p)))
+		main.ferox_rebuild_queue.append({
+			"block_id": bid,
+			"grid_pos": gp,
+			"rotation": int(entry.get("rotation", 0)),
+			"links_out": lo,
+			"links_in": li,
+		})
 
 
 func _deserialize_links_to(target_array: Array, links_data: Array) -> void:

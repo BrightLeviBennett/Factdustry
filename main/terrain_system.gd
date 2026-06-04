@@ -74,6 +74,17 @@ var _floor_edge_distance: Dictionary = {}  # Vector2i -> int
 ## Distance from each hidden floor tile to the nearest visible floor tile.
 var _hidden_floor_distance: Dictionary = {}  # Vector2i -> int
 var _floor_edge_dirty := true
+## Separate, cheap dirty flag for just the floor-tile geometry meshes
+## (which tiles exist + their textures). Set on every terrain edit so
+## painted tiles appear immediately, while the far more expensive
+## edge-fade / darkness BFS behind `_floor_edge_dirty` can be deferred.
+var _floor_geom_dirty := true
+## When true, `_draw` skips the expensive edge-fade / darkness rebuild
+## even if `_floor_edge_dirty` is set. The map editor raises this for
+## the duration of a paint stroke so the O(floor_tiles) BFS runs once
+## on release instead of every frame of the drag. Always false during
+## gameplay, so runtime behaviour is unchanged.
+var defer_floor_fade := false
 
 # --- WATER DEPTH ---
 ## Auto-computed water depth for each water floor tile: Vector2i → int (1-3).
@@ -88,6 +99,12 @@ var _water_depth_t: Dictionary = {}  # Vector2i -> float in [0, 1]
 ## edges. Format: Vector2i -> PackedFloat32Array [tl, tr, br, bl].
 var _water_corner_t: Dictionary = {}
 var _water_depth_dirty := true
+## Set when a mid-stroke prune dropped a cell from the water render set.
+## The (cheap, water-cells-only) mesh rebuild is coalesced to once per
+## `_draw` instead of running per painted cell — a fast drag over water
+## stamps many cells per frame, and rebuilding the whole water mesh on
+## each one was O(cells × water_cells) and froze the editor.
+var _water_mesh_dirty := false
 ## Batched water layer meshes, grouped by water texture. Each entry is
 ## `{texture: Texture2D, mesh: ArrayMesh}` so `_draw_floor_tiles` can
 ## blast the whole water layer in one draw call per distinct texture
@@ -96,7 +113,10 @@ var _water_meshes: Array = []
 ## Batched sand underlay: a single ArrayMesh covering every water cell
 ## that still shows any sand (any corner with t < 1). Drawn before the
 ## water meshes at full opacity.
-var _sand_mesh: ArrayMesh = null
+## One entry per distinct shore texture: {texture: Texture2D, mesh: ArrayMesh}.
+## Most maps use only the default sand texture (one entry); a tile with a
+## custom `shore_icon` (e.g. sulfur water) adds its own bucket.
+var _sand_meshes: Array = []
 ## Floor tiles within fewer than this distance of void start fading (higher = wider fade)
 const FLOOR_FADE_START := 6
 ## How many tiles into a hidden region the fade extends
@@ -562,6 +582,7 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 		# mesh — re-bake on any ore add so surface coal etc. shows.
 		if data.tags.has("floor_ore"):
 			_floor_edge_dirty = true
+			_floor_geom_dirty = true
 	elif data.is_wall():
 		wall_tiles[grid_pos] = tile_id
 		if data.destructible:
@@ -574,15 +595,25 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 				unit_mgr.astar_crawler.set_point_solid(grid_pos, true)
 			if unit_mgr and unit_mgr.astar_hover:
 				unit_mgr.astar_hover.set_point_solid(grid_pos, true)
+			if unit_mgr and unit_mgr.astar_naval:
+				unit_mgr.astar_naval.set_point_solid(grid_pos, true)
 		if unit_mgr:
 			unit_mgr._recompute_crawler_wall_passability()
 		walls_changed.emit()
 		_floor_edge_dirty = true
+		_floor_geom_dirty = true
 		_water_depth_dirty = true
 	else:
 		floor_tiles[grid_pos] = tile_id
 		_floor_edge_dirty = true
+		_floor_geom_dirty = true
 		_water_depth_dirty = true
+		# Painting a non-water floor over a water cell: drop it from the
+		# water render NOW so the (z=1) water mesh stops drawing over the
+		# new floor. The full depth/shore recompute is deferred during an
+		# editor stroke (`defer_floor_fade`), so without this prune the old
+		# water quad lingered on top until the drag released.
+		_prune_water_cell_if_not_water(grid_pos)
 
 	queue_redraw()
 
@@ -598,6 +629,7 @@ func remove_tile(grid_pos: Vector2i) -> void:
 		ore_tiles.erase(grid_pos)
 		# Drop the cell from the floor-ore overlay mesh if it was there.
 		_floor_edge_dirty = true
+		_floor_geom_dirty = true
 	elif wall_tiles.has(grid_pos):
 		var old_data = Registry.get_tile(wall_tiles[grid_pos])
 		wall_tiles.erase(grid_pos)
@@ -626,7 +658,12 @@ func remove_tile(grid_pos: Vector2i) -> void:
 			if ore_data and ore_data.tags.has("floor_ore"):
 				ore_tiles.erase(grid_pos)
 		_floor_edge_dirty = true
+		_floor_geom_dirty = true
 		_water_depth_dirty = true
+		# See place_tile: erasing a water cell must immediately drop it from
+		# the water render so the stale water quad doesn't keep covering the
+		# now-bare cell mid-stroke (full recompute is deferred).
+		_prune_water_cell_if_not_water(grid_pos)
 	else:
 		return
 
@@ -644,8 +681,8 @@ func _is_multi_tile(tile_id: StringName) -> bool:
 	var data = Registry.get_tile(tile_id)
 	if not data:
 		return false
-	# Check display_name for "Geyser" or "Vent"
-	return data.id == "geyser" or data.id == "vent"
+	# Geyser, Vent, and Sulfur Vent all use the 3x3 multi-tile renderer.
+	return data.id == "geyser" or data.id == "vent" or data.id == "sulfur_vent"
 
 
 ## Places a 3x3 floor tile. The origin is grid_pos (center).
@@ -954,10 +991,39 @@ func _draw_water_layer() -> void:
 		_water_canvas.draw_mesh(bucket["mesh"], bucket["texture"])
 
 
+## Immediately drops `cell` from the water render set if its current floor
+## is no longer a water tile, then rebuilds the (cheap, water-cells-only)
+## water mesh. Used when a stroke paints / erases over water while the full
+## depth + shore-shading recompute is deferred behind `defer_floor_fade`,
+## so the stale water quad doesn't keep drawing on top of the new floor
+## until the drag releases. No-op if the cell wasn't water.
+func _prune_water_cell_if_not_water(cell: Vector2i) -> void:
+	if not _water_depth_t.has(cell):
+		return
+	# Still water? (e.g. painted one water variant over another) — leave it;
+	# the deferred recompute will refresh shading on release.
+	var data = Registry.get_tile(floor_tiles.get(cell, &""))
+	if data != null and data.is_liquid and data.tags.has("water"):
+		return
+	_water_depth_t.erase(cell)
+	_water_corner_t.erase(cell)
+	# Neighbours' shore corners are now stale, but recomputing them needs
+	# the full flood-fill (deferred). Dropping just this cell is enough to
+	# stop the wrong quad covering the new floor; shore re-shades on release.
+	# Defer the mesh rebuild to once per frame (see `_water_mesh_dirty`) so a
+	# fast multi-cell stroke doesn't rebuild the whole water layer per cell.
+	_water_mesh_dirty = true
+
+
 func _rebuild_water_meshes() -> void:
 	_water_meshes.clear()
-	_sand_mesh = null
+	_sand_meshes.clear()
 	if _water_depth_t.is_empty():
+		# No water left — still repaint so the now-empty mesh set clears any
+		# previously-drawn water (e.g. the last water cell was just painted
+		# over). Without this the final water quad lingered until release.
+		if _water_canvas != null:
+			_water_canvas.queue_redraw()
 		return
 
 	var ss := _sector_script_ref()
@@ -965,7 +1031,9 @@ func _rebuild_water_meshes() -> void:
 	# water variants (e.g. fresh water + salt water) still compresses to
 	# one draw per distinct texture.
 	var by_tex: Dictionary = {}  # Texture2D -> Array of {pos, corners, opacity}
-	var sand_cells: Array = []   # [pos, opacity] — only cells with any sand
+	# Shore (underlay) cells grouped by their shore texture so a tile with a
+	# custom `shore_icon` (sulfur water) fades into its own shore, not sand.
+	var shore_by_tex: Dictionary = {}  # Texture2D -> Array of [pos, opacity]
 	for pos in _water_depth_t:
 		if ss and ss.is_tile_hidden(pos):
 			continue
@@ -979,14 +1047,20 @@ func _rebuild_water_meshes() -> void:
 		if not by_tex.has(data.icon):
 			by_tex[data.icon] = []
 		by_tex[data.icon].append([pos, corners, data.opacity])
-		# Skip sand under fully-deep cells — water is opaque there, so
-		# the sand underneath is wasted fill.
+		# Skip the underlay under fully-deep cells — water is opaque there, so
+		# the shore beneath is wasted fill.
 		if corners[0] < 1.0 or corners[1] < 1.0 \
 				or corners[2] < 1.0 or corners[3] < 1.0:
-			sand_cells.append([pos, data.opacity])
+			var shore_tex: Texture2D = data.shore_icon if data.shore_icon != null else _sand_texture
+			if shore_tex != null:
+				if not shore_by_tex.has(shore_tex):
+					shore_by_tex[shore_tex] = []
+				shore_by_tex[shore_tex].append([pos, data.opacity])
 
-	if _sand_texture != null and not sand_cells.is_empty():
-		_sand_mesh = _build_flat_quad_mesh(sand_cells)
+	for stex in shore_by_tex:
+		var smesh: ArrayMesh = _build_flat_quad_mesh(shore_by_tex[stex])
+		if smesh != null:
+			_sand_meshes.append({"texture": stex, "mesh": smesh})
 	for tex in by_tex:
 		var cells: Array = by_tex[tex]
 		var mesh: ArrayMesh = _build_water_quad_mesh(cells)
@@ -1200,8 +1274,14 @@ func _rebuild_floor_edge_cache() -> void:
 
 	# Rebuild the batched fade mesh so each frame only costs one draw call.
 	_rebuild_fade_mesh()
-	# Same for the base floor-tile meshes — replaces a 6000-iteration
-	# per-frame loop with N draw_mesh calls (N = unique floor textures).
+	# Always refresh the base floor-tile meshes alongside the edge pass. The
+	# edge pass only runs when NOT mid-stroke (it's gated on `not
+	# defer_floor_fade` in `_draw`), so this adds no per-frame cost while
+	# dragging — there, geometry is handled immediately by `_floor_geom_dirty`.
+	# But on a map LOAD or bulk edit, callers set only `_floor_edge_dirty`
+	# (e.g. SaveManager), and without this the floor meshes would never
+	# rebuild until the first manual tile placement — floors stayed invisible.
+	_floor_geom_dirty = false
 	_rebuild_floor_meshes()
 
 
@@ -1231,14 +1311,21 @@ func _rebuild_floor_meshes() -> void:
 	for grid_pos in floor_tiles:
 		if ss and ss.is_tile_hidden(grid_pos):
 			continue
-		if _water_depth_t.has(grid_pos):
-			continue
 		if multi_tile_origins.has(grid_pos) and multi_tile_origins[grid_pos] == grid_pos:
 			continue
 		var data = Registry.get_tile(floor_tiles[grid_pos])
 		if data == null:
 			continue
 		if data.is_wall():
+			continue
+		# Water cells are drawn separately (corner-shaded `_water_meshes`),
+		# so skip them here. Test the ACTUAL tile type, not the deferred
+		# `_water_depth_t` set: during an editor stroke that set is stale
+		# (its rebuild is deferred behind `defer_floor_fade`), so a freshly
+		# painted non-water floor over an old water cell would otherwise
+		# stay invisible until the stroke released. The authoritative check
+		# is the tile data itself.
+		if data.is_liquid and data.tags.has("water"):
 			continue
 		if data.icon != null:
 			if not by_tex.has(data.icon):
@@ -1432,14 +1519,32 @@ func _get_floor_corner_darkness(grid_pos: Vector2i) -> Array:
 # =========================
 
 func _draw() -> void:
-	if _floor_edge_dirty:
-		_rebuild_floor_edge_cache()
 	# Water depth bake is lazy through get_water_depth_at(), but the
 	# renderer reads _water_depth_t directly — force a rebuild here if
 	# dirty so the fade shows on first paint (editor, post-load, or after
 	# bulk terrain edits) instead of only after the first gameplay query.
-	if _water_depth_dirty:
+	# Rebuilt before the floor meshes so they exclude water cells correctly.
+	# Also a full-map flood-fill, so it's deferred mid-stroke alongside the
+	# edge-fade pass; newly painted water shows flat until the stroke ends.
+	if _water_depth_dirty and not defer_floor_fade:
 		_rebuild_water_depth()
+		_water_mesh_dirty = false   # full recompute already rebuilt the mesh
+	elif _water_mesh_dirty:
+		# Mid-stroke prune: coalesced cheap water-mesh rebuild (water cells
+		# only, no flood-fill). Runs at most once per frame regardless of how
+		# many cells the stroke painted over water this frame.
+		_water_mesh_dirty = false
+		_rebuild_water_meshes()
+	# Cheap pass: rebuild only the floor-tile geometry meshes so newly
+	# painted/erased tiles show up immediately, every frame if needed.
+	if _floor_geom_dirty:
+		_floor_geom_dirty = false
+		_rebuild_floor_meshes()
+	# Expensive pass: edge-fade distance BFS + per-corner darkness bake +
+	# fade mesh. Deferrable mid-stroke in the editor (see `defer_floor_fade`)
+	# so this O(floor_tiles) work runs once per stroke, not once per frame.
+	if _floor_edge_dirty and not defer_floor_fade:
+		_rebuild_floor_edge_cache()
 	_draw_floor_tiles()
 	_draw_multi_tiles()
 
@@ -1528,8 +1633,8 @@ func _draw_floor_tiles() -> void:
 	# Sand underlay stays on the terrain canvas (no shader). Water
 	# meshes have moved to `_water_canvas`, which paints them with
 	# the scrolling-UV shader (`_draw_water_layer`).
-	if _sand_mesh != null and _sand_texture != null:
-		draw_mesh(_sand_mesh, _sand_texture)
+	for sbucket in _sand_meshes:
+		draw_mesh(sbucket["mesh"], sbucket["texture"])
 
 	# Floor ores layered over the base floor (surface coal etc.) —
 	# wall-embedded ores keep their own path through BuildingSystem.

@@ -1330,7 +1330,13 @@ func _on_item_produced(item_id: StringName) -> void:
 	_produced_counts[item_id] = _produced_counts.get(item_id, 0) + 1
 
 
-func _on_building_placed(block_id: StringName, _grid_pos: Vector2i) -> void:
+func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
+	# Player build goals only count the player's own (LUMINA) blocks. FEROX
+	# shardling rebuilds also reach building_completed now (so their reveal
+	# animation and core-shardling respawn fire), but they must not tick a
+	# "build N drills" objective.
+	if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
+		return
 	_placed_counts[block_id] = _placed_counts.get(block_id, 0) + 1
 
 

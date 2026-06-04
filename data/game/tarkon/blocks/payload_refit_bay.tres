@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"payload_refit_bay"
+display_name = "Payload Refit Bay"
+description = "Strips upgrades off a unit. Accepts only units that carry at least one upgrade; ejects each upgrade as a payload (4s + 25 power each), then ejects the unit."
+category = 6
+tags = PackedStringArray("refit_bay")
+color = Color(0.55, 0.65, 0.8, 1)
+grid_size = Vector2i(3, 3)
+max_health = 300.0
+max_payload_size = 3
+max_stored_items = 200
+electrical_power_use = 25.0

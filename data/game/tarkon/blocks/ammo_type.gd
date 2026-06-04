@@ -115,6 +115,38 @@ extends Resource
 
 
 # =========================
+# FRAGMENTATION
+# =========================
+## On impact, spawn this many child "frag" projectiles flung out in a ring
+## (Detonater: 6 smaller orbs). 0 = no fragmentation. Frags do NOT fragment
+## again.
+@export var frag_count: int = 0
+## Damage each frag deals on hit.
+@export var frag_damage: float = 0.0
+## Travel speed (px/sec) of frag projectiles.
+@export var frag_speed: float = 250.0
+## Visual radius of frag projectiles.
+@export var frag_radius: float = 4.0
+## How far (px) a frag flies before despawning.
+@export var frag_range: float = 160.0
+
+
+# =========================
+# LIQUID BULLET (fluid turrets — Corrosion)
+# =========================
+## Render this projectile as a liquid orb (flat fluid-coloured blob, no energy
+## glow) and leave a fading puddle splat where it lands. For fluid-ammo turrets.
+@export var liquid_bullet: bool = false
+## Per-tick velocity damping (0 = none). A liquid blob loses this fraction of
+## its speed each 1/60s, giving the lobbed, decelerating fluid arc.
+@export_range(0.0, 0.2, 0.001) var drag: float = 0.0
+## Per-projectile launch-speed jitter (Mindustry's `velocityRnd`). Each shot
+## leaves the muzzle at speed × (1 ± velocity_rnd), so a liquid spray's globs
+## scatter to slightly different distances instead of landing in one spot.
+@export_range(0.0, 1.0, 0.01) var velocity_rnd: float = 0.0
+
+
+# =========================
 # STATUS / DOT
 # =========================
 
@@ -160,6 +192,10 @@ extends Resource
 
 ## Scale of the impact effect (0 = no impact effect)
 @export var impact_effect_scale: float = 1.0
+
+## When true, firing spits a short cone of flame particles out the muzzle
+## (Mindustry's Scorch "shootSmallFlame" look). Used by the Flarecaster.
+@export var muzzle_flame: bool = false
 
 
 # =========================

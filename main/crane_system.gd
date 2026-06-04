@@ -420,14 +420,15 @@ func _crane_autonomous_pickup(anchor: Vector2i, state: Dictionary, head_pos: Vec
 				continue
 			if not _crane_payload_matches_filter({"type": "unit", "unit_id": str(u.data.id) if u.data else ""}, spec):
 				continue
-			var unit_payload := {
-				"type": "unit",
-				"unit_id": str(u.data.id) if u.data else "",
-				"health": u.health,
-				"team": u.team if "team" in u else 0,
-				"aim_angle": float(u.aim_angle) if "aim_angle" in u else 0.0,
-				"facing_angle": float(u.facing_angle) if "facing_angle" in u else 0.0,
-			}
+			var unit_payload := {}
+			if u.has_method("capture_payload_state"):
+				u.capture_payload_state(unit_payload)
+			else:
+				unit_payload = {
+					"type": "unit",
+					"unit_id": str(u.data.id) if u.data else "",
+					"health": u.health,
+				}
 			unit_mgr.player_units.erase(u)
 			u.queue_free()
 			state["held_payload"] = unit_payload
@@ -482,15 +483,25 @@ func _crane_autonomous_drop(anchor: Vector2i, state: Dictionary, head_pos: Vecto
 				return
 			var unit_id := StringName(payload.get("unit_id", ""))
 			if unit_id != &"":
-				unit_mgr.spawn_player_unit(c, unit_id)
-				if not unit_mgr.player_units.is_empty():
-					var spawned = unit_mgr.player_units[-1]
-					if is_instance_valid(spawned):
+				# Honour the payload team so a Payload-Source Ferox unit unpacks
+				# as an enemy; everything else stays Lumina/player.
+				var team := int(payload.get("team", 0))
+				var spawned = null
+				if unit_mgr.has_method("spawn_unit_with_team"):
+					spawned = unit_mgr.spawn_unit_with_team(c, unit_id, team)
+				else:
+					unit_mgr.spawn_player_unit(c, unit_id)
+					spawned = unit_mgr.player_units[-1] if not unit_mgr.player_units.is_empty() else null
+				if is_instance_valid(spawned):
+					# Restore the FULL captured runtime state (pose, turret
+					# rotations, commands) so the redeployed unit resumes
+					# exactly as it was picked up.
+					if spawned.has_method("apply_payload_state"):
+						spawned.apply_payload_state(payload)
+					else:
 						spawned.health = float(payload.get("health", spawned.health))
-						if "facing_angle" in spawned and payload.has("facing_angle"):
-							spawned.facing_angle = float(payload["facing_angle"])
-						if "aim_angle" in spawned and payload.has("aim_angle"):
-							spawned.aim_angle = float(payload["aim_angle"])
+					if "is_dummy" in spawned:
+						spawned.is_dummy = bool(payload.get("is_dummy", false))
 				state["held_payload"] = null
 				state["grabber_open"] = true
 		elif payload.get("type", "") == "building":

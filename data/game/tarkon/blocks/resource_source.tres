@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"resource_source"
+display_name = "Resource Source"
+description = "Developer block. Click to pick any item or fluid; emits it infinitely out of every side."
+category = 8
+tags = PackedStringArray("resource_source", "no_pathfinding")
+color = Color(0.95, 0.85, 0.2, 1)
+grid_size = Vector2i(1, 1)
+max_health = 1000.0

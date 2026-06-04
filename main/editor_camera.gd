@@ -21,6 +21,10 @@ extends Camera2D
 var target_zoom := 0.5
 var _mid_dragging := false
 var _mid_drag_start := Vector2.ZERO
+# Last camera transform we issued a terrain redraw for, so _process can
+# skip redrawing the terrain layer while the camera sits still.
+var _last_draw_pos := Vector2(INF, INF)
+var _last_draw_zoom := -1.0
 
 
 func _ready() -> void:
@@ -58,10 +62,19 @@ func _process(delta: float) -> void:
 	var new_zoom := lerpf(zoom.x, target_zoom, delta * zoom_smoothing)
 	zoom = Vector2(new_zoom, new_zoom)
 
-	# Redraw terrain for any zoom-dependent rendering
-	var terrain = get_node_or_null("/root/Main/TerrainSystem")
-	if terrain:
-		terrain.queue_redraw()
+	# Redraw terrain for zoom-dependent rendering and viewport culling,
+	# but only when the camera actually moved or zoomed this frame —
+	# redrawing the whole terrain layer every idle frame was a needless
+	# editor lag source. A tiny epsilon on zoom catches the lerp's long
+	# asymptotic tail so we stop redrawing once it's visually settled.
+	var moved: bool = position != _last_draw_pos
+	var zoomed: bool = absf(new_zoom - _last_draw_zoom) > 0.0001
+	if moved or zoomed:
+		_last_draw_pos = position
+		_last_draw_zoom = new_zoom
+		var terrain = get_node_or_null("/root/Main/TerrainSystem")
+		if terrain:
+			terrain.queue_redraw()
 
 
 func _unhandled_input(event: InputEvent) -> void:

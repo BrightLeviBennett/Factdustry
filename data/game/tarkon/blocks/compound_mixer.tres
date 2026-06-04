@@ -1,0 +1,65 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"compound_mixer"
+display_name = "Compound Mixer"
+description = "Reagent reactor. Pick a recipe: blast compound, acid, or simple fuel."
+category = 2
+tags = PackedStringArray("production", "processing", "recipe_select", "omnidirectional")
+color = Color(0.5, 0.55, 0.3, 1)
+grid_size = Vector2i(3, 3)
+max_health = 340.0
+build_cost = {
+"copper": 200,
+"silicon": 80,
+"steel": 40
+}
+build_time = 4.0
+production_time = 3.0
+electrical_power_use = 20.0
+liquid_capacity = 30.0
+max_stored_items = 40
+factory_recipes = [{
+"id": &"blast_compound",
+"display_name": "Blast Compound",
+"input": {"mat_sulfur": 1, "mat_coal": 1},
+"output": {"mat_blast_compound": 1}
+}, {
+"id": &"acid",
+"display_name": "Acid",
+"input": {"mat_sulfur": 1, "mat_water": 1, "mat_oxygen": 1},
+"output": {"mat_acid": 1}
+}, {
+"id": &"simple_fuel",
+"display_name": "Simple Fuel",
+"input": {"mat_blast_compound": 1, "mat_petroleum": 1},
+"output": {"mat_simple_fuel": 1}
+}, {
+"id": &"salt_water",
+"display_name": "Salt Water",
+"input": {"mat_salt": 1, "mat_water": 1},
+"output": {"mat_salt_water": 1}
+}, {
+"id": &"brine_coolant",
+"display_name": "Brine Coolant",
+"input": {"mat_salt_water": 1, "mat_graphite": 2},
+"output": {"mat_brine_coolant": 2}
+}, {
+"id": &"oxidized_fuel",
+"display_name": "Oxidized Fuel",
+"input": {"mat_simple_fuel": 1, "mat_oxygen": 2},
+"output": {"mat_oxidized_fuel": 1}
+}, {
+"id": &"super_coolant",
+"display_name": "Super Coolant",
+"input": {"mat_water": 1, "mat_copper": 2, "mat_aluminum": 1},
+"output": {"mat_super_coolant": 3}
+}, {
+"id": &"asphalt",
+"display_name": "Asphalt",
+"input": {"mat_petroleum": 1.0, "mat_sand": 2},
+"output": {"mat_asphalt": 1}
+}]

@@ -15,6 +15,11 @@ enum MovementLayer {
 	CRAWLER,  ## Ignores buildings; blocked only by terrain wall segments >= 4 cells
 	HOVER,    ## Ignores all terrain, direct movement
 	FLYING,   ## Ignores all terrain, direct movement (highest layer)
+	NAVAL,    ## Water-only: may ONLY occupy water floor with no platform on
+			  ## it. Everything else (land, walls, buildings, platforms) is
+			  ## impassable, so a naval unit treats the water's edge the way
+	          ## a tank treats a wall. Appended last to keep existing .tres
+	          ## integer movement_layer values stable.
 }
 enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 
@@ -47,6 +52,10 @@ enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 @export var head_turn_speed: float = 3.0
 ## Radians/sec the chassis rotates to face travel direction.
 @export var body_turn_speed: float = 2.0
+## Extra rotation (radians) added when drawing the base + head sprites, to
+## correct art whose "forward" isn't the default UP. Use PI for art that
+## faces DOWN, ±PI/2 for sideways art. 0 = source art already faces up.
+@export var sprite_angle_offset: float = 0.0
 
 
 @export_group("Movement")
@@ -58,6 +67,18 @@ enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 @export var tank_steering: bool = false
 ## Turn radius in pixels. >0 arcs around a pivot; 0 pivots in place.
 @export var turn_radius: float = 0.0
+@export_subgroup("Naval Wake")
+## Number of history points in each side wake-trail ribbon (Mindustry's
+## `trailLength`). 0 = no wake. Higher = longer trail.
+@export var trail_length: int = 0
+## Lateral offset (px) of each wake trail from the unit centre (Mindustry's
+## `waveTrailX`). The two trails sit at ±this, rotated by the hull heading.
+@export var wave_trail_x: float = 8.0
+## Forward/back offset (px) of the wake trails (Mindustry's `waveTrailY`,
+## negative = behind the centre).
+@export var wave_trail_y: float = -6.0
+## Overall width multiplier of the wake ribbons (Mindustry's `trailScl`).
+@export var trail_scl: float = 1.0
 
 
 @export_group("Stats")
@@ -66,6 +87,20 @@ enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 @export var health_regen: float = 0.0
 ## Flat damage reduction.
 @export var armor: float = 0.0
+## Unit tier (1-5), set per fabricator-chain position. Drives the number
+## of upgrade slots via `upgrade_slots()`.
+@export var tier: int = 1
+
+
+## Number of upgrade modules this unit can hold, by tier:
+## t1=1, t2=2, t3=3, t4=5, t5=6 (anything else = tier-1 = 1 slot).
+func upgrade_slots() -> int:
+	match tier:
+		2: return 2
+		3: return 3
+		4: return 5
+		5: return 6
+		_: return 1
 
 
 @export_group("Combat")
@@ -76,6 +111,13 @@ enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 @export var attack_range: float = 32.0
 @export var is_aoe: bool = false
 @export var aoe_radius: float = 0.0
+## Mindustry-style mounted weapons. Each WeaponData is a stateless weapon
+## placed at an offset on the unit; at spawn they expand into live mounts
+## (one each, or two if `mirror`). When this list is NON-EMPTY the unit
+## fires through the mount system instead of the legacy single-shot
+## attack path, so a unit can have multiple weapons at distinct points
+## doing distinct things. Empty = legacy behaviour (unchanged).
+@export var weapons: Array[WeaponData] = []
 
 
 @export_group("AI")

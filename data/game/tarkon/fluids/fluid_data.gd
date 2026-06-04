@@ -63,6 +63,11 @@ extends Resource
 ## Status effect applied when units walk through this fluid
 @export var contact_effect: Resource
 
+# --- FIRE ---
+## Whether this is a burnable fluid — a block holding it keeps burning
+## indefinitely and lets fire spread to it.
+@export var flammable: bool = false
+
 
 # =========================
 # HELPER METHODS
