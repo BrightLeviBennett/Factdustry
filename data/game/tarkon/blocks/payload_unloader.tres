@@ -9,7 +9,7 @@
 script = ExtResource("1")
 id = &"payload_unloader"
 display_name = "Payload Unloader"
-description = "Unloads payloads at their destination."
+description = "Unloads reources from payloads."
 icon = ExtResource("3")
 category = 6
 tags = PackedStringArray("payload", "payload_unloader")

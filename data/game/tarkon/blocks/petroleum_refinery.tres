@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://du1kru0khpcf7"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,34 +6,53 @@
 script = ExtResource("1")
 id = &"petroleum_refinery"
 display_name = "Petroleum Refinery"
-description = "Cracks crude petroleum into useful chemical products. Pick a fraction: coolant, heavy fuel, light fuel, or acetylene."
+description = "Refines crude petroleum into useful chemical products."
 category = 2
 tags = PackedStringArray("production", "processing", "recipe_select", "omnidirectional")
 color = Color(0.3, 0.3, 0.3, 1)
 max_health = 420.0
-build_cost = { "copper": 350, "silicon": 150 }
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
 build_time = 4.0
 production_time = 4.0
-electrical_power_use = 25.0
-liquid_capacity = 30.0
 factory_recipes = [{
-"id": &"coolant",
 "display_name": "Coolant",
-"input": {"mat_petroleum": 1.0},
-"output": {"mat_coolant": 0.5}
+"id": &"coolant",
+"input": {
+"mat_petroleum": 1.0
+},
+"output": {
+"mat_coolant": 0.5
+}
 }, {
-"id": &"heavy_fuel",
 "display_name": "Heavy Fuel",
-"input": {"mat_petroleum": 1.0},
-"output": {"mat_heavy_fuel": 0.5}
+"id": &"heavy_fuel",
+"input": {
+"mat_petroleum": 1.0
+},
+"output": {
+"mat_heavy_fuel": 0.5
+}
 }, {
-"id": &"light_fuel",
 "display_name": "Light Fuel",
-"input": {"mat_petroleum": 1.0},
-"output": {"mat_light_fuel": 0.5}
+"id": &"light_fuel",
+"input": {
+"mat_petroleum": 1.0
+},
+"output": {
+"mat_light_fuel": 0.5
+}
 }, {
-"id": &"acetylene",
 "display_name": "Acetylene",
-"input": {"mat_petroleum": 1.0},
-"output": {"mat_acetylene": 0.5}
+"id": &"acetylene",
+"input": {
+"mat_petroleum": 1.0
+},
+"output": {
+"mat_acetylene": 0.5
+}
 }]
+liquid_capacity = 30.0
+electrical_power_use = 25.0

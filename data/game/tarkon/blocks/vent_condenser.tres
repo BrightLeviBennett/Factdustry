@@ -7,7 +7,8 @@
 script = ExtResource("1")
 id = &"vent_condenser"
 display_name = "Vent Condenser"
-description = "Condenses thermal-vent and geyser steam into clean water. Outputs 4/s on a vent, 8/s on a geyser. Pipes accept the water on any side."
+description = "Condenses vent and geyser steam into water.
+More efficient on geysers due to their occasional water spurts."
 icon = ExtResource("1_70fbi")
 category = 9
 tags = PackedStringArray("fluid", "transport", "pump", "condenser", "omnidirectional")

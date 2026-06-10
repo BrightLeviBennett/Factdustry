@@ -9,7 +9,7 @@
 script = ExtResource("1")
 id = &"tank_fabricator"
 display_name = "Tank Fabricator"
-description = "Primary unit production facility. Builds ground vehicles."
+description = "Builds ground units."
 icon = ExtResource("2_mqosj")
 category = 6
 tags = PackedStringArray("fabricator", "units")

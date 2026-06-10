@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://wwqfgl32rd4y"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,13 +6,16 @@
 script = ExtResource("1")
 id = &"large_deconstructor"
 display_name = "Large Deconstructor"
-description = "Industrial deconstructor for fast teardown."
+description = "Deconstructs larger payloads and recovers their build cost."
 category = 6
-color = Color(0.9, 0.4, 0.4, 1)
-max_health = 400.0
-build_cost = { "copper": 350, "silicon": 150 }
-build_time = 3.0
-max_stored_items = 400
 tags = PackedStringArray("construction", "deconstructor")
+color = Color(0.9, 0.4, 0.4, 1)
 grid_size = Vector2i(6, 6)
+max_health = 400.0
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
+build_time = 3.0
 max_payload_size = 5
+max_stored_items = 400

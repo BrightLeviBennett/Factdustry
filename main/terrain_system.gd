@@ -78,6 +78,9 @@ var _floor_edge_dirty := true
 ## (which tiles exist + their textures). Set on every terrain edit so
 ## painted tiles appear immediately, while the far more expensive
 ## edge-fade / darkness BFS behind `_floor_edge_dirty` can be deferred.
+## Full-rebuild flag for the floor-geometry meshes — set on map load / bulk
+## edits / fog reveal (and by SaveManager). Single tile edits use the cheaper
+## per-chunk `_floor_dirty_chunks` path instead.
 var _floor_geom_dirty := true
 ## When true, `_draw` skips the expensive edge-fade / darkness rebuild
 ## even if `_floor_edge_dirty` is set. The map editor raises this for
@@ -117,8 +120,10 @@ var _water_meshes: Array = []
 ## Most maps use only the default sand texture (one entry); a tile with a
 ## custom `shore_icon` (e.g. sulfur water) adds its own bucket.
 var _sand_meshes: Array = []
-## Floor tiles within fewer than this distance of void start fading (higher = wider fade)
-const FLOOR_FADE_START := 6
+## Floor tiles within fewer than this distance of void start fading (higher = wider fade).
+## Pushed deeper inward so the darkening reaches full black well before the void
+## edge — otherwise the hard void tiles peek through at the shallow end of the fade.
+const FLOOR_FADE_START := 9
 ## How many tiles into a hidden region the fade extends
 const HIDDEN_FADE_TILES := 2
 ## Pre-baked per-corner darkness for each floor tile. Rebuilt when _floor_edge_dirty.
@@ -138,16 +143,23 @@ var _fade_mesh: ArrayMesh = null
 ## with the gradient-corner shading. Hidden tiles are skipped at bake
 ## time and re-baked when the hidden set changes.
 ##
-## Each entry: { "texture": Texture2D, "mesh": ArrayMesh }
-var _floor_meshes: Array = []
-## Same shape, for floor-ore overlays (e.g. surface coal). Drawn on
-## top of the base floor pass.
-var _floor_ore_meshes: Array = []
-## Single ArrayMesh covering every floor tile that has no icon — drawn
-## with no texture, using vertex colors from the tile's `data.color`
-## (modulated by `data.opacity`). Rare in shipped content but kept for
-## authoring fallback.
-var _floor_color_mesh: ArrayMesh = null
+## Floor-tile meshes are batched per CHUNK (FLOOR_CHUNK×FLOOR_CHUNK cells) so a
+## single tile edit only rebuilds that one chunk's quads (~256 cells) instead of
+## the whole map (~14k). Drawing iterates chunks (visible-culled), each costing
+## one draw call per distinct texture it contains.
+##   chunk:Vector2i -> {
+##     "tex":   Array of { texture: Texture2D, mesh: ArrayMesh },  # base floor
+##     "ore":   Array of { texture: Texture2D, mesh: ArrayMesh },  # floor-ore overlay
+##     "color": ArrayMesh | null,                                  # untextured tiles
+##   }
+## Water tiles are NOT included (they go through `_water_meshes`); hidden tiles
+## are skipped at bake time and re-baked when the hidden set changes.
+const FLOOR_CHUNK := 16
+var _floor_chunk_meshes: Dictionary = {}
+## Chunks awaiting an incremental rebuild after a single tile edit. Processed
+## in `_draw` — far cheaper than the full `_floor_geom_dirty` rebuild, which is
+## reserved for map load / bulk edits / fog reveal.
+var _floor_dirty_chunks: Dictionary = {}
 
 ## Dedicated child CanvasItem that hosts the water-mesh draws so a
 ## ShaderMaterial can scroll the water surface without affecting the
@@ -156,6 +168,11 @@ var _floor_color_mesh: ArrayMesh = null
 ## (static) draw list and the GPU re-samples per frame.
 var _water_canvas: Node2D = null
 var _water_material: ShaderMaterial = null
+## Dedicated canvas for the sector-edge floor fade, sitting at z=2 — ABOVE the
+## water canvas (z=1) so the dark gradient veils water tiles too. Drawn on the
+## terrain canvas (z=0) it was painted UNDER the water and hidden on water
+## sectors (hard black edge instead of a fade).
+var _fade_canvas: Node2D = null
 ## Pausable clock fed into the water shader. Advances by delta each
 ## frame in _process unless the game is paused — keeps the wobble +
 ## drift frozen during pause alongside everything else.
@@ -284,6 +301,15 @@ func _ready() -> void:
 	_water_canvas.z_index = 1   # above terrain (0), below building/logistics layers
 	_water_canvas.draw.connect(_draw_water_layer)
 	add_child(_water_canvas)
+	# Sector-edge fade canvas — z=2 so the dark gradient overlays BOTH the
+	# floor (z=0) and the water surface (z=1), but still sits below buildings
+	# (z=50). Repainted in lockstep with the terrain canvas (see _draw).
+	_fade_canvas = Node2D.new()
+	_fade_canvas.name = "FadeCanvas"
+	_fade_canvas.z_as_relative = false
+	_fade_canvas.z_index = 2
+	_fade_canvas.draw.connect(_draw_fade_layer)
+	add_child(_fade_canvas)
 	await get_tree().process_frame
 	_sector_script = get_node_or_null("/root/Main/SectorScript")
 	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
@@ -581,9 +607,12 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 		# Floor-ore overlay layer participates in the batched floor
 		# mesh — re-bake on any ore add so surface coal etc. shows.
 		if data.tags.has("floor_ore"):
-			_floor_edge_dirty = true
-			_floor_geom_dirty = true
+			# Ore is an overlay in the chunk mesh only — no edge-fade change.
+			_mark_floor_chunk_dirty(grid_pos)
 	elif data.is_wall():
+		# Overwriting a vent/geyser footprint cell with a wall — dissolve the
+		# 3x3 first so it doesn't keep rendering across the new tile.
+		_dissolve_multi_tile_at(grid_pos)
 		wall_tiles[grid_pos] = tile_id
 		if data.destructible:
 			tile_health[grid_pos] = data.max_health
@@ -601,13 +630,29 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 			unit_mgr._recompute_crawler_wall_passability()
 		walls_changed.emit()
 		_floor_edge_dirty = true
-		_floor_geom_dirty = true
-		_water_depth_dirty = true
+		_mark_floor_chunk_dirty(grid_pos)
+		# Water depth only when the wall borders water (a wall acts as shore).
+		if _edit_touches_water(grid_pos, &""):
+			_water_depth_dirty = true
 	else:
+		var was_floor: bool = floor_tiles.has(grid_pos)
+		var was_water: bool = _cell_is_water(grid_pos)
+		# Overwriting a vent/geyser footprint cell with a plain floor — dissolve
+		# the 3x3 first, else its stale origin keeps the multi-tile renderer
+		# drawing this new tile across the full 3x3.
+		_dissolve_multi_tile_at(grid_pos)
 		floor_tiles[grid_pos] = tile_id
-		_floor_edge_dirty = true
-		_floor_geom_dirty = true
-		_water_depth_dirty = true
+		# Edge fade depends only on floor/wall PRESENCE (the void boundary), not
+		# the tile texture — so re-texturing already-floored land needs no edge
+		# rebuild (that full-map BFS was the bulk of the on-release hitch). Only
+		# a new void→floor transition changes the boundary.
+		if not was_floor:
+			_floor_edge_dirty = true
+		_mark_floor_chunk_dirty(grid_pos)
+		# Water depth only needs the full flood-fill when the edit actually
+		# touches water — painting land away from water skips it entirely.
+		if was_water or _edit_touches_water(grid_pos, tile_id):
+			_water_depth_dirty = true
 		# Painting a non-water floor over a water cell: drop it from the
 		# water render NOW so the (z=1) water mesh stops drawing over the
 		# new floor. The full depth/shore recompute is deferred during an
@@ -627,9 +672,8 @@ func remove_tile(grid_pos: Vector2i) -> void:
 	# Remove top layer first: ore → wall → floor
 	if ore_tiles.has(grid_pos):
 		ore_tiles.erase(grid_pos)
-		# Drop the cell from the floor-ore overlay mesh if it was there.
-		_floor_edge_dirty = true
-		_floor_geom_dirty = true
+		# Ore is an overlay only — drop it from the chunk mesh; no edge change.
+		_mark_floor_chunk_dirty(grid_pos)
 	elif wall_tiles.has(grid_pos):
 		var old_data = Registry.get_tile(wall_tiles[grid_pos])
 		wall_tiles.erase(grid_pos)
@@ -649,6 +693,7 @@ func remove_tile(grid_pos: Vector2i) -> void:
 				unit_mgr._recompute_crawler_wall_passability()
 		walls_changed.emit()
 	elif floor_tiles.has(grid_pos):
+		var was_water_r: bool = _cell_is_water(grid_pos)
 		floor_tiles.erase(grid_pos)
 		# Floor-ores (e.g. surface coal) sit ON the floor — once the
 		# floor is gone, the ore has nothing to rest on. Mirrors how
@@ -657,9 +702,12 @@ func remove_tile(grid_pos: Vector2i) -> void:
 			var ore_data = Registry.get_tile(ore_tiles[grid_pos])
 			if ore_data and ore_data.tags.has("floor_ore"):
 				ore_tiles.erase(grid_pos)
+		# Removing a floor always changes the void boundary → edge rebuild.
 		_floor_edge_dirty = true
-		_floor_geom_dirty = true
-		_water_depth_dirty = true
+		_mark_floor_chunk_dirty(grid_pos)
+		# Water depth only when the erased cell was water or borders water.
+		if was_water_r or _edit_touches_water(grid_pos, &""):
+			_water_depth_dirty = true
 		# See place_tile: erasing a water cell must immediately drop it from
 		# the water render so the stale water quad doesn't keep covering the
 		# now-bare cell mid-stroke (full recompute is deferred).
@@ -705,6 +753,11 @@ func _place_multi_tile(origin: Vector2i, tile_id: StringName) -> void:
 
 	# Store the tile in floor layer at the origin
 	floor_tiles[origin] = tile_id
+	# The origin cell leaves the batched floor mesh (multi-tiles draw
+	# themselves), and any floor under the footprint may need refreshing.
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			_mark_floor_chunk_dirty(origin + Vector2i(dx, dy))
 	queue_redraw()
 
 
@@ -715,8 +768,43 @@ func _remove_multi_tile(origin: Vector2i) -> void:
 		for dy in range(-1, 2):
 			var cell = origin + Vector2i(dx, dy)
 			multi_tile_origins.erase(cell)
+			# Footprint cells revert to plain floor (or bare) — refresh meshes.
+			_mark_floor_chunk_dirty(cell)
 
 	floor_tiles.erase(origin)
+
+
+## Dissolve a 3x3 multi-tile (vent/geyser) ONLY when its CENTER (origin) cell is
+## being overwritten. Called before placing a plain 1x1 floor/wall: overwriting
+## the center removes the whole vent (otherwise its stale origin would make the
+## new tile render across the full 3x3); overwriting one of the 8 surrounding
+## footprint cells leaves the vent intact.
+func _dissolve_multi_tile_at(cell: Vector2i) -> void:
+	if multi_tile_origins.get(cell, null) == cell:
+		_remove_multi_tile(cell)
+
+
+## True if `cell` currently holds a water floor tile.
+func _cell_is_water(cell: Vector2i) -> bool:
+	if not floor_tiles.has(cell):
+		return false
+	var d = Registry.get_tile(floor_tiles[cell])
+	return d != null and d.is_liquid and d.tags.has("water")
+
+
+## True if an edit at `cell` could affect water-depth shading: the placed tile
+## is water, or any cell in the 3x3 around it is water. Lets a land edit far
+## from any water skip the (full-map) depth flood-fill entirely.
+func _edit_touches_water(cell: Vector2i, new_tile_id: StringName) -> bool:
+	if new_tile_id != &"":
+		var nd = Registry.get_tile(new_tile_id)
+		if nd != null and nd.is_liquid and nd.tags.has("water"):
+			return true
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			if _cell_is_water(cell + Vector2i(dx, dy)):
+				return true
+	return false
 
 
 # =========================
@@ -779,7 +867,11 @@ func is_void(grid_pos: Vector2i) -> bool:
 ## isn't water. 1 = shallow, 2 = medium, 3 = deep.
 ## Computed via BFS distance from the nearest non-water floor tile.
 func get_water_depth_at(grid_pos: Vector2i) -> int:
-	if _water_depth_dirty:
+	# Skip the (full-map) rebuild while an editor stroke is in progress —
+	# `defer_floor_fade` means the depth map is intentionally stale until the
+	# stroke commits. Without this guard, any per-frame gameplay query during
+	# editing would force a full flood-fill every frame, defeating the defer.
+	if _water_depth_dirty and not defer_floor_fade:
 		_rebuild_water_depth()
 	return _water_depth_map.get(grid_pos, 0)
 
@@ -989,6 +1081,19 @@ func _draw_water_layer() -> void:
 		return
 	for bucket in _water_meshes:
 		_water_canvas.draw_mesh(bucket["mesh"], bucket["texture"])
+
+
+## Renders the batched sector-edge fade mesh onto `_fade_canvas` (z=2), above
+## the water layer. `_ensure_white_pixel_tex()` instead of null: Godot 4's
+## canvas path drops per-vertex Color modulation when no texture is supplied,
+## so the dark gradient quads would render fully transparent → no fade at all.
+func _draw_fade_layer() -> void:
+	if _fade_canvas == null or _fade_mesh == null:
+		return
+	var fade_off: bool = "fade_enabled" in main and not main.fade_enabled
+	if fade_off:
+		return
+	_fade_canvas.draw_mesh(_fade_mesh, _ensure_white_pixel_tex())
 
 
 ## Immediately drops `cell` from the water render set if its current floor
@@ -1274,15 +1379,14 @@ func _rebuild_floor_edge_cache() -> void:
 
 	# Rebuild the batched fade mesh so each frame only costs one draw call.
 	_rebuild_fade_mesh()
-	# Always refresh the base floor-tile meshes alongside the edge pass. The
-	# edge pass only runs when NOT mid-stroke (it's gated on `not
-	# defer_floor_fade` in `_draw`), so this adds no per-frame cost while
-	# dragging — there, geometry is handled immediately by `_floor_geom_dirty`.
-	# But on a map LOAD or bulk edit, callers set only `_floor_edge_dirty`
-	# (e.g. SaveManager), and without this the floor meshes would never
-	# rebuild until the first manual tile placement — floors stayed invisible.
-	_floor_geom_dirty = false
-	_rebuild_floor_meshes()
+	# Refresh the base floor-tile meshes ONLY when a full rebuild was requested
+	# (map load / bulk edit set `_floor_geom_dirty`). During editor strokes the
+	# floor geometry is kept current incrementally via `_floor_dirty_chunks`, so
+	# a full rebuild here would be redundant — and that redundant full-map pass
+	# on every stroke commit was a big part of the on-release hitch.
+	if _floor_geom_dirty:
+		_floor_geom_dirty = false
+		_rebuild_floor_meshes()
 
 
 ## Builds one ArrayMesh per distinct floor texture, covering every
@@ -1294,62 +1398,117 @@ func _rebuild_floor_edge_cache() -> void:
 ## call per cell. Wall-embedded ores keep their existing path through
 ## BuildingSystem.
 func _rebuild_floor_meshes() -> void:
-	_floor_meshes.clear()
-	_floor_ore_meshes.clear()
-	_floor_color_mesh = null
+	# Full rebuild — re-bake every chunk from scratch. Used on map load / bulk
+	# edits / fog reveal. Single tile edits go through `_rebuild_floor_chunk`.
+	_floor_chunk_meshes.clear()
+	_floor_dirty_chunks.clear()
 	if floor_tiles.is_empty():
 		return
 	var ss := _sector_script_ref()
-	# Group floor cells by texture. Skip:
-	#   • water tiles (they're in `_water_meshes` with corner shading)
-	#   • multi-tile origins (they paint themselves separately)
-	#   • hidden tiles (sector script override)
-	#   • wall tiles (those are owned by the building/wall pass)
-	var by_tex: Dictionary = {}        # Texture2D -> Array of [pos, opacity]
-	var ore_by_tex: Dictionary = {}    # Texture2D -> Array of [pos, opacity]
-	var colored_cells: Array = []      # Array of [pos, color, opacity]
+	# One pass over all floor tiles, bucketed by chunk so each chunk's mesh
+	# set is built independently (and can later be rebuilt in isolation).
+	# chunk:Vector2i -> {by_tex, ore_by_tex, colored}
+	var per_chunk: Dictionary = {}
 	for grid_pos in floor_tiles:
-		if ss and ss.is_tile_hidden(grid_pos):
-			continue
-		if multi_tile_origins.has(grid_pos) and multi_tile_origins[grid_pos] == grid_pos:
-			continue
-		var data = Registry.get_tile(floor_tiles[grid_pos])
-		if data == null:
-			continue
-		if data.is_wall():
-			continue
-		# Water cells are drawn separately (corner-shaded `_water_meshes`),
-		# so skip them here. Test the ACTUAL tile type, not the deferred
-		# `_water_depth_t` set: during an editor stroke that set is stale
-		# (its rebuild is deferred behind `defer_floor_fade`), so a freshly
-		# painted non-water floor over an old water cell would otherwise
-		# stay invisible until the stroke released. The authoritative check
-		# is the tile data itself.
-		if data.is_liquid and data.tags.has("water"):
-			continue
-		if data.icon != null:
-			if not by_tex.has(data.icon):
-				by_tex[data.icon] = []
-			by_tex[data.icon].append([grid_pos, data.opacity])
-		else:
-			colored_cells.append([grid_pos, data.color, data.opacity])
-		# Floor-ore overlay layer.
-		if ore_tiles.has(grid_pos):
-			var ore_data: TerrainTileData = Registry.get_tile(ore_tiles[grid_pos])
-			if ore_data and ore_data.icon != null and ore_data.tags.has("floor_ore"):
-				if not ore_by_tex.has(ore_data.icon):
-					ore_by_tex[ore_data.icon] = []
-				ore_by_tex[ore_data.icon].append([grid_pos, ore_data.opacity])
+		var ch: Vector2i = _chunk_of(grid_pos)
+		var b: Dictionary = per_chunk.get(ch, {})
+		if b.is_empty():
+			b = {"by_tex": {}, "ore_by_tex": {}, "colored": []}
+			per_chunk[ch] = b
+		_classify_floor_cell(grid_pos, ss, b["by_tex"], b["ore_by_tex"], b["colored"])
+	for ch in per_chunk:
+		var b: Dictionary = per_chunk[ch]
+		var entry: Dictionary = _build_chunk_mesh_entry(b["by_tex"], b["ore_by_tex"], b["colored"])
+		if entry != null and not _chunk_entry_empty(entry):
+			_floor_chunk_meshes[ch] = entry
+
+
+## Chunk coordinate containing a cell. Cells are always within [0, GRID_*),
+## so plain integer division is correct (no negative-floor issue).
+func _chunk_of(cell: Vector2i) -> Vector2i:
+	return Vector2i(cell.x / FLOOR_CHUNK, cell.y / FLOOR_CHUNK)
+
+
+## Flags the chunk owning `cell` for an incremental floor-mesh rebuild.
+func _mark_floor_chunk_dirty(cell: Vector2i) -> void:
+	_floor_dirty_chunks[_chunk_of(cell)] = true
+
+
+## Rebuilds the batched floor meshes for ONE chunk by scanning only its cells
+## (FLOOR_CHUNK²), so a single tile edit costs ~256 cells instead of the whole
+## map. Erases the chunk's entry when it ends up empty.
+func _rebuild_floor_chunk(chunk: Vector2i) -> void:
+	var ss := _sector_script_ref()
+	var by_tex: Dictionary = {}
+	var ore_by_tex: Dictionary = {}
+	var colored_cells: Array = []
+	var x0: int = chunk.x * FLOOR_CHUNK
+	var y0: int = chunk.y * FLOOR_CHUNK
+	for cx in range(x0, x0 + FLOOR_CHUNK):
+		for cy in range(y0, y0 + FLOOR_CHUNK):
+			var grid_pos := Vector2i(cx, cy)
+			if floor_tiles.has(grid_pos):
+				_classify_floor_cell(grid_pos, ss, by_tex, ore_by_tex, colored_cells)
+	var entry: Dictionary = _build_chunk_mesh_entry(by_tex, ore_by_tex, colored_cells)
+	if _chunk_entry_empty(entry):
+		_floor_chunk_meshes.erase(chunk)
+	else:
+		_floor_chunk_meshes[chunk] = entry
+
+
+## Classifies one floor cell into the texture/ore/color buckets, applying the
+## same skips the batched pass always used:
+##   • hidden tiles (sector-script fog override)
+##   • multi-tile origins (vents/geysers draw themselves)
+##   • wall tiles (owned by the building/wall pass)
+##   • water tiles (drawn corner-shaded via `_water_meshes`) — tested on the
+##     ACTUAL tile data, not the deferred `_water_depth_t` set, so a freshly
+##     painted non-water floor over an old water cell shows immediately.
+func _classify_floor_cell(grid_pos: Vector2i, ss, by_tex: Dictionary, ore_by_tex: Dictionary, colored_cells: Array) -> void:
+	if ss and ss.is_tile_hidden(grid_pos):
+		return
+	if multi_tile_origins.has(grid_pos) and multi_tile_origins[grid_pos] == grid_pos:
+		return
+	var data = Registry.get_tile(floor_tiles[grid_pos])
+	if data == null:
+		return
+	if data.is_wall():
+		return
+	if data.is_liquid and data.tags.has("water"):
+		return
+	if data.icon != null:
+		if not by_tex.has(data.icon):
+			by_tex[data.icon] = []
+		by_tex[data.icon].append([grid_pos, data.opacity])
+	else:
+		colored_cells.append([grid_pos, data.color, data.opacity])
+	# Floor-ore overlay layer.
+	if ore_tiles.has(grid_pos):
+		var ore_data: TerrainTileData = Registry.get_tile(ore_tiles[grid_pos])
+		if ore_data and ore_data.icon != null and ore_data.tags.has("floor_ore"):
+			if not ore_by_tex.has(ore_data.icon):
+				ore_by_tex[ore_data.icon] = []
+			ore_by_tex[ore_data.icon].append([grid_pos, ore_data.opacity])
+
+
+## Builds a chunk's mesh-entry dict from its bucketed cells.
+func _build_chunk_mesh_entry(by_tex: Dictionary, ore_by_tex: Dictionary, colored_cells: Array) -> Dictionary:
+	var entry: Dictionary = {"tex": [], "ore": [], "color": null}
 	for tex in by_tex:
 		var mesh: ArrayMesh = _build_flat_quad_mesh(by_tex[tex])
 		if mesh != null:
-			_floor_meshes.append({"texture": tex, "mesh": mesh})
+			entry["tex"].append({"texture": tex, "mesh": mesh})
 	for tex in ore_by_tex:
 		var mesh: ArrayMesh = _build_flat_quad_mesh(ore_by_tex[tex])
 		if mesh != null:
-			_floor_ore_meshes.append({"texture": tex, "mesh": mesh})
+			entry["ore"].append({"texture": tex, "mesh": mesh})
 	if not colored_cells.is_empty():
-		_floor_color_mesh = _build_colored_quad_mesh(colored_cells)
+		entry["color"] = _build_colored_quad_mesh(colored_cells)
+	return entry
+
+
+func _chunk_entry_empty(entry: Dictionary) -> bool:
+	return entry["tex"].is_empty() and entry["ore"].is_empty() and entry["color"] == null
 
 
 ## Like `_build_flat_quad_mesh` but takes a per-cell color so untextured
@@ -1444,6 +1603,8 @@ func _rebuild_fade_mesh() -> void:
 	arr[Mesh.ARRAY_INDEX] = idxs
 	_fade_mesh = ArrayMesh.new()
 	_fade_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	if _fade_canvas != null:
+		_fade_canvas.queue_redraw()
 
 
 
@@ -1535,11 +1696,17 @@ func _draw() -> void:
 		# many cells the stroke painted over water this frame.
 		_water_mesh_dirty = false
 		_rebuild_water_meshes()
-	# Cheap pass: rebuild only the floor-tile geometry meshes so newly
-	# painted/erased tiles show up immediately, every frame if needed.
+	# Rebuild floor-tile geometry meshes so newly painted/erased tiles show up.
+	# A full rebuild (load / bulk edit / fog reveal) wins; otherwise only the
+	# chunks touched by recent tile edits are re-baked (~256 cells each), so a
+	# fast paint drag over a big map no longer rebuilds all ~14k quads per frame.
 	if _floor_geom_dirty:
 		_floor_geom_dirty = false
 		_rebuild_floor_meshes()
+	elif not _floor_dirty_chunks.is_empty():
+		for ch in _floor_dirty_chunks:
+			_rebuild_floor_chunk(ch)
+		_floor_dirty_chunks.clear()
 	# Expensive pass: edge-fade distance BFS + per-corner darkness bake +
 	# fade mesh. Deferrable mid-stroke in the editor (see `defer_floor_fade`)
 	# so this O(floor_tiles) work runs once per stroke, not once per frame.
@@ -1547,6 +1714,10 @@ func _draw() -> void:
 		_rebuild_floor_edge_cache()
 	_draw_floor_tiles()
 	_draw_multi_tiles()
+	# Keep the edge-fade overlay (its own z=2 canvas) in sync with this
+	# terrain repaint — covers camera moves, terrain edits, and fade toggles.
+	if _fade_canvas != null:
+		_fade_canvas.queue_redraw()
 
 	if paint_mode and selected_tile != &"":
 		_draw_paint_preview()
@@ -1619,16 +1790,25 @@ func _get_visible_bounds() -> Rect2i:
 
 ## Draws all regular (1x1) floor tiles.
 func _draw_floor_tiles() -> void:
-	var fade_off: bool = "fade_enabled" in main and not main.fade_enabled
 
-	# Batched floor pass: one draw_mesh per distinct tile texture.
-	# Replaces the 6000-iteration visible-bounds loop that used to do a
-	# per-cell `draw_texture_rect`. GPU culls off-screen triangles for
-	# free, so the full-map mesh isn't a problem.
-	if _floor_color_mesh != null:
-		draw_mesh(_floor_color_mesh, _ensure_white_pixel_tex())
-	for bucket in _floor_meshes:
-		draw_mesh(bucket["mesh"], bucket["texture"])
+	# Batched floor pass, per chunk: a few draw_mesh calls per on-screen chunk.
+	# Off-screen chunks are skipped entirely (cheaper than relying on GPU
+	# triangle culling of one giant full-map mesh). Two passes keep the
+	# base→sand→ore layering: all chunk bases first, then the sand underlay,
+	# then all chunk ores.
+	var white := _ensure_white_pixel_tex()
+	var vis: Rect2i = _get_visible_bounds()
+	# Visible bounds in chunk space (inclusive), padded by one chunk for safety.
+	var c_min := Vector2i((vis.position.x / FLOOR_CHUNK) - 1, (vis.position.y / FLOOR_CHUNK) - 1)
+	var c_max := Vector2i(((vis.position.x + vis.size.x) / FLOOR_CHUNK) + 1, ((vis.position.y + vis.size.y) / FLOOR_CHUNK) + 1)
+	for ch in _floor_chunk_meshes:
+		if ch.x < c_min.x or ch.x > c_max.x or ch.y < c_min.y or ch.y > c_max.y:
+			continue
+		var entry: Dictionary = _floor_chunk_meshes[ch]
+		if entry["color"] != null:
+			draw_mesh(entry["color"], white)
+		for bucket in entry["tex"]:
+			draw_mesh(bucket["mesh"], bucket["texture"])
 
 	# Sand underlay stays on the terrain canvas (no shader). Water
 	# meshes have moved to `_water_canvas`, which paints them with
@@ -1638,17 +1818,17 @@ func _draw_floor_tiles() -> void:
 
 	# Floor ores layered over the base floor (surface coal etc.) —
 	# wall-embedded ores keep their own path through BuildingSystem.
-	for bucket in _floor_ore_meshes:
-		draw_mesh(bucket["mesh"], bucket["texture"])
+	for ch in _floor_chunk_meshes:
+		if ch.x < c_min.x or ch.x > c_max.x or ch.y < c_min.y or ch.y > c_max.y:
+			continue
+		for bucket in _floor_chunk_meshes[ch]["ore"]:
+			draw_mesh(bucket["mesh"], bucket["texture"])
 
-	# Single draw call for all faded floor tiles, using a mesh rebuilt only
-	# when _floor_edge_dirty flips. GPU culls off-screen triangles for free.
-	# `_ensure_white_pixel_tex()` instead of null: Godot 4's canvas item
-	# path drops the per-vertex Color modulation when no texture is
-	# supplied, so the dark gradient quads end up rendering as
-	# completely transparent → no visible sector-edge fade at all.
-	if _fade_mesh and not fade_off:
-		draw_mesh(_fade_mesh, _ensure_white_pixel_tex())
+	# NOTE: the edge-fade is NOT drawn here anymore. It now lives on the
+	# dedicated `_fade_canvas` (z=2) so the dark gradient overlays the water
+	# surface too — when it was drawn on this canvas (z=0) the water layer
+	# (z=1) painted over it and water sectors lost their edge fade entirely.
+	# See `_draw_fade_layer`.
 
 
 

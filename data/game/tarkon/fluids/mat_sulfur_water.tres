@@ -1,11 +1,13 @@
-[gd_resource type="Resource" script_class="FluidData" format=3]
+[gd_resource type="Resource" script_class="FluidData" format=3 uid="uid://cxm1jrhwpehmf"]
 
-[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/tarkon/fluids/fluid_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bu8i8auir6v8" path="res://textures/resources/sulfurWater.png" id="1_apn4c"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_sulfur_water"
 display_name = "Sulfur Water"
 description = "Sulfur-saturated water. Centrifuge to recover sulfur and clean water."
+icon = ExtResource("1_apn4c")
 color = Color(0.75, 0.78, 0.35, 1)
 viscosity = 1.1

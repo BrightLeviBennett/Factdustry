@@ -10,3 +10,4 @@ description = "High-grade coolant brewed from water, copper, and aluminum. Bleed
 color = Color(0.35, 0.85, 1, 1)
 highlight_color = Color(0.7, 0.95, 1, 1)
 viscosity = 0.8
+units_per_segment = 20.0

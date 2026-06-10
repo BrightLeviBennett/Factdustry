@@ -1,4 +1,5 @@
 extends Node2D
+class_name Main
 
 # ============================================================
 # MAIN.GD - The root game controller
@@ -979,6 +980,20 @@ func _terrain_accepts_at(grid_pos: Vector2i, data: BlockData) -> bool:
 		return true
 	var is_platform: bool = data.tags.has("platform")
 	var is_pump: bool = data.tags.has("pump")
+	# Vent extractors (e.g. Water Extractor on sand) must sit on their required
+	# floor tile — at least one footprint cell on `vent_tile`. Mirrors the same
+	# check in BuildingSystem._can_place_terrain.
+	if data.vent_tile != &"" and "floor_tiles" in terrain:
+		var on_vent_tile: bool = false
+		for vx in range(data.grid_size.x):
+			for vy in range(data.grid_size.y):
+				if StringName(terrain.floor_tiles.get(grid_pos + Vector2i(vx, vy), &"")) == data.vent_tile:
+					on_vent_tile = true
+					break
+			if on_vent_tile:
+				break
+		if not on_vent_tile:
+			return false
 	for x in range(data.grid_size.x):
 		for y in range(data.grid_size.y):
 			var cell: Vector2i = grid_pos + Vector2i(x, y)
@@ -999,7 +1014,10 @@ func _terrain_accepts_at(grid_pos: Vector2i, data: BlockData) -> bool:
 			var depth: int = 0
 			if terrain.has_method("get_water_depth_at"):
 				depth = int(terrain.get_water_depth_at(cell))
-			if is_platform and depth <= 0:
+			# Platforms bridge SHALLOW water only — depths 1-2, where the
+			# shore tile is still visible beneath the surface. Reject dry
+			# land (0) and deep water (3, fully submerged / no shore shown).
+			if is_platform and (depth <= 0 or depth >= 3):
 				return false
 			if depth > 0:
 				if is_platform:

@@ -554,6 +554,13 @@ func _update_mouse_cursor(hovered_grid: Vector2i, in_unit_mode: bool, unit_mgr) 
 		var terrain = main.get_node_or_null("TerrainSystem")
 		if terrain != null and "ore_tiles" in terrain and terrain.ore_tiles.has(hovered_grid):
 			desired_tex = _cursor_drill_tex
+	# If the pointer is over a UI control (build menu, info panel, etc.), keep
+	# the default cursor regardless of what world cell sits behind it — the
+	# Drill / Target / Wrench cursors are world-interaction hints and shouldn't
+	# show when you're actually pointing at the HUD.
+	if get_viewport().gui_get_hovered_control() != null:
+		desired_tex = null
+
 	# The DEFAULT cursor is owned by the GlobalCursor autoload — see
 	# main/global_cursor.gd. That one paints across every scene (main
 	# menu, planet select, sectors). Here we only override it when HUD
@@ -1108,12 +1115,29 @@ func _update_portrait_panel() -> void:
 			var ammo_visible: bool = false
 			if bdata and not bdata.ammo_types.is_empty() and _logistics:
 				var ammo_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-				var ammo_have: int = 0
-				for ammo in bdata.ammo_types:
-					if ammo is AmmoType:
-						ammo_have += _logistics.get_stored_item_count(ammo_anchor, (ammo as AmmoType).item_id)
-				var ammo_cap: int = bdata.max_stored_items if bdata.max_stored_items > 0 else 100
-				ammo_pct = clampf(float(ammo_have) / float(ammo_cap), 0.0, 1.0)
+				# Average each ammo resource's fill fraction so the bar works for
+				# fluid ammo (stored under "fluids", capped by liquid_capacity) and
+				# item ammo (stored items, capped by max_stored_items) alike, and
+				# covers extra_costs (e.g. the Cutter's hydrogen) — get_stored_item_
+				# count only reads items, so a pure-fluid turret read 0 before.
+				var ammo_ids: Array = bdata.ammo_resource_ids()
+				var frac_sum: float = 0.0
+				var frac_n: int = 0
+				var st_ammo: Dictionary = _logistics.block_storage.get(ammo_anchor, {})
+				for rid in ammo_ids:
+					var is_fluid: bool = Registry.get_fluid(rid) != null
+					var have_f: float
+					var cap_f: float
+					if is_fluid:
+						have_f = float(st_ammo.get("fluids", {}).get(rid, 0.0))
+						cap_f = float(bdata.liquid_capacity) if bdata.liquid_capacity > 0.0 else 100.0
+					else:
+						have_f = float(_logistics.get_stored_item_count(ammo_anchor, rid))
+						cap_f = float(bdata.max_stored_items) if bdata.max_stored_items > 0 else 100.0
+					if cap_f > 0.0:
+						frac_sum += clampf(have_f / cap_f, 0.0, 1.0)
+						frac_n += 1
+				ammo_pct = (frac_sum / float(frac_n)) if frac_n > 0 else 0.0
 				ammo_visible = true
 			portrait_right_bar_2_container.visible = ammo_visible
 			if ammo_visible:
@@ -1745,37 +1769,58 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					origin
 				)
 
-	# --- Fluid Storage Bar ---
-	# Pumps, condensers, fluid-boosted turrets / cranes — anything
-	# with non-zero `liquid_capacity` gets a blue bar showing
-	# stored/max. Value is read from BuildingSystem's eased display
-	# dict so the bar slides smoothly per-frame instead of snapping.
-	if data.liquid_capacity > 0.0:
-		var bs = main.get_node_or_null("BuildingSystem")
-		var disp_fl: float = 0.0
-		if bs and "_fluid_bar_display" in bs:
-			disp_fl = float(bs._fluid_bar_display.get(origin, 0.0))
-		_add_tooltip_fluid_bar(disp_fl, data.liquid_capacity)
+	# --- Arc Fire-Rate Bar ---
+	# The Arc winds up: it shoots faster the longer it fires. Show the current
+	# rate of fire and a bar tracking the wind-up charge (0 = cold / slow,
+	# 1 = fully spun up / fast).
+	if data.tags.has("lightning_emitter"):
+		var combat_fr = _combat_sys_ref()
+		if combat_fr and "arc_charge" in combat_fr:
+			var charge_fr: float = clampf(float(combat_fr.arc_charge.get(origin, 0.0)), 0.0, 1.0)
+			var reload_fr: float = lerpf(combat_fr.ARC_MAX_RELOAD, combat_fr.ARC_MIN_RELOAD, charge_fr)
+			var rate_fr: float = (1.0 / reload_fr) if reload_fr > 0.0 else 0.0
+			_add_tooltip_rate_bar(charge_fr, "%.1f shots/sec" % rate_fr, Color(0.6, 0.85, 1.0))
 
-	# --- Unit Fabricator Input Progress + Unit Count ---
+	# --- Fluid Storage Bars ---
+	# Pumps, condensers, fluid-boosted turrets / cranes — anything with a
+	# non-zero `liquid_capacity` gets one bar PER stored fluid, each coloured
+	# and labelled by the fluid, sharing the block's total capacity.
+	if data.liquid_capacity > 0.0:
+		var stored_fluids: Dictionary = {}
+		if _logistics and _logistics.block_storage.has(origin):
+			stored_fluids = _logistics.block_storage[origin].get("fluids", {})
+		for fluid_id in stored_fluids:
+			var amt_fl: float = float(stored_fluids[fluid_id])
+			if amt_fl <= 0.0:
+				continue
+			var fluid_res = Registry.get_fluid(fluid_id)
+			var fl_color: Variant = fluid_res.color if fluid_res else null
+			var fl_name: String = fluid_res.display_name if fluid_res else String(fluid_id)
+			_add_tooltip_fluid_bar(amt_fl, data.liquid_capacity, fl_color, fl_name)
+
+	# --- Factory Fluid-Input Bars (water etc.) ---
+	# Factories that consume a FLUID input buffer it in factory_buffers (as unit
+	# counts), separate from the output fluid storage above. Show a bar per input
+	# fluid so the player can see e.g. the Graphite Electrolyzer's / Water
+	# Centrifuge's water level. Solid inputs stay in the "Needs" row below.
+	# (Unit fabricators have their own input progress bars further down.)
+	if _logistics and data.produced_unit == &"" and _logistics.factory_buffers.has(origin):
+		var fin_state = _logistics.factory_buffers[origin]
+		var fin_inputs: Dictionary = data.input_items
+		if _logistics.has_method("_get_effective_inputs"):
+			fin_inputs = _logistics._get_effective_inputs(data, origin)
+		for in_id in fin_inputs:
+			var in_sn := StringName(in_id)
+			var in_fluid = Registry.get_fluid(in_sn)
+			if in_fluid == null:
+				continue  # only fluid inputs get a bar
+			var recipe_amt: int = int(fin_inputs[in_id])
+			var cap_in: int = data.max_stored_items if data.max_stored_items > 0 else maxi(recipe_amt * 10, 1)
+			var have_in: int = int(fin_state.get("inputs", {}).get(in_sn, 0))
+			_add_tooltip_fluid_bar(float(have_in), float(cap_in), in_fluid.color, in_fluid.display_name)
+
+	# --- Unit Fabricator Unit Count ---
 	if data.produced_unit != &"":
-		if _logistics and _logistics.factory_buffers.has(origin):
-			var state = _logistics.factory_buffers[origin]
-			# Unit fabricators consume the produced unit's build_cost.
-			# Normalize short ids ("copper") to full item ids ("mat_copper")
-			# so we look up the runtime buffer with the same key the conveyor
-			# pushes items under.
-			var ufab_unit = Registry.get_unit(data.produced_unit)
-			var ufab_raw: Dictionary = ufab_unit.build_cost if ufab_unit and not ufab_unit.build_cost.is_empty() else data.input_items
-			var ufab_inputs: Dictionary = _logistics._normalize_item_keys(ufab_raw) if _logistics.has_method("_normalize_item_keys") else ufab_raw
-			for raw_id in ufab_inputs:
-				var sn_id := StringName(raw_id)
-				var recipe: int = int(ufab_inputs[raw_id])
-				var cap: int = data.max_stored_items if data.max_stored_items > 0 else recipe
-				var have: int = state["inputs"].get(sn_id, 0)
-				var item = Registry.get_item_or_fluid(sn_id)
-				var item_name: String = item.display_name if item else str(sn_id)
-				_add_tooltip_progress_bar(have, cap, item_name, Color(0.9, 0.6, 0.1))
 		# Show current count / max for this unit type
 		var unit_data = Registry.get_unit(data.produced_unit)
 		var unit_name: String = unit_data.display_name if unit_data else str(data.produced_unit)
@@ -1784,6 +1829,13 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		var at_cap: bool = current_count >= max_count
 		var count_color := Color(0.9, 0.3, 0.3) if at_cap else Color(0.7, 0.9, 0.7)
 		_add_tooltip_line("%s: %d / %d" % [unit_name, current_count, max_count], count_color)
+
+	# --- Factory input requirements (Mindustry ConsumeItems / ReqImage) ---
+	# Non-unit producers show each required input as an icon + amount, with a
+	# diagonal red line struck through it when the building currently lacks
+	# that input. Unit fabricators already get per-input progress bars above.
+	if data.produced_unit == &"":
+		_add_tooltip_requirements(origin, data)
 
 	# (Conveyor "Carrying:" line removed — what's on the belt is
 	# already visible in the world.)
@@ -1963,8 +2015,12 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		# Refabricators additionally support per-tier-2 overrides via
 		# `refab_recipes` — pick up the currently-selected tier-2's recipe
 		# when there is one, else fall back to `input_items`.
-		elif (not data.input_items.is_empty() or data.produced_unit != &"") and _logistics.factory_buffers.has(origin):
-			var fb = _logistics.factory_buffers[origin]
+		elif not data.input_items.is_empty() or data.produced_unit != &"":
+			# Don't gate on the runtime factory buffer existing — an unpowered or
+			# not-yet-ticked fabricator (e.g. a naval fabricator placed by the
+			# water before its power line is run) has no buffer entry yet, but the
+			# player should still see what it needs. Missing buffer → have = 0.
+			var fb: Dictionary = _logistics.factory_buffers.get(origin, {})
 			var inputs: Dictionary = fb.get("inputs", {})
 			var effective_recipe: Dictionary = data.input_items
 			if data.produced_unit != &"":
@@ -2001,7 +2057,12 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				if have < needed:
 					has_need = true
 					break
-			if has_need or is_omni_bldg or is_refab_with_t2:
+			# Unit fabricators always show their recipe as a persistent resource
+			# readout — otherwise a fabricator sitting with a full buffer (e.g. a
+			# naval fabricator that can't deploy because there's no open water in
+			# front) would hide the requirements entirely.
+			var is_unit_fab_panel: bool = data.produced_unit != &""
+			if has_need or is_omni_bldg or is_refab_with_t2 or is_unit_fab_panel:
 				_add_tooltip_separator()
 				for raw_id in effective_recipe:
 					var sn_id := StringName(raw_id)
@@ -2144,7 +2205,12 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			if not dstate.is_empty():
 				var did: StringName = dstate.get("archive_id", &"")
 				if did == &"":
-					_add_tooltip_line("Decoding Archive: (idle)", Color(0.7, 0.7, 0.7))
+					# Distinguish "facing an already-decoded archive" (done)
+					# from a decoder with nothing to work on (idle).
+					if dstate.get("complete_id", &"") != &"":
+						_add_tooltip_line("<Archive Decoding Complete>", Color(0.5, 0.9, 0.5))
+					else:
+						_add_tooltip_line("Decoding Archive: (idle)", Color(0.7, 0.7, 0.7))
 				else:
 					var dnd = TechTree.get_node_data(did)
 					var dname: String = dnd["name"] if dnd else String(did)
@@ -2345,6 +2411,89 @@ func _add_tooltip_separator() -> void:
 	tooltip_vbox.add_child(sep)
 
 
+## Adds the factory's input-requirement row to the block info panel — an
+## icon (+amount) per input, including fluid inputs. Inputs the building
+## currently lacks get a diagonal red line drawn over the icon, a port of
+## Mindustry's ui/ReqImage.java (used by ConsumeItems / ConsumeLiquid).
+## Resolves recipe-select factories via LogisticsSystem.
+func _add_tooltip_requirements(origin: Vector2i, data: BlockData) -> void:
+	# Active inputs — recipe-select factories override input_items.
+	var inputs: Dictionary = {}
+	if _logistics and _logistics.has_method("_get_effective_inputs"):
+		inputs = _logistics._get_effective_inputs(data, origin)
+	else:
+		inputs = data.input_items
+	if inputs == null or inputs.is_empty():
+		return
+
+	# Current holdings — includes factory input buffers (water etc.) via
+	# _collect_block_stored_items, so fluid inputs are covered too.
+	var bs = main.get_node_or_null("BuildingSystem")
+	var held_items: Dictionary = {}
+	if bs and bs.has_method("_collect_block_stored_items"):
+		held_items = bs._collect_block_stored_items(origin)
+
+	var row = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	for id in inputs:
+		var amount: float = float(inputs[id])
+		if amount <= 0.0:
+			continue
+		var held: float = float(held_items.get(id, 0))
+		var has_it: bool = held + 0.0001 >= amount
+		var res = Registry.get_item_or_fluid(id)
+
+		var cell = Control.new()
+		cell.custom_minimum_size = Vector2(26, 26)
+		cell.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+		var ic = TextureRect.new()
+		ic.texture = res.icon if res else null
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cell.add_child(ic)
+
+		# Required amount, bottom-right (trim trailing ".0" for whole numbers).
+		var amt_lbl = Label.new()
+		amt_lbl.text = str(int(amount)) if absf(amount - roundf(amount)) < 0.001 else "%.1f" % amount
+		amt_lbl.add_theme_font_size_override("font_size", 10)
+		amt_lbl.add_theme_color_override("font_color", Color.WHITE)
+		amt_lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+		amt_lbl.add_theme_constant_override("shadow_offset_x", 1)
+		amt_lbl.add_theme_constant_override("shadow_offset_y", 1)
+		amt_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		amt_lbl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		amt_lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+		amt_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cell.add_child(amt_lbl)
+
+		# Missing input → diagonal red strike overlay.
+		if not has_it:
+			var strike = Control.new()
+			strike.set_anchors_preset(Control.PRESET_FULL_RECT)
+			strike.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			strike.draw.connect(_draw_req_strike.bind(strike))
+			cell.add_child(strike)
+
+		row.add_child(cell)
+
+	tooltip_vbox.add_child(row)
+
+
+## Draws the ReqImage red strike (dark backing line + bright red line) from
+## bottom-left to top-right across `ctrl`, used to mark a missing input.
+func _draw_req_strike(ctrl: Control) -> void:
+	var sz: Vector2 = ctrl.size
+	var bl := Vector2(0.0, sz.y)
+	var tr := Vector2(sz.x, 0.0)
+	ctrl.draw_line(bl + Vector2(0, 2), tr + Vector2(0, 2), Color(0.25, 0.0, 0.0, 0.9), 3.0)
+	ctrl.draw_line(bl, tr, Color(0.95, 0.2, 0.2, 1.0), 2.0)
+
+
 func _add_tooltip_health_bar(pct: float, current: float, max_hp: float) -> void:
 	var bar_container = HBoxContainer.new()
 	bar_container.add_theme_constant_override("separation", 6)
@@ -2394,7 +2543,8 @@ func _add_tooltip_health_bar(pct: float, current: float, max_hp: float) -> void:
 ## actual fluid being carried instead of a generic blue). Optional
 ## `label_prefix` prepends a name to the readout — e.g. "Water 7 / 10".
 func _add_tooltip_fluid_bar(stored: float, max_amount: float,
-		fluid_color_override: Variant = null, label_prefix: String = "") -> void:
+		fluid_color_override: Variant = null, label_prefix: String = "",
+		show_label: bool = true) -> void:
 	if max_amount <= 0.0:
 		return
 	var pct: float = clampf(stored / max_amount, 0.0, 1.0)
@@ -2430,24 +2580,22 @@ func _add_tooltip_fluid_bar(stored: float, max_amount: float,
 
 	bar_container.add_child(bar_panel)
 
-	var fl_lbl := Label.new()
-	# Show one decimal place when the stored amount isn't a whole
-	# number — so a brand-new 0.5-unit drip reads as "0.5/10" instead
-	# of rounding to 1.
-	var stored_str: String = "%.1f" % stored if absf(stored - round(stored)) > 0.05 else "%.0f" % stored
-	if label_prefix != "":
-		fl_lbl.text = "%s %s / %.0f" % [label_prefix, stored_str, max_amount]
-	else:
-		fl_lbl.text = "%s / %.0f" % [stored_str, max_amount]
-	fl_lbl.add_theme_font_size_override("font_size", 11)
-	# Light tint of the fill colour so the label reads against the
-	# tooltip background without being a hard primary colour.
-	var lbl_color: Color = Color(0.7, 0.85, 1.0)
-	if fluid_color_override is Color:
-		lbl_color = (fluid_color_override as Color).lightened(0.5)
-	fl_lbl.add_theme_color_override("font_color", lbl_color)
-	fl_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	bar_container.add_child(fl_lbl)
+	if show_label:
+		var fl_lbl := Label.new()
+		# Always show one decimal place — fluid amounts read as 11.0, not 11.
+		if label_prefix != "":
+			fl_lbl.text = "%s %.1f / %.1f" % [label_prefix, stored, max_amount]
+		else:
+			fl_lbl.text = "%.1f / %.1f" % [stored, max_amount]
+		fl_lbl.add_theme_font_size_override("font_size", 11)
+		# Light tint of the fill colour so the label reads against the
+		# tooltip background without being a hard primary colour.
+		var lbl_color: Color = Color(0.7, 0.85, 1.0)
+		if fluid_color_override is Color:
+			lbl_color = (fluid_color_override as Color).lightened(0.5)
+		fl_lbl.add_theme_color_override("font_color", lbl_color)
+		fl_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bar_container.add_child(fl_lbl)
 
 	tooltip_vbox.add_child(bar_container)
 
@@ -2674,6 +2822,47 @@ func _add_tooltip_progress_bar(current: int, max_val: int, label_text: String, b
 	lbl.text = "%s: %d/%d" % [label_text, current, max_val]
 	lbl.add_theme_font_size_override("font_size", 11)
 	lbl.add_theme_color_override("font_color", Color(0.9, 0.75, 0.5))
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_container.add_child(lbl)
+
+	tooltip_vbox.add_child(bar_container)
+
+
+## Generic 0..1 progress bar with a free-text label. Used for the Arc's
+## fire-rate wind-up (fill = charge, label = current shots/sec).
+func _add_tooltip_rate_bar(pct: float, label_text: String, bar_color: Color) -> void:
+	pct = clampf(pct, 0.0, 1.0)
+
+	var bar_container = HBoxContainer.new()
+	bar_container.add_theme_constant_override("separation", 6)
+	bar_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar_bg = ColorRect.new()
+	bar_bg.custom_minimum_size = Vector2(180, 10)
+	bar_bg.color = Color(0.05, 0.08, 0.12, 0.8)
+	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar_fill = ColorRect.new()
+	bar_fill.color = bar_color
+	bar_fill.custom_minimum_size = Vector2(180 * pct, 10)
+	bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar_panel = Control.new()
+	bar_panel.custom_minimum_size = Vector2(180, 10)
+	bar_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_panel.add_child(bar_bg)
+	bar_bg.position = Vector2.ZERO
+	bar_bg.size = Vector2(180, 10)
+	bar_panel.add_child(bar_fill)
+	bar_fill.position = Vector2.ZERO
+	bar_fill.size = Vector2(180 * pct, 10)
+
+	bar_container.add_child(bar_panel)
+
+	var lbl = Label.new()
+	lbl.text = label_text
+	lbl.add_theme_font_size_override("font_size", 11)
+	lbl.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar_container.add_child(lbl)
 

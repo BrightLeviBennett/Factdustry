@@ -63,6 +63,13 @@ enum EffectType {
 @export var defense_modifier: float = 1.0
 ## Attack speed multiplier
 @export var attack_speed_modifier: float = 1.0
+## Aim / turret-head turn-speed multiplier (units only). <1.0 makes the unit
+## swing its weapon onto a target more slowly (e.g. Crystallized / Tarred).
+@export var aim_speed_modifier: float = 1.0
+## Armor-effectiveness multiplier (units only). Scales the unit's flat armor
+## when computing incoming damage, so <1.0 makes its armor block less (e.g.
+## Embrittled = 0.5 → armor only half as effective). 0.0 ignores armor entirely.
+@export var armor_effectiveness_modifier: float = 1.0
 ## Production speed multiplier (buildings only)
 @export var production_modifier: float = 1.0
 

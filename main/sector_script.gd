@@ -64,6 +64,13 @@ var _current_step: int = -1  # -1 = not running
 var _step_wait_timer: float = 0.0
 var _script_running := false
 
+## Active "delay" actions. Each entry: {remaining: float, text: String,
+## action: Dictionary}. Counted down every frame in `_tick_delays`; while a
+## delay is pending it shows "<text>: <remaining>" in the objective panel, and
+## when it hits zero its nested `action` runs. Survives step changes and save/
+## load so a long delay isn't lost.
+var _active_delays: Array = []
+
 # --- HINTS ---
 ## Authored hint definitions, see HINT FORMAT comment below.
 var _hints: Array = []
@@ -136,6 +143,10 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_hint_clock += delta
 	_tick_hints()
+	# Delays run independently of the step machine — once started they count
+	# down (and fire their action) even across step changes or after the script
+	# finishes, so tick them before the early-out below.
+	_tick_delays(delta)
 	if not _script_running or _current_step < 0 or _current_step >= _script_steps.size():
 		return
 
@@ -824,6 +835,7 @@ func reset_runtime_state() -> void:
 	_current_step = -1
 	_script_running = false
 	_step_wait_timer = 0.0
+	_active_delays.clear()
 	_mined_counts.clear()
 	_core_counts.clear()
 	_produced_counts.clear()
@@ -875,6 +887,7 @@ func get_runtime_state() -> Dictionary:
 		"current_step": _current_step,
 		"script_running": _script_running,
 		"step_wait_timer": _step_wait_timer,
+		"active_delays": _active_delays.duplicate(true),
 		"mined_counts": _dict_sname_to_str(_mined_counts),
 		"core_counts": _dict_sname_to_str(_core_counts),
 		"produced_counts": _dict_sname_to_str(_produced_counts),
@@ -896,6 +909,7 @@ func load_runtime_state(state: Dictionary) -> void:
 	_current_step = int(state.get("current_step", -1))
 	_script_running = bool(state.get("script_running", false))
 	_step_wait_timer = float(state.get("step_wait_timer", 0.0))
+	_active_delays = (state.get("active_delays", []) as Array).duplicate(true)
 	_mined_counts = _dict_str_to_sname(state.get("mined_counts", {}))
 	_core_counts = _dict_str_to_sname(state.get("core_counts", {}))
 	_produced_counts = _dict_str_to_sname(state.get("produced_counts", {}))
@@ -1000,15 +1014,21 @@ static func _dict_str_to_sname(d: Dictionary) -> Dictionary:
 ## Each dict: {"text": String, "current": int, "target": int, "done": bool}
 ## Returns empty array if no script is running or step has no trackable conditions.
 func get_current_objectives() -> Array:
-	if not _script_running or _current_step < 0 or _current_step >= _script_steps.size():
-		return []
-	var step: Dictionary = _script_steps[_current_step]
-	var conditions: Array = _get_step_conditions(step)
 	var objectives: Array = []
-	for cond in conditions:
-		var obj: Dictionary = _get_objective_for_condition(cond)
-		if not obj.is_empty():
-			objectives.append(obj)
+	if _script_running and _current_step >= 0 and _current_step < _script_steps.size():
+		var step: Dictionary = _script_steps[_current_step]
+		for cond in _get_step_conditions(step):
+			var obj: Dictionary = _get_objective_for_condition(cond)
+			if not obj.is_empty():
+				objectives.append(obj)
+	# Active `delay` actions show "<text>: <remaining>" as live objectives,
+	# independent of the current step. current=0/target=1 so the HUD doesn't
+	# append a "0/1" counter to the line.
+	for dly in _active_delays:
+		objectives.append({
+			"text": "%s: %s" % [String(dly.get("text", "")), _format_delay_time(float(dly.get("remaining", 0.0)))],
+			"current": 0, "target": 1, "done": false,
+		})
 	return objectives
 
 
@@ -1080,6 +1100,12 @@ func _get_objective_for_condition(cond: Dictionary) -> Dictionary:
 			var amount := int(cond.get("amount", 1))
 			var name: String = _get_display_name_item(item_id)
 			return {"text": "%s in block storage" % name, "icon": _get_item_icon(item_id), "current": 0, "target": amount, "done": false}
+		"decoded_archive":
+			var archive_id := StringName(cond.get("archive_id", ""))
+			var amount := int(cond.get("amount", 1))
+			var current := get_decoded_archive_count(archive_id)
+			var text: String = "Decode an Archive" if archive_id == &"" else "Decode %s" % _get_display_name_archive(archive_id)
+			return {"text": text, "icon": _get_archive_icon(archive_id), "current": mini(current, amount), "target": amount, "done": current >= amount}
 	return {}
 
 
@@ -1113,6 +1139,23 @@ func _get_display_name_block(block_id: StringName) -> String:
 func _get_display_name_unit(unit_id: StringName) -> String:
 	var data = Registry.get_unit(unit_id)
 	return data.display_name if data and data.display_name != "" else str(unit_id)
+
+
+func _get_display_name_archive(archive_id: StringName) -> String:
+	if Registry.has_method("get_archive"):
+		var data = Registry.get_archive(archive_id)
+		if data and data.display_name != "":
+			return data.display_name
+	# Fall back to the tech-tree node name, then the raw id.
+	var nd = TechTree.get_node_data(archive_id)
+	return nd["name"] if nd else str(archive_id)
+
+
+func _get_archive_icon(archive_id: StringName) -> Texture2D:
+	if Registry.has_method("get_archive"):
+		var data = Registry.get_archive(archive_id)
+		return data.icon if data else null
+	return null
 
 
 ## Execute on_enter actions for a step.
@@ -1262,6 +1305,45 @@ func _execute_action(action: Dictionary) -> void:
 			if wm_x and wm_x.has_method("stop"):
 				wm_x.stop()
 				print("SectorScript: Waves stopped.")
+		"delay":
+			# Waits `seconds` (starting now), shows "<text>: <remaining>" in
+			# the objective panel for the duration, then runs the nested
+			# `action`. Multiple delays can run at once.
+			var dly_seconds: float = float(action.get("seconds", 1.0))
+			var dly_entry: Dictionary = {
+				"remaining": dly_seconds,
+				"text": String(action.get("text", "")),
+				"action": action.get("action", {}),
+			}
+			_active_delays.append(dly_entry)
+
+
+## Counts down every active `delay` action; when one reaches zero it's removed
+## and its nested `action` runs (which may itself queue another delay).
+func _tick_delays(delta: float) -> void:
+	if _active_delays.is_empty():
+		return
+	# Freeze the countdown while the world is paused so a delay doesn't burn
+	# down (or fire its action) during a pause / pause-menu.
+	if main != null and "world_paused" in main and main.world_paused:
+		return
+	# Iterate backwards so removing finished entries is index-safe.
+	var i: int = _active_delays.size() - 1
+	while i >= 0:
+		var dly: Dictionary = _active_delays[i]
+		dly["remaining"] = float(dly["remaining"]) - delta
+		if dly["remaining"] <= 0.0:
+			_active_delays.remove_at(i)
+			var act = dly.get("action", {})
+			if act is Dictionary and not (act as Dictionary).is_empty():
+				_execute_action(act)
+		i -= 1
+
+
+## Formats a delay's remaining seconds for the objective panel. Whole seconds,
+## counting down (e.g. "5s"), clamped at 0.
+func _format_delay_time(seconds: float) -> String:
+	return "%ds" % int(ceil(maxf(seconds, 0.0)))
 
 
 # =========================

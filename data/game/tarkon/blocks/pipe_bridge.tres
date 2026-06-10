@@ -21,3 +21,4 @@ build_cost = {
 build_time = 0.5
 transport_speed = 5.0
 transports_fluid = true
+link_range = 9.5

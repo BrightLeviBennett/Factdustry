@@ -11,3 +11,4 @@ description = "Flammable gas used as fuel and chemical precursor."
 icon = ExtResource("2")
 color = Color(0.55, 0.6, 0.45, 1)
 viscosity = 0.6
+units_per_segment = 20.0

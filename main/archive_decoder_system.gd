@@ -43,6 +43,10 @@ func register(anchor: Vector2i) -> void:
 		"archive_id": &"",
 		"progress": 0.0,
 		"scanner": Vector2i(-9999, -9999),
+		# Set to the archive id this decoder's scanner faces when that archive
+		# is ALREADY decoded — lets the HUD show "decoding complete" instead of
+		# a plain idle line. Empty when there's nothing decode-complete in view.
+		"complete_id": &"",
 	}
 
 
@@ -95,6 +99,7 @@ func _tick(delta: float) -> void:
 		if power_sys and not power_sys.is_electrical_powered(anchor):
 			state["progress"] = 0.0
 			state["archive_id"] = &""
+			state["complete_id"] = &""
 			continue
 
 		# 2. Find a touching, powered archive scanner whose front faces
@@ -105,6 +110,10 @@ func _tick(delta: float) -> void:
 		var scanner_pos: Vector2i = Vector2i(-9999, -9999)
 		var archive_id: StringName = &""
 		var found := false
+		# Tracks a facing archive that's ALREADY decoded, so when there's
+		# nothing left to decode we can still tell the HUD this decoder has
+		# finished its archive rather than sitting idle with no target.
+		var decoded_aid: StringName = &""
 		var seen_scanners: Dictionary = {}
 		var perimeter: Array[Vector2i] = building_sys._get_block_perimeter_cells(anchor, data.grid_size)
 		for n in perimeter:
@@ -132,6 +141,10 @@ func _tick(delta: float) -> void:
 				if aid == &"":
 					continue
 				if TechTree.is_researched(aid):
+					# This archive is already decoded — remember it so the HUD
+					# can report "complete", but keep scanning for one that
+					# still needs work.
+					decoded_aid = aid
 					continue
 				scanner_pos = n_anchor
 				archive_id = aid
@@ -143,6 +156,9 @@ func _tick(delta: float) -> void:
 		if not found:
 			state["progress"] = 0.0
 			state["archive_id"] = &""
+			# Non-empty only when a touching scanner faces an archive that's
+			# already fully decoded — HUD shows "decoding complete" then.
+			state["complete_id"] = decoded_aid
 			continue
 
 		# 3. Track which archive we're decoding (reset progress if it
@@ -150,6 +166,7 @@ func _tick(delta: float) -> void:
 		if state.get("archive_id", &"") != archive_id:
 			state["archive_id"] = archive_id
 			state["progress"] = 0.0
+		state["complete_id"] = &""
 		state["scanner"] = scanner_pos
 
 		# 4. Tick progress.

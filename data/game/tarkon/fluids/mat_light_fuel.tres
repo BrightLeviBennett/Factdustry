@@ -10,3 +10,4 @@ description = "Volatile light fraction cracked from crude petroleum."
 color = Color(0.85, 0.78, 0.4, 1)
 viscosity = 0.6
 flammable = true
+units_per_segment = 20.0

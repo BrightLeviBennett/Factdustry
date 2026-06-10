@@ -567,7 +567,8 @@ func _rebuild_buckets() -> void:
 		if not tags.has("refabricator") \
 				and data.category != BlockData.BlockCategory.EXTRACTORS \
 				and not (data.side_inputs.is_empty() and data.side_outputs.is_empty() \
-					and data.produced_unit == &"" and not tags.has("omnidirectional")):
+					and data.produced_unit == &"" and not tags.has("omnidirectional") \
+					and data.output_sides.is_empty()):
 			factory.append(grid_pos)
 	_buckets = {
 		"extractor": extractor,
@@ -1152,6 +1153,27 @@ func _get_full_ring(origin: Vector2i, grid_size: Vector2i) -> Array[Vector2i]:
 	return cells
 
 
+## Cells immediately adjacent to ONE world side of a building footprint.
+## world_dir: 0=right, 1=down, 2=left, 3=up. Used for per-output directional
+## routing on omnidirectional factories (output_sides).
+func _side_neighbor_cells(origin: Vector2i, grid_size: Vector2i, world_dir: int) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	match world_dir:
+		3:  # up
+			for x in range(grid_size.x):
+				cells.append(Vector2i(origin.x + x, origin.y - 1))
+		1:  # down
+			for x in range(grid_size.x):
+				cells.append(Vector2i(origin.x + x, origin.y + grid_size.y))
+		2:  # left
+			for y in range(grid_size.y):
+				cells.append(Vector2i(origin.x - 1, origin.y + y))
+		0:  # right
+			for y in range(grid_size.y):
+				cells.append(Vector2i(origin.x + grid_size.x, origin.y + y))
+	return cells
+
+
 ## Determines which direction an item enters an output cell from, based on
 ## which edge of the building footprint it's on.
 func _get_entry_dir_from_building(out_pos: Vector2i, origin: Vector2i, grid_size: Vector2i) -> int:
@@ -1642,6 +1664,29 @@ func _update_conveyors(delta: float) -> void:
 		elif _router_exit_accepts(grid_pos, picked, item["item_id"]):
 			item["exit_dir"] = picked
 
+	# Pre-decide exit direction for overflow / underflow items so they animate
+	# toward the face they'll actually leave by — front-first for overflow,
+	# sides-first for underflow, mirroring their transfer priority. Recomputed
+	# each tick by priority; if nothing accepts, the last choice is kept so a
+	# stalled item holds instead of flickering.
+	for grid_pos in conveyor_items:
+		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
+			continue
+		var is_of: bool = _is_overflow_cell(grid_pos)
+		var is_uf: bool = _is_underflow_cell(grid_pos)
+		if not is_of and not is_uf:
+			continue
+		var of_item = conveyor_items[grid_pos]
+		var of_rot: int = main.building_rotation.get(grid_pos, 0)
+		var of_front: int = of_rot
+		var of_left: int = (of_rot + 3) % 4
+		var of_right: int = (of_rot + 1) % 4
+		var of_prio: Array = [of_front, of_left, of_right] if is_of else [of_left, of_right, of_front]
+		for d in of_prio:
+			if _router_exit_accepts(grid_pos, d, of_item["item_id"]):
+				of_item["exit_dir"] = d
+				break
+
 	# Advance junction perpendicular-axis items too
 	for grid_pos in junction_items:
 		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
@@ -1719,9 +1764,10 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 			return false
 
 		# Special blocks: items pass through instantly (no visual sliding)
+		# Overflow / underflow are NOT instant — they animate the item across the
+		# cell like a router (exit_dir is pre-decided for the draw below).
 		var _is_instant := (_is_sorter_cell(to)
-			or _is_inverted_sorter_cell(to) or _is_overflow_cell(to)
-			or _is_underflow_cell(to) or _is_bridge_cell(to))
+			or _is_inverted_sorter_cell(to) or _is_bridge_cell(to))
 
 		# Routers only accept items entering from their BACK side (the
 		# direction opposite the rotation arrow). Items hitting any other
@@ -1880,8 +1926,36 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 		var cap_n: int = data.max_stored_items if data.max_stored_items > 0 else 8
 		return total_n < cap_n
 
+	# --- Auto-recipe factory (Water Centrifuge) ---
+	# Reports "accepts X" for any recipe input fluid, UNLESS a different
+	# recipe's input is already buffered (one fluid at a time). Mirrors the
+	# gate in `_try_accept_factory_item` so routers don't try to push a
+	# second, incompatible fluid at it.
+	if data.tags.has("auto_recipe"):
+		var ar_anchor = main.get_building_anchor(grid_pos)
+		var ar_origin: Vector2i = ar_anchor if ar_anchor != null else grid_pos
+		var ar_buf: Dictionary = factory_buffers[ar_origin].get("inputs", {}) if factory_buffers.has(ar_origin) else {}
+		var ar_amt: int = -1
+		var ar_locked_other: bool = false
+		for entry in data.factory_recipes:
+			if typeof(entry) != TYPE_DICTIONARY:
+				continue
+			var in_dict: Dictionary = entry.get("input", {})
+			for in_id in in_dict:
+				var in_sn := StringName(in_id)
+				if in_sn == item_id:
+					ar_amt = int(in_dict[in_id])
+				elif int(ar_buf.get(in_sn, 0)) > 0:
+					ar_locked_other = true
+		if ar_amt < 0 or ar_locked_other:
+			return false
+		var ar_cap2: int = data.max_stored_items if data.max_stored_items > 0 else maxi(ar_amt, 1) * 10
+		return int(ar_buf.get(item_id, 0)) < ar_cap2
+
 	# --- Factory-style accept (omnidirectional, side_inputs, unit_fabricator) ---
-	var is_omni: bool = data.tags.has("omnidirectional")
+	# Directional factories that route outputs via `output_sides` accept inputs
+	# on any side (only their output is directional), so treat them like omni.
+	var is_omni: bool = data.tags.has("omnidirectional") or not data.output_sides.is_empty()
 	var is_unit_fab: bool = data.produced_unit != &""
 	if is_omni or is_unit_fab:
 		var anchor = main.get_building_anchor(grid_pos)
@@ -1930,14 +2004,7 @@ func _could_block_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 
 	# --- Turret ammo (any side) ---
 	if data.is_turret() and not data.ammo_types.is_empty():
-		var accepts_item: bool = false
-		for ammo in data.ammo_types:
-			if ammo == null or not (ammo is AmmoType):
-				continue
-			if (ammo as AmmoType).item_id == item_id:
-				accepts_item = true
-				break
-		if not accepts_item:
+		if not data.ammo_accepts(item_id):
 			return false
 		# Respect the turret's ammo cap — otherwise the router picker
 		# would keep committing to a full turret because "the ammo type
@@ -4394,18 +4461,55 @@ func _update_storage_unloading(_delta: float) -> void:
 		for item_id in items_to_remove:
 			storage["items"].erase(item_id)
 
-		# Try to push stored fluids into adjacent pipes
+		# Try to push stored fluids into adjacent pipes.
+		# Only fluids the block actually PRODUCES are released — input fluids
+		# (e.g. the Graphite Electrolyzer's water) must stay buffered to be
+		# consumed, never leaked back out. Blocks with no declared fluid
+		# output (pumps, condensers) have an empty product set and drain
+		# everything they hold, as before.
+		var produced_fluids := {}
+		if data:
+			var eff_out: Dictionary = _get_effective_outputs(data, origin)
+			for oid in eff_out:
+				var osn := StringName(oid)
+				if Registry.get_fluid(osn) != null:
+					produced_fluids[osn] = true
+		var has_output_sides: bool = data != null and not data.output_sides.is_empty()
 		var fluids_to_remove := {}
 		for fluid_id in storage["fluids"]:
+			var fsn := StringName(fluid_id)
 			if float(storage["fluids"][fluid_id]) <= 0:
 				fluids_to_remove[fluid_id] = true
 				continue
-			for dir in range(4):
-				var neighbor: Vector2i = origin + DIR_VECTORS[dir]
+			# Skip inputs / anything this block doesn't produce.
+			if not produced_fluids.is_empty() and not produced_fluids.has(fsn):
+				continue
+			# Honour output_sides routing: a routed fluid (e.g. hydrogen up /
+			# oxygen down) may ONLY exit its configured edge. Unrouted fluids
+			# drain to every side (the previous all-directions behaviour, kept
+			# so pumps / condensers still feed pipes on any face).
+			var fluid_cells: Array = _get_full_ring(origin, grid_size)
+			if has_output_sides and data.output_sides.has(fsn):
+				# output_sides routes are relative to the block's facing, so
+				# rotate them by the building's rotation (see _factory_try_output).
+				var wdir: int = (int(data.output_sides[fsn]) + rot) % 4
+				fluid_cells = _side_neighbor_cells(origin, grid_size, wdir)
+			for neighbor in fluid_cells:
 				if _is_cross_faction(origin, neighbor):
 					continue
 				if _is_pipe_cell(neighbor):
-					if _add_fluid_to_pipe(neighbor, fluid_id, PIPE_PUSH_AMOUNT, dir):
+					var from_dir: int = (_get_entry_dir_from_building(neighbor, origin, grid_size) + 2) % 4
+					if _add_fluid_to_pipe(neighbor, fluid_id, PIPE_PUSH_AMOUNT, from_dir):
+						storage["fluids"][fluid_id] = float(storage["fluids"][fluid_id]) - 1.0
+						if float(storage["fluids"][fluid_id]) <= 0:
+							fluids_to_remove[fluid_id] = true
+						break
+				else:
+					# Deposit directly into an adjacent factory's fluid input
+					# buffer (e.g. electrolyzer oxygen → compound mixer), the
+					# same as a pipe would feed it — no pipe required between them.
+					var f_entry: int = _get_entry_dir_from_building(neighbor, origin, grid_size)
+					if _try_accept_factory_item(neighbor, fluid_id, f_entry):
 						storage["fluids"][fluid_id] = float(storage["fluids"][fluid_id]) - 1.0
 						if float(storage["fluids"][fluid_id]) <= 0:
 							fluids_to_remove[fluid_id] = true
@@ -4937,12 +5041,9 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 	# adjacent pipe into its fluid buffer, capped by liquid_capacity. This is
 	# separate from the booster table below (no passive per-second drain).
 	if data.is_turret() and data.liquid_capacity > 0 and not data.ammo_types.is_empty():
-		var is_ammo_fluid := false
-		for ammo in data.ammo_types:
-			if ammo is AmmoType and (ammo as AmmoType).item_id == fluid_id:
-				is_ammo_fluid = true
-				break
-		if is_ammo_fluid:
+		# Accept any fluid the ammo needs — primary OR extra_cost (the Eclipse
+		# beam needs oxygen + hydrogen together, so both must flow in).
+		if data.ammo_accepts(fluid_id):
 			var t_anchor = main.get_building_anchor(grid_pos)
 			var t_origin: Vector2i = t_anchor if t_anchor != null else grid_pos
 			if not block_storage.has(t_origin):
@@ -4951,10 +5052,18 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 			if not t_storage.has("fluids"):
 				t_storage["fluids"] = {}
 			var t_fluids: Dictionary = t_storage["fluids"]
-			var t_total: float = 0.0
-			for k in t_fluids:
-				t_total += float(t_fluids[k])
-			if t_total >= float(data.liquid_capacity):
+			# One ammo type at a time: reject if a fluid from a DIFFERENT ammo
+			# group is already loaded (so a Spritz holding water won't also take
+			# slag). A combined ammo_type's co-required fluids (the Cutter's
+			# oxygen + hydrogen) share a group, so they're allowed together.
+			var grp: Array = data.ammo_group_ids(fluid_id)
+			for f in t_fluids:
+				if float(t_fluids[f]) > 0.0 and not grp.has(f):
+					return false
+			# Cap PER FLUID (not total) so a turret needing two distinct ammo
+			# fluids gives each its own liquid_capacity buffer — otherwise the
+			# first fluid fills the shared cap and starves the second.
+			if float(t_fluids.get(fluid_id, 0.0)) >= float(data.liquid_capacity):
 				return false
 			t_fluids[fluid_id] = float(t_fluids.get(fluid_id, 0.0)) + 1.0
 			t_storage["fluids"] = t_fluids
@@ -5005,15 +5114,9 @@ func _try_accept_turret_ammo(grid_pos: Vector2i, item_id: StringName) -> bool:
 	if data.ammo_types.is_empty():
 		return false
 
-	# Confirm the item matches one of the turret's accepted ammos.
-	var accepted := false
-	for ammo in data.ammo_types:
-		if ammo == null or not (ammo is AmmoType):
-			continue
-		if (ammo as AmmoType).item_id == item_id:
-			accepted = true
-			break
-	if not accepted:
+	# Confirm the item matches one of the turret's accepted ammos (primary or
+	# extra_cost, e.g. the Protium's silicon).
+	if not data.ammo_accepts(item_id):
 		return false
 
 	# Resolve to the turret's anchor for multi-tile turrets.
@@ -6781,8 +6884,11 @@ func _draw_items() -> void:
 		# slide the item visibly toward whatever's behind the router
 		# (often bare terrain).
 		var exit_dir: int = entry.get("exit_dir", -1)
-		var is_router: bool = _is_router_cell(grid_pos)
-		if is_router and exit_dir < 0:
+		# Routers and overflow/underflow belts hold the item at cell centre until
+		# an exit is decided, then animate it out toward that face.
+		var holds_center: bool = _is_router_cell(grid_pos) \
+			or _is_overflow_cell(grid_pos) or _is_underflow_cell(grid_pos)
+		if holds_center and exit_dir < 0:
 			var cw: Vector2 = main.grid_to_world(grid_pos) \
 				+ Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 			var off: Vector2 = Vector2.ZERO
@@ -7186,7 +7292,7 @@ func _update_factories(delta: float) -> void:
 			continue
 		# Omnidirectional factories intentionally have empty side_inputs/side_outputs,
 		# so keep them in the loop — the processing logic handles them separately.
-		if data.side_inputs.is_empty() and data.side_outputs.is_empty() and data.produced_unit == &"" and not data.tags.has("omnidirectional"):
+		if data.side_inputs.is_empty() and data.side_outputs.is_empty() and data.produced_unit == &"" and not data.tags.has("omnidirectional") and data.output_sides.is_empty():
 			continue
 
 		# Handle multi-tile factories (use anchor as origin)
@@ -7208,6 +7314,16 @@ func _update_factories(delta: float) -> void:
 		# (no generators at all) still skips this tick so nothing progresses.
 		var power_sys_f = _power_sys_ref()
 		var is_unit_fabricator: bool = data.produced_unit != &""
+		# Per-recipe power: a recipe-select factory whose active recipe specifies
+		# "power" draws that instead of the block's electrical_power_use. Pushed
+		# to the power system as a dynamic override (cleared back to static when
+		# the recipe has no override / none is selected).
+		if power_sys_f and data.factory_recipes != null and data.factory_recipes.size() > 0:
+			var rp_rec: Dictionary = _get_selected_recipe(data, origin)
+			if not rp_rec.is_empty() and rp_rec.has("power"):
+				power_sys_f.set_dynamic_power_use(origin, float(rp_rec["power"]))
+			else:
+				power_sys_f.clear_dynamic_power_use(origin)
 		var factory_power_eff: float = 1.0
 		if power_sys_f and (data.electrical_power_use > 0 or is_unit_fabricator):
 			factory_power_eff = power_sys_f.get_electrical_efficiency(origin)
@@ -7235,8 +7351,14 @@ func _update_factories(delta: float) -> void:
 
 		match state["phase"]:
 			"collecting":
-				# Don't start production if storage is full (skip for unit fabricators)
-				if not is_unit_fabricator and _is_storage_full(origin, data):
+				# Don't start production if storage is full — UNLESS at least one
+				# output can still be delivered externally. That lets a multi-
+				# output factory keep running while one product is backed up (the
+				# electrolyzer keeps making hydrogen with its oxygen pipe jammed;
+				# the surplus oxygen is vented in _factory_try_output). Skipped
+				# for unit fabricators.
+				if not is_unit_fabricator and _is_storage_full(origin, data) \
+						and not _factory_has_output_route(origin, data):
 					continue
 				# FEROX (enemy) fabricators ignore both the player's tech
 				# tree and the player's per-unit cap — those gates are
@@ -7265,7 +7387,7 @@ func _update_factories(delta: float) -> void:
 						var unit_data = Registry.get_unit(data.produced_unit)
 						state["timer"] = unit_data.build_time if unit_data else 5.0
 					else:
-						state["timer"] = data.production_time
+						state["timer"] = _get_effective_production_time(data, origin)
 					state["timer_total"] = state["timer"]
 					state["recipe_consumed"] = {}
 
@@ -7312,7 +7434,7 @@ func _update_factories(delta: float) -> void:
 						# have no side_outputs — derive the pending list from
 						# output_items instead (one entry per item unit to push).
 						var pending := {}
-						if data.tags.has("omnidirectional"):
+						if data.tags.has("omnidirectional") or not data.output_sides.is_empty():
 							var slot: int = 0
 							# Recipe-select factories override output_items per
 							# the picked recipe; fall back to data.output_items
@@ -7412,6 +7534,22 @@ func _get_effective_inputs(data: BlockData, anchor: Vector2i = Vector2i(-2147483
 func _get_selected_recipe(data: BlockData, anchor: Vector2i) -> Dictionary:
 	if data == null or data.factory_recipes == null or data.factory_recipes.size() == 0:
 		return {}
+	# Auto-recipe factories (Water Centrifuge) have no player picker: the
+	# active recipe is whichever recipe's input is currently buffered. The
+	# input gate (`_try_accept_factory_item`) only ever lets ONE recipe's
+	# input in at a time, so at most one recipe matches here.
+	if data.tags.has("auto_recipe"):
+		if not factory_buffers.has(anchor):
+			return {}
+		var buf_inputs: Dictionary = factory_buffers[anchor].get("inputs", {})
+		for entry in data.factory_recipes:
+			if typeof(entry) != TYPE_DICTIONARY:
+				continue
+			var in_dict: Dictionary = entry.get("input", {})
+			for in_id in in_dict:
+				if int(buf_inputs.get(StringName(in_id), 0)) > 0:
+					return entry
+		return {}
 	var sel: StringName = StringName(factory_recipe_state.get(anchor, &""))
 	if sel == &"":
 		return {}
@@ -7432,6 +7570,28 @@ func _get_effective_outputs(data: BlockData, anchor: Vector2i = Vector2i(-214748
 			return _normalize_item_keys(rec.get("output", {}))
 		return {}
 	return data.output_items
+
+
+## Production-cycle length for this factory — the selected recipe's per-recipe
+## "time" override when present, otherwise the block's `production_time`.
+func _get_effective_production_time(data: BlockData, anchor: Vector2i = Vector2i(-2147483648, -2147483648)) -> float:
+	if data.factory_recipes != null and data.factory_recipes.size() > 0:
+		var rec: Dictionary = _get_selected_recipe(data, anchor)
+		if not rec.is_empty() and rec.has("time"):
+			return float(rec["time"])
+	return data.production_time
+
+
+## Electrical draw for this factory — the selected recipe's per-recipe "power"
+## override when present, otherwise the block's `electrical_power_use`. The
+## block still needs a non-zero `electrical_power_use` baseline to register as
+## a consumer at all; the override only changes the amount drawn.
+func _get_effective_power(data: BlockData, anchor: Vector2i = Vector2i(-2147483648, -2147483648)) -> float:
+	if data.factory_recipes != null and data.factory_recipes.size() > 0:
+		var rec: Dictionary = _get_selected_recipe(data, anchor)
+		if not rec.is_empty() and rec.has("power"):
+			return float(rec["power"])
+	return data.electrical_power_use
 
 
 ## Public setter for the recipe-pick world menu. `recipe_id` must match one
@@ -7563,18 +7723,75 @@ func _factory_has_all_inputs(state: Dictionary, data: BlockData, anchor: Vector2
 ## Omnidirectional factories (tag "omnidirectional") ignore side_outputs and
 ## instead try every cell around their full footprint, skipping conveyors
 ## that are pointing INTO the factory (those are input-feeders).
+## True if at least one of the factory's outputs has somewhere external to go
+## (a pipe for fluids, an empty conveyor / core for items) on its output side.
+## Lets the production gate keep a multi-output factory running when one output
+## is backed up but another can still be delivered (e.g. the electrolyzer
+## keeps making hydrogen while its oxygen pipe is jammed).
+func _factory_has_output_route(origin: Vector2i, data: BlockData) -> bool:
+	var rot: int = main.building_rotation.get(origin, 0)
+	var outs: Dictionary = _get_effective_outputs(data, origin)
+	if outs.is_empty():
+		return false
+	var has_os: bool = not data.output_sides.is_empty()
+	var is_omni: bool = data.tags.has("omnidirectional")
+	for raw_id in outs:
+		var oid := StringName(raw_id)
+		var cells: Array
+		if has_os and data.output_sides.has(oid):
+			var wdir: int = (int(data.output_sides[oid]) + rot) % 4
+			cells = _side_neighbor_cells(origin, data.grid_size, wdir)
+		elif is_omni:
+			cells = _get_full_ring(origin, data.grid_size)
+		else:
+			cells = _get_all_output_cells(origin, data.grid_size, rot)
+		var is_fluid: bool = Registry.get_fluid(oid) != null
+		for cell in cells:
+			if _is_cross_faction(origin, cell):
+				continue
+			if is_fluid:
+				if _is_pipe_cell(cell):
+					return true
+			else:
+				if _is_core_cell(cell):
+					return true
+				if _is_conveyor_cell(cell) and not conveyor_items.has(cell):
+					return true
+	return false
+
+
 func _factory_try_output(origin: Vector2i, data: BlockData, state: Dictionary) -> void:
 	var rot: int = main.building_rotation.get(origin, 0)
 	var delivered := []
 	var is_omni: bool = data.tags.has("omnidirectional")
+	var has_output_sides: bool = not data.output_sides.is_empty()
 
-	if is_omni:
+	# Omnidirectional factories AND directional factories that route their
+	# products via `output_sides` (e.g. the Graphite Electrolyzer) share this
+	# ring-based output path. Plain directional factories use the side_outputs
+	# path below.
+	if is_omni or has_output_sides:
 		# Build the ring of cells around the factory's full footprint.
 		var ring: Array[Vector2i] = _get_all_output_cells(origin, data.grid_size, rot)
+		# Track how many outputs left via an external destination (pipe /
+		# conveyor / core) this tick, plus any fluid outputs that couldn't be
+		# delivered OR stored. If something got out externally, those stuck
+		# fluids are vented at the end so a single jammed output (e.g. oxygen)
+		# doesn't halt the whole factory's other output (hydrogen).
+		var delivered_external: int = 0
+		var stuck_fluid_keys := []
 		for rel_dir_key in state["pending_outputs"]:
 			var out_item: StringName = state["pending_outputs"][rel_dir_key]
+			# Per-output directional routing: an item/fluid listed in
+			# `output_sides` may ONLY exit the configured side, ROTATED by the
+			# block's rotation (so the electrolyzer's hydrogen-up / oxygen-down
+			# turns with the building). Unlisted outputs use the full ring.
+			var candidates: Array[Vector2i] = ring
+			if has_output_sides and data.output_sides.has(out_item):
+				var wdir: int = (int(data.output_sides[out_item]) + rot) % 4
+				candidates = _side_neighbor_cells(origin, data.grid_size, wdir)
 			var pushed := false
-			for target_pos in ring:
+			for target_pos in candidates:
 				if _is_cross_faction(origin, target_pos):
 					continue
 				# Skip conveyors that are pointing INTO the factory (feeders).
@@ -7586,10 +7803,20 @@ func _factory_try_output(origin: Vector2i, data: BlockData, state: Dictionary) -
 					break
 			if pushed:
 				delivered.append(rel_dir_key)
-			else:
+				delivered_external += 1
+			elif _add_to_storage(origin, out_item, data):
 				# Couldn't push anywhere — fall back to internal storage.
-				if _add_to_storage(origin, out_item, data):
-					delivered.append(rel_dir_key)
+				delivered.append(rel_dir_key)
+			elif Registry.get_fluid(out_item) != null:
+				# A fluid output that can't be pushed OR stored — a candidate
+				# for venting (resolved below). Items instead hold (back-pressure).
+				stuck_fluid_keys.append(rel_dir_key)
+		# Vent stuck fluid outputs ONLY if another output got out this tick. A
+		# fully-blocked factory holds everything (no waste); a partially-blocked
+		# one keeps its working output flowing and vents the jammed surplus.
+		if delivered_external > 0:
+			for k in stuck_fluid_keys:
+				delivered.append(k)
 	else:
 		for rel_dir_key in state["pending_outputs"]:
 			var rel_dir: int = int(rel_dir_key)
@@ -7927,7 +8154,10 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	# output lane and belts running across it shouldn't get their contents
 	# silently absorbed. Without this guard a refabricator placed under a
 	# fabricator would eat the materials intended for the fabricator above it.
-	var is_omni: bool = data.tags.has("omnidirectional") or data.tags.has("refabricator")
+	# A factory that routes outputs via `output_sides` (e.g. the electrolyzer)
+	# still accepts inputs on ANY side — only its OUTPUT is directional — so it
+	# shares the omnidirectional input path here.
+	var is_omni: bool = data.tags.has("omnidirectional") or data.tags.has("refabricator") or not data.output_sides.is_empty()
 	var is_unit_fab_early: bool = data.produced_unit != &""
 	if not is_omni and not is_unit_fab_early and data.side_inputs.is_empty():
 		return false
@@ -7958,6 +8188,38 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 		if not accepts_in_processing or state["phase"] != "processing":
 			if not is_omni or state["phase"] != "outputting":
 				return false
+
+	# Auto-recipe factories (Water Centrifuge): accept exactly one of the
+	# recipe input fluids at a time. The first matching input "locks" the
+	# factory to that recipe until its buffer drains; the OTHER recipe's
+	# input is refused while locked, so salt water and sulfur water can never
+	# be loaded simultaneously. The active recipe is then resolved from the
+	# buffered fluid in `_get_selected_recipe`.
+	if data.tags.has("auto_recipe"):
+		var matched_amt: int = -1
+		var is_known_input: bool = false
+		var locked_other: bool = false
+		for entry in data.factory_recipes:
+			if typeof(entry) != TYPE_DICTIONARY:
+				continue
+			var in_dict: Dictionary = entry.get("input", {})
+			for in_id in in_dict:
+				var in_sn := StringName(in_id)
+				if in_sn == item_id:
+					is_known_input = true
+					matched_amt = int(in_dict[in_id])
+				elif int(state["inputs"].get(in_sn, 0)) > 0:
+					locked_other = true
+		if not is_known_input or locked_other:
+			return false
+		if matched_amt < 1:
+			matched_amt = 1
+		var ar_cap: int = data.max_stored_items if data.max_stored_items > 0 else matched_amt * 10
+		var ar_have: int = int(state["inputs"].get(item_id, 0))
+		if ar_have >= ar_cap:
+			return false
+		state["inputs"][item_id] = ar_have + 1
+		return true
 
 	# Omnidirectional / unit-fabricator path: accept any item that matches one
 	# of the factory's effective inputs, regardless of entry direction. Inputs

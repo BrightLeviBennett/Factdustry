@@ -9,7 +9,7 @@
 script = ExtResource("1")
 id = &"naval_fabricator"
 display_name = "Naval Fabricator"
-description = "Constructs naval (water-going) units."
+description = "Builds naval units."
 icon = ExtResource("2_4qffy")
 category = 6
 tags = PackedStringArray("fabricator", "units")
@@ -17,12 +17,20 @@ color = Color(0.5, 0.6, 0.9, 1)
 grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("4_4qffy")
 base_sprite = ExtResource("1_pv6ed")
+liquid_tint = null
+liquid_tint_fluid = null
 max_health = 280.0
 build_cost = {
-"copper": 100,
-"silicon": 30
+"copper": 50,
+"silicon": 20
 }
 build_time = 4.0
+random_outputs = null
+vent_tile = null
+vent_fluid = null
+vent_rate = null
+charge_time = null
 electrical_power_use = 30.0
+output_sides = null
 max_stored_items = 40
 produced_unit = &"wade"

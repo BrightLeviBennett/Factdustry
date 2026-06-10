@@ -1,10 +1,9 @@
-[gd_resource type="Resource" script_class="ArchiveData" format=3]
+[gd_resource type="Resource" script_class="ArchiveData" format=3 uid="uid://c2pxt8ndo3x8f"]
 
-[ext_resource type="Script" path="res://data/game/tarkon/archives/archive_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://d0yon0msrif8h" path="res://data/game/tarkon/archives/archive_data.gd" id="1"]
 
 [resource]
 script = ExtResource("1")
 id = &"archive_naval_units"
 display_name = "Archive: Naval Units"
-icon = null
-description = ""
+description = "This fabricator seems to be made to produce naval units which will be perfect for the large lakes and reivers scatered around tarkon."

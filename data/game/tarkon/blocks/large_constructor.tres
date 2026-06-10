@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://buhecll255ohp"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,13 +6,16 @@
 script = ExtResource("1")
 id = &"large_constructor"
 display_name = "Large Constructor"
-description = "High-speed constructor for rapid building."
+description = "Creates larger buildings using resources."
 category = 6
-color = Color(0.5, 0.6, 0.9, 1)
-max_health = 320.0
-build_cost = { "copper": 200, "silicon": 80 }
-build_time = 3.0
-max_stored_items = 400
 tags = PackedStringArray("construction", "constructor")
+color = Color(0.5, 0.6, 0.9, 1)
 grid_size = Vector2i(6, 6)
+max_health = 320.0
+build_cost = {
+"copper": 200,
+"silicon": 80
+}
+build_time = 3.0
 max_payload_size = 5
+max_stored_items = 400

@@ -32,6 +32,19 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var top_sprite: Texture2D
 ## Base sprite drawn first (for layered blocks like cores/fabricators).
 @export var base_sprite: Texture2D
+## When true, a liquid-tint layer is drawn between `base_sprite` and
+## `top_sprite` (Mindustry's DrawLiquidTile look): the base silhouette is
+## tinted by the block's most-stored fluid, with alpha = stored ÷
+## `liquid_capacity`, so it fades in/out as the tank fills (e.g. the
+## Graphite Electrolyzer's base turning blue with water). Needs both a
+## `base_sprite` and `liquid_capacity` > 0.
+@export var liquid_tint: bool = false
+## Restricts `liquid_tint` to a single fluid. When set, the tint only shows
+## that fluid's level and ignores everything else stored — e.g. the Graphite
+## Electrolyzer tints only by its water input, so a tank holding nothing but
+## its hydrogen / oxygen output stays untinted. Empty = tint by whichever
+## fluid is most-stored (the original behaviour).
+@export var liquid_tint_fluid: StringName = &""
 @export_subgroup("Refabricator Overlays")
 ## Drawn on top of base_sprite when a payload conveyor sits on the
 ## building's back side (opposite its front/output edge).
@@ -163,6 +176,12 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ##   "display_name":  String      label shown in the picker
 ##   "input":         Dictionary  item_id -> amount consumed per cycle
 ##   "output":        Dictionary  item_id -> amount produced per cycle
+##   "time":          float       OPTIONAL per-recipe cycle seconds (overrides
+##                                the block's `production_time` for this recipe)
+##   "power":         float       OPTIONAL per-recipe electrical draw (overrides
+##                                `electrical_power_use`; the block still needs a
+##                                non-zero `electrical_power_use` to count as a
+##                                power consumer at all)
 ## A factory with `factory_recipes` set but no selection stays idle and
 ## refuses any inputs (matches the Unit Refabricator's "no T2 picked" gate).
 @export var factory_recipes: Array = []
@@ -189,8 +208,12 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 
 
 @export_group("Combat")
-## Seconds between shots.
+## Seconds between shots. For charge weapons (the Blaster) this is the cooldown
+## AFTER a shot, before the next wind-up can begin.
 @export var attack_speed: float = 1.0
+## Wind-up time in seconds before a charge weapon fires (the Blaster). 0 = fires
+## the instant it has a target. Ignored by normal turrets.
+@export var charge_time: float = 0.0
 ## Range in grid tiles.
 @export var attack_range: float = 0.0
 @export var is_aoe: bool = false
@@ -212,11 +235,6 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## Max ammo this turret can stockpile (0 = no internal magazine, pulls
 ## from network on demand). Display-only for now.
 @export var ammo_capacity: int = 0
-## Maximum amount of fluid this block can buffer (turret fuel, pump
-## reservoir, condenser tank, etc.). 0 = no fluid storage. Used by
-## logistics for capacity caps and surfaced as "Liquid Capacity" in
-## the database UI.
-@export var liquid_capacity: float = 0.0
 ## Required tiles — blocks like pumps / wall crushers / condensers
 ## need to be placed on or facing specific terrain. Each entry is
 ## { "tile_id": StringName, "efficiency": float, "label": String? }.
@@ -278,10 +296,23 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 @export var side_inputs: Dictionary = {}
 ## Relative direction -> produced item_id.
 @export var side_outputs: Dictionary = {}
+## Per-output directional routing for an OMNIDIRECTIONAL factory: maps a
+## produced item/fluid id -> relative direction (0=right,1=down,2=left,3=up)
+## it must exit from. Items NOT listed exit from any free side as usual.
+## The block still ACCEPTS inputs on every side (omnidirectional); only the
+## listed outputs are restricted. The relative direction rotates with the
+## block's rotation, and any non-empty map makes the block rotatable.
+## e.g. Graphite Electrolyzer: { &"mat_hydrogen": 3 (up), &"mat_oxygen": 1 (down) }.
+@export var output_sides: Dictionary = {}
 
 
 @export_group("Storage")
 @export var max_stored_items: int = 6
+## Maximum amount of fluid this block can buffer (turret fuel, pump
+## reservoir, condenser tank, etc.). 0 = no fluid storage. Used by
+## logistics for capacity caps and surfaced as "Liquid Capacity" in
+## the database UI.
+@export var liquid_capacity: float = 0.0
 
 
 @export_group("Special")
@@ -359,11 +390,76 @@ func can_afford(available_resources: Dictionary) -> bool:
 
 func is_turret() -> bool:
 	# A block is a turret iff it has at least one configured ammo type.
+	# (Power-based weapons like the Arc still carry an ammo entry — a
+	# "powered" AmmoType that consumes electricity instead of an item.)
 	# `Array.count(value)` was being misused here (passing the array
 	# itself as the value), which made every block fall back to "not a
 	# turret" once the per-block `damage` field was removed and damage
 	# moved onto AmmoType entries.
 	return ammo_types.size() > 0 and attack_range > 0
+
+
+## Returns true if `id` is consumed by ANY of this block's ammo types — either as
+## a primary `item_id` or as an `extra_costs` entry. Used by the fluid/item intake
+## and acceptance checks so a turret accepts every resource its ammo needs (e.g.
+## the Eclipse beam draws both oxygen (primary) and hydrogen (extra_cost)).
+func ammo_accepts(id: StringName) -> bool:
+	for ammo in ammo_types:
+		if not (ammo is AmmoType):
+			continue
+		var a: AmmoType = ammo as AmmoType
+		if a.item_id == id:
+			return true
+		for k in a.extra_costs:
+			if StringName(k) == id:
+				return true
+	return false
+
+
+## The set of resource ids that may be loaded ALONGSIDE `id` — i.e. the union of
+## every ammo_type that references `id` (its `item_id` + `extra_costs`). Fluids
+## from a DIFFERENT ammo_type are NOT in this set, so the intake can enforce
+## "one ammo type loaded at a time" for alternative-ammo turrets (Spritz) while
+## still letting a single combined ammo_type's co-required fluids coexist (the
+## Eclipse beam's oxygen + hydrogen).
+func ammo_group_ids(id: StringName) -> Array:
+	var grp: Array = []
+	for ammo in ammo_types:
+		if not (ammo is AmmoType):
+			continue
+		var a: AmmoType = ammo as AmmoType
+		var in_this: bool = (a.item_id == id)
+		if not in_this:
+			for k in a.extra_costs:
+				if StringName(k) == id:
+					in_this = true
+					break
+		if not in_this:
+			continue
+		if a.item_id != &"" and not grp.has(a.item_id):
+			grp.append(a.item_id)
+		for k2 in a.extra_costs:
+			var kid: StringName = StringName(k2)
+			if not grp.has(kid):
+				grp.append(kid)
+	return grp
+
+
+## Every distinct resource id this block's ammo consumes (primary + extras),
+## deduped. Used to enumerate the turret's "magazine" for UI bars.
+func ammo_resource_ids() -> Array:
+	var ids: Array = []
+	for ammo in ammo_types:
+		if not (ammo is AmmoType):
+			continue
+		var a: AmmoType = ammo as AmmoType
+		if a.item_id != &"" and not ids.has(a.item_id):
+			ids.append(a.item_id)
+		for k in a.extra_costs:
+			var kid: StringName = StringName(k)
+			if not ids.has(kid):
+				ids.append(kid)
+	return ids
 
 
 func is_transport() -> bool:

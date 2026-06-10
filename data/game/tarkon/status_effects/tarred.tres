@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"tarred"
+display_name = "Tarred"
+description = "Coated in heavy fuel tar. Slow to move and slow to bring weapons on target."
+duration = 5.0
+stackable = false
+refresh_on_reapply = true
+effect_type = 1
+tint_color = Color(0.22, 0.2, 0.16, 1)
+particle_color = Color(0.32, 0.28, 0.22, 1)
+speed_modifier = 0.4
+aim_speed_modifier = 0.6
+tags = PackedStringArray("slow", "tar")

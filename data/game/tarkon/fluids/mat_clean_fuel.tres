@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="FluidData" format=3]
+
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_clean_fuel"
+display_name = "Clean Fuel"
+description = "Petroleum with the sulfur stripped out by hydrogen. Burns cleaner and hotter."
+color = Color(0.95, 0.9, 0.6, 1)
+viscosity = 0.6
+flammable = true
+units_per_segment = 20.0

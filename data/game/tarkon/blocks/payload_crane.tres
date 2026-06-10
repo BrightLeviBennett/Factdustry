@@ -7,7 +7,8 @@
 script = ExtResource("1")
 id = &"payload_crane"
 display_name = "Payload Crane"
-description = "Articulated crane arm that can pick up and place buildings and units. Ctrl+click to control manually, press E to grab/drop. Can also drop payloads onto payload conveyors."
+description = "Rotating crane arm that can pick up and place buildings and units. 
+Can also drop payloads onto payload conveyors."
 icon = ExtResource("2_pcbase")
 category = 6
 tags = PackedStringArray("construction", "crane", "controllable", "storage")

@@ -1,0 +1,58 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b7protium001a"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="2_ammo"]
+[ext_resource type="Texture2D" uid="uid://cnr74cpaunr6q" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="3_base"]
+[ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="4_head"]
+[ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="5_icon"]
+[ext_resource type="Resource" path="res://data/game/tarkon/status_effects/embrittled.tres" id="6_embr"]
+[ext_resource type="Texture2D" uid="uid://b2ejfwyaadrmh" path="res://textures/blocks/turrets/Protium/ProtiumMissile.png" id="7_missile"]
+
+[sub_resource type="Resource" id="Ammo_protium"]
+script = ExtResource("2_ammo")
+item_id = &"mat_hydrogen"
+amount_per_shot = 3
+extra_costs = {
+&"mat_silicon": 2
+}
+damage = 20.0
+building_damage_mult = 0.0
+unit_damage_mult = 1.0
+projectiles_per_shot = 1
+projectile_speed = 420.0
+projectile_lifetime = 2.6
+projectile_radius = 5.0
+homing = 0.07
+status_effect = ExtResource("6_embr")
+collides_air = true
+collides_ground = false
+projectile_sprite = ExtResource("7_missile")
+projectile_color = Color(0.7, 0.85, 1.0, 1)
+trail_color = Color(0.8, 0.92, 1.0, 0.85)
+trail_length = 18.0
+
+[resource]
+script = ExtResource("1")
+id = &"protium"
+display_name = "Protium"
+description = "Anti-air missile turret. Fires hydrogen-fed homing missiles that crack enemy armor — hits apply Embrittled (armor half as effective, plus a lingering burn)."
+icon = ExtResource("5_icon")
+category = 4
+tags = PackedStringArray("turret", "defense")
+color = Color(0.7, 0.85, 1.0, 1)
+base_sprite = ExtResource("3_base")
+turret_head_sprite = ExtResource("4_head")
+max_health = 260.0
+build_cost = {
+"copper": 150,
+"silicon": 60,
+"steel": 40
+}
+build_time = 3.5
+attack_speed = 1.5
+attack_range = 9.0
+targets_air = true
+targets_ground = false
+ammo_types = Array[Resource]([SubResource("Ammo_protium")])
+liquid_capacity = 30.0
+max_stored_items = 30

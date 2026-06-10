@@ -15,6 +15,12 @@ var _detail_open := false
 var _hovered_entry: Resource = null
 var _current_detail_cat := ""
 
+# Active recipe craft-time bars (MultiCrafterLib-style). Each entry is
+# { "bar": ProgressBar, "dur": float, "t": float }; `_process` advances `t`
+# and loops it to animate the fill. Cleared whenever the detail overlay is
+# rebuilt or closed (the bars themselves are freed with the container).
+var _recipe_time_bars: Array = []
+
 # --- UI NODES ---
 var _bg: ColorRect
 var _scroll: ScrollContainer
@@ -150,17 +156,41 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if Input.is_action_just_pressed("toggle_database"):
 		if is_open:
 			_hide_ui()
 		else:
 			_show_ui()
 
-	# Update tooltip position
+	# Update tooltip position. Sit it just ABOVE the cursor so the global
+	# custom-cursor sprite (drawn at layer 9999) doesn't cover the first
+	# line. Falls back below the cursor when there isn't room above, and
+	# clamps to the viewport so it never runs off an edge.
 	if _tooltip_panel and _tooltip_panel.visible:
 		var mpos = get_viewport().get_mouse_position()
-		_tooltip_panel.position = mpos + Vector2(16, 16)
+		var ts: Vector2 = _tooltip_panel.size
+		var vp: Vector2 = get_viewport().get_visible_rect().size
+		var pos := Vector2(mpos.x + 12, mpos.y - ts.y - 10)
+		if pos.y < 4.0:
+			pos.y = mpos.y + 20.0
+		pos.x = clampf(pos.x, 4.0, maxf(4.0, vp.x - ts.x - 4.0))
+		_tooltip_panel.position = pos
+
+	# Drive recipe craft-time bars — fill 0→1 over the cycle, then loop, with
+	# an ease-in-out so the sweep matches MultiCrafter's `Interp.smooth`.
+	if not _recipe_time_bars.is_empty():
+		for e in _recipe_time_bars:
+			var bar = e["bar"]
+			if not is_instance_valid(bar):
+				continue
+			var dur: float = e["dur"]
+			var t: float = e["t"] + delta
+			if t > dur:
+				t = fmod(t, dur)
+			e["t"] = t
+			var f: float = t / dur
+			bar.value = f * f * (3.0 - 2.0 * f)
 
 
 # =========================
@@ -204,6 +234,12 @@ func _setup_categories() -> void:
 			"list": Registry.sectors_list,
 			"dict": Registry.sectors,
 			"color": Color(0.9, 0.7, 0.2),
+		},
+		"archives": {
+			"label": "Archives",
+			"list": Registry.archives_list,
+			"dict": Registry.archives,
+			"color": Color(0.95, 0.55, 0.25),
 		},
 	}
 
@@ -574,6 +610,7 @@ func _show_detail(entry: Resource, cat_key: String) -> void:
 	_detail_panel.visible = true
 	_tooltip_panel.visible = false
 
+	_recipe_time_bars.clear()
 	_clear_container(_detail_container)
 
 	var cat_color = categories[cat_key]["color"]
@@ -600,11 +637,14 @@ func _show_detail(entry: Resource, cat_key: String) -> void:
 			_show_fluid_details(entry as FluidData)
 		"status_effects":
 			_show_status_effect_details(entry as StatusEffectData)
+		"archives":
+			_show_archive_details(entry as ArchiveData)
 
 func _close_detail() -> void:
 	_detail_open = false
 	_detail_overlay.visible = false
 	_detail_panel.visible = false
+	_recipe_time_bars.clear()
 	# When the detail was opened standalone (e.g. clicked from the tech
 	# tree), the rest of the database UI is hidden — closing the detail
 	# means the database is fully gone, so drop our pause hold. Skip if
@@ -674,6 +714,32 @@ func _get_tech_id_for_entry(entry: Resource) -> StringName:
 # =========================
 # DETAIL PANEL RENDERING
 # =========================
+
+func _show_archive_details(archive: ArchiveData) -> void:
+	# An archive is a decode milestone. Tech nodes opt into it via a
+	# "-D-<archive_id>" dependency marker, so scan every node for that marker
+	# and resolve the ones that map to a database block into an "Unlocks" grid.
+	var marker: StringName = StringName("-D-%s" % archive.id)
+	var unlocks: Array[BlockData] = []
+	var seen := {}
+	for nid in TechTree.nodes:
+		var nd: Dictionary = TechTree.nodes[nid]
+		var deps: Array = nd.get("dependencies", [])
+		if not deps.has(marker) or seen.has(nid):
+			continue
+		var blk: BlockData = Registry.get_block(nid)
+		if blk != null:
+			seen[nid] = true
+			unlocks.append(blk)
+	# Status line: decoded archives are "researched" in the tech tree.
+	var decoded: bool = TechTree.is_researched(archive.id)
+	_add_stat("Status", "Decoded" if decoded else "Not yet decoded",
+			Color(0.5, 0.9, 0.5) if decoded else dim_text_color)
+	if unlocks.is_empty():
+		_add_text("Decoding this archive unlocks new technology.", dim_text_color, 13)
+	else:
+		_add_block_icon_grid("Unlocks", unlocks)
+
 
 func _show_item_details(item: ItemData) -> void:
 	var produced_by: Array[BlockData] = []
@@ -829,55 +895,67 @@ func _show_block_details(block: BlockData) -> void:
 		_add_section("Required Tiles")
 		_add_required_tiles_row(req_tiles)
 
-	# --- Input / Output ---
-	if block.is_producer() or block.produced_unit != &"":
+	# --- Input / Output (recipe visualizer) ---
+	var cycle: float = block.production_time if block.production_time > 0.0 else 1.0
+	# Skip output entries whose id isn't a real item/fluid — old drill .tres
+	# files used "ore" as a placeholder key that never resolves to a
+	# registered item and would render as a bogus "ore" row.
+	var real_outputs: Dictionary = {}
+	for raw_id in block.output_items:
+		if Registry.get_item_or_fluid(StringName(raw_id)) != null:
+			real_outputs[raw_id] = block.output_items[raw_id]
+	var has_factory_recipe: bool = block.factory_recipes.size() > 0
+	# Standard single recipe — a factory with a fixed output, or a
+	# random-output caster (e.g. the Slag Caster, which produces only via
+	# random_outputs). Gated on actually producing something so consume-only
+	# blocks (generators, incinerator) don't sprout an empty recipe. Extractors
+	# are excluded; their ores live in the separate Drillables section.
+	var has_std_recipe: bool = block.category != BlockData.BlockCategory.EXTRACTORS \
+		and (real_outputs.size() > 0 or block.random_outputs.size() > 0)
+	if block.produced_unit != &"":
 		_add_separator()
 		_add_section("Input/Output")
-		var cycle: float = block.production_time if block.production_time > 0.0 else 1.0
 		# Fabricator with a produced unit: show output as the unit card.
-		if block.produced_unit != &"":
-			_add_text("Output:", dim_text_color, 13)
-			var unit_data = Registry.get_unit(block.produced_unit)
-			if unit_data:
-				_add_unit_card(unit_data, "%s seconds" % _fmt_num(cycle))
-			# Real inputs = the produced unit's build_cost (normalized to
-			# "mat_*" runtime ids); falls back to block.input_items only
-			# when the unit declares none. Without this, a fabricator's
-			# .tres input_items had to be kept in sync with the unit's
-			# recipe by hand — and they drift (e.g. tank fabricator listed
-			# only copper while Press actually needs copper + silicon).
-			var fab_recipe: Dictionary = {}
-			if unit_data and not unit_data.build_cost.is_empty():
-				fab_recipe = _normalize_mat_keys(unit_data.build_cost)
-			else:
-				fab_recipe = block.input_items
-			if fab_recipe.size() > 0:
-				_add_text("Inputs:", dim_text_color, 13)
-				for item_id in fab_recipe:
-					var amt: int = int(fab_recipe[item_id])
-					var rate: float = amt / cycle
-					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
+		_add_text("Output:", dim_text_color, 13)
+		var unit_data = Registry.get_unit(block.produced_unit)
+		if unit_data:
+			_add_unit_card(unit_data, "%s seconds" % _fmt_num(cycle))
+		# Real inputs = the produced unit's build_cost (normalized to
+		# "mat_*" runtime ids); falls back to block.input_items only
+		# when the unit declares none. Without this, a fabricator's
+		# .tres input_items had to be kept in sync with the unit's
+		# recipe by hand — and they drift (e.g. tank fabricator listed
+		# only copper while Press actually needs copper + silicon).
+		var fab_recipe: Dictionary = {}
+		if unit_data and not unit_data.build_cost.is_empty():
+			fab_recipe = _normalize_mat_keys(unit_data.build_cost)
 		else:
-			if block.input_items.size() > 0:
-				_add_text("Input:", dim_text_color, 13)
-				for item_id in block.input_items:
-					var amt: int = int(block.input_items[item_id])
-					var rate: float = amt / cycle
-					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
-			# Skip output entries whose id isn't a real item/fluid — old
-			# drill .tres files used "ore" as a placeholder key that
-			# never resolves to a registered item and would render as a
-			# bogus "ore" row in the database.
-			var real_outputs: Dictionary = {}
-			for raw_id in block.output_items:
-				if Registry.get_item_or_fluid(StringName(raw_id)) != null:
-					real_outputs[raw_id] = block.output_items[raw_id]
-			if real_outputs.size() > 0:
-				_add_text("Output:", dim_text_color, 13)
-				for item_id in real_outputs:
-					var amt: int = int(real_outputs[item_id])
-					var rate: float = amt / cycle
-					_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
+			fab_recipe = block.input_items
+		if fab_recipe.size() > 0:
+			_add_text("Inputs:", dim_text_color, 13)
+			for item_id in fab_recipe:
+				var amt: int = int(fab_recipe[item_id])
+				var rate: float = amt / cycle
+				_add_item_card(item_id, amt, "%s/sec" % _fmt_num(rate))
+		_add_stat("Production Time", "%s seconds" % _fmt_num(cycle), text_color)
+	elif has_factory_recipe or has_std_recipe:
+		_add_separator()
+		# Plural header when the factory offers a selectable recipe list.
+		_add_section("Recipes" if (has_factory_recipe and block.factory_recipes.size() > 1) else "Recipe")
+		if has_factory_recipe:
+			for r in block.factory_recipes:
+				if typeof(r) != TYPE_DICTIONARY:
+					continue
+				var rin: Dictionary = r.get("input", {})
+				var rout: Dictionary = r.get("output", {})
+				var rname: String = String(r.get("display_name", ""))
+				# Per-recipe time/power override the block defaults when set;
+				# the power shows as an icon in the input cluster.
+				var rcycle: float = float(r["time"]) if r.has("time") else cycle
+				var rpower: float = float(r["power"]) if r.has("power") else block.electrical_power_use
+				_add_recipe_card(rin, rout, rcycle, [], rname, rpower)
+		else:
+			_add_recipe_card(block.input_items, real_outputs, cycle, block.random_outputs, "", block.electrical_power_use)
 		_add_stat("Production Time", "%s seconds" % _fmt_num(cycle), text_color)
 
 	# --- Function: turret combat info ---
@@ -1588,6 +1666,243 @@ func _add_item_card(item_id, amount: int, rate_text: String) -> void:
 	_detail_container.add_child(card)
 
 
+## Recipe visualizer — modeled on the MultiCrafterLib mod's recipe stats
+## (github.com/liplum/MultiCrafterLib). Each recipe is one dark panel laid
+## out as [inputs] · [animated craft-time bar] · [outputs]: inputs hug the
+## left, outputs the right, item/fluid icons carry their per-cycle amount as
+## a corner badge and wrap two-per-row, and the centre bar fills over the
+## craft time and loops with the time-in-seconds shown on it. `random_outputs`
+## (the weighted one-of-N caster table, e.g. the Slag Caster) is appended to
+## the output group behind a "?" marker, each icon annotated with its roll
+## chance. `title` labels a player-selectable recipe (Compound Mixer / Rod
+## Shapper picker entries).
+func _add_recipe_card(inputs: Dictionary, outputs: Dictionary, cycle: float, random_outputs: Array = [], title: String = "", input_power: float = 0.0, output_power: float = 0.0) -> void:
+	var card = PanelContainer.new()
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.09, 0.09, 0.11, 0.95)
+	sb.set_corner_radius_all(6)
+	sb.content_margin_left = 12
+	sb.content_margin_right = 12
+	sb.content_margin_top = 8
+	sb.content_margin_bottom = 8
+	card.add_theme_stylebox_override("panel", sb)
+	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var outer = VBoxContainer.new()
+	outer.add_theme_constant_override("separation", 6)
+	outer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	card.add_child(outer)
+
+	var row = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	outer.add_child(row)
+
+	# Inputs and outputs reserve the SAME fixed width on every row, so the
+	# centred time bar always lands at the card's centre — otherwise a wider
+	# input/output cluster (e.g. the coal recipes with two outputs) would shift
+	# the bar relative to the single-output recipes.
+	const _IO_COL_W := 96.0
+	var in_group = _make_io_group(inputs, cycle, [], true, input_power)
+	in_group.custom_minimum_size.x = _IO_COL_W
+	in_group.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	row.add_child(in_group)
+
+	# Centre: animated craft-time bar, expands to fill the gap between the two
+	# equal-width side columns so it sits centred in the card.
+	var time_box = CenterContainer.new()
+	time_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	time_box.add_child(_make_time_bar(cycle))
+	row.add_child(time_box)
+
+	# Outputs — same reserved width as inputs so the bar stays centred.
+	var out_group = _make_io_group(outputs, cycle, random_outputs, false, output_power)
+	out_group.custom_minimum_size.x = _IO_COL_W
+	out_group.size_flags_horizontal = Control.SIZE_SHRINK_END
+	row.add_child(out_group)
+
+	_detail_container.add_child(card)
+
+
+## Builds the input/output icon cluster for a recipe panel: a two-column grid
+## of icon badges (matching MultiCrafter's two-per-row wrap). `random_outputs`,
+## when supplied (output side only), is appended after the deterministic
+## entries behind a "?" marker with per-entry roll-chance annotations.
+func _make_io_group(io: Dictionary, cycle: float, random_outputs: Array, _is_input: bool, power: float = 0.0) -> Control:
+	var grid = GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 4)
+	grid.add_theme_constant_override("v_separation", 4)
+	for item_id in io:
+		grid.add_child(_make_io_icon(item_id, int(io[item_id]), cycle, ""))
+	# Power consumed (input) / produced (output) sits in the cluster alongside
+	# the item & fluid badges, like MultiCrafterLib's PowerImage.
+	if power > 0.0:
+		grid.add_child(_make_power_icon(power))
+	if not random_outputs.is_empty():
+		var total_w: float = 0.0
+		for entry in random_outputs:
+			if typeof(entry) == TYPE_DICTIONARY:
+				total_w += float(entry.get("weight", 1.0))
+		if total_w <= 0.0:
+			total_w = 1.0
+		# "?" marker so the random table reads as "rolls one of these".
+		var q = Label.new()
+		q.text = "?"
+		q.add_theme_font_size_override("font_size", 18)
+		q.add_theme_color_override("font_color", Color(0.95, 0.82, 0.35))
+		q.custom_minimum_size = Vector2(40, 40)
+		q.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		q.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		grid.add_child(q)
+		# Keep the grid columns aligned if the "?" landed in column 1.
+		if grid.get_child_count() % 2 == 1:
+			var spacer = Control.new()
+			spacer.custom_minimum_size = Vector2(40, 40)
+			grid.add_child(spacer)
+		for entry in random_outputs:
+			if typeof(entry) != TYPE_DICTIONARY:
+				continue
+			var rid = entry.get("item", &"")
+			var w: float = float(entry.get("weight", 1.0))
+			var pct: int = int(round(w / total_w * 100.0))
+			grid.add_child(_make_io_icon(rid, 1, 0.0, "%d%%" % pct))
+	return grid
+
+
+## One resource badge inside a recipe IO cluster — a 40×40 icon with the
+## per-cycle amount painted in the bottom-right corner (MultiCrafter's
+## ItemImage look). The tooltip carries the full name plus the per-second
+## rate; `corner_override` replaces the amount text (random-output chances).
+## Resolves bare ("copper") and "mat_"-prefixed keys.
+func _make_io_icon(item_id, amount: int, cycle: float, corner_override: String) -> Control:
+	var item = Registry.get_item_or_fluid(item_id)
+	if item == null:
+		var s := String(item_id)
+		if not s.begins_with("mat_"):
+			item = Registry.get_item_or_fluid(StringName("mat_" + s))
+	var box = Control.new()
+	box.custom_minimum_size = Vector2(40, 40)
+	box.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var ir = TextureRect.new()
+	ir.set_anchors_preset(Control.PRESET_FULL_RECT)
+	ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ir.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	ir.texture = item.icon if (item and item.icon) else _fallback_icon
+	ir.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(ir)
+
+	# Amount badge, bottom-right (with a shadow so it reads over a bright icon).
+	var corner: String = corner_override if corner_override != "" else ("%d" % amount)
+	if corner != "":
+		var amt = Label.new()
+		amt.text = corner
+		amt.add_theme_font_size_override("font_size", 13)
+		amt.add_theme_color_override("font_color", Color.WHITE)
+		amt.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+		amt.add_theme_constant_override("shadow_offset_x", 1)
+		amt.add_theme_constant_override("shadow_offset_y", 1)
+		amt.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		amt.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		amt.set_anchors_preset(Control.PRESET_FULL_RECT)
+		amt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		box.add_child(amt)
+
+	# Route through the database's own tooltip panel (positioned above the
+	# cursor in _process) rather than Godot's built-in tooltip, which renders
+	# below-right of the cursor where the custom cursor sprite covers it.
+	var nm: String = item.display_name if item else String(item_id)
+	var tip: String = nm
+	if cycle > 0.0:
+		tip = "%s — %s/sec" % [nm, _fmt_num(amount / cycle)]
+	box.mouse_entered.connect(_show_text_tooltip.bind(tip))
+	box.mouse_exited.connect(_on_tile_unhover)
+	return box
+
+
+## Power badge for a recipe IO cluster — the power icon with the per-second
+## draw painted in the corner, styled like the item/fluid badges. Used when a
+## recipe consumes power (input side) or generates it (output side), matching
+## MultiCrafterLib's PowerImage in the input/output rows.
+func _make_power_icon(power: float) -> Control:
+	var box = Control.new()
+	box.custom_minimum_size = Vector2(40, 40)
+	box.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var ir = TextureRect.new()
+	ir.set_anchors_preset(Control.PRESET_FULL_RECT)
+	ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ir.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	ir.texture = _DB_POWER_ICON
+	ir.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(ir)
+
+	var amt = Label.new()
+	amt.text = _fmt_num(power)
+	amt.add_theme_font_size_override("font_size", 13)
+	amt.add_theme_color_override("font_color", Color.WHITE)
+	amt.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	amt.add_theme_constant_override("shadow_offset_x", 1)
+	amt.add_theme_constant_override("shadow_offset_y", 1)
+	amt.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	amt.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	amt.set_anchors_preset(Control.PRESET_FULL_RECT)
+	amt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(amt)
+
+	box.mouse_entered.connect(_show_text_tooltip.bind("Power — %s/sec" % _fmt_num(power)))
+	box.mouse_exited.connect(_on_tile_unhover)
+	return box
+
+
+## Shows the shared database tooltip panel with arbitrary text. Used by the
+## recipe IO icons; positioning is handled in _process.
+func _show_text_tooltip(text: String) -> void:
+	_tooltip_label.text = text
+	_tooltip_panel.visible = true
+
+
+## Animated craft-time bar — the centre element of a recipe panel. Fills from
+## empty to full over `cycle` seconds, loops, and shows the time centred on
+## it. Registered in `_recipe_time_bars` so `_process` drives the fill while
+## the (paused) game sits behind the database.
+func _make_time_bar(cycle: float) -> Control:
+	var bar = ProgressBar.new()
+	bar.custom_minimum_size = Vector2(200, 36)
+	bar.min_value = 0.0
+	bar.max_value = 1.0
+	bar.value = 0.0
+	bar.show_percentage = false
+
+	var bg = StyleBoxFlat.new()
+	bg.bg_color = Color(0.05, 0.05, 0.07, 1.0)
+	bg.set_corner_radius_all(4)
+	var fill = StyleBoxFlat.new()
+	fill.bg_color = accent_color.darkened(0.1)
+	fill.set_corner_radius_all(4)
+	bar.add_theme_stylebox_override("background", bg)
+	bar.add_theme_stylebox_override("fill", fill)
+
+	var lbl = Label.new()
+	lbl.text = "%ss" % _fmt_num(cycle)
+	lbl.add_theme_font_size_override("font_size", 14)
+	lbl.add_theme_color_override("font_color", text_color)
+	lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	lbl.add_theme_constant_override("shadow_offset_x", 1)
+	lbl.add_theme_constant_override("shadow_offset_y", 1)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.add_child(lbl)
+
+	_recipe_time_bars.append({"bar": bar, "dur": maxf(cycle, 0.01), "t": 0.0})
+	return bar
+
+
 ## Card showing a unit (icon + display name + subtitle).
 func _add_unit_card(unit: UnitData, subtitle_text: String) -> void:
 	var card = PanelContainer.new()
@@ -2042,19 +2357,25 @@ func _add_ammo_card(_turret: BlockData, ammo: AmmoType) -> void:
 	vbox.add_theme_constant_override("separation", 2)
 	card.add_child(vbox)
 
-	# Header: ammo icon + display name
+	# Header: ammo icon + display name. Powered ammo (the Arc) draws power
+	# instead of an item, so it shows the power icon + a "/shot" cost.
+	var powered: bool = ammo.has_method("is_powered") and ammo.is_powered()
 	var item = Registry.get_item_or_fluid(ammo.item_id)
 	var header = HBoxContainer.new()
 	header.add_theme_constant_override("separation", 6)
-	if item and item.icon:
+	var head_icon: Texture2D = _DB_POWER_ICON if powered else (item.icon if item else null)
+	if head_icon:
 		var ir = TextureRect.new()
-		ir.texture = item.icon
+		ir.texture = head_icon
 		ir.custom_minimum_size = Vector2(20, 20)
 		ir.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		ir.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		header.add_child(ir)
 	var hname = Label.new()
-	hname.text = item.display_name if item else str(ammo.item_id)
+	if powered:
+		hname.text = "Power — %s/shot" % _fmt_num(ammo.power_per_shot)
+	else:
+		hname.text = item.display_name if item else str(ammo.item_id)
 	hname.add_theme_font_size_override("font_size", 15)
 	hname.add_theme_color_override("font_color", text_color)
 	header.add_child(hname)

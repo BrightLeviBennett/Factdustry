@@ -59,6 +59,9 @@ var _status_timer := 0.0
 # Cursor position label
 var cursor_pos_label: Label
 
+# Hovered-block name label (bottom-right corner)
+var hover_name_label: Label
+
 const TILE_BTN_SIZE := 48
 const GRID_COLS := 4
 
@@ -76,6 +79,7 @@ func _ready() -> void:
 	_create_load_popup()
 	_create_faction_popup()
 	_create_status_label()
+	_create_hover_name_label()
 	_create_script_editor()
 	_create_wave_editor()
 	_populate_tiles(selected_category)
@@ -92,6 +96,16 @@ func _process(delta: float) -> void:
 	if cursor_pos_label and main:
 		var grid_pos: Vector2i = main.world_to_grid(main.get_global_mouse_position())
 		cursor_pos_label.text = "x: %d, y: %d" % [grid_pos.x, grid_pos.y]
+
+		# Name the block under the cursor in the bottom-right corner.
+		if hover_name_label:
+			var block_id: StringName = main.placed_buildings.get(grid_pos, &"")
+			if block_id != &"":
+				var bdata = Registry.get_block(block_id)
+				hover_name_label.text = bdata.display_name if bdata else String(block_id)
+				hover_name_label.visible = true
+			else:
+				hover_name_label.visible = false
 
 
 # =========================
@@ -486,6 +500,12 @@ func _create_building_palette() -> void:
 	_add_block_cat_btn(cat_row3, "Units", BlockData.BlockCategory.UNITS)
 	_add_block_cat_btn(cat_row3, "Assist", BlockData.BlockCategory.ASSIST)
 	_add_block_cat_btn(cat_row3, "Items", BlockData.BlockCategory.ITEMS)
+
+	var cat_row4 = HBoxContainer.new()
+	cat_row4.add_theme_constant_override("separation", 2)
+	vbox.add_child(cat_row4)
+
+	_add_block_cat_btn(cat_row4, "Fluids", BlockData.BlockCategory.FLUIDS)
 
 	# Block grid (scrollable)
 	var grid_panel = PanelContainer.new()
@@ -1218,6 +1238,30 @@ func _create_status_label() -> void:
 	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	status_label.visible = false
 	add_child(status_label)
+
+
+## Bottom-right label that names the block under the cursor while hovering.
+func _create_hover_name_label() -> void:
+	hover_name_label = Label.new()
+	hover_name_label.anchor_left = 1.0
+	hover_name_label.anchor_right = 1.0
+	hover_name_label.anchor_top = 1.0
+	hover_name_label.anchor_bottom = 1.0
+	hover_name_label.offset_left = -320
+	hover_name_label.offset_right = -12
+	hover_name_label.offset_top = -34
+	hover_name_label.offset_bottom = -10
+	hover_name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hover_name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	hover_name_label.add_theme_font_size_override("font_size", 16)
+	hover_name_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.95))
+	# Drop shadow so the name stays legible over any terrain/blocks behind it.
+	hover_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.7))
+	hover_name_label.add_theme_constant_override("shadow_offset_x", 1)
+	hover_name_label.add_theme_constant_override("shadow_offset_y", 1)
+	hover_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover_name_label.visible = false
+	add_child(hover_name_label)
 
 
 func _show_status(text: String, duration := 3.0) -> void:

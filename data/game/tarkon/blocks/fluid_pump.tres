@@ -1,19 +1,22 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cy3dc4faa2j5a"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cewuw5w61eneb" path="res://textures/blocks/fluid transportation/FluidPump.png" id="1_72a0i"]
+[ext_resource type="Texture2D" uid="uid://b5no8pgrfuff1" path="res://textures/blocks/fluid transportation/FluidPumpBase.png" id="1_e1qfh"]
+[ext_resource type="Texture2D" uid="uid://dagc7fkpkdd58" path="res://textures/blocks/fluid transportation/FluidPumpTop.png" id="2_l3wuv"]
 
 [resource]
 script = ExtResource("1")
 id = &"fluid_pump"
 display_name = "Fluid Pump"
 description = "Extracts fluids from source tiles into the pipe network."
-icon = ExtResource("1_72a0i")
+icon = ExtResource("2_l3wuv")
 category = 9
 tags = PackedStringArray("fluid", "transport", "pump", "omnidirectional")
 color = Color(0.3, 0.6, 0.9, 1)
 grid_size = Vector2i(2, 2)
-top_sprite = ExtResource("1_72a0i")
+top_sprite = ExtResource("2_l3wuv")
+base_sprite = ExtResource("1_e1qfh")
+liquid_tint = true
 max_health = 200.0
 build_cost = {
 "copper": 100,
@@ -24,4 +27,4 @@ production_time = 2.0
 transport_speed = 5.0
 transports_fluid = true
 electrical_power_use = 8.0
-liquid_capacity = 10.0
+liquid_capacity = 20.0

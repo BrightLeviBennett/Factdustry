@@ -1,20 +1,21 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://ch35fdcgqsc7t"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cekxv35oqv6fn" path="res://textures/blocks/factories/SteelFurnaceIcon.png" id="1_tc3sy"]
-[ext_resource type="Texture2D" uid="uid://cn4yr0uujbwpl" path="res://textures/blocks/factories/SteelFurnace.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://cekxv35oqv6fn" path="res://textures/blocks/factories/SteelFurnace.png" id="2"]
 
 [resource]
 script = ExtResource("1")
 id = &"steel_furnace"
 display_name = "Steel Furnace"
-description = "Smelts iron into steel. Accepts iron from any side and outputs steel from any side. Requires electrical power."
-icon = ExtResource("1_tc3sy")
+description = "Smelts iron into steel. Requires power."
+icon = ExtResource("2")
 category = 2
 tags = PackedStringArray("production", "processing", "omnidirectional")
 color = Color(0.8, 0.4, 0.2, 1)
 grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("2")
+liquid_tint = null
+liquid_tint_fluid = null
 max_health = 340.0
 build_cost = {
 "copper": 80,
@@ -27,7 +28,8 @@ input_items = {
 output_items = {
 "mat_steel": 1
 }
-production_time = 1.5
-power_consumption = 4.0
+production_time = 0.7
+charge_time = null
 electrical_power_use = 15.0
+output_sides = null
 max_stored_items = 30

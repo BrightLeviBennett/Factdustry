@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"archive_decoder"
 display_name = "Archive Decoder"
-description = "Decodes raw archive data piped in through a data cable. Each completed decode reveals lost technology from before the collapse."
+description = "Decodes archives when placed next to a archive scanner"
 icon = ExtResource("1_nggvr")
 category = 0
 tags = PackedStringArray("production", "archive", "archive_decoder")

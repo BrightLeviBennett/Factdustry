@@ -1,24 +1,24 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b2wkvsidciwum"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://bgq2thd1urx8i" path="res://textures/blocks/cores/CoreShard/CoreShardFerox.png" id="2_4rvnv"]
-[ext_resource type="Texture2D" uid="uid://clw7h25mnsw1v" path="res://textures/blocks/cores/CoreShard/CoreShardBase.png" id="3"]
-[ext_resource type="Texture2D" uid="uid://bkmy08mybjtx8" path="res://textures/blocks/cores/CoreShard/CoreShardComplete.png" id="3_d1e5q"]
-[ext_resource type="Texture2D" uid="uid://p35rfaj2jagt" path="res://textures/blocks/cores/CoreShard/CoreShardLumina.png" id="4_dpqvi"]
+[ext_resource type="Texture2D" uid="uid://dauy4w7e4c1dh" path="res://textures/blocks/cores/CoreShard/CoreShardBase.png" id="1_4rvnv"]
+[ext_resource type="Texture2D" uid="uid://cmb7e3ndlg8ja" path="res://textures/blocks/cores/CoreShard/CoreShardFerox.png" id="2_d1e5q"]
+[ext_resource type="Texture2D" uid="uid://dorxokeydmvyu" path="res://textures/blocks/cores/CoreShard/CoreShardComplete.png" id="3_dpqvi"]
+[ext_resource type="Texture2D" uid="uid://n0q386gladye" path="res://textures/blocks/cores/CoreShard/CoreShardLumina.png" id="4_ce5b6"]
 
 [resource]
 script = ExtResource("1")
 id = &"core_shard"
 display_name = "Core: Shard"
 description = "The heart of your colony. Provides basic storage and power."
-icon = ExtResource("3_d1e5q")
+icon = ExtResource("3_dpqvi")
 category = 0
 tags = PackedStringArray("core")
 color = Color(0.9, 0.75, 0.2, 1)
 grid_size = Vector2i(3, 3)
-base_sprite = ExtResource("3")
-lumina_overlay = ExtResource("4_dpqvi")
-ferox_overlay = ExtResource("2_4rvnv")
+base_sprite = ExtResource("1_4rvnv")
+lumina_overlay = ExtResource("4_ce5b6")
+ferox_overlay = ExtResource("2_d1e5q")
 max_health = 500.0
 armor = 4.0
 build_cost = {

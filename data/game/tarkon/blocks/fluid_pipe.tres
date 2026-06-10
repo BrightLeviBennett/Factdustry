@@ -1,7 +1,7 @@
-[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dqthqgsfeniw"]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cri7ejq3qo03a"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://b46ht66inla1j" path="res://textures/blocks/fluid transportation/pipe/Pipe.png" id="1_phwqv"]
+[ext_resource type="Texture2D" uid="uid://datxohlwtus6h" path="res://textures/blocks/fluid transportation/pipe/Pipe.png" id="1_phwqv"]
 
 [resource]
 script = ExtResource("1")

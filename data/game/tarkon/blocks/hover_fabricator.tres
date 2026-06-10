@@ -9,7 +9,7 @@
 script = ExtResource("1")
 id = &"hover_fabricator"
 display_name = "Hover Fabricator"
-description = "Builds hover-class vehicles."
+description = "Builds hover units."
 icon = ExtResource("2")
 category = 6
 tags = PackedStringArray("fabricator", "units")

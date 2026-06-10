@@ -1,7 +1,7 @@
-[gd_resource type="Resource" script_class="FluidData" format=3]
+[gd_resource type="Resource" script_class="FluidData" format=3 uid="uid://bxn1yaagljjsc"]
 
-[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cnak8t6tjcd55" path="res://textures/resources/water.png" id="2"]
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/tarkon/fluids/fluid_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://gfixim88bkdc" path="res://textures/resources/water.png" id="2"]
 
 [resource]
 script = ExtResource("1")
@@ -10,4 +10,3 @@ display_name = "Water"
 description = "Essential liquid for cooling and chemical processes."
 icon = ExtResource("2")
 color = Color(0.3, 0.5, 1, 1)
-viscosity = 1.0

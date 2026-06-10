@@ -1,11 +1,13 @@
-[gd_resource type="Resource" script_class="FluidData" format=3]
+[gd_resource type="Resource" script_class="FluidData" format=3 uid="uid://v27adw01pc8w"]
 
-[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/tarkon/fluids/fluid_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://kvcdu4e5d0wp" path="res://textures/resources/slag.png" id="1_5f12v"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_slag"
 display_name = "Slag"
 description = "Molten smelting byproduct. Cast back down into sand, copper, or iron."
+icon = ExtResource("1_5f12v")
 color = Color(0.55, 0.3, 0.18, 1)
 viscosity = 2.5

@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_shield_cell"
+display_name = "Shield Cell"
+description = "A charged cell that powers projected energy shields."
+max_stack = 200
+category = 3
+color = Color(0.5, 0.8, 0.95, 1)
+base_value = 8.0
+conveyable = true

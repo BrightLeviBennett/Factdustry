@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bauvxmu8wmb5v"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,12 +6,14 @@
 script = ExtResource("1")
 id = &"unit_reassembler"
 display_name = "Unit Reassembler"
-description = "Disassembles and reassembles units into new configurations."
+description = "Upgrades tier 4 units into tier 5 units."
 category = 6
-color = Color(0.9, 0.5, 1.0, 1)
-max_health = 520.0
-grid_size = Vector2i(3, 3)
-build_cost = { "copper": 500, "silicon": 250 }
-build_time = 4.0
-power_consumption = 8.0
 tags = PackedStringArray("fabricator", "units")
+color = Color(0.9, 0.5, 1, 1)
+grid_size = Vector2i(3, 3)
+max_health = 520.0
+build_cost = {
+"copper": 500,
+"silicon": 250
+}
+build_time = 4.0

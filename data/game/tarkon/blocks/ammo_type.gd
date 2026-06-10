@@ -24,11 +24,29 @@ extends Resource
 # COST
 # =========================
 
-## The item/resource consumed per shot (e.g. &"mat_copper")
+## The item/resource consumed per shot (e.g. &"mat_copper").
+## Leave empty for a power-based ammo (see `power_per_shot`).
 @export var item_id: StringName = &""
 
 ## How many of that item a single shot consumes
 @export var amount_per_shot: int = 1
+
+## Additional resources consumed per shot ALONGSIDE `item_id` — id -> amount
+## (items or fluids). A shot only fires if every cost (primary + extras) is
+## affordable. e.g. the Protium missile costs 3 hydrogen + 2 silicon:
+## item_id = &"mat_hydrogen", amount_per_shot = 3, extra_costs = {&"mat_silicon": 2}.
+@export var extra_costs: Dictionary = {}
+
+## Power-seconds drawn from the turret's electrical network per shot, in
+## place of an item. When > 0 this ammo is "powered": it consumes no item
+## and is only available while the turret's network is supplying power.
+## Used by the Arc — it fires lightning fuelled by electricity, not ammo.
+@export var power_per_shot: float = 0.0
+
+
+## True when this ammo is fuelled by electrical power instead of an item.
+func is_powered() -> bool:
+	return power_per_shot > 0.0
 
 
 # =========================
@@ -177,6 +195,11 @@ extends Resource
 # =========================
 # VISUALS
 # =========================
+
+## Optional sprite drawn for the projectile, rotated to face its travel
+## direction. When set, this replaces the procedural glowing-orb body
+## (the trail still draws). Used by the Protium missile.
+@export var projectile_sprite: Texture2D
 
 ## Color of the projectile body
 @export var projectile_color: Color = Color.YELLOW

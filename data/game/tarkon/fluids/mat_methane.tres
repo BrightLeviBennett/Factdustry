@@ -11,3 +11,4 @@ description = "Potent fuel gas. Primary natural gas component."
 icon = ExtResource("2")
 color = Color(0.5, 0.65, 0.4, 1)
 viscosity = 0.5
+units_per_segment = 20.0

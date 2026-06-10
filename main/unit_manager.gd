@@ -92,6 +92,18 @@ const _SQUAD_AVG_UNIT_DPS := 8.0
 # into an int via `_flow_key`. Value: { "field": FlowField, "age": float }.
 var _flow_field_cache: Dictionary = {}
 const _FLOW_FIELD_TTL: float = 4.0
+## When true (default), ALL enemy pathing routes through the shared, cached
+## FlowField (Mindustry-style) instead of per-unit threaded A*. One field per
+## target cell is reused by every enemy heading there and across frames, which
+## scales far better than one A* request per unit. Set false to revert to pure
+## per-unit A* (the threaded worker is still the fallback when a field can't
+## reach a unit's start).
+var flow_field_pathing: bool = true
+## Keys (target+layer) with an in-flight worker build, so we request each once.
+var _flow_pending: Dictionary = {}
+## Bumped on every flow-field invalidation; results tagged with an older
+## generation are dropped (they were built against a since-changed grid).
+var _flow_generation: int = 0
 var _flow_field_age_timer: float = 0.0
 
 # --- RTSAI BASE CLUSTERS ---
@@ -146,7 +158,7 @@ const SEPARATION_STRENGTH := 150.0
 const MIN_SEPARATION_DIST := 0.5
 
 # --- Unit spatial hash (perf) ---
-# Both `_resolve_unit_collisions` (here) and `enemy_unit._compute_separation_force`
+# Both `_resolve_unit_collisions` (here) and `enemy_unit._apply_separation`
 # used to scan EVERY same-layer unit per unit — O(n²) every frame, the main
 # large-battle cost. This is a uniform-grid spatial hash: units are bucketed
 # by (movement_layer, cellX, cellY) once per frame, and a neighbour query
@@ -730,44 +742,17 @@ func _command_move(world_pos: Vector2) -> void:
 	if living.size() == 0:
 		return
 
-	# Stamp the single command anchor for the indicator. Even though
-	# individual units fan out to formation slots around `world_pos`,
-	# the on-screen marker is just one dot at the player's actual
-	# click point with lines back to each unit.
+	# Stamp the single command anchor for the indicator: one dot at the player's
+	# actual click point with lines back to each unit.
 	_move_command_point = world_pos
 	_attack_command_anchor = Vector2i(-9999, -9999)
 
-	# Single unit — move directly to the target
-	if living.size() == 1:
-		living[0].move_to_position(world_pos)
-		return
-
-	# Multiple units — spread into a formation around the target
-	var offsets := _compute_formation_offsets(living.size(), living[0].unit_size)
-	for i in range(living.size()):
-		living[i].move_to_position(world_pos + offsets[i])
-
-
-## Computes formation offsets for N units arranged in concentric rings.
-## Spacing is at least one grid cell so each unit targets a different AStar cell.
-func _compute_formation_offsets(count: int, unit_radius: float) -> Array[Vector2]:
-	var offsets: Array[Vector2] = []
-	# Use grid-cell-sized spacing so units target distinct AStar cells
-	var spacing := maxf(unit_radius * 3.0, main.GRID_SIZE * 0.8)
-	offsets.append(Vector2.ZERO)      # First unit goes to center
-
-	var ring := 1
-	while offsets.size() < count:
-		var ring_radius := spacing * ring
-		var slots: int = maxi(6 * ring, 1)  # 6 per ring, 12 per ring 2, etc.
-		for s in range(slots):
-			if offsets.size() >= count:
-				break
-			var angle: float = (TAU / slots) * s
-			offsets.append(Vector2(cos(angle), sin(angle)) * ring_radius)
-		ring += 1
-
-	return offsets
+	# Every selected unit heads to the EXACT click point (Mindustry-style) — no
+	# pre-assigned formation slots. They converge on the target and the
+	# continuous separation force fans them out naturally around it, so they
+	# cluster on where you told them to go instead of spacing into a ring.
+	for unit in living:
+		unit.move_to_position(world_pos)
 
 
 func _deselect_all() -> void:
@@ -1351,22 +1336,20 @@ func _update_controlled_turret(_delta: float) -> void:
 	if bdata_aim and combat.has_method("_update_barrel_toe_in"):
 		combat._update_barrel_toe_in(grid_pos, bdata_aim, turret_world, mouse_pos, _delta)
 
+	# Special "emitter" weapons (fume / flame / lightning) go through the SAME
+	# shared dispatch the auto-fire loop uses, so the two paths can't drift
+	# apart again. Runs every frame so the Arc's charge decays when the trigger
+	# is released; `firing` = fire button held. The controlled turret is skipped
+	# by _update_turrets, so tick its cooldown here.
+	if bdata_aim and (bdata_aim.tags.has("fume_emitter") or bdata_aim.tags.has("flame_emitter") or bdata_aim.tags.has("lightning_emitter") or bdata_aim.tags.has("beam_emitter") or bdata_aim.tags.has("shockwave_emitter")) and combat.has_method("try_fire_special_weapon"):
+		var em_firing: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &""
+		combat.turret_cooldowns[grid_pos] = float(combat.turret_cooldowns.get(grid_pos, 0.0)) - _delta
+		var em_range_px: float = bdata_aim.attack_range * float(main.GRID_SIZE)
+		combat.try_fire_special_weapon(grid_pos, bdata_aim, turret_world, target_angle, main.Faction.LUMINA, 1.0, em_range_px, em_firing, _delta)
+		return
+
 	# Fire on left mouse held
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &"":
-		# Fume emitter: hold-to-spray a corroding cloud in front of the turret.
-		# No projectiles and no cooldown gate — it vents continuously while held.
-		var fume_blk = Registry.get_block(main.placed_buildings[grid_pos])
-		if fume_blk and fume_blk.tags.has("fume_emitter") and combat.has_method("_update_fume_emitter"):
-			combat._update_fume_emitter(grid_pos, fume_blk, turret_world, 1.0, _delta)
-			return
-		# Flame emitter (Flarecaster): hold-to-spray a fire jet at the cursor —
-		# the flame is the weapon, so it damages + ignites without projectiles.
-		if fume_blk and fume_blk.tags.has("flame_emitter") and combat.has_method("_update_flame_emitter"):
-			var flame_range_px: float = fume_blk.attack_range * float(main.GRID_SIZE)
-			combat._update_flame_emitter(grid_pos, fume_blk, turret_world,
-				combat.turret_angles.get(grid_pos, target_angle), flame_range_px,
-				main.Faction.LUMINA, 1.0, _delta)
-			return
 		if _control_attack_timer <= 0:
 			var block_id = main.placed_buildings[grid_pos]
 			var bdata = Registry.get_block(block_id)
@@ -1498,6 +1481,13 @@ func is_circle_walkable(world_pos: Vector2, radius: float, ml: int, team: int = 
 		return true
 	if not is_world_pos_walkable(world_pos, ml, team):
 		return false
+	# NAVAL uses CENTRE-only collision: water bodies have irregular, stepped
+	# shorelines, and the radius-aware edge test made a boat's flank snag on
+	# every corner of a wall or non-water tile next to the water (units got
+	# stuck on the coast). Boats are allowed to overhang the shore; they only
+	# stop when their CENTRE would leave navigable water.
+	if ml == UnitData.MovementLayer.NAVAL:
+		return true
 	# Cap the collision half-extent just under half a tile. A face point at
 	# centre ± radius must stay inside the unit's own (open) cell for a
 	# 1-tile-wide corridor to remain passable; clamping below GRID_SIZE/2
@@ -1526,21 +1516,44 @@ func is_circle_walkable(world_pos: Vector2, radius: float, ml: int, team: int = 
 ## face instead of snagging on the cell corner. `radius` is the unit's
 ## collision half-extent (≈ unit_size). Pure-axis callers still work since a
 ## zero component just resolves to itself.
+# Segmented (swept) movement — a port of Mindustry's EntityCollisions.move():
+# the displacement is walked in small fixed-size steps so a fast unit can't
+# TUNNEL through a wall the way the old point-based resolve did (it only tested
+# the endpoint). Each step is axis-separated, so the unit still slides along a
+# wall face instead of snagging its corner. MOVE_SEG_FRAC must be < 1 tile so a
+# single step can never skip over a 1-tile-thick wall.
+const MOVE_SEG_FRAC := 0.25          # collision substep ≈ quarter-tile
+const MOVE_MAX_DELTA := 6000.0       # hard per-call cap (anti lag-spike teleport)
 func resolve_move(from: Vector2, delta: Vector2, radius: float, ml: int, team: int = -1) -> Vector2:
 	if ml == UnitData.MovementLayer.FLYING:
 		return from + delta
+	var dist: float = delta.length()
+	if dist <= 0.0001:
+		return from
+	# Clamp a runaway displacement (lag spike / absurd speed) so we never try to
+	# resolve thousands of substeps or fling a unit across the map in one frame.
+	if dist > MOVE_MAX_DELTA:
+		delta = delta * (MOVE_MAX_DELTA / dist)
+		dist = MOVE_MAX_DELTA
+	var step_len: float = maxf(float(main.GRID_SIZE) * MOVE_SEG_FRAC, 1.0)
+	var dir: Vector2 = delta / dist
 	var pos: Vector2 = from
-	# --- X axis: only the leading/trailing horizontal faces matter ---
-	if absf(delta.x) > 0.0001:
-		var try_x: Vector2 = Vector2(pos.x + delta.x, pos.y)
-		if is_circle_walkable(try_x, radius, ml, team, 0x1 | 0x2):
-			pos.x = try_x.x
-	# --- Y axis: only the vertical faces matter (using the possibly-
-	# already-advanced X so we slide along, not through, the corner) ---
-	if absf(delta.y) > 0.0001:
-		var try_y: Vector2 = Vector2(pos.x, pos.y + delta.y)
-		if is_circle_walkable(try_y, radius, ml, team, 0x4 | 0x8):
-			pos.y = try_y.y
+	var travelled: float = 0.0
+	while travelled < dist - 0.0001:
+		var s: float = minf(step_len, dist - travelled)
+		travelled += s
+		var seg: Vector2 = dir * s
+		# --- X axis: only the leading/trailing horizontal faces matter ---
+		if absf(seg.x) > 0.0001:
+			var try_x: Vector2 = Vector2(pos.x + seg.x, pos.y)
+			if is_circle_walkable(try_x, radius, ml, team, 0x1 | 0x2):
+				pos.x = try_x.x
+		# --- Y axis: vertical faces, using the maybe-advanced X so we slide
+		# along (not through) the corner ---
+		if absf(seg.y) > 0.0001:
+			var try_y: Vector2 = Vector2(pos.x, pos.y + seg.y)
+			if is_circle_walkable(try_y, radius, ml, team, 0x4 | 0x8):
+				pos.y = try_y.y
 	return pos
 
 
@@ -1867,6 +1880,17 @@ func _poll_path_results() -> void:
 				continue
 
 		unit.set_path(path, target_bldg)
+
+	# Drain finished flow-field builds from the worker into the cache. Discard
+	# results whose generation is stale (a building changed since the request,
+	# so the field was built against an out-of-date grid).
+	if _path_worker.has_method("poll_flow_results"):
+		for fr in _path_worker.poll_flow_results():
+			var fkey: String = fr["key"]
+			_flow_pending.erase(fkey)
+			if int(fr["generation"]) != _flow_generation:
+				continue
+			_flow_field_cache[fkey] = {"field": fr["field"], "age": 0.0}
 
 
 ## BFS-based fallback target picker. Floods walkable cells outward from
@@ -2219,8 +2243,15 @@ func _assign_path_to_enemy(enemy: Node2D) -> void:
 
 	var ml: int = enemy.data.movement_layer if enemy.data else 0
 
-	var target_bldg_id: int = _pack_grid_pos(nearest_building)
+	# Main pathing now flows through the shared FlowField: one cached field per
+	# target cell, reused by every enemy heading there and across frames, rather
+	# than a per-unit A* request. _assign_flow_path_to_enemy falls back to the
+	# threaded A* worker when the field can't reach this start (or for flyers).
+	if flow_field_pathing:
+		_assign_flow_path_to_enemy(enemy, nearest_building as Vector2i)
+		return
 
+	var target_bldg_id: int = _pack_grid_pos(nearest_building)
 	_path_worker.request_path(
 		enemy.get_instance_id(),
 		enemy_grid,
@@ -2626,20 +2657,28 @@ func _get_flow_field(target: Vector2i, ml: int) -> FlowField:
 		var entry: Dictionary = _flow_field_cache[key]
 		entry["age"] = 0.0
 		return entry["field"]
-	var grid: AStarGrid2D = _astar_for_layer(ml)
-	# FLYING doesn't need a flow field — fall back to direct pathing.
-	if grid == null:
+	# FLYING doesn't use a flow field.
+	if _astar_for_layer(ml) == null:
 		return null
-	var field := FlowField.new()
-	field.build(target, grid, main.GRID_WIDTH, main.GRID_HEIGHT, float(main.GRID_SIZE), ml)
-	_flow_field_cache[key] = {"field": field, "age": 0.0}
-	return field
+	# Not built yet — request a build on the worker thread (once) and return
+	# null. The caller (_assign_flow_path_to_enemy) falls back to the threaded
+	# A* path meanwhile; once the field arrives in _poll_path_results, the next
+	# (re)assignment picks it up. This keeps full-map BFS off the main thread.
+	if not _flow_pending.has(key) and _path_worker != null and _path_worker.has_method("request_flow_field"):
+		_flow_pending[key] = true
+		_path_worker.request_flow_field(target, ml, key, _flow_generation)
+	return null
 
 
 ## Clear the flow-field cache. Called whenever a building is placed
 ## or destroyed because that change may have created or broken a route.
 func _invalidate_flow_fields() -> void:
 	_flow_field_cache.clear()
+	# Bump the generation so any in-flight worker builds (against the old grid)
+	# are discarded when they return, and clear the in-flight set so the new
+	# grid's fields get re-requested.
+	_flow_pending.clear()
+	_flow_generation += 1
 
 
 ## Trace a flow-field path for one enemy toward a target cell. Falls
@@ -3565,12 +3604,19 @@ func _recompute_crawler_wall_passability() -> void:
 
 	# Sync worker thread grids — full rebuild for crawler + hover walls
 	if _path_worker:
+		# Dedup with a Dictionary set — `Array.has()` here is O(n), so the
+		# old version was O(n²) over every wall and dominated sector-load
+		# time on wall-heavy maps (Sulfur Springs has ~68k walls, making
+		# this loop alone billions of comparisons).
+		var ground_seen: Dictionary = {}
 		var ground_solids: Array[Vector2i] = []
 		for grid_pos in main.placed_buildings:
 			if not _is_ground_passable_building(grid_pos):
+				ground_seen[grid_pos] = true
 				ground_solids.append(grid_pos)
 		for wall_pos in all_wall_positions:
-			if not ground_solids.has(wall_pos):
+			if not ground_seen.has(wall_pos):
+				ground_seen[wall_pos] = true
 				ground_solids.append(wall_pos)
 
 		var crawler_solids: Array[Vector2i] = []

@@ -7,13 +7,13 @@
 script = ExtResource("1")
 id = &"sulfur_springs"
 display_name = "Sulfur Springs"
-description = "Bubbling sulfur springs and venting fumaroles. Mine the sulfur and tap the vents — but mind the corroding clouds."
+description = "A large valley with multiple enemy bases and lots of new research oportunities."
 icon = ExtResource("1_lkmmi")
 planet_id = &"Tarkon"
-hex_q = -13
-hex_r = 4
+hex_q = -22
 available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_sulfur")
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray("aluminum_mountains")
 required_sectors = PackedStringArray("zinc_deposits")
+map_path = "res://data/game/tarkon/maps/SS.sector.json"
 tags = PackedStringArray("campaign", "sector")

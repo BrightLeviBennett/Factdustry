@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d3pwsofi01bgy"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,14 +6,17 @@
 script = ExtResource("1")
 id = &"freight_mass_driver"
 display_name = "Freight Mass Driver"
-description = "Heavy mass driver for freight-class payloads."
+description = "A larger mass driver for freight payloads."
 category = 6
+tags = PackedStringArray("freight", "mass_driver", "linkable")
 color = Color(0.4, 0.25, 0.7, 1)
+grid_size = Vector2i(6, 6)
 max_health = 380.0
-link_range = 160.0
-build_cost = { "copper": 350, "silicon": 150 }
+build_cost = {
+"copper": 350,
+"silicon": 150
+}
 build_time = 1.5
 transport_speed = 11.0
-tags = PackedStringArray("freight", "mass_driver", "linkable")
-grid_size = Vector2i(6, 6)
 max_payload_size = 5
+link_range = 160.0

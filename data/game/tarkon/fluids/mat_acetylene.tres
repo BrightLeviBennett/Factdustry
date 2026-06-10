@@ -11,3 +11,4 @@ color = Color(0.9, 0.7, 0.3, 1)
 viscosity = 0.5
 is_hazardous = true
 hazard_damage = 2.0
+units_per_segment = 20.0

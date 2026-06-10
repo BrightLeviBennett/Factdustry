@@ -29,6 +29,8 @@ var _grid_size: float
 # --- QUEUES (protected by _mutex) ---
 var _requests: Array[Dictionary] = []       # {unit_id, start, end, movement_layer, target_building_id}
 var _results: Array[Dictionary] = []        # {unit_id, path, target_building_id}
+var _flow_requests: Array[Dictionary] = []  # {target, ml, key, generation}
+var _flow_results: Array[Dictionary] = []   # {key, field, generation}
 var _mutations: Array[Dictionary] = []      # {type, pos, solid} or {type: "rebuild", solids, crawler_passable}
 var _rebuild_pending: bool = false
 var _rebuild_data: Dictionary = {}
@@ -113,6 +115,33 @@ func request_path(unit_id: int, start: Vector2i, end: Vector2i,
 	_semaphore.post()
 
 
+## Queue a flow-field build on the worker thread. `key`/`generation` are echoed
+## back in the result so the main thread can match it to its cache and discard
+## stale fields (built against a since-changed grid).
+func request_flow_field(target: Vector2i, ml: int, key: String, generation: int) -> void:
+	_mutex.lock()
+	_flow_requests.append({"target": target, "ml": ml, "key": key, "generation": generation})
+	_mutex.unlock()
+	_semaphore.post()
+
+
+func poll_flow_results() -> Array[Dictionary]:
+	_mutex.lock()
+	var out: Array[Dictionary] = _flow_results.duplicate()
+	_flow_results.clear()
+	_mutex.unlock()
+	return out
+
+
+func _astar_for_layer(ml: int) -> AStarGrid2D:
+	match ml:
+		1: return _astar_crawler
+		2: return _astar_hover
+		4: return _astar_naval
+		3: return null    # flying — no field needed
+		_: return _astar
+
+
 func queue_set_solid(pos: Vector2i, solid: bool, grid_name: String = "ground") -> void:
 	_mutex.lock()
 	_mutations.append({"type": "point", "pos": pos, "solid": solid, "grid": grid_name})
@@ -167,6 +196,8 @@ func _worker_loop() -> void:
 		# Grab all pending requests
 		var reqs: Array[Dictionary] = _requests.duplicate()
 		_requests.clear()
+		var flow_reqs: Array[Dictionary] = _flow_requests.duplicate()
+		_flow_requests.clear()
 		_mutex.unlock()
 
 		# Apply mutations
@@ -199,6 +230,27 @@ func _worker_loop() -> void:
 			_mutex.lock()
 			_results.append_array(batch_results)
 			_mutex.unlock()
+
+		# Build flow fields (off the main thread). Grids were just mutated above,
+		# so fields reflect the current map. Dedupe by key within the batch.
+		if flow_reqs.size() > 0:
+			var flow_batch: Array[Dictionary] = []
+			var built_keys: Dictionary = {}
+			for fr in flow_reqs:
+				var fkey: String = fr["key"]
+				if built_keys.has(fkey):
+					continue
+				built_keys[fkey] = true
+				var grid: AStarGrid2D = _astar_for_layer(int(fr["ml"]))
+				if grid == null:
+					continue
+				var field := FlowField.new()
+				field.build(fr["target"], grid, _grid_width, _grid_height, _grid_size, int(fr["ml"]))
+				flow_batch.append({"key": fkey, "field": field, "generation": int(fr["generation"])})
+			if flow_batch.size() > 0:
+				_mutex.lock()
+				_flow_results.append_array(flow_batch)
+				_mutex.unlock()
 
 
 func _do_rebuild(rb_data: Dictionary) -> void:
@@ -293,14 +345,32 @@ func _compute_path(req: Dictionary) -> Dictionary:
 	}
 
 
-func _find_adjacent_walkable(grid_pos: Vector2i, grid: AStarGrid2D) -> Vector2i:
-	var neighbors: Array[Vector2i] = [
-		Vector2i(0, -1), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(1, 0),
-		Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1),
-	]
-	for offset: Vector2i in neighbors:
-		var neighbor: Vector2i = grid_pos + offset
-		if neighbor.x >= 0 and neighbor.x < _grid_width and neighbor.y >= 0 and neighbor.y < _grid_height:
-			if not grid.is_point_solid(neighbor):
-				return neighbor
+## Finds the nearest non-solid cell to `grid_pos` by scanning outward in
+## Chebyshev rings. Ground/crawler/hover units almost always hit on ring 1 (a
+## building has walkable land right next to it), so their behaviour is unchanged.
+## NAVAL units attacking an inland base have NO navigable water in the immediate
+## ring — without searching outward they'd get an empty path and never move — so
+## this walks out to the nearest water cell, which their long-range weapons can
+## bombard the target from. Bounded by `max_radius` so a target with no walkable
+## cell anywhere nearby still returns quickly.
+func _find_adjacent_walkable(grid_pos: Vector2i, grid: AStarGrid2D, max_radius: int = 48) -> Vector2i:
+	for r: int in range(1, max_radius + 1):
+		var best := Vector2i(-1, -1)
+		var best_d: float = 1.0e20
+		for dx: int in range(-r, r + 1):
+			for dy: int in range(-r, r + 1):
+				# Only the cells on the current ring's perimeter.
+				if maxi(abs(dx), abs(dy)) != r:
+					continue
+				var n: Vector2i = grid_pos + Vector2i(dx, dy)
+				if n.x < 0 or n.x >= _grid_width or n.y < 0 or n.y >= _grid_height:
+					continue
+				if grid.is_point_solid(n):
+					continue
+				var d: float = float(dx * dx + dy * dy)
+				if d < best_d:
+					best_d = d
+					best = n
+		if best != Vector2i(-1, -1):
+			return best
 	return Vector2i(-1, -1)

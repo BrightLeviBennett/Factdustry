@@ -56,6 +56,10 @@ version_control/autoload_on_startup=true
 
 enabled=PackedStringArray("res://addons/manifest_builder/plugin.cfg")
 
+[gui]
+
+theme/default_font_multichannel_signed_distance_field=true
+
 [importer_defaults]
 
 texture={

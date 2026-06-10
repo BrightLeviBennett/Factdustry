@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"petroleum_drill"
 display_name = "Petroleum Drill"
-description = "Specialized drill for extracting petroleum deposits."
+description = "A specialized drill for extracting petroleum deposits."
 icon = ExtResource("2")
 category = 1
 tags = PackedStringArray("mining", "extraction", "omnidirectional")

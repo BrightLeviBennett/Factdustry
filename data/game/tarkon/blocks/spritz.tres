@@ -5,28 +5,141 @@
 [ext_resource type="Texture2D" uid="uid://12n0k6gpubv5" path="res://textures/blocks/turrets/DoubleBarrel/DoubeBarrelBase.png" id="2_base"]
 [ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="3_head"]
 [ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="4_icon"]
+[ext_resource type="Resource" path="res://data/game/tarkon/status_effects/wet.tres" id="5_wet"]
+[ext_resource type="Resource" path="res://data/game/tarkon/status_effects/crystallized.tres" id="6_crys"]
+[ext_resource type="Resource" path="res://data/game/tarkon/status_effects/burning.tres" id="7_burn"]
+[ext_resource type="Resource" path="res://data/game/tarkon/status_effects/tarred.tres" id="8_tar"]
 
-[sub_resource type="Resource" id="Resource_spritz_water"]
+[sub_resource type="Resource" id="Ammo_water"]
 script = ExtResource("1_ammo")
-item_id = &"water"
+item_id = &"mat_water"
 amount_per_shot = 1
-damage = 4.0
+damage = 10.0
 building_damage_mult = 0.4
-inaccuracy = 8.0
 projectiles_per_shot = 1
 projectile_speed = 540.0
 projectile_lifetime = 0.5
-projectile_radius = 3.0
+projectile_radius = 4.0
+bullet_spread = 4.0
+status_effect = ExtResource("5_wet")
 projectile_color = Color(0.45, 0.75, 1.0, 1)
 trail_color = Color(0.55, 0.85, 1.0, 0.8)
-trail_length = 8.0
-metadata/_custom_type_script = "uid://mlvivi0chx0p"
+liquid_bullet = true
+drag = 0.001
+velocity_rnd = 0.08
+
+[sub_resource type="Resource" id="Ammo_salt_water"]
+script = ExtResource("1_ammo")
+item_id = &"mat_salt_water"
+amount_per_shot = 1
+damage = 12.0
+building_damage_mult = 0.4
+projectiles_per_shot = 1
+projectile_speed = 520.0
+projectile_lifetime = 0.5
+projectile_radius = 4.0
+bullet_spread = 4.0
+status_effect = ExtResource("6_crys")
+projectile_color = Color(0.7, 0.85, 0.95, 1)
+trail_color = Color(0.8, 0.92, 1.0, 0.8)
+liquid_bullet = true
+drag = 0.001
+velocity_rnd = 0.08
+
+[sub_resource type="Resource" id="Ammo_slag"]
+script = ExtResource("1_ammo")
+item_id = &"mat_slag"
+amount_per_shot = 1
+damage = 16.0
+building_damage_mult = 0.5
+projectiles_per_shot = 1
+projectile_speed = 480.0
+projectile_lifetime = 0.55
+projectile_radius = 5.0
+bullet_spread = 5.0
+status_effect = ExtResource("7_burn")
+burn_damage = 6.0
+burn_duration = 6.0
+projectile_color = Color(1.0, 0.5, 0.15, 1)
+trail_color = Color(1.0, 0.6, 0.2, 0.85)
+liquid_bullet = true
+drag = 0.001
+velocity_rnd = 0.08
+
+[sub_resource type="Resource" id="Ammo_petroleum"]
+script = ExtResource("1_ammo")
+item_id = &"mat_petroleum"
+amount_per_shot = 1
+damage = 10.0
+building_damage_mult = 0.4
+projectiles_per_shot = 1
+projectile_speed = 500.0
+projectile_lifetime = 0.5
+projectile_radius = 4.0
+bullet_spread = 4.0
+projectile_color = Color(0.25, 0.22, 0.18, 1)
+trail_color = Color(0.35, 0.3, 0.24, 0.85)
+liquid_bullet = true
+drag = 0.001
+velocity_rnd = 0.08
+
+[sub_resource type="Resource" id="Ammo_heavy_fuel"]
+script = ExtResource("1_ammo")
+item_id = &"mat_heavy_fuel"
+amount_per_shot = 1
+damage = 10.0
+building_damage_mult = 0.4
+projectiles_per_shot = 1
+projectile_speed = 500.0
+projectile_lifetime = 0.5
+projectile_radius = 4.0
+bullet_spread = 4.0
+status_effect = ExtResource("8_tar")
+projectile_color = Color(0.4, 0.32, 0.2, 1)
+trail_color = Color(0.5, 0.42, 0.28, 0.85)
+liquid_bullet = true
+drag = 0.001
+velocity_rnd = 0.08
+
+[sub_resource type="Resource" id="Ammo_oxygen"]
+script = ExtResource("1_ammo")
+item_id = &"mat_oxygen"
+amount_per_shot = 1
+damage = 2.0
+building_damage_mult = 0.0
+projectiles_per_shot = 1
+projectile_speed = 500.0
+projectile_lifetime = 0.5
+projectile_radius = 4.0
+bullet_spread = 4.0
+projectile_color = Color(0.9977433, 0.7656583, 1, 1)
+trail_color = Color(0.9977433, 0.7656583, 1, 0.7)
+liquid_bullet = true
+drag = 0.001
+velocity_rnd = 0.08
+
+[sub_resource type="Resource" id="Ammo_hydrogen"]
+script = ExtResource("1_ammo")
+item_id = &"mat_hydrogen"
+amount_per_shot = 1
+damage = 2.0
+building_damage_mult = 0.0
+projectiles_per_shot = 1
+projectile_speed = 500.0
+projectile_lifetime = 0.5
+projectile_radius = 4.0
+bullet_spread = 4.0
+projectile_color = Color(0.6, 0.8, 1, 1)
+trail_color = Color(0.6, 0.8, 1, 0.7)
+liquid_bullet = true
+drag = 0.001
+velocity_rnd = 0.08
 
 [resource]
 script = ExtResource("1")
 id = &"spritz"
 display_name = "Spritz"
-description = "Rapid-fire water turret. Light damage, high uptime — best as area suppression."
+description = "Rapid-fire fluid sprayer. Accepts water, salt water, slag, petroleum, heavy fuel, oxygen, or hydrogen. Oxygen and hydrogen build a lingering gas cloud at the impact: hydrogen poisons + slows enemies inside; oxygen is flammable and bursts into fire when a Flarecaster's flame sweeps through it. Water auto-douses nearby fires; slag + petroleum on the same target doubles the slag's burn."
 icon = ExtResource("4_icon")
 category = 4
 tags = PackedStringArray("turret", "defense")
@@ -39,8 +152,9 @@ build_cost = {
 "silicon": 30
 }
 build_time = 3.0
-power_consumption = 3.0
+electrical_power_use = 3.0
 attack_speed = 0.25
 attack_range = 5.5
-ammo_types = Array[Resource]([SubResource("Resource_spritz_water")])
+ammo_types = Array[Resource]([SubResource("Ammo_water"), SubResource("Ammo_salt_water"), SubResource("Ammo_slag"), SubResource("Ammo_petroleum"), SubResource("Ammo_heavy_fuel"), SubResource("Ammo_oxygen"), SubResource("Ammo_hydrogen")])
+liquid_capacity = 40.0
 max_stored_items = 30

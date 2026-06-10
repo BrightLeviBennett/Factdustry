@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"unloader"
 display_name = "Unloader"
-description = "Rapidly pulls items from an adjacent building's storage and places them onto a conveyor. Click to set an item filter."
+description = "Removes items from adjacent building's storage and ouputs them infront of it. Click to set an item filter."
 icon = ExtResource("1_rf36o")
 tags = PackedStringArray("unloader", "transport")
 color = Color(0.5, 0.5, 0.6, 1)

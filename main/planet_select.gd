@@ -900,8 +900,9 @@ func _build_hover_outline(planet_id: StringName, cell_idx: int) -> void:
 		hover_inst.mesh = null
 		return
 
-	# Get all cells within 3 hops
-	var nearby: Dictionary = _get_cells_in_radius(planet_id, cell_idx, 3)
+	# Get all cells within `radius` hops of the hovered cell.
+	const HOVER_RADIUS := 2
+	var nearby: Dictionary = _get_cells_in_radius(planet_id, cell_idx, HOVER_RADIUS)
 
 	var im := ImmediateMesh.new()
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -912,9 +913,10 @@ func _build_hover_outline(planet_id: StringName, cell_idx: int) -> void:
 		if polygon.size() < 3:
 			continue
 		# Fade opacity based on distance: center = bright, edges = faint
-		var alpha: float = lerpf(0.6, 0.08, float(dist) / 3.0)
+		var dist_t: float = float(dist) / float(HOVER_RADIUS)
+		var alpha: float = lerpf(0.6, 0.08, dist_t)
 		var hover_color := Color(0.8, 1.0, 0.8, alpha)
-		var t: float = lerpf(HOVER_THICKNESS, HOVER_THICKNESS * 0.6, float(dist) / 3.0)
+		var t: float = lerpf(HOVER_THICKNESS, HOVER_THICKNESS * 0.6, dist_t)
 		_add_cell_outline(im, polygon, t, hover_color)
 
 	im.surface_end()

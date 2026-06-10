@@ -1,19 +1,43 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b7eclipse001a"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="2_ammo"]
+[ext_resource type="Texture2D" uid="uid://cnr74cpaunr6q" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="3_base"]
+[ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="4_head"]
+[ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="5_icon"]
+
+[sub_resource type="Resource" id="Ammo_eclipse"]
+script = ExtResource("2_ammo")
+item_id = &"mat_oxygen"
+amount_per_shot = 2
+extra_costs = {
+&"mat_hydrogen": 2
+}
+damage = 60.0
+building_damage_mult = 1.0
+projectile_color = Color(0.8, 0.95, 1.0, 1)
 
 [resource]
 script = ExtResource("1")
 id = &"eclipse"
 display_name = "Eclipse"
-description = "Long-range gauss sniper. Devastating single-target damage."
+description = "Burns oxygen and hydrogen into a continuous cutting beam. Each activation fires for 7 seconds straight, then needs 9 seconds to recharge. The beam carves through everything in a line out to its range."
+icon = ExtResource("5_icon")
 category = 4
-color = Color(0.9, 0.3, 0.3, 1)
+tags = PackedStringArray("turret", "defense", "beam_emitter")
+color = Color(0.8, 0.95, 1.0, 1)
+base_sprite = ExtResource("3_base")
+turret_head_sprite = ExtResource("4_head")
 max_health = 500.0
-build_cost = { "copper": 500, "silicon": 250 }
+build_cost = {
+"copper": 500,
+"silicon": 250,
+"steel": 120
+}
 build_time = 5.0
-power_consumption = 6.0
-attack_damage = 130.0
-attack_speed = 4.0
-attack_range = 15.0
-tags = PackedStringArray("turret", "defense")
+electrical_power_use = 6.0
+attack_speed = 0.1
+attack_range = 8.0
+ammo_types = Array[Resource]([SubResource("Ammo_eclipse")])
+liquid_capacity = 40.0
+max_stored_items = 30

@@ -255,3 +255,21 @@ func is_burning(grid_pos: Vector2i) -> bool:
 	if main == null:
 		return false
 	return building_fires.has(main.building_origins.get(grid_pos, grid_pos))
+
+
+## Puts out the fire on the building at `grid_pos` (or its anchor). Used by the
+## Spritz turret's water firefighting. Returns true if a fire was extinguished.
+func extinguish_building(grid_pos: Vector2i) -> bool:
+	if main == null:
+		return false
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	if building_fires.has(anchor):
+		building_fires.erase(anchor)
+		return true
+	return false
+
+
+## Anchors of every building currently on fire (snapshot copy — safe to iterate
+## while extinguishing). Used by the Spritz to find friendly fires to douse.
+func burning_anchors() -> Array:
+	return building_fires.keys()

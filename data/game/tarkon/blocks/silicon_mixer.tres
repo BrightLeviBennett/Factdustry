@@ -7,12 +7,15 @@
 script = ExtResource("1")
 id = &"silicon_mixer"
 display_name = "Silicon Refinery"
-description = "Refines sand and graphite into silicon. Accepts inputs and outputs on every side."
+description = "Refines sand and graphite into silicon.
+Requires power."
 icon = ExtResource("2_srcom")
 category = 2
 tags = PackedStringArray("production", "processing", "omnidirectional")
 color = Color(0.6, 0.6, 0.7, 1)
 grid_size = Vector2i(3, 3)
+liquid_tint = null
+liquid_tint_fluid = null
 max_health = 520.0
 build_cost = {
 "copper": 50,
@@ -27,5 +30,7 @@ output_items = {
 "mat_silicon": 1
 }
 production_time = 0.5
+charge_time = null
 electrical_power_use = 10.0
+output_sides = null
 max_stored_items = 30

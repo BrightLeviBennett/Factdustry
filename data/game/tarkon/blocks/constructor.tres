@@ -1,15 +1,15 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bkbvw1xlxoptr"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://c2xjokauwv7mq" path="res://textures/blocks/units/Consructor/ConstructorBase.png" id="1_hsdbx"]
-[ext_resource type="Texture2D" uid="uid://84271cgudcis" path="res://textures/blocks/units/Consructor/ConstructorComplete.png" id="2_2ouht"]
-[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_kjyab"]
+[ext_resource type="Texture2D" uid="uid://hjicc5xj4swf" path="res://textures/blocks/units/Consructor/ConstructorBase.png" id="1_hsdbx"]
+[ext_resource type="Texture2D" uid="uid://b2jbji3pm7t5x" path="res://textures/blocks/units/Consructor/ConstructorComplete.png" id="2_2ouht"]
+[ext_resource type="Texture2D" uid="uid://uhhvwyue44gg" path="res://textures/blocks/units/FabricatorTop.png" id="4_kjyab"]
 
 [resource]
 script = ExtResource("1")
 id = &"constructor"
 display_name = "Constructor"
-description = "Builds structures using delivered materials."
+description = "Creates buildings using resources."
 icon = ExtResource("2_2ouht")
 category = 6
 tags = PackedStringArray("construction", "constructor")

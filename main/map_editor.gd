@@ -565,6 +565,11 @@ func _unhandled_input(event: InputEvent) -> void:
 						if click_data.tags.has("refabricator"):
 							wui.open("refabricator", click_anchor)
 							return
+						if click_data.tags.has("recipe_select") \
+								and click_data.factory_recipes != null \
+								and click_data.factory_recipes.size() > 0:
+							wui.open("recipe_select", click_anchor)
+							return
 						if click_data.id == &"archive":
 							wui.open("archive", click_anchor)
 							return

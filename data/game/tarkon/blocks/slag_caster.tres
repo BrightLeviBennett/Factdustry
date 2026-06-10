@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cu6aanmxcujec"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,11 +6,13 @@
 script = ExtResource("1")
 id = &"slag_caster"
 display_name = "Slag Caster"
-description = "Casts molten slag back into solid grains — a random yield of sand, copper, or iron per pour."
+description = "Casts slag into sand, copper, or iron. Doesn't require power."
 category = 2
 tags = PackedStringArray("production", "processing", "omnidirectional")
 color = Color(0.55, 0.32, 0.2, 1)
 grid_size = Vector2i(3, 3)
+liquid_tint = null
+liquid_tint_fluid = null
 max_health = 320.0
 build_cost = {
 "copper": 180,
@@ -20,6 +22,7 @@ build_time = 4.0
 input_items = {
 "mat_slag": 1
 }
+production_time = 2.0
 random_outputs = [{
 "item": &"mat_sand",
 "weight": 1.0
@@ -30,7 +33,6 @@ random_outputs = [{
 "item": &"mat_iron",
 "weight": 1.0
 }]
-production_time = 2.0
-electrical_power_use = 10.0
-liquid_capacity = 20.0
+output_sides = null
 max_stored_items = 30
+liquid_capacity = 20.0

@@ -1,14 +1,14 @@
-[gd_resource type="Resource" script_class="ItemData" format=3]
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://bhq8ls7ipvies"]
 
-[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/items/item_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://h1gr5q22bxh5" path="res://data/game/tarkon/items/item_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://deq2xy8l77jwl" path="res://textures/resources/salt.png" id="1_o84lm"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_salt"
 display_name = "Salt"
 description = "Crystalline mineral extracted from salt water. Used in chemical processes."
+icon = ExtResource("1_o84lm")
 max_stack = 200
-category = 0
 color = Color(0.95, 0.95, 0.9, 1)
 base_value = 0.8
-conveyable = true

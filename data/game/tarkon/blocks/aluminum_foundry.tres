@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d2xcwphssu36b"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"aluminum_foundry"
 display_name = "Aluminum Foundry"
-description = "Smelts bauxite into pure aluminum, tapping molten slag as a byproduct. Accepts bauxite from any side; outputs aluminum and pipes out slag. Requires electrical power."
+description = "Smelts bauxite into aluminum, producing slag as a byproduct. Requires power."
 category = 2
 tags = PackedStringArray("production", "processing", "omnidirectional")
 color = Color(0.78, 0.82, 0.86, 1)
@@ -26,7 +26,6 @@ output_items = {
 "mat_slag": 3
 }
 production_time = 3.0
-power_consumption = 4.0
 electrical_power_use = 18.0
-liquid_capacity = 30.0
 max_stored_items = 30
+liquid_capacity = 30.0

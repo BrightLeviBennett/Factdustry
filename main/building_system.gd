@@ -264,6 +264,13 @@ const _LAYERED_SPINNERS := {
 		"spin":  4.5,
 		"accel": 8.0,
 	},
+	&"compound_mixer": {
+		"base": "res://textures/blocks/factories/Compound Mixer/CompoundMixerBase.png",
+		"head": "res://textures/blocks/factories/Compound Mixer/CompoundMixerHead.png",
+		"top":  "res://textures/blocks/factories/Compound Mixer/CompoundMixerTop.png",
+		"spin":  4.5,
+		"accel": 8.0,
+	},
 }
 # Loaded Texture2D per block_id → {"base": Texture2D, "head": ..., "top": ...}.
 var _layered_spinner_textures: Dictionary = {}
@@ -1192,7 +1199,10 @@ func _draw_drill_lasers(grid_pos: Vector2i, rotation: int, grid_size: Vector2i, 
 		var start: Vector2 = main.grid_to_world(inner_front) + Vector2(gs * 0.5, gs * 0.5) + fwd * (gs * 0.5) + parallax
 		# End: NEAR face of the hit cell (the side facing the bore).
 		var end: Vector2 = main.grid_to_world(hit_cell) + Vector2(gs * 0.5, gs * 0.5) - fwd * (gs * 0.5) + parallax
-		main.draw_beam(self, start, end, laser_color, pulse)
+		# `draw_beam` is a static helper on Main — call it on the class, not
+		# the `main` node, so it also works when the building renderer runs
+		# under the Map Editor (whose root node has no draw_beam method).
+		Main.draw_beam(self, start, end, laser_color, pulse)
 
 
 ## Draws two gear-style crusher heads on a block tagged "crusher_heads".
@@ -2790,6 +2800,20 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	var is_platform: bool = data.tags.has("platform")
 	var is_pump: bool = data.tags.has("pump")
+	# Vent extractors (e.g. Water Extractor on sand) must sit on their required
+	# floor tile — reject the placement unless at least one footprint cell is on
+	# `vent_tile`, matching the cell where it actually produces fluid.
+	if data.vent_tile != &"" and terrain != null and "floor_tiles" in terrain:
+		var on_vent_tile: bool = false
+		for vx in range(data.grid_size.x):
+			for vy in range(data.grid_size.y):
+				if StringName(terrain.floor_tiles.get(grid_pos + Vector2i(vx, vy), &"")) == data.vent_tile:
+					on_vent_tile = true
+					break
+			if on_vent_tile:
+				break
+		if not on_vent_tile:
+			return false
 	# If the new block is a member of a swap family (belt/duct/pipe/etc),
 	# cells already holding another same-family block count as placeable —
 	# the click handler in main.try_place_building will swap them.
@@ -2863,13 +2887,15 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 				return false
 			if terrain:
 				var depth: int = terrain.get_water_depth_at(check_pos)
-				# Platforms are water-only — they bridge any water depth
-				# but reject placement on dry land. The red "can't place"
-				# overlay falls out of the same _can_place_terrain check.
-				if is_platform and depth <= 0 and not has_platform_under:
+				# Platforms bridge SHALLOW water only — depths 1-2, where the
+				# shore tile is still visible beneath the surface. Reject dry
+				# land (0) and deep water (3, fully submerged). The red
+				# "can't place" overlay falls out of this same check.
+				if is_platform and not has_platform_under and (depth <= 0 or depth >= 3):
 					return false
 				if depth > 0 and not has_platform_under:
-					# Platforms can be placed on any water depth (they bridge it).
+					# Platforms reach here only for depth 1-2 (deep water was
+					# already rejected above); they bridge that shallow water.
 					if is_platform:
 						pass
 					# Pumps can be placed on depth 1 or 2 water (needs to stand
@@ -4804,6 +4830,68 @@ func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: floa
 	c.draw_set_transform(Vector2.ZERO, 0.0)
 
 
+## Mindustry DrawLiquidTile look: re-draws the block's `base_sprite` tinted by
+## its most-stored fluid, with alpha = stored ÷ liquid_capacity, so the base
+## silhouette fades toward the fluid colour as the tank fills (the Graphite
+## Electrolyzer's base turning blue with water). Drawn between base and top.
+## No-op unless the block opts in (`liquid_tint`), has a base sprite + liquid
+## capacity, and is actually holding fluid.
+func _draw_block_liquid_tint(grid_pos: Vector2i, data: BlockData, top_pos: Vector2, w: float, h: float, rot: int, is_dir: bool) -> void:
+	if not data.liquid_tint or data.base_sprite == null or data.liquid_capacity <= 0.0:
+		return
+	if _logistics == null:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var is_auto: bool = data.tags.has("auto_recipe")
+	# Gather the fluids to tint by. Two sources:
+	#  - factory_buffers["inputs"]: the INPUT fluids a consuming factory is
+	#    actively buffering (e.g. the electrolyzer's water, the centrifuge's
+	#    salt / sulfur water). Input fluids never land in block_storage, so
+	#    without this the tint on consuming factories would never show.
+	#  - block_storage["fluids"]: pump output / backed-up product fluids.
+	#    Skipped for auto_recipe factories so a PRODUCT fluid (the centrifuge's
+	#    output water) can't override the input-fluid tint.
+	var fluids: Dictionary = {}
+	if _logistics.factory_buffers.has(anchor):
+		var buf_inputs: Dictionary = _logistics.factory_buffers[anchor].get("inputs", {})
+		for iid in buf_inputs:
+			var isn := StringName(iid)
+			if Registry.get_fluid(isn) != null:
+				fluids[isn] = fluids.get(isn, 0.0) + float(buf_inputs[iid])
+	if not is_auto and _logistics.block_storage.has(anchor):
+		var stored_fluids: Dictionary = _logistics.block_storage[anchor].get("fluids", {})
+		for fid in stored_fluids:
+			var fsn := StringName(fid)
+			fluids[fsn] = fluids.get(fsn, 0.0) + float(stored_fluids[fid])
+	if fluids.is_empty():
+		return
+	var best_id: StringName = &""
+	var best_amt: float = 0.0
+	if data.liquid_tint_fluid != &"":
+		# Single-fluid tint: only ever show this fluid's level (e.g. the
+		# electrolyzer tints by water, never by its hydrogen / oxygen output).
+		best_id = data.liquid_tint_fluid
+		best_amt = float(fluids.get(best_id, 0.0))
+	else:
+		# Pick the dominant stored fluid (the one with the most units) to tint by.
+		for fid in fluids:
+			var amt: float = float(fluids[fid])
+			if amt > best_amt:
+				best_amt = amt
+				best_id = fid
+	if best_id == &"" or best_amt <= 0.0:
+		return
+	var fluid = Registry.get_fluid(best_id)
+	if fluid == null:
+		return
+	# alpha = fill fraction, scaled by the fluid's own opacity so different
+	# fluids read at sensible strengths.
+	var frac: float = clampf(best_amt / data.liquid_capacity, 0.0, 1.0)
+	var tint: Color = Color(fluid.color)
+	tint.a = frac * fluid.opacity
+	_draw_block_texture(data.base_sprite, top_pos, w, h, rot, tint, is_dir)
+
+
 ## Draws the refabricator: base sprite plus per-side "input" overlays that
 ## light up when a payload conveyor is adjacent on that side of the
 ## building. Each overlay texture rotates with the base.
@@ -5201,12 +5289,7 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 	# Turret: accepts items whose id matches one of its AmmoType entries,
 	# filling block_storage up to max_stored_items (default 30).
 	if data.is_turret() and not data.ammo_types.is_empty():
-		var is_ammo := false
-		for ammo in data.ammo_types:
-			if ammo is AmmoType and (ammo as AmmoType).item_id == item_id:
-				is_ammo = true
-				break
-		if not is_ammo:
+		if not data.ammo_accepts(item_id):
 			return 0
 		if not _logistics.block_storage.has(anchor):
 			_logistics.block_storage[anchor] = {"items": {}, "fluids": {}}
@@ -5289,11 +5372,10 @@ func _block_accepts_item(anchor: Vector2i, item_id: StringName) -> bool:
 		return true
 	if data.tags.has("storage"):
 		return true
-	# Turret accepts anything listed in its ammo_types.
+	# Turret accepts anything its ammo needs (primary or extra_cost).
 	if data.is_turret() and not data.ammo_types.is_empty():
-		for ammo in data.ammo_types:
-			if ammo is AmmoType and (ammo as AmmoType).item_id == item_id:
-				return true
+		if data.ammo_accepts(item_id):
+			return true
 	# Item conveyors accept any item when the cell is empty.
 	if data.is_transport() and not data.transports_fluid \
 			and not data.tags.has("payload") and not data.tags.has("freight"):
@@ -5709,6 +5791,10 @@ func _compute_is_directional(block_id: StringName) -> bool:
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return false
+	# Per-output directional routing (output_sides) needs a rotation to rotate
+	# its output sides with the block — wins over the omnidirectional default.
+	if not data.output_sides.is_empty():
+		return true
 	# Omnidirectional blocks accept/output on every side, so they never need
 	# a rotation. The tag wins over the EXTRACTORS-category default.
 	if data.tags.has("omnidirectional"):
@@ -6082,11 +6168,33 @@ func _transport_outputs_to(from_pos: Vector2i, to_pos: Vector2i) -> bool:
 	if data == null:
 		return false
 
+	# Kind match: the receiving cell (to_pos) is the belt / duct / pipe whose
+	# texture we're picking. A belt (item transport) must only connect to a
+	# neighbour that outputs ITEMS, and a pipe (fluid transport) only to one
+	# that outputs FLUIDS — so belts don't treat a pipe / fluid-only block as an
+	# input (and vice versa).
+	var recv = Registry.get_block(main.placed_buildings.get(to_pos, &""))
+	if recv != null and recv.is_transport():
+		if recv.transports_fluid:
+			if not _block_outputs_fluid(data):
+				return false
+		else:
+			if not _block_outputs_item(data):
+				return false
+
 	# Find the building's origin for correct rotation lookup on multi-tile buildings
 	var anchor = main.get_building_anchor(from_pos)
 	var origin: Vector2i = anchor if anchor != null else from_pos
 	var rot: int = main.building_rotation.get(origin, 0)
 	var dir: Vector2i = DIR_VECTORS[rot]
+
+	# Pumps: extract from underneath and output fluid on all 4 sides. Checked
+	# BEFORE the transport branch because pumps also carry `transport_speed`
+	# (so is_transport() is true) but should connect on every face, not just
+	# their facing direction — otherwise adjacent pipes never pick up a corner /
+	# junction texture toward the pump.
+	if data.tags.has("pump"):
+		return true
 
 	# Transport blocks: output in their facing direction only — except
 	# routers (split flow across every face EXCEPT the back) and
@@ -6094,7 +6202,13 @@ func _transport_outputs_to(from_pos: Vector2i, to_pos: Vector2i) -> bool:
 	# belts can't detect the splitter and stay straight instead of
 	# picking up their corner / junction texture variants.
 	if data.is_transport():
-		if data.tags.has("router"):
+		# Routers AND the directional splitters (sorter / inverted sorter /
+		# overflow / underflow) all take input on the back and can output on
+		# the front + both sides, so neighbouring belts on ANY non-back face
+		# should pick up their corner / junction texture variant.
+		if data.tags.has("router") or data.tags.has("sorter") \
+				or data.tags.has("inverted_sorter") or data.tags.has("overflow") \
+				or data.tags.has("underflow"):
 			var back: Vector2i = -dir
 			var rel: Vector2i = to_pos - from_pos
 			return rel != back and (rel == dir \
@@ -6105,10 +6219,6 @@ func _transport_outputs_to(from_pos: Vector2i, to_pos: Vector2i) -> bool:
 			return rel2 == Vector2i(1, 0) or rel2 == Vector2i(-1, 0) \
 				or rel2 == Vector2i(0, 1) or rel2 == Vector2i(0, -1)
 		return from_pos + dir == to_pos
-
-	# Pumps: extract from underneath, output in all 4 directions
-	if data.tags.has("pump"):
-		return true
 
 	# Extractors (drills): output on all sides EXCEPT the front (mining) edge
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
@@ -6138,6 +6248,58 @@ func _transport_outputs_to(from_pos: Vector2i, to_pos: Vector2i) -> bool:
 		or data.tags.has("payload_unloader") or data.tags.has("freight_unloader"):
 		return true
 
+	return false
+
+
+## True if the block can put out a FLUID — fluid pipes, pumps, condensers, or
+## any factory whose output (incl. recipe-select outputs) is a fluid. Used by
+## the transport texture picker to keep belts from connecting to fluid sources.
+func _block_outputs_fluid(data: BlockData) -> bool:
+	if data.transports_fluid:
+		return true
+	if data.tags.has("pump") or data.vent_fluid != &"":
+		return true
+	for k in data.output_items:
+		if Registry.get_fluid(StringName(k)) != null:
+			return true
+	for rk in data.side_outputs:
+		if Registry.get_fluid(StringName(data.side_outputs[rk])) != null:
+			return true
+	for r in data.factory_recipes:
+		if typeof(r) == TYPE_DICTIONARY:
+			for ok in r.get("output", {}):
+				if Registry.get_fluid(StringName(ok)) != null:
+					return true
+	return false
+
+
+## True if the block can put out an ITEM — belts/ducts, drills, constructors,
+## loaders, or any factory whose output (incl. recipe-select outputs) is an
+## item. Used so pipes don't connect to item sources.
+func _block_outputs_item(data: BlockData) -> bool:
+	if data.is_transport() and not data.transports_fluid:
+		return true
+	# Drills / scrapers mine ore items (fluid extractors carry pump/vent_fluid).
+	if data.category == BlockData.BlockCategory.EXTRACTORS \
+			and not data.tags.has("pump") and data.vent_fluid == &"":
+		return true
+	if data.tags.has("constructor") or data.tags.has("deconstructor") \
+			or data.tags.has("payload_loader") or data.tags.has("freight_loader") \
+			or data.tags.has("payload_unloader") or data.tags.has("freight_unloader"):
+		return true
+	for k in data.output_items:
+		if Registry.get_item(StringName(k)) != null and Registry.get_fluid(StringName(k)) == null:
+			return true
+	for rk in data.side_outputs:
+		var oid := StringName(data.side_outputs[rk])
+		if Registry.get_item(oid) != null and Registry.get_fluid(oid) == null:
+			return true
+	for r in data.factory_recipes:
+		if typeof(r) == TYPE_DICTIONARY:
+			for ok in r.get("output", {}):
+				var okid := StringName(ok)
+				if Registry.get_item(okid) != null and Registry.get_fluid(okid) == null:
+					return true
 	return false
 
 
@@ -6184,6 +6346,96 @@ func _get_belt_draw_info(grid_pos: Vector2i) -> Dictionary:
 	elif bid == &"fluid_pipe":
 		textures = _pipe_textures
 	return {"texture": textures.get(tex_key), "angle": angle, "key": tex_key}
+
+
+## Draws a pipe's stored fluid as a centred channel — a hub at the block centre
+## plus an arm toward each connected cardinal neighbour — so the tint follows
+## the pipe's I/L/T/+ footprint. A corner pipe only draws its two arms, leaving
+## the empty quadrant untinted (fixes the fluid bleeding past the corner art).
+## Hub + arms are laid out non-overlapping so a semi-transparent fill doesn't
+## double-blend (darken) where they meet.
+## Draws a fluid-transport cell's stored fluid as a tint behind its sprite,
+## masked by the sprite's OWN alpha footprint. The pipe channel is a
+## semi-transparent band in the art, so the fill shows through it; the opaque
+## walls/chevrons cover it; and the fully-transparent corner cutout / bridge
+## margins get nothing (no bleed). This is pixel-exact for every variant
+## (straight / corner / T / router / junction / bridge) with no geometry
+## guessing. Reads the fill from the pipe network (or junction compartments).
+func _draw_pipe_fluid_shape(grid_pos: Vector2i, block_id: StringName, top_pos: Vector2, w: float, h: float) -> void:
+	if _logistics == null:
+		return
+	var fluid_id: StringName = &""
+	var amount: float = 0.0
+	if "pipe_contents" in _logistics and _logistics.pipe_contents.has(grid_pos):
+		var pc: Dictionary = _logistics.pipe_contents[grid_pos]
+		fluid_id = StringName(pc.get("fluid_id", &""))
+		amount = float(pc.get("amount", 0.0))
+	elif "pipe_junction_state" in _logistics and _logistics.pipe_junction_state.has(grid_pos):
+		var js: Dictionary = _logistics.pipe_junction_state[grid_pos]
+		var va: float = float(js.get("v_amount", 0.0))
+		var ha: float = float(js.get("h_amount", 0.0))
+		# Tint by whichever channel holds more.
+		if va >= ha and StringName(js.get("v_fluid", &"")) != &"":
+			fluid_id = StringName(js["v_fluid"]); amount = va
+		elif StringName(js.get("h_fluid", &"")) != &"":
+			fluid_id = StringName(js["h_fluid"]); amount = ha
+	if fluid_id == &"" or amount <= 0.0:
+		return
+	var fluid = Registry.get_fluid(fluid_id)
+	if fluid == null:
+		return
+	var cap: float = fluid.units_per_segment if fluid.units_per_segment > 0.0 else 10.0
+	var fill: Color = Color(fluid.color)
+	fill.a = clampf(amount / cap, 0.0, 1.0) * fluid.opacity
+
+	if block_id == &"fluid_pipe":
+		# Auto-tiled pipe: mask = the chosen variant texture's footprint, drawn
+		# with the same rotation so it lines up with the sprite.
+		var info: Dictionary = _get_belt_draw_info(grid_pos)
+		var mask: Texture2D = _alpha_mask_for(info.get("texture"))
+		if mask == null:
+			return
+		var center: Vector2 = top_pos + Vector2(w / 2.0, h / 2.0)
+		draw_set_transform(center, float(info.get("angle", 0.0)))
+		draw_texture_rect_region(mask, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)),
+				Rect2(Vector2.ZERO, mask.get_size()), fill)
+		draw_set_transform(Vector2.ZERO, 0.0)
+	else:
+		# Router / junction / bridge: mask = their top sprite's footprint.
+		var data2: BlockData = Registry.get_block(block_id)
+		if data2 == null or data2.top_sprite == null:
+			return
+		var mask2: Texture2D = _alpha_mask_for(data2.top_sprite)
+		if mask2 == null:
+			return
+		var is_dir: bool = _is_directional(block_id)
+		var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
+		_draw_block_texture(mask2, top_pos, w, h, rot, fill, is_dir)
+
+
+## Returns a cached white-silhouette mask of `tex` (white where the texture has
+## any opacity, transparent where fully transparent). Used to tint the pipe
+## fluid fill confined to the sprite's footprint. Generated lazily on first use.
+var _alpha_mask_cache: Dictionary = {}
+func _alpha_mask_for(tex: Texture2D) -> Texture2D:
+	if tex == null:
+		return null
+	if _alpha_mask_cache.has(tex):
+		return _alpha_mask_cache[tex]
+	var src: Image = tex.get_image()
+	var result: Texture2D = null
+	if src != null:
+		var ww: int = src.get_width()
+		var hh: int = src.get_height()
+		var m: Image = Image.create(ww, hh, false, Image.FORMAT_RGBA8)
+		var white := Color(1, 1, 1, 1)
+		var clear := Color(0, 0, 0, 0)
+		for y in range(hh):
+			for x in range(ww):
+				m.set_pixel(x, y, white if src.get_pixel(x, y).a > 0.05 else clear)
+		result = ImageTexture.create_from_image(m)
+	_alpha_mask_cache[tex] = result
+	return result
 
 
 ## Like _transport_outputs_to but also checks virtual preview cells.
@@ -6698,14 +6950,10 @@ func _draw_placed_buildings() -> void:
 		# neighbours picks the right CA / CB / JA / JL / JR / straight
 		# art.
 		elif block_id == &"fluid_pipe" and not _pipe_textures.is_empty():
-			if _logistics and _logistics.pipe_contents.has(grid_pos):
-				var pipe: Dictionary = _logistics.pipe_contents[grid_pos]
-				var fluid = Registry.get_fluid(pipe["fluid_id"])
-				if fluid:
-					var fill_pct: float = clampf(pipe["amount"] / fluid.units_per_segment, 0.0, 1.0)
-					var fill_color: Color = Color(fluid.color)
-					fill_color.a = fill_pct * fluid.opacity
-					draw_rect(Rect2(top_pos, Vector2(width, height)), fill_color, true)
+			# Fluid tint behind the pipe sprite, filling only the quadrants the
+			# auto-tile shape occupies (full channel for straights, both arms
+			# for corners, empty quadrant left clear).
+			_draw_pipe_fluid_shape(grid_pos, block_id, top_pos, width, height)
 			var info: Dictionary = _get_belt_draw_info(grid_pos)
 			var texture: Texture2D = info["texture"]
 			var angle: float = info["angle"]
@@ -6730,6 +6978,10 @@ func _draw_placed_buildings() -> void:
 			var top_rect := Rect2(top_pos, Vector2(width, height))
 			var is_dir: bool = _is_directional(block_id)
 			var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
+			# Fluid tint for non-pipe fluid transport (router / junction /
+			# bridge), drawn BEHIND the sprite so it shows through the channel.
+			if data and data.is_transport() and data.transports_fluid:
+				_draw_pipe_fluid_shape(grid_pos, block_id, top_pos, width, height)
 			# Scraper head: spinning drum drawn UNDER whatever this block's
 			# base sprite ends up being, so the base covers the center of
 			# the head and only the rim peeks out — same composition as
@@ -6791,9 +7043,12 @@ func _draw_placed_buildings() -> void:
 				_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Plain layered render: base + top (no faction overlay, no
 			# fabricator unit layer, no refabricator side overlays). Used
-			# by any block that just wants a static two-layer sprite.
+			# by any block that just wants a static two-layer sprite. Blocks
+			# with `liquid_tint` get a fluid-coloured layer between the two
+			# whose alpha tracks how full the tank is (Mindustry DrawLiquidTile).
 			elif data and data.base_sprite and data.top_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
+				_draw_block_liquid_tint(grid_pos, data, top_pos, width, height, rot, is_dir)
 				_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Faction-layered rendering (cores): base sprite + faction overlay
 			elif data and data.base_sprite:

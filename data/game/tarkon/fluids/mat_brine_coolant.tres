@@ -9,3 +9,4 @@ display_name = "Brine Coolant"
 description = "Salt-water coolant cut with graphite. Cheap heat transfer for hot machinery."
 color = Color(0.3, 0.7, 0.62, 1)
 viscosity = 1.1
+units_per_segment = 20.0

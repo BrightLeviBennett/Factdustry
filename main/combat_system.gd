@@ -46,15 +46,30 @@ var _watchtower_sys: Node
 #   "aoe_radius": float    — explosion radius in pixels
 var projectiles: Array[Dictionary] = []
 
-# --- GAS CLOUDS (Fume turret + sulfur vents) ---
+# --- GAS CLOUDS (Fume turret + sulfur vents + Spritz oxygen/hydrogen) ---
 # key -> {center: Vector2, radius: float, target_radius: float, t_last: float,
-#         type: "fume"|"vent"}. A cloud grows toward target_radius and applies
-# the corroding status to enemies inside. Fume turrets key by "fume:x,y" and
-# refresh each frame they have fumes; sulfur vents key by "vent:x,y".
+#         type: "fume"|"vent"|"oxygen"|"hydrogen", ...}. A cloud grows toward
+# target_radius and applies a per-type effect to enemies inside. Fume turrets key
+# by "fume:x,y" and refresh each frame they have fumes; sulfur vents by
+# "vent:x,y"; Spritz oxygen/hydrogen clouds get a unique "oxygen:N"/"hydrogen:N"
+# key (see _feed_gas_cloud) and grow as more is sprayed in, shrinking when not.
+# Oxygen clouds also carry { ignited, fire_t, fire_origin } for the Flarecaster
+# detonation.
 var gas_clouds: Dictionary = {}
 var _cloud_time: float = 0.0
 var _vent_cloud_scan_timer: float = 0.0
 var _cloud_damage_timer: float = 0.0
+var _gas_seq: int = 0  # monotonic id for Spritz-sprayed clouds
+var _particle_overlay: Node = null  # cached ref for block-on-fire particles
+# Spritz gas-cloud tuning (in tiles / seconds).
+const GAS_FEED_PER_SHOT := 0.55     # radius added per shot
+const GAS_MAX_RADIUS := 3.0         # cap on a cloud's radius
+const GAS_MERGE_DIST := 2.5         # a shot within this of a same-kind cloud feeds it
+const GAS_DECAY_RATE := 1.2         # radius/sec a cloud shrinks once it stops being fed
+# Oxygen detonation timing (seconds).
+const OXY_FIRE_SPREAD := 0.5        # fire grows from the entry point to cover the cloud
+const OXY_FIRE_DURATION := 4.0      # full-strength burn
+const OXY_FIRE_FADE := 1.5          # then shrinks to nothing
 
 # --- MUZZLE FLAME (Flarecaster) ---
 # Replicates Mindustry's Fx.shootSmallFlame: each shot spits a short cone of
@@ -74,9 +89,68 @@ const _FLAME_CONE_DEG := 14.0
 # Per-flame-turret fuel meter: anchor -> seconds since last fuel was burned.
 var _flame_fuel_acc: Dictionary = {}
 
+# --- Eclipse continuous cutting beam state ---
+# anchor -> { phase:int, timer:float, start:Vector2, end:Vector2, active:bool }.
+# phase 0 = idle (waiting for a target + ammo), 1 = firing the beam, 2 = cooling
+# down. Each activation pays 2 oxygen + 2 hydrogen, fires for BEAM_FIRE_TIME,
+# then locks out for BEAM_COOLDOWN_TIME. `active` is set true only on frames the
+# beam actually renders + damages, so _draw_beams skips idle/cooldown turrets.
+var beam_states: Dictionary = {}
+const BEAM_FIRE_TIME := 7.0       # seconds of continuous beam per activation
+const BEAM_COOLDOWN_TIME := 9.0   # lockout after a beam burst finishes
+const BEAM_HALF_WIDTH := 6.0      # px — beam thickness for unit collision
+
+# --- Blaster (charge + quarter-circle shockwave) state ---
+# anchor -> { phase:int, charge:float, cooldown:float, draw_charge:float,
+#            muzzle:Vector2 }. phase 0 = charging (winds up while it has a
+#            target), 1 = cooldown. On a full charge it pays 3 hydrogen, emits
+# one shockwave, and locks out for `attack_speed` seconds. `draw_charge`/`muzzle` feed
+# the charge-glow visual.
+var blaster_states: Dictionary = {}
+# Charge (wind-up) and post-shot cooldown are data-driven — see BlockData's
+# `charge_time` and `attack_speed`.
+# Active expanding shockwaves (one per shot). Each: { origin:Vector2, aim:float,
+# radius:float, max_radius:float, speed:float, faction:int, dps:float,
+# hit:Dictionary }. Knockback lands once per unit (tracked in `hit`); contact
+# damage applies each frame the ring front overlaps the unit.
+var shockwaves: Array = []
+const SHOCKWAVE_EXPAND_TIME := 0.6                  # seconds to reach max radius
+const SHOCKWAVE_HALF_ANGLE: float = deg_to_rad(45.0)  # quarter-circle = ±45°
+const SHOCKWAVE_BAND := 12.0                        # px ring thickness for contact
+const SHOCKWAVE_KNOCKBACK_TILES := 2.0              # tiles of shove per unit
+
 # --- TURRET STATE ---
 # Key = Vector2i grid pos of a turret, Value = float (cooldown remaining)
 var turret_cooldowns := {}
+
+# --- Arc (lightning) turret state ---
+# Per-anchor continuous-fire "charge" in [0, 1]. Ramps UP while the turret has
+# a live target (firing) and decays toward 0 when idle. The reload between
+# bolts is lerped from ARC_MAX_RELOAD (slow) at charge 0 to ARC_MIN_RELOAD
+# (fast) at charge 1, so the Arc visibly winds up the longer it runs.
+var arc_charge := {}
+# Active lightning bolt visuals: { "points": PackedVector2Array, "age": float,
+# "lifetime": float, "color": Color }. Drawn on the projectile overlay.
+var _lightning_bolts: Array = []
+const ARC_MAX_RELOAD := 2.0      # seconds between shots when cold (charge 0)
+const ARC_MIN_RELOAD := 0.3      # seconds between shots when fully wound (charge 1)
+const ARC_RAMP_UP_TIME := 15.0   # seconds of continuous fire to reach full speed
+const ARC_RAMP_DOWN_TIME := 8.0  # seconds idle to fully spin back down
+const ARC_SEGMENTS := 12         # vertices in a bolt (≈ Mindustry lightningLength/2)
+const ARC_MAX_CHAIN := 5         # how many enemies one bolt may chain through
+const ARC_BOLT_LIFETIME := 0.12  # how long a bolt stays on screen
+const ARC_BLDG_DAMAGE_MULT := 0.25  # Mindustry's buildingDamageMultiplier
+const ARC_BOLTS_PER_SHOT := 3    # bolts loosed per shot (Mindustry arc fans several)
+const ARC_BOLT_FAN_DEG := 18.0   # angular spread between those bolts
+const ARC_COLOR := Color(0.6, 0.85, 1.0, 1.0)
+
+# --- Spritz turret state ---
+# Per-unit recent-hit marks for the slag + petroleum combo. unit_id ->
+# { &"mat_slag": secs_left, &"mat_petroleum": secs_left }. When a unit has both
+# marks live, the slag's effects are doubled (see _spritz_on_hit).
+var _spritz_marks: Dictionary = {}
+const SPRITZ_MARK_WINDOW := 4.0    # how long a slag/petroleum mark lingers (s)
+const SPRITZ_SLAG_DAMAGE := 16.0   # bonus damage applied when the pairing completes
 
 # --- Structural combat caches (perf) ---
 # The targeting snapshot + turret update used to scan ALL placed_buildings
@@ -365,6 +439,9 @@ func _process(delta: float) -> void:
 	_update_held_units(delta)
 	_update_drone_combat(delta)
 	_update_projectiles(delta)
+	_update_lightning_bolts(delta)
+	_update_shockwaves(delta)
+	_tick_spritz_marks(delta)
 	queue_redraw()
 
 
@@ -644,7 +721,34 @@ func _update_turrets(delta: float) -> void:
 			for i in range(bcd.size()):
 				bcd[i] = float(bcd[i]) - delta * turret_power_eff
 				bff[i] = maxf(float(bff[i]) - delta, 0.0)
+
+		# Special "emitter" weapons (fume / flame / lightning) route through the
+		# shared dispatch — the SAME helper the manual-control loop uses, so a
+		# new emitter type is registered in exactly one place. Run every frame
+		# (even at zero power) so the Arc's charge keeps decaying when idle.
+		# `firing` = a valid in-range opposing target exists and there's power.
+		if data.tags.has("fume_emitter") or data.tags.has("flame_emitter") or data.tags.has("lightning_emitter") or data.tags.has("beam_emitter") or data.tags.has("shockwave_emitter"):
+			var em_world: Vector2 = main.grid_to_world(grid_pos) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+			var em_faction: int = main.get_building_faction(main.building_origins.get(grid_pos, grid_pos))
+			var em_range: float = (data.attack_range + _watchtower_range_bonus(grid_pos)) * main.GRID_SIZE
+			var em_firing: bool = false
+			if turret_power_eff > 0.0:
+				var em_tw = _emitter_target_world(grid_pos, data, em_world)
+				if em_tw != null:
+					em_firing = true
+					var ta: float = (em_tw - em_world).angle()
+					turret_angles[grid_pos] = lerp_angle(float(turret_angles.get(grid_pos, ta)), ta, delta * 8.0)
+					_update_barrel_toe_in(grid_pos, data, em_world, em_tw, delta)
+			try_fire_special_weapon(grid_pos, data, em_world, float(turret_angles.get(grid_pos, 0.0)), em_faction, turret_power_eff, em_range, em_firing, delta)
+			continue
+
 		if turret_power_eff <= 0.0:
+			continue
+
+		# Spritz water firefighting: when loaded with water it prioritises
+		# dousing friendly fires over shooting enemies. If a friendly fire is in
+		# range it handles aiming/spraying here and skips normal targeting.
+		if block_id == &"spritz" and _spritz_firefight(grid_pos, data, delta):
 			continue
 
 		# Use pre-computed target from worker thread
@@ -751,20 +855,8 @@ func _update_turrets(delta: float) -> void:
 		# chassis angle so the heads can converge on a close target.
 		_update_barrel_toe_in(grid_pos, data, turret_world, target_world, delta)
 
-		# Fume emitter: continuously vents a corroding gas cloud in front of
-		# itself while fed sulfur fumes — no discrete projectiles, no cooldown.
-		if data.tags.has("fume_emitter"):
-			_update_fume_emitter(grid_pos, data, turret_world, turret_power_eff, delta)
-			continue
-
-		# Flame emitter (Flarecaster): the flame cone IS the weapon. We only
-		# reach here with a live in-range target, so spray a fire jet out to
-		# full range and burn every enemy caught in the cone. No projectiles.
-		if data.tags.has("flame_emitter"):
-			_update_flame_emitter(grid_pos, data, turret_world,
-				turret_angles[grid_pos], live_range_px, turret_faction,
-				turret_power_eff, delta)
-			continue
+		# (fume / flame / lightning emitters are handled earlier via the shared
+		# try_fire_special_weapon dispatch — they never reach the projectile path.)
 
 		# Multi-barrel: any barrel with a cooldown <= 0 is ready to fire.
 		# Single-barrel falls back to the original scalar cooldown.
@@ -850,6 +942,18 @@ func _update_turrets(delta: float) -> void:
 		# Bullets travel along the aim axis (not fire_pos→target) so a laterally
 		# offset multi-barrel muzzle doesn't veer its rounds back to centre.
 		var base_shot_dir: Vector2 = aim_dir
+		# Lead a MOVING unit target so non-homing bullets connect (port of
+		# Mindustry's Predict.intercept). Skipped for homing/liquid ammo and for
+		# building / held targets (they don't move) and stationary units.
+		if shoot_at_unit and nearest_unit != null \
+				and float(profile["homing"]) <= 0.0 and not bool(profile.get("liquid", false)) \
+				and float(profile["speed"]) > 0.0 and "velocity" in nearest_unit:
+			var tvel: Vector2 = nearest_unit.velocity
+			if tvel.length_squared() > 1.0:
+				var aim_pt: Vector2 = _intercept_point(fire_pos, nearest_unit.position, tvel, float(profile["speed"]))
+				var lead_dir: Vector2 = aim_pt - fire_pos
+				if lead_dir.length_squared() > 0.0001:
+					base_shot_dir = lead_dir.normalized()
 		if data.inaccuracy > 0.0:
 			var miss_deg: float = randf_range(-data.inaccuracy, data.inaccuracy)
 			base_shot_dir = base_shot_dir.rotated(deg_to_rad(miss_deg))
@@ -878,6 +982,586 @@ func _update_turrets(delta: float) -> void:
 		# Muzzle flame cone (Flarecaster) — emitted once per shot along the aim axis.
 		if bool(profile["muzzle_flame"]):
 			spawn_muzzle_flame(fire_pos, base_shot_dir.angle())
+
+
+## Unified dispatch for the special "emitter" weapons (fume / flame / lightning)
+## that don't fire standard projectiles. BOTH the auto-fire loop and the manual-
+## control loop route through this, so registering a new emitter type is a
+## one-line change here instead of two divergent copies (the bug that left the
+## Arc dead under manual control). `firing` = whether the weapon should actively
+## shoot this frame (auto: a valid in-range target exists; manual: the fire
+## button is held). `aim_angle` is where to point, `range_px` the reach. Returns
+## true when `data` is a special weapon (handled); false → caller falls back to
+## the projectile path.
+## Records a Spritz slag/petroleum hit on a unit and, when BOTH fluids have
+## struck it within the mark window, doubles the slag's effects — an extra
+## slag-damage hit plus another Burning stack.
+func _spritz_on_hit(unit, proj) -> void:
+	var aid: StringName = StringName(proj.get("ammo_id", &""))
+	if aid != &"mat_slag" and aid != &"mat_petroleum":
+		return
+	if unit == null or not is_instance_valid(unit):
+		return
+	var uid: int = unit.get_instance_id()
+	var m: Dictionary = _spritz_marks.get(uid, {})
+	m[aid] = SPRITZ_MARK_WINDOW
+	var other: StringName = &"mat_petroleum" if aid == &"mat_slag" else &"mat_slag"
+	if float(m.get(other, 0.0)) > 0.0:
+		# Pairing complete — double the slag's effects on this unit.
+		if unit.has_method("take_damage"):
+			unit.take_damage(SPRITZ_SLAG_DAMAGE)
+		var burn = Registry.get_status_effect(&"burning")
+		if burn != null and unit.has_method("apply_status_effect"):
+			unit.apply_status_effect(burn)
+		# Consume the pairing so it only re-fires on fresh hits of both fluids.
+		m.erase(&"mat_slag")
+		m.erase(&"mat_petroleum")
+	if m.is_empty():
+		_spritz_marks.erase(uid)
+	else:
+		_spritz_marks[uid] = m
+
+
+## Ages out the slag/petroleum combo marks and drops dead units.
+func _tick_spritz_marks(delta: float) -> void:
+	if _spritz_marks.is_empty():
+		return
+	var dead: Array = []
+	for uid in _spritz_marks:
+		var m: Dictionary = _spritz_marks[uid]
+		for k in m.keys():
+			m[k] = float(m[k]) - delta
+			if float(m[k]) <= 0.0:
+				m.erase(k)
+		if m.is_empty():
+			dead.append(uid)
+	for uid in dead:
+		_spritz_marks.erase(uid)
+
+
+## Water-Spritz firefighting. While loaded with water, the turret prioritises
+## dousing fires of its OWN faction (a LUMINA Spritz puts out LUMINA fires and
+## ignores enemy ones; an enemy Spritz does the opposite). Covers both burning
+## buildings (FireSystem) and burning units. Returns true if a friendly fire is
+## in range — the caller then skips normal enemy targeting this frame.
+func _spritz_firefight(grid_pos: Vector2i, data, delta: float) -> bool:
+	if _logistics == null:
+		return false
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	# Only fights fires while it actually has water loaded.
+	var st: Dictionary = _logistics.block_storage.get(anchor, {})
+	var fluids: Dictionary = st.get("fluids", {})
+	if float(fluids.get(&"mat_water", 0.0)) < 1.0:
+		return false
+	var my_faction: int = main.get_building_faction(anchor)
+	var gs: float = float(main.GRID_SIZE)
+	var gsz: Vector2i = data.grid_size
+	var turret_world: Vector2 = main.grid_to_world(anchor) + Vector2(float(gsz.x), float(gsz.y)) * gs * 0.5
+	var range_px: float = (data.attack_range + _watchtower_range_bonus(grid_pos)) * gs
+
+	var best_pos := Vector2.ZERO
+	var best_d := INF
+	var best: Dictionary = {}
+	# Burning buildings of my faction.
+	var fire_sys = _fire_sys_ref()
+	if fire_sys != null and fire_sys.has_method("burning_anchors"):
+		for fa in fire_sys.burning_anchors():
+			if main.get_building_faction(fa) != my_faction:
+				continue
+			var fbd = Registry.get_block(main.placed_buildings.get(fa, &""))
+			var fgsz: Vector2i = fbd.grid_size if fbd else Vector2i.ONE
+			var fpos: Vector2 = main.grid_to_world(fa) + Vector2(float(fgsz.x), float(fgsz.y)) * gs * 0.5
+			var d: float = turret_world.distance_to(fpos)
+			if d <= range_px and d < best_d:
+				best_d = d
+				best_pos = fpos
+				best = {"type": "building", "anchor": fa}
+	# Burning units of my faction.
+	var um = _unit_mgr_ref()
+	if um != null:
+		var near: Array = um.get_player_units_in_range(turret_world, range_px) if my_faction == main.Faction.LUMINA else um.get_enemies_in_range(turret_world, range_px)
+		for u in near:
+			if u == null or not is_instance_valid(u) or u.is_dead:
+				continue
+			if not (u.has_method("is_burning") and u.is_burning()):
+				continue
+			var d2: float = turret_world.distance_to(u.position)
+			if d2 < best_d:
+				best_d = d2
+				best_pos = u.position
+				best = {"type": "unit", "unit": u}
+
+	if best.is_empty():
+		return false
+
+	# Aim at the fire.
+	var cur: float = float(turret_angles.get(grid_pos, 0.0))
+	var ta: float = (best_pos - turret_world).angle()
+	turret_angles[grid_pos] = lerp_angle(cur, ta, delta * 8.0)
+
+	# Spray when the cooldown is ready and water is available.
+	if float(turret_cooldowns.get(grid_pos, 0.0)) <= 0.0:
+		var profile: Dictionary = read_ammo_profile(data, _logistics, anchor)
+		if profile["found"] and StringName(profile.get("ammo_id", &"")) == &"mat_water":
+			turret_cooldowns[grid_pos] = data.attack_speed * float(profile["reload_mult"])
+			var aim_dir := Vector2.from_angle(turret_angles[grid_pos])
+			var barrel_len: float = gs * 0.4
+			if data.turret_head_sprite:
+				var hts: Vector2 = data.turret_head_sprite.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+				barrel_len = maxf(hts.y - 14.0 * main.SPRITE_SCALE_FACTOR, 0.0)
+			# Visual douse spray with ZERO damage — it never harms the friendly
+			# building / unit it's putting out.
+			emit_fire_pellets(turret_world + aim_dir * barrel_len, turret_angles[grid_pos], best_d, range_px, profile, null, "none", 0.0, my_faction)
+			# Put the fire out.
+			if best.get("type") == "building":
+				if fire_sys != null:
+					fire_sys.extinguish_building(best["anchor"])
+			else:
+				var u2 = best.get("unit")
+				if u2 != null and is_instance_valid(u2) and u2.has_method("douse"):
+					u2.douse()
+	return true
+
+
+func try_fire_special_weapon(grid_pos: Vector2i, data, turret_world: Vector2, aim_angle: float, faction: int, power_eff: float, range_px: float, firing: bool, delta: float) -> bool:
+	if data.tags.has("fume_emitter"):
+		if firing:
+			_update_fume_emitter(grid_pos, data, turret_world, power_eff, delta)
+		return true
+	if data.tags.has("flame_emitter"):
+		if firing:
+			_update_flame_emitter(grid_pos, data, turret_world, aim_angle, range_px, faction, power_eff, delta)
+		return true
+	if data.tags.has("lightning_emitter"):
+		_tick_arc(grid_pos, data, turret_world, aim_angle, faction, range_px, firing, delta)
+		return true
+	if data.tags.has("beam_emitter"):
+		_update_beam_emitter(grid_pos, data, turret_world, aim_angle, range_px, faction, power_eff, firing, delta)
+		return true
+	if data.tags.has("shockwave_emitter"):
+		_update_blaster(grid_pos, data, turret_world, aim_angle, range_px, faction, power_eff, firing, delta)
+		return true
+	return false
+
+
+## Lightweight target resolution for emitter weapons: returns the live world
+## position of the turret's current opposing target (from the worker snapshot),
+## or null if none is valid / in range. The worker already filtered by faction,
+## so this only re-checks liveness + range — enough to aim, without duplicating
+## the projectile path's full faction-guard gauntlet.
+## Port of Mindustry's Predict.intercept: the point a shooter at `src` should aim
+## at to hit a target at `dst` moving at `dst_vel` (px/sec) with a projectile of
+## speed `v` (px/sec). Solves a*t² + b*t + c = 0 for the smallest positive time
+## of flight, then returns the target's position at that time. Falls back to
+## `dst` (no lead) when there's no real positive solution (target outrunning the
+## bullet, etc.).
+func _intercept_point(src: Vector2, dst: Vector2, dst_vel: Vector2, v: float) -> Vector2:
+	if v <= 0.0:
+		return dst
+	var tx: float = dst.x - src.x
+	var ty: float = dst.y - src.y
+	var a: float = dst_vel.x * dst_vel.x + dst_vel.y * dst_vel.y - v * v
+	var b: float = 2.0 * (dst_vel.x * tx + dst_vel.y * ty)
+	var c: float = tx * tx + ty * ty
+	var t: float = -1.0
+	if absf(a) < 0.0001:
+		if absf(b) > 0.0001:
+			t = -c / b
+	else:
+		var disc: float = b * b - 4.0 * a * c
+		if disc >= 0.0:
+			var sq: float = sqrt(disc)
+			var t1: float = (-b - sq) / (2.0 * a)
+			var t2: float = (-b + sq) / (2.0 * a)
+			if t1 > 0.0 and t2 > 0.0:
+				t = minf(t1, t2)
+			elif t1 > 0.0:
+				t = t1
+			elif t2 > 0.0:
+				t = t2
+	if t <= 0.0:
+		return dst
+	return dst + dst_vel * t
+
+
+func _emitter_target_world(grid_pos: Vector2i, data, turret_world: Vector2):
+	if not _turret_targets.has(grid_pos):
+		return null
+	var ti: Dictionary = _turret_targets[grid_pos]
+	var ttype: String = String(ti.get("target_type", ""))
+	var tw = ti.get("target_pos", null)
+	if ttype == "unit":
+		var obj = instance_from_id(int(ti.get("target_id", 0)))
+		if obj == null or not is_instance_valid(obj) or obj.is_dead:
+			return null
+		tw = obj.position
+	elif ttype == "building":
+		# `units_only` emitters (the Blaster) ignore building targets entirely —
+		# they only ever aim at / fire on units.
+		if data.tags.has("units_only"):
+			return null
+		var b: Vector2i = ti.get("target_bldg", Vector2i(-1, -1))
+		if not main.placed_buildings.has(b):
+			return null
+		tw = main.grid_to_world(b) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+	if tw == null:
+		return null
+	var rng: float = (data.attack_range + _watchtower_range_bonus(grid_pos)) * main.GRID_SIZE
+	if turret_world.distance_to(tw) > rng:
+		return null
+	return tw
+
+
+## Arc per-frame tick: ramps the continuous-fire charge up while firing / down
+## while idle, then looses a burst of chaining bolts once the charge-scaled
+## reload elapses. The cooldown is decremented by the caller (auto loop / manual
+## loop each tick it), so this only reads + resets it.
+func _tick_arc(grid_pos: Vector2i, data, turret_world: Vector2, aim_angle: float, faction: int, range_px: float, firing: bool, delta: float) -> void:
+	var charge: float = float(arc_charge.get(grid_pos, 0.0))
+	if firing:
+		charge = minf(charge + delta / ARC_RAMP_UP_TIME, 1.0)
+	else:
+		charge = maxf(charge - delta / ARC_RAMP_DOWN_TIME, 0.0)
+	arc_charge[grid_pos] = charge
+
+	if not firing or float(turret_cooldowns.get(grid_pos, 0.0)) > 0.0:
+		return
+	# Powered ammo gate — the Arc's ammo draws electricity, so this only
+	# succeeds while the network is supplying power. Damage from the profile.
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var profile: Dictionary = read_ammo_profile(data, _logistics, anchor)
+	if not profile["found"]:
+		return
+	turret_cooldowns[grid_pos] = lerpf(ARC_MAX_RELOAD, ARC_MIN_RELOAD, charge)
+
+	if turret_barrel_recoil.has(grid_pos):
+		var brc: Array = turret_barrel_recoil[grid_pos]
+		if brc.size() > 0:
+			brc[0] = 1.0
+
+	var aim_dir := Vector2.from_angle(aim_angle)
+	var barrel_length: float = main.GRID_SIZE * 0.4
+	if data.turret_head_sprite:
+		var head_tex_size: Vector2 = data.turret_head_sprite.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+		barrel_length = maxf(head_tex_size.y - 14.0 * main.SPRITE_SCALE_FACTOR, 0.0)
+	var muzzle: Vector2 = turret_world + aim_dir * barrel_length
+	# Loose several bolts per shot, fanned around the aim (Mindustry arc look).
+	var dmg: float = float(profile["damage"])
+	for i in range(ARC_BOLTS_PER_SHOT):
+		var fan: float = 0.0
+		if ARC_BOLTS_PER_SHOT > 1:
+			fan = deg_to_rad((float(i) - float(ARC_BOLTS_PER_SHOT - 1) * 0.5) * ARC_BOLT_FAN_DEG)
+		_fire_arc_lightning(muzzle, aim_angle + fan, dmg, range_px, faction)
+
+
+## Spawns one chaining lightning bolt — a port of Mindustry's Lightning.create
+## (entities/Lightning.java). Steps along ARC_SEGMENTS vertices but never strays
+## past `range_px` from the muzzle (the bolt only reaches the turret's range):
+## at each vertex it damages nearby ground enemies (flying units are immune —
+## collidesAir=false) and any opposing building on the cell, then chains to the
+## furthest un-hit enemy within reach (and within range) or wanders forward with
+## slight random deviation. Builds the jagged polyline used for the visual.
+func _fire_arc_lightning(start: Vector2, angle: float, dmg: float, range_px: float, faction: int) -> void:
+	var unit_mgr = _unit_mgr_ref()
+	var hit_range: float = float(main.GRID_SIZE) * 1.2
+	var step: float = hit_range * 0.65
+	var max_reach: float = maxf(range_px, hit_range)  # bolt never extends past the turret's range
+	var enemy_faction: int = main.Faction.FEROX if faction == main.Faction.LUMINA else main.Faction.LUMINA
+	var x: float = start.x
+	var y: float = start.y
+	var rot: float = angle
+	var points := PackedVector2Array()
+	points.append(start)
+	var hit_units := {}
+	var hit_bldgs := {}
+	var chain_count: int = 0
+
+	for _i in range(ARC_SEGMENTS):
+		var p := Vector2(x, y)
+		# Stop once the bolt has reached the edge of the turret's range.
+		if start.distance_to(p) >= max_reach:
+			break
+		# Damage ground enemies clustered at this vertex.
+		var near: Array = []
+		if unit_mgr:
+			near = unit_mgr.get_player_units_in_range(p, hit_range * 0.5) if faction == main.Faction.FEROX else unit_mgr.get_enemies_in_range(p, hit_range * 0.5)
+		for u in near:
+			if not is_instance_valid(u) or u.is_dead:
+				continue
+			var uid: int = u.get_instance_id()
+			if hit_units.has(uid):
+				continue
+			var ml: int = u.data.movement_layer if ("data" in u and u.data) else 0
+			if ml == 3:  # flying — immune (collidesAir = false)
+				continue
+			hit_units[uid] = true
+			u.take_damage(dmg)
+		# Damage an opposing building sitting on this vertex (reduced, ×0.25).
+		var g: Vector2i = main.world_to_grid(p)
+		if main.placed_buildings.has(g):
+			var anc: Vector2i = main.building_origins.get(g, g)
+			if not hit_bldgs.has(anc) and main.get_building_faction(anc) == enemy_faction:
+				hit_bldgs[anc] = true
+				main.damage_building(anc, dmg * ARC_BLDG_DAMAGE_MULT)
+		# Pick the next vertex: chain to the furthest un-hit enemy within reach
+		# (and within range), else wander forward with a little random deviation.
+		var chain_to: Node2D = null
+		if chain_count < ARC_MAX_CHAIN and unit_mgr:
+			var cand: Array = unit_mgr.get_player_units_in_range(p, hit_range) if faction == main.Faction.FEROX else unit_mgr.get_enemies_in_range(p, hit_range)
+			var best_d: float = -1.0
+			for u in cand:
+				if not is_instance_valid(u) or u.is_dead:
+					continue
+				if hit_units.has(u.get_instance_id()):
+					continue
+				var ml2: int = u.data.movement_layer if ("data" in u and u.data) else 0
+				if ml2 == 3:
+					continue
+				if start.distance_to(u.position) > max_reach:
+					continue
+				var d: float = p.distance_to(u.position)
+				if d > best_d:
+					best_d = d
+					chain_to = u
+		if chain_to != null:
+			chain_count += 1
+			x = chain_to.position.x + randf_range(-3.0, 3.0)
+			y = chain_to.position.y + randf_range(-3.0, 3.0)
+		else:
+			rot += deg_to_rad(randf_range(-20.0, 20.0))
+			x += cos(rot) * step + randf_range(-3.0, 3.0)
+			y += sin(rot) * step + randf_range(-3.0, 3.0)
+		# Clamp the new vertex onto the range circle so the bolt can't overshoot.
+		var npos := Vector2(x, y)
+		if start.distance_to(npos) > max_reach:
+			npos = start + (npos - start).normalized() * max_reach
+			x = npos.x
+			y = npos.y
+		points.append(npos)
+
+	_lightning_bolts.append({
+		"points": points,
+		"age": 0.0,
+		"lifetime": ARC_BOLT_LIFETIME,
+		"color": ARC_COLOR,
+	})
+
+
+## Ages out finished lightning bolts. Visual only — damage was already applied
+## at spawn time in _fire_arc_lightning.
+func _update_lightning_bolts(delta: float) -> void:
+	if _lightning_bolts.is_empty():
+		return
+	var keep: Array = []
+	for bolt in _lightning_bolts:
+		bolt["age"] = float(bolt["age"]) + delta
+		if float(bolt["age"]) < float(bolt["lifetime"]):
+			keep.append(bolt)
+	_lightning_bolts = keep
+
+
+## Returns the first AmmoType resource configured on `data`, or null.
+func _first_ammo(data) -> AmmoType:
+	for a in data.ammo_types:
+		if a is AmmoType:
+			return a
+	return null
+
+
+## Eclipse beam tick. Drives a 3-phase per-anchor state machine: idle →
+## (pay 2 oxygen + 2 hydrogen, on a live target) → firing the beam for
+## BEAM_FIRE_TIME → cooldown for BEAM_COOLDOWN_TIME → idle. While firing it
+## carves a straight beam from the muzzle out to range, damaging the first
+## opposing building it meets (and stopping there) plus every opposing unit the
+## beam line passes through. Damage is dps × delta so it's frame-rate stable.
+## Brownout (power_eff 0) pauses the burst — the timer only advances with power.
+func _update_beam_emitter(grid_pos: Vector2i, data, turret_world: Vector2, aim: float, range_px: float, faction: int, power_eff: float, firing: bool, delta: float) -> void:
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var st: Dictionary = beam_states.get(anchor, {
+		"phase": 0, "timer": 0.0, "start": Vector2.ZERO, "end": Vector2.ZERO, "active": false,
+	})
+	var phase: int = int(st["phase"])
+	var timer: float = float(st["timer"])
+	st["active"] = false
+	match phase:
+		0:  # idle — kick off a new burst when a target is in range and ammo is paid
+			if firing and power_eff > 0.0:
+				var ammo: AmmoType = _first_ammo(data)
+				if ammo != null and _consume_ammo_with_extras(_logistics, anchor, ammo):
+					phase = 1
+					timer = BEAM_FIRE_TIME
+		1:  # firing — beam runs the full duration regardless of target presence
+			timer -= delta * maxf(power_eff, 0.0)
+			if power_eff > 0.0:
+				var ammo2: AmmoType = _first_ammo(data)
+				var dps: float = ammo2.damage if ammo2 != null else 0.0
+				var muzzle: Vector2 = turret_world + Vector2.from_angle(aim) * (float(main.GRID_SIZE) * 0.5)
+				st["start"] = muzzle
+				st["end"] = _beam_hit(muzzle, aim, range_px, faction, dps * delta)
+				st["active"] = true
+			if timer <= 0.0:
+				phase = 2
+				timer = BEAM_COOLDOWN_TIME
+		2:  # cooldown — locked out, ticks down even with no target
+			timer -= delta
+			if timer <= 0.0:
+				phase = 0
+				timer = 0.0
+	st["phase"] = phase
+	st["timer"] = timer
+	beam_states[anchor] = st
+
+
+## Applies one frame of beam damage from `muzzle` along `aim` out to the full
+## `range_px` (the beam never stops short — it carves all the way out) and returns
+## the range-end point. `dmg` is the per-frame damage (dps × delta). Damages every
+## opposing building under the beam line plus every opposing unit it overlaps.
+func _beam_hit(muzzle: Vector2, aim: float, range_px: float, faction: int, dmg: float) -> Vector2:
+	var dir := Vector2.from_angle(aim)
+	var gs: float = float(main.GRID_SIZE)
+	var enemy_faction: int = main.Faction.FEROX if faction == main.Faction.LUMINA else main.Faction.LUMINA
+	var endp: Vector2 = muzzle + dir * range_px
+	# Walk the full beam and damage EVERY opposing building it passes over (the
+	# beam punches straight through to max range — blocks just take damage).
+	var dist: float = gs * 0.5
+	var seen: Dictionary = {}
+	while dist <= range_px:
+		var p: Vector2 = muzzle + dir * dist
+		var cell: Vector2i = main.world_to_grid(p)
+		if main.placed_buildings.has(cell):
+			var anc: Vector2i = main.building_origins.get(cell, cell)
+			if not seen.has(anc) and main.get_building_faction(anc) == enemy_faction:
+				seen[anc] = true
+				main.damage_building(anc, dmg)
+		dist += gs * 0.5
+	# Damage every opposing unit whose body overlaps the muzzle→endp segment.
+	var unit_mgr := _unit_mgr_ref()
+	if unit_mgr != null:
+		var src_team: int = UnitData.Team.PLAYER if faction == main.Faction.LUMINA else UnitData.Team.ENEMY
+		for lst in [unit_mgr.enemies, unit_mgr.player_units]:
+			for u in lst:
+				if not is_instance_valid(u) or u.is_dead:
+					continue
+				if "team" in u and u.team == src_team:
+					continue
+				var cp: Vector2 = Geometry2D.get_closest_point_to_segment(u.position, muzzle, endp)
+				if u.position.distance_to(cp) <= BEAM_HALF_WIDTH + u.unit_size:
+					u.take_damage(dmg)
+	return endp
+
+
+## Blaster tick. A 2-phase per-anchor state machine: charging (winds up while it
+## has a live target + power) → on a full charge, pays 3 hydrogen and emits one
+## quarter-circle shockwave → cooldown (`attack_speed`) → charging. Charge
+## holds (doesn't decay) when the target is briefly lost, and parks at full if
+## the turret is charged but can't afford ammo, so it looses the instant fuel
+## arrives. The actual sweep + knockback live in _update_shockwaves.
+func _update_blaster(grid_pos: Vector2i, data, turret_world: Vector2, aim: float, range_px: float, faction: int, power_eff: float, firing: bool, delta: float) -> void:
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var st: Dictionary = blaster_states.get(anchor, {
+		"phase": 0, "charge": 0.0, "cooldown": 0.0, "draw_charge": 0.0, "muzzle": Vector2.ZERO,
+	})
+	var phase: int = int(st["phase"])
+	var charge: float = float(st["charge"])
+	var cooldown: float = float(st["cooldown"])
+	# Timing is data-driven: `charge_time` = wind-up, `attack_speed` = the
+	# post-shot cooldown. Both tunable from the block's .tres.
+	var charge_time: float = maxf(data.charge_time, 0.0)
+	var cd_time: float = maxf(data.attack_speed, 0.0)
+	# Use the head's ACTUAL drawn angle (the per-barrel toe-in angle the head
+	# sprite is rotated to), not the chassis aim — otherwise the glow/wave lag
+	# the head while it's rotating onto a target.
+	var head_angle: float = aim
+	var bangs: Array = turret_barrel_angles.get(grid_pos, [])
+	if bangs.size() > 0:
+		head_angle = float(bangs[0])
+	# Charge glow sits at the muzzle TIP — derive the barrel length from the head
+	# sprite the same way the projectile path does, so it's at the end of the
+	# head rather than the turret centre.
+	var barrel_length: float = float(main.GRID_SIZE) * 0.4
+	if data.turret_head_sprite:
+		var head_tex_size: Vector2 = data.turret_head_sprite.get_size() * 0.3 * main.SPRITE_SCALE_FACTOR
+		barrel_length = maxf(head_tex_size.y - 14.0 * main.SPRITE_SCALE_FACTOR, 0.0)
+	var muzzle: Vector2 = turret_world + Vector2.from_angle(head_angle) * barrel_length
+	match phase:
+		0:  # charging — only winds up with a live target and power
+			if firing and power_eff > 0.0:
+				charge = minf(charge + delta * power_eff, charge_time)
+				if charge >= charge_time:
+					var ammo: AmmoType = _first_ammo(data)
+					if ammo != null and _consume_ammo_with_extras(_logistics, anchor, ammo):
+						var dps: float = ammo.damage
+						_spawn_shockwave(muzzle, head_angle, range_px, faction, dps)
+						charge = 0.0
+						cooldown = cd_time
+						phase = 1
+		1:  # cooldown — locked out regardless of target
+			cooldown -= delta
+			if cooldown <= 0.0:
+				cooldown = 0.0
+				phase = 0
+	st["phase"] = phase
+	st["charge"] = charge
+	st["cooldown"] = cooldown
+	st["draw_charge"] = (charge / charge_time if charge_time > 0.0 else 0.0) if phase == 0 else 0.0
+	st["muzzle"] = muzzle
+	blaster_states[anchor] = st
+
+
+## Spawns one expanding quarter-circle shockwave from `origin`, facing `aim`, that
+## sweeps out to `range_px`. `dps` is its contact damage per second.
+func _spawn_shockwave(origin: Vector2, aim: float, range_px: float, faction: int, dps: float) -> void:
+	shockwaves.append({
+		"origin": origin,
+		"aim": aim,
+		"radius": 0.0,
+		"max_radius": range_px,
+		"speed": range_px / maxf(SHOCKWAVE_EXPAND_TIME, 0.0001),
+		"faction": faction,
+		"dps": dps,
+		"hit": {},
+	})
+
+
+## Expands every active shockwave, applies contact damage + a one-time radial
+## knockback to opposing units the ring front sweeps over (within its ±45° arc),
+## and culls waves that have reached full radius. Knockback reuses _apply_knockback
+## from the wave origin so units are shoved straight outward.
+func _update_shockwaves(delta: float) -> void:
+	if shockwaves.is_empty():
+		return
+	var unit_mgr := _unit_mgr_ref()
+	var knock: float = float(main.GRID_SIZE) * SHOCKWAVE_KNOCKBACK_TILES
+	for i in range(shockwaves.size() - 1, -1, -1):
+		var sw: Dictionary = shockwaves[i]
+		sw["radius"] = float(sw["radius"]) + float(sw["speed"]) * delta
+		var radius: float = float(sw["radius"])
+		if unit_mgr != null:
+			var origin: Vector2 = sw["origin"]
+			var aim: float = float(sw["aim"])
+			var src_team: int = UnitData.Team.PLAYER if int(sw["faction"]) == main.Faction.LUMINA else UnitData.Team.ENEMY
+			var hit: Dictionary = sw["hit"]
+			for lst in [unit_mgr.enemies, unit_mgr.player_units]:
+				for u in lst:
+					if not is_instance_valid(u) or u.is_dead:
+						continue
+					if "team" in u and u.team == src_team:
+						continue
+					var to: Vector2 = u.position - origin
+					var d: float = to.length()
+					# Inside the quarter-circle arc?
+					if d > 1.0 and absf(wrapf(to.angle() - aim, -PI, PI)) > SHOCKWAVE_HALF_ANGLE:
+						continue
+					# In contact when the expanding ring front overlaps the body.
+					if absf(d - radius) > SHOCKWAVE_BAND + u.unit_size:
+						continue
+					u.take_damage(float(sw["dps"]) * delta)
+					var uid: int = u.get_instance_id()
+					if not hit.has(uid):
+						hit[uid] = true
+						_apply_knockback(u, origin, knock)
+		if radius >= float(sw["max_radius"]):
+			shockwaves.remove_at(i)
 
 
 ## Springs every barrel angle back toward the chassis angle. Called each
@@ -1276,9 +1960,11 @@ func _spawn_projectile(
 		"homing": float(extras.get("homing", 0.0)),
 		"knockback": float(extras.get("knockback", 0.0)),
 		"trail_color": extras.get("trail_color", color),
+		"projectile_sprite": extras.get("projectile_sprite", null),
 		"collides_air": bool(extras.get("collides_air", true)),
 		"collides_ground": bool(extras.get("collides_ground", true)),
 		"status": extras.get("status", null),
+		"ammo_id": StringName(extras.get("ammo_id", &"")),
 		"splash_mult": float(extras.get("splash_mult", 1.0)),
 		"shot_id": int(extras.get("shot_id", 0)),
 		# Fragmentation: on impact spawn N child orbs (Detonater). Frags
@@ -1366,22 +2052,30 @@ func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
 		"drag": 0.0,
 		"velocity_rnd": 0.0,
 		"muzzle_flame": false,
+		"ammo_id": &"",
 	}
 	# A turret with NO ammo_types configured cannot fire (Mindustry-style: every
 	# turret must be loaded).
-	if bdata.ammo_types.is_empty() or log_ref == null:
+	if bdata.ammo_types.is_empty():
 		return p
 	for ammo in bdata.ammo_types:
 		if ammo == null or not (ammo is AmmoType):
 			continue
 		var ammo_data: AmmoType = ammo as AmmoType
 		var amt: int = maxi(ammo_data.amount_per_shot, 1)
-		if not _consume_turret_ammo(log_ref, anchor, ammo_data.item_id, amt):
+		# Powered ammo (the Arc) draws electricity instead of an item: it's
+		# "loaded" whenever the turret's network is supplying power.
+		if ammo_data.is_powered():
+			if not _consume_power_ammo(anchor, ammo_data.power_per_shot):
+				continue
+		elif not _consume_ammo_with_extras(log_ref, anchor, ammo_data):
 			continue
 		p["damage"] = ammo_data.damage
 		p["reload_mult"] = ammo_data.reload_multiplier
 		p["color"] = ammo_data.projectile_color
+		p["projectile_sprite"] = ammo_data.projectile_sprite
 		p["status"] = ammo_data.status_effect
+		p["ammo_id"] = ammo_data.item_id
 		p["speed"] = ammo_data.projectile_speed
 		p["lifetime"] = ammo_data.projectile_lifetime
 		p["radius"] = ammo_data.projectile_radius
@@ -1477,9 +2171,11 @@ func emit_fire_pellets(fire_pos: Vector2, aim_angle: float, shot_distance: float
 				"homing": float(profile["homing"]),
 				"knockback": float(profile["knockback"]),
 				"trail_color": profile["trail_color"],
+				"projectile_sprite": profile.get("projectile_sprite", null),
 				"collides_air": bool(profile["collides_air"]),
 				"collides_ground": bool(profile["collides_ground"]),
 				"status": profile["status"],
+				"ammo_id": profile.get("ammo_id", &""),
 				"splash_mult": float(profile["splash_mult"]),
 				"max_range": max_range,
 				"shot_id": salvo_shot_id,
@@ -1639,6 +2335,7 @@ func _update_projectiles(delta: float) -> void:
 					hit_unit.take_damage(_shot_damage(proj, hit_unit.get_instance_id(), proj["damage"]))
 					_apply_knockback(hit_unit, proj["pos"], float(proj.get("knockback", 0.0)))
 					_apply_status(hit_unit, proj.get("status"))
+					_spritz_on_hit(hit_unit, proj)
 					# Burst on a unit struck mid-flight (Detonater) — spawn from
 					# the shot's own position so the orbs fan out from where the
 					# shell was, letting the rear-facing ones fly clear instead
@@ -1673,6 +2370,13 @@ func _update_projectiles(delta: float) -> void:
 				"radius": float(dead_proj.get("radius", 6.0)) * 1.7,
 				"age": 0.0, "life": 0.55,
 			})
+		# Spritz oxygen/hydrogen shots deposit into a growing gas cloud where they
+		# land (the cloud, not the bullet, does the work).
+		var dead_ammo: StringName = StringName(dead_proj.get("ammo_id", &""))
+		if dead_ammo == &"mat_oxygen":
+			_feed_gas_cloud(dead_proj["pos"], "oxygen")
+		elif dead_ammo == &"mat_hydrogen":
+			_feed_gas_cloud(dead_proj["pos"], "hydrogen")
 		_release_shot_id(int(dead_proj.get("shot_id", 0)))
 		projectiles.remove_at(to_remove[i])
 
@@ -1769,6 +2473,7 @@ func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 					unit.take_damage(proj["damage"] * splash_mult)
 					_apply_knockback(unit, proj["target_pos"], knockback)
 					_apply_status(unit, status)
+					_spritz_on_hit(unit, proj)
 			else:
 				# Single target
 				var enemy = proj["target_ref"]
@@ -1776,6 +2481,7 @@ func _on_projectile_hit(proj: Dictionary, unit_mgr: Node2D) -> void:
 					enemy.take_damage(_shot_damage(proj, enemy.get_instance_id(), proj["damage"]))
 					_apply_knockback(enemy, proj["pos"], knockback)
 					_apply_status(enemy, status)
+					_spritz_on_hit(enemy, proj)
 
 		"building":
 			# Splash on buildings: also damage buildings inside the radius
@@ -2294,6 +3000,52 @@ func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, sourc
 ## block_storage items via logistics; fluids pull from the block_storage fluids
 ## bucket (fed by an adjacent pipe — see logistics _try_accept_booster_fluid).
 ## Returns true only if the full amount was available and removed.
+## "Consumes" a powered ammo's per-shot cost. The Arc's per-shot energy is
+## already drawn continuously from the grid via `electrical_power_use`, so this
+## doesn't double-drain — it just reports whether the turret's network is
+## currently supplying power (efficiency > 0). No PowerSystem (e.g. map editor)
+## → treated as available so the weapon still demos.
+func _consume_power_ammo(anchor: Vector2i, _power_per_shot: float) -> bool:
+	var power_sys = get_node_or_null("/root/Main/PowerSystem")
+	if power_sys == null:
+		return true
+	return power_sys.get_electrical_efficiency(anchor) > 0.0
+
+
+## Peek: does the block at `anchor` currently hold `amount` of `item_id`
+## (item or fluid)? Read-only — used to check multi-resource affordability
+## before committing any consumption.
+func _has_turret_ammo(log_ref: Node2D, anchor: Vector2i, item_id: StringName, amount: float) -> bool:
+	if log_ref == null:
+		return false
+	if Registry.get_fluid(item_id) != null:
+		var st: Dictionary = log_ref.block_storage.get(anchor, {})
+		return float(st.get("fluids", {}).get(item_id, 0.0)) >= amount
+	if not log_ref.has_method("get_stored_item_count"):
+		return false
+	return float(log_ref.get_stored_item_count(anchor, item_id)) >= amount
+
+
+## Consumes one shot's primary ammo PLUS any `extra_costs` for `ammo_data`,
+## but only if ALL of them are affordable (all-or-nothing). Returns false
+## without consuming anything if the block can't pay the full cost.
+func _consume_ammo_with_extras(log_ref: Node2D, anchor: Vector2i, ammo_data: AmmoType) -> bool:
+	if log_ref == null:
+		return false
+	var amt: int = maxi(ammo_data.amount_per_shot, 1)
+	# Affordability pass (no mutation yet).
+	if not _has_turret_ammo(log_ref, anchor, ammo_data.item_id, float(amt)):
+		return false
+	for k in ammo_data.extra_costs:
+		if not _has_turret_ammo(log_ref, anchor, StringName(k), float(ammo_data.extra_costs[k])):
+			return false
+	# Commit.
+	_consume_turret_ammo(log_ref, anchor, ammo_data.item_id, amt)
+	for k in ammo_data.extra_costs:
+		_consume_turret_ammo(log_ref, anchor, StringName(k), int(ammo_data.extra_costs[k]))
+	return true
+
+
 func _consume_turret_ammo(log_ref: Node2D, anchor: Vector2i, item_id: StringName, amount: int) -> bool:
 	if Registry.get_fluid(item_id) != null:
 		var st: Dictionary = log_ref.block_storage.get(anchor, {})
@@ -2367,6 +3119,86 @@ func _assert_cloud(key: String, center: Vector2, target_radius: float, kind: Str
 		}
 
 
+## Deposits one Spritz oxygen/hydrogen shot into a gas cloud at `pos`. Merges
+## into the nearest same-kind cloud within GAS_MERGE_DIST (growing it toward the
+## cap and refreshing its feed time), otherwise spawns a new one. Clouds shrink
+## on their own once they stop being fed (see _update_gas_clouds).
+func _feed_gas_cloud(pos: Vector2, kind: String) -> void:
+	var gs: float = float(main.GRID_SIZE)
+	var merge_px: float = GAS_MERGE_DIST * gs
+	var feed_px: float = GAS_FEED_PER_SHOT * gs
+	var max_px: float = GAS_MAX_RADIUS * gs
+	var best_key: String = ""
+	var best_d: float = merge_px
+	for key in gas_clouds:
+		var c: Dictionary = gas_clouds[key]
+		if String(c["type"]) != kind:
+			continue
+		# A burning oxygen cloud CAN still be fed — more oxygen keeps it big and
+		# lit (the fire is held on its plateau while supply continues).
+		var d: float = pos.distance_to(c["center"])
+		if d < best_d:
+			best_d = d
+			best_key = key
+	if best_key != "":
+		var c: Dictionary = gas_clouds[best_key]
+		c["target_radius"] = minf(float(c["target_radius"]) + feed_px, max_px)
+		c["t_last"] = _cloud_time
+		# Drift the centre slightly toward the new impact so the cloud follows
+		# where the player is spraying.
+		c["center"] = (c["center"] as Vector2).lerp(pos, 0.15)
+	else:
+		_gas_seq += 1
+		gas_clouds["%s:%d" % [kind, _gas_seq]] = {
+			"center": pos, "radius": 0.0, "target_radius": minf(feed_px, max_px),
+			"t_last": _cloud_time, "type": kind,
+			"ignited": false, "fire_t": 0.0, "fire_origin": pos,
+		}
+
+
+## Current fire radius (in px) of an ignited oxygen cloud, 0 if not burning. The
+## fire grows from the entry point to cover the cloud over OXY_FIRE_SPREAD, holds
+## for OXY_FIRE_DURATION, then fades over OXY_FIRE_FADE.
+func _oxy_fire_radius(c: Dictionary) -> float:
+	if not bool(c.get("ignited", false)):
+		return 0.0
+	var ft: float = float(c.get("fire_t", 0.0))
+	var full: float = float(c["radius"])
+	if ft < OXY_FIRE_SPREAD:
+		return full * (ft / OXY_FIRE_SPREAD)
+	if ft < OXY_FIRE_SPREAD + OXY_FIRE_DURATION:
+		return full
+	var fade: float = (ft - OXY_FIRE_SPREAD - OXY_FIRE_DURATION) / OXY_FIRE_FADE
+	return full * maxf(0.0, 1.0 - fade)
+
+
+## Emits the standard block-on-fire particles across a burning oxygen cloud's
+## fire area, so it reads as the exact same flame overlay buildings use. Density
+## scales with the fire radius; throttled by a per-cloud emit accumulator.
+func _emit_cloud_fire(c: Dictionary, delta: float) -> void:
+	if _particle_overlay == null:
+		_particle_overlay = get_node_or_null("/root/Main/ParticleOverlay")
+	var po: Node = _particle_overlay
+	if po == null or not po.has_method("spawn_fire"):
+		return
+	var fr: float = _oxy_fire_radius(c)
+	if fr < 4.0:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	const EMIT_INTERVAL := 0.06
+	c["fire_emit_acc"] = float(c.get("fire_emit_acc", 0.0)) + delta
+	while float(c["fire_emit_acc"]) >= EMIT_INTERVAL:
+		c["fire_emit_acc"] = float(c["fire_emit_acc"]) - EMIT_INTERVAL
+		var cells: float = fr / gs
+		var emits: int = clampi(int(cells * 1.5) + 1, 1, 10)
+		var fo: Vector2 = c.get("fire_origin", c["center"])
+		for i in range(emits):
+			var a: float = randf() * TAU
+			var rr: float = sqrt(randf()) * fr  # uniform over the disc
+			var px: Vector2 = fo + Vector2(cos(a), sin(a)) * rr
+			po.spawn_fire(px, Vector2(0.0, -1.0), 2, 55.0, 0.65, gs * 0.18, 110.0)
+
+
 func _update_gas_clouds(delta: float) -> void:
 	_cloud_time += delta
 	# Re-assert sulfur-vent clouds (always-on, 4-tile) once a second.
@@ -2378,13 +3210,32 @@ func _update_gas_clouds(delta: float) -> void:
 	var to_erase: Array = []
 	for key in gas_clouds:
 		var c: Dictionary = gas_clouds[key]
+		var ctype: String = String(c["type"])
+		var fed_recently: bool = (_cloud_time - float(c["t_last"])) <= 0.3
 		# Fume clouds decay if their turret stopped refreshing them.
-		if c["type"] == "fume" and (_cloud_time - float(c["t_last"])) > 0.3:
+		if ctype == "fume" and not fed_recently:
 			c["target_radius"] = 0.0
+		# Spritz oxygen/hydrogen clouds shrink once they STOP being fed. A burning
+		# oxygen cloud kept supplied with more oxygen stays big and lit.
+		elif ctype == "oxygen" or ctype == "hydrogen":
+			if not fed_recently:
+				c["target_radius"] = maxf(0.0, float(c["target_radius"]) - GAS_DECAY_RATE * float(main.GRID_SIZE) * delta)
 		var tr: float = float(c["target_radius"])
 		var r: float = float(c["radius"])
 		r += (tr - r) * minf(1.0, delta * 4.0)
 		c["radius"] = r
+		# Advance an oxygen cloud's fire. While it's still being fed, hold the
+		# fire on the full-strength plateau so it never starts fading; only once
+		# the supply stops does fire_t run on into the fade and the cloud is
+		# removed. Meanwhile emit the block-on-fire particles over the burn area.
+		if bool(c.get("ignited", false)):
+			c["fire_t"] = float(c.get("fire_t", 0.0)) + delta
+			if fed_recently:
+				c["fire_t"] = minf(float(c["fire_t"]), OXY_FIRE_SPREAD + OXY_FIRE_DURATION * 0.5)
+			if float(c["fire_t"]) >= OXY_FIRE_SPREAD + OXY_FIRE_DURATION + OXY_FIRE_FADE:
+				to_erase.append(key)
+				continue
+			_emit_cloud_fire(c, delta)
 		if r < 3.0 and tr <= 0.0:
 			to_erase.append(key)
 	for k in to_erase:
@@ -2422,19 +3273,40 @@ func _apply_cloud_effects() -> void:
 	if unit_mgr == null:
 		return
 	var corr: StatusEffectData = Registry.get_status_effect(&"corroding")
-	if corr == null:
-		return
+	var hydro: StatusEffectData = Registry.get_status_effect(&"hydrogen_slowed")
+	var burn: StatusEffectData = Registry.get_status_effect(&"burning")
 	for key in gas_clouds:
 		var c: Dictionary = gas_clouds[key]
+		var ctype: String = String(c["type"])
 		var r: float = float(c["radius"])
-		if r < 6.0:
-			continue
-		var enemies: Array = unit_mgr.get_enemies_in_range(c["center"], r)
-		for u in enemies:
-			if not is_instance_valid(u) or u.is_dead:
-				continue
-			if u.has_method("apply_status_effect"):
-				u.apply_status_effect(corr, 6.0)  # fume/vent cloud → 6s corroding
+		match ctype:
+			"oxygen":
+				# Only an ignited oxygen cloud hurts anyone — its fire burns every
+				# enemy inside the growing/shrinking fire radius.
+				if not bool(c.get("ignited", false)) or burn == null:
+					continue
+				var fr: float = _oxy_fire_radius(c)
+				if fr < 6.0:
+					continue
+				for u in unit_mgr.get_enemies_in_range(c["center"], fr):
+					if is_instance_valid(u) and not u.is_dead and u.has_method("apply_status_effect"):
+						u.apply_status_effect(burn)
+			"hydrogen":
+				# Poison + slow every enemy inside. The status carries both the
+				# 5-dmg/2s DoT and the ×0.8 move-speed; re-applied each tick with a
+				# short duration so it lapses shortly after leaving the cloud.
+				if r < 6.0 or hydro == null:
+					continue
+				for u in unit_mgr.get_enemies_in_range(c["center"], r):
+					if is_instance_valid(u) and not u.is_dead and u.has_method("apply_status_effect"):
+						u.apply_status_effect(hydro)
+			_:
+				# Fume / vent → corroding.
+				if r < 6.0 or corr == null:
+					continue
+				for u in unit_mgr.get_enemies_in_range(c["center"], r):
+					if is_instance_valid(u) and not u.is_dead and u.has_method("apply_status_effect"):
+						u.apply_status_effect(corr, 6.0)
 
 
 func _update_liquid_splashes(delta: float) -> void:
@@ -2466,10 +3338,65 @@ func _draw_gas_clouds() -> void:
 		if r < 2.0:
 			continue
 		var center: Vector2 = c["center"]
-		# Layered translucent yellow-green puff.
-		draw_circle(center, r, Color(0.72, 0.82, 0.25, 0.15))
-		draw_circle(center, r * 0.72, Color(0.78, 0.86, 0.3, 0.13))
-		draw_circle(center, r * 0.42, Color(0.85, 0.9, 0.35, 0.12))
+		# Per-type tint: yellow-green fume/vent, rose oxygen, blue hydrogen.
+		var tint: Color
+		match String(c["type"]):
+			"oxygen":   tint = Color(0.997, 0.766, 1.0)
+			"hydrogen": tint = Color(0.6, 0.8, 1.0)
+			_:          tint = Color(0.8, 0.88, 0.3)
+		# Layered translucent puff. A burning oxygen cloud's flames are drawn by
+		# the ParticleOverlay (the same block-on-fire particles) via
+		# _emit_cloud_fire, so here we only fade the gas tint as it's consumed.
+		var puff_a: float = 0.08 if bool(c.get("ignited", false)) else 0.15
+		draw_circle(center, r, Color(tint.r, tint.g, tint.b, puff_a))
+		draw_circle(center, r * 0.72, Color(tint.r, tint.g, tint.b, puff_a * 0.87))
+		draw_circle(center, r * 0.42, Color(tint.r, tint.g, tint.b, puff_a * 0.8))
+
+
+## Draws each active Eclipse beam as a layered line: a soft wide glow,
+## a brighter mid stripe, and a hot white core, capped with a glow at the
+## impact point. Only turrets whose state machine is mid-burst are `active`.
+func _draw_beams() -> void:
+	for anchor in beam_states:
+		var st: Dictionary = beam_states[anchor]
+		if not bool(st.get("active", false)):
+			continue
+		var a: Vector2 = st["start"]
+		var b: Vector2 = st["end"]
+		draw_line(a, b, Color(0.6, 0.9, 1.0, 0.22), 11.0)
+		draw_line(a, b, Color(0.8, 0.95, 1.0, 0.55), 5.0)
+		draw_line(a, b, Color(1.0, 1.0, 1.0, 0.95), 2.0)
+		draw_circle(b, 6.0, Color(0.85, 0.96, 1.0, 0.5))
+
+
+## Draws each active Blaster shockwave as an expanding, fading quarter-circle of
+## translucent white — a soft wide arc behind a brighter leading edge.
+func _draw_shockwaves() -> void:
+	for sw in shockwaves:
+		var radius: float = float(sw["radius"])
+		if radius < 2.0:
+			continue
+		var origin: Vector2 = sw["origin"]
+		var aim: float = float(sw["aim"])
+		var a0: float = aim - SHOCKWAVE_HALF_ANGLE
+		var a1: float = aim + SHOCKWAVE_HALF_ANGLE
+		var fade: float = clampf(1.0 - radius / maxf(float(sw["max_radius"]), 0.0001), 0.0, 1.0)
+		draw_arc(origin, radius, a0, a1, 48, Color(1.0, 1.0, 1.0, 0.22 * fade), 12.0, true)
+		draw_arc(origin, radius, a0, a1, 48, Color(1.0, 1.0, 1.0, 0.8 * fade), 4.0, true)
+
+
+## Draws the charge-up glow on Blasters that are winding up: a hydrogen-blue orb
+## at the muzzle that swells as the charge approaches full.
+func _draw_blaster_charges() -> void:
+	for anchor in blaster_states:
+		var st: Dictionary = blaster_states[anchor]
+		var c: float = float(st.get("draw_charge", 0.0))
+		if c <= 0.01:
+			continue
+		var muzzle: Vector2 = st.get("muzzle", Vector2.ZERO)
+		var r: float = lerpf(1.5, 9.0, c)
+		draw_circle(muzzle, r * 1.6, Color(0.6, 0.85, 1.0, 0.18 * c))
+		draw_circle(muzzle, r, Color(0.85, 0.96, 1.0, 0.55 * c))
 
 
 # =========================
@@ -2572,6 +3499,28 @@ func _update_flame_emitter(grid_pos: Vector2i, data: BlockData, turret_world: Ve
 							fire_sys.ignite_building(b_anchor, true)
 				dist += gs * 0.5
 
+	# Detonate any oxygen cloud the flame cone sweeps through. The fire ignites
+	# at the point where the cone enters the cloud and spreads from there.
+	if not gas_clouds.is_empty():
+		var aim_dir: Vector2 = Vector2.from_angle(aim)
+		for key in gas_clouds:
+			var oc: Dictionary = gas_clouds[key]
+			if String(oc["type"]) != "oxygen" or bool(oc.get("ignited", false)):
+				continue
+			var ocr: float = float(oc["radius"])
+			if ocr < 4.0:
+				continue
+			var to_c: Vector2 = (oc["center"] as Vector2) - muzzle
+			var along: float = to_c.dot(aim_dir)          # distance along the cone axis
+			if along < 0.0 or along > range_px + ocr:
+				continue
+			if absf(to_c.cross(aim_dir)) > ocr:           # perpendicular distance to axis
+				continue
+			oc["ignited"] = true
+			oc["fire_t"] = 0.0
+			# Entry point: where the cone axis first reaches the cloud's near edge.
+			oc["fire_origin"] = muzzle + aim_dir * maxf(along - ocr, 0.0)
+
 
 func _update_flame_particles(delta: float) -> void:
 	if _flame_particles.is_empty():
@@ -2632,6 +3581,8 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	turret_barrel_fire_flash.erase(grid_pos)
 	turret_barrel_recoil.erase(grid_pos)
 	turret_barrel_angles.erase(grid_pos)
+	beam_states.erase(grid_pos)
+	blaster_states.erase(grid_pos)
 
 
 # =========================
@@ -2641,6 +3592,9 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 func _draw() -> void:
 	_draw_liquid_splashes()
 	_draw_gas_clouds()
+	_draw_beams()
+	_draw_shockwaves()
+	_draw_blaster_charges()
 	_draw_turret_heads()
 	_draw_flame_particles()
 	# Projectiles render on `_projectile_overlay` (z_index 4095) so
@@ -2817,7 +3771,20 @@ func _draw_projectiles(canvas: CanvasItem) -> void:
 			var trail_color = Color(color.r, color.g, color.b, 0.5)
 			canvas.draw_line(trail[trail.size() - 1], pos, trail_color, radius * 0.8)
 
-		if bool(proj.get("liquid", false)):
+		var sprite: Texture2D = proj.get("projectile_sprite", null)
+		if sprite != null:
+			# Sprite-based projectile (Protium missile): draw the texture
+			# rotated to face its travel direction. Use the trail's last
+			# segment for heading, falling back to the vector toward target.
+			var heading: Vector2 = pos - trail[trail.size() - 1] if trail.size() > 0 else proj["target_pos"] - pos
+			var ang: float = heading.angle() if heading.length_squared() > 0.0001 else 0.0
+			var tex_size: Vector2 = sprite.get_size()
+			# Scale the sprite so its length matches ~16x the projectile radius.
+			var scale: float = (radius * 16.0) / maxf(tex_size.x, 1.0)
+			canvas.draw_set_transform(pos, ang + PI / 2.0, Vector2(scale, scale))
+			canvas.draw_texture(sprite, -tex_size / 2.0)
+			canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		elif bool(proj.get("liquid", false)):
 			# Liquid-bullet orb: a flat fluid blob, the liquid's colour blended
 			# a touch toward white over its life (no energy-glow core). A soft
 			# translucent rim sells the wet, rounded look.
@@ -2836,3 +3803,15 @@ func _draw_projectiles(canvas: CanvasItem) -> void:
 			var aoe_r: float = float(proj.get("aoe_radius", 0.0))
 			if aoe_r > 0.0:
 				canvas.draw_arc(pos, aoe_r, 0, TAU, 48, Color(1.0, 0.5, 0.0, 0.7), 1.0)
+
+	# Arc lightning bolts — jagged polyline, fading over its short lifetime.
+	# Drawn as a wide soft glow, a mid stroke, and a thin white core.
+	for bolt in _lightning_bolts:
+		var pts: PackedVector2Array = bolt["points"]
+		if pts.size() < 2:
+			continue
+		var fade: float = clampf(1.0 - float(bolt["age"]) / maxf(float(bolt["lifetime"]), 0.0001), 0.0, 1.0)
+		var bc: Color = bolt["color"]
+		canvas.draw_polyline(pts, Color(bc.r, bc.g, bc.b, fade * 0.25), 6.0)
+		canvas.draw_polyline(pts, Color(bc.r, bc.g, bc.b, fade * 0.7), 2.5)
+		canvas.draw_polyline(pts, Color(1.0, 1.0, 1.0, fade), 1.0)

@@ -10,3 +10,4 @@ description = "Dense, slow-burning fraction cracked from crude petroleum."
 color = Color(0.35, 0.28, 0.18, 1)
 viscosity = 2.5
 flammable = true
+units_per_segment = 20.0

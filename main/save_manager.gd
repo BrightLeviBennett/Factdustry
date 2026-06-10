@@ -879,6 +879,26 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 					unit.capture_payload_state(u_entry)
 				units_save.append(u_entry)
 
+	# Save enemy (Ferox) units too. Wave-spawned enemies used to be left to
+	# respawn on load, but fabricator-made enemies (e.g. a Ferox naval
+	# fabricator's units) are NOT driven by the wave schedule, so without this
+	# they'd vanish permanently after a save/load. The wave manager resumes
+	# from its restored wave index and only spawns FUTURE waves, so persisting
+	# the current live enemies here doesn't double them up.
+	var enemies_save: Array = []
+	if unit_mgr:
+		for enemy in unit_mgr.enemies:
+			if enemy and is_instance_valid(enemy) and not enemy.is_dead and enemy.data:
+				var e_entry := {
+					"unit_id": str(enemy.data.id),
+					"x": enemy.position.x,
+					"y": enemy.position.y,
+					"health": enemy.health,
+				}
+				if enemy.has_method("capture_payload_state"):
+					enemy.capture_payload_state(e_entry)
+				enemies_save.append(e_entry)
+
 	# Save logistics state (block storage, conveyor items, factory buffers)
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
 	var block_storage_save := {}
@@ -937,17 +957,8 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 			for pos in logistics.payload_items:
 				var entry = logistics.payload_items[pos]
 				var pd = entry.get("payload_data", {})
-				var pd_save := {}
-				for k in pd:
-					if k == "stored_items" or k == "stored_fluids":
-						var inner := {}
-						for ik in pd[k]:
-							inner[str(ik)] = pd[k][ik]
-						pd_save[str(k)] = inner
-					else:
-						pd_save[str(k)] = pd[k]
 				payload_items_save[_vec2i_to_str(pos)] = {
-					"payload_data": pd_save,
+					"payload_data": _ser_payload(pd),
 					"progress": entry.get("progress", 0.0),
 					"entry_dir": entry.get("entry_dir", -1),
 				}
@@ -1014,16 +1025,11 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		if "deconstructor_state" in logistics:
 			for pos in logistics.deconstructor_state:
 				var state = logistics.deconstructor_state[pos]
-				var payload_save = null
-				if state.get("payload") != null:
-					payload_save = {}
-					for k in state["payload"]:
-						payload_save[str(k)] = state["payload"][k]
 				var pending_save := {}
 				for k in state.get("pending_items", {}):
 					pending_save[str(k)] = state["pending_items"][k]
 				deconstructor_state_save[_vec2i_to_str(pos)] = {
-					"payload": payload_save,
+					"payload": _ser_payload(state.get("payload")),
 					"phase": str(state.get("phase", "idle")),
 					"timer": state.get("timer", 0.0),
 					"pending_items": pending_save,
@@ -1031,25 +1037,15 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		if "loader_state" in logistics:
 			for pos in logistics.loader_state:
 				var state = logistics.loader_state[pos]
-				var payload_save = null
-				if state.get("payload") != null:
-					payload_save = {}
-					for k in state["payload"]:
-						payload_save[str(k)] = state["payload"][k]
 				loader_state_save[_vec2i_to_str(pos)] = {
-					"payload": payload_save,
+					"payload": _ser_payload(state.get("payload")),
 					"phase": str(state.get("phase", "idle")),
 				}
 		if "unloader_state" in logistics:
 			for pos in logistics.unloader_state:
 				var state = logistics.unloader_state[pos]
-				var payload_save = null
-				if state.get("payload") != null:
-					payload_save = {}
-					for k in state["payload"]:
-						payload_save[str(k)] = state["payload"][k]
 				unloader_state_save[_vec2i_to_str(pos)] = {
-					"payload": payload_save,
+					"payload": _ser_payload(state.get("payload")),
 					"phase": str(state.get("phase", "idle")),
 				}
 
@@ -1063,21 +1059,8 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		if "mass_driver_state" in logistics:
 			for pos in logistics.mass_driver_state:
 				var ms: Dictionary = logistics.mass_driver_state[pos]
-				var payload_save = null
-				if ms.get("payload") != null:
-					payload_save = {}
-					for k in ms["payload"]:
-						# Recurse one level for stored_items / stored_fluids so
-						# StringName item ids serialise correctly in JSON.
-						if k == "stored_items" or k == "stored_fluids":
-							var inner := {}
-							for ik in ms["payload"][k]:
-								inner[str(ik)] = ms["payload"][k][ik]
-							payload_save[str(k)] = inner
-						else:
-							payload_save[str(k)] = ms["payload"][k]
 				mass_driver_state_save[_vec2i_to_str(pos)] = {
-					"payload": payload_save,
+					"payload": _ser_payload(ms.get("payload")),
 					"head_angle": float(ms.get("head_angle", 0.0)),
 					"target_angle": float(ms.get("target_angle", 0.0)),
 					"recoil": float(ms.get("recoil", 0.0)),
@@ -1088,21 +1071,12 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		if "mass_driver_projectiles" in logistics:
 			for proj in logistics.mass_driver_projectiles:
 				var pd_raw: Dictionary = proj.get("payload_data", {})
-				var pd_save := {}
-				for k in pd_raw:
-					if k == "stored_items" or k == "stored_fluids":
-						var inner := {}
-						for ik in pd_raw[k]:
-							inner[str(ik)] = pd_raw[k][ik]
-						pd_save[str(k)] = inner
-					else:
-						pd_save[str(k)] = pd_raw[k]
 				mass_driver_projectiles_save.append({
 					"from_x": float(proj.get("from", Vector2.ZERO).x),
 					"from_y": float(proj.get("from", Vector2.ZERO).y),
 					"to_x": float(proj.get("to", Vector2.ZERO).x),
 					"to_y": float(proj.get("to", Vector2.ZERO).y),
-					"payload_data": pd_save,
+					"payload_data": _ser_payload(pd_raw),
 					"progress": float(proj.get("progress", 0.0)),
 					"source_origin": _vec2i_to_str(proj.get("source_origin", Vector2i.ZERO)),
 					"target_origin": _vec2i_to_str(proj.get("target_origin", Vector2i.ZERO)),
@@ -1176,18 +1150,124 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 	if building_sys and "crane_states" in building_sys:
 		for pos in building_sys.crane_states:
 			var cs = building_sys.crane_states[pos]
-			var held_save = null
-			if cs.get("held_payload") != null:
-				held_save = {}
-				for k in cs["held_payload"]:
-					held_save[str(k)] = cs["held_payload"][k]
-			var _tp = cs.get("target_pos")
 			crane_states_save[_vec2i_to_str(pos)] = {
 				"arm_angle": cs.get("arm_angle", 0.0),
 				"arm_extension": cs.get("arm_extension", 20.0),
 				"grabber_open": cs.get("grabber_open", true),
-				"held_payload": held_save,
+				"held_payload": _ser_payload(cs.get("held_payload")),
 			}
+
+	# --- Battery charge (power network stored energy) ---
+	var power_sys_s = get_node_or_null("/root/Main/PowerSystem")
+	var battery_stored_save := {}
+	var block_internal_battery_save := {}
+	if power_sys_s:
+		if "_battery_stored" in power_sys_s:
+			battery_stored_save = _ser_pos_map(power_sys_s._battery_stored)
+		if "_block_internal_battery" in power_sys_s:
+			block_internal_battery_save = _ser_pos_map(power_sys_s._block_internal_battery)
+
+	# --- Shield projector HP / cooldown ---
+	var shield_sys_s = get_node_or_null("/root/Main/ShieldSystem")
+	var shield_states_save := {}
+	if shield_sys_s and "states" in shield_sys_s:
+		for a in shield_sys_s.states:
+			var st = shield_sys_s.states[a]
+			shield_states_save[_vec2i_to_str(a)] = {
+				"current_health": float(st.get("current_health", 0.0)),
+				"is_broken": bool(st.get("is_broken", false)),
+				"cooldown_remaining": float(st.get("cooldown_remaining", 0.0)),
+			}
+
+	# --- Building fires ---
+	var fire_sys_s = get_node_or_null("/root/Main/FireSystem")
+	var building_fires_save := {}
+	if fire_sys_s and "building_fires" in fire_sys_s:
+		for a in fire_sys_s.building_fires:
+			var f = fire_sys_s.building_fires[a]
+			var contact_save := {}
+			for ck in f.get("contact", {}):
+				if ck is Vector2i:
+					contact_save[_vec2i_to_str(ck)] = float(f["contact"][ck])
+			building_fires_save[_vec2i_to_str(a)] = {
+				"normal_burn": float(f.get("normal_burn", 0.0)),
+				"dmg_acc": float(f.get("dmg_acc", 0.0)),
+				"emit_acc": float(f.get("emit_acc", 0.0)),
+				"gone": bool(f.get("gone", false)),
+				"gone_timer": float(f.get("gone_timer", 0.0)),
+				"contact": contact_save,
+			}
+
+	# --- Drone carried inventory + heal/shoot mode ---
+	var drone_s = get_node_or_null("/root/Main/PlayerDrone")
+	var drone_inventory_save := {}
+	var drone_heal_mode_save := false
+	if drone_s:
+		if "mined_inventory" in drone_s:
+			for ik in drone_s.mined_inventory:
+				drone_inventory_save[str(ik)] = int(drone_s.mined_inventory[ik])
+		if "heal_mode" in drone_s:
+			drone_heal_mode_save = bool(drone_s.heal_mode)
+
+	# --- Unit upgrader / refit bay in-progress state (held units!) ---
+	var upgrader_state_save := {}
+	var refit_state_save := {}
+	if logistics:
+		if "upgrader_state" in logistics:
+			for pos in logistics.upgrader_state:
+				var us = logistics.upgrader_state[pos]
+				var uq := []
+				for qi in us.get("queue", []):
+					uq.append(str(qi))
+				upgrader_state_save[_vec2i_to_str(pos)] = {
+					"unit": _ser_payload(us.get("unit")),
+					"queue": uq,
+					"applying": str(us.get("applying", &"")),
+					"timer": float(us.get("timer", 0.0)),
+					"applied_session": int(us.get("applied_session", 0)),
+				}
+		if "refit_state" in logistics:
+			for pos in logistics.refit_state:
+				var rfs = logistics.refit_state[pos]
+				var rp := []
+				for pi in rfs.get("pending", []):
+					rp.append(str(pi))
+				refit_state_save[_vec2i_to_str(pos)] = {
+					"unit": _ser_payload(rfs.get("unit")),
+					"pending": rp,
+					"timer": float(rfs.get("timer", 0.0)),
+					"ejecting": bool(rfs.get("ejecting", false)),
+				}
+
+	# --- Round-robin indices + extractor timers / efficiency ---
+	var router_idx_save := {}
+	var sorter_idx_save := {}
+	var payload_router_idx_save := {}
+	var bridge_rr_save := {}
+	var drill_timers_save := {}
+	var pump_timers_save := {}
+	var extractor_eff_save := {}
+	if logistics:
+		if "router_output_index" in logistics:
+			router_idx_save = _ser_pos_map(logistics.router_output_index)
+		if "sorter_side_index" in logistics:
+			sorter_idx_save = _ser_pos_map(logistics.sorter_side_index)
+		if "payload_router_idx" in logistics:
+			payload_router_idx_save = _ser_pos_map(logistics.payload_router_idx)
+		if "bridge_output_rr" in logistics:
+			bridge_rr_save = _ser_pos_map(logistics.bridge_output_rr)
+		if "drill_timers" in logistics:
+			drill_timers_save = _ser_pos_map(logistics.drill_timers)
+		if "pump_timers" in logistics:
+			pump_timers_save = _ser_pos_map(logistics.pump_timers)
+		if "extractor_efficiency" in logistics:
+			extractor_eff_save = _ser_pos_map(logistics.extractor_efficiency)
+
+	# --- Arc turret charge wind-up ---
+	var combat_s = get_node_or_null("/root/Main/CombatSystem")
+	var arc_charge_save := {}
+	if combat_s and "arc_charge" in combat_s:
+		arc_charge_save = _ser_pos_map(combat_s.arc_charge)
 
 	var landing_pad_filters_serialized := _serialize_landing_pad_filters()
 	# Push the freshly-serialised filter map into the cross-sector
@@ -1211,6 +1291,7 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"building_home_core": _serialize_home_core(main.building_home_core if "building_home_core" in main else {}),
 		"linked_pairs": _serialize_links(links),
 		"sorter_filters": _serialize_sorter_filters(),
+		"factory_recipe_state": _serialize_factory_recipe_state(),
 		"landing_pad_filters": landing_pad_filters_serialized,
 		"launchpad_state": _serialize_launchpad_state(),
 		"duct_bridge_filters": _serialize_duct_bridge_filters(),
@@ -1228,6 +1309,7 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"building_resources_consumed": resources_consumed_save,
 		"building_resources_refunded": resources_refunded_save,
 		"player_units": units_save,
+		"enemy_units": enemies_save,
 		"block_storage": block_storage_save,
 		"conveyor_items": conveyor_items_save,
 		"factory_buffers": factory_buffers_save,
@@ -1247,6 +1329,22 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"pipe_junction_state": pipe_junction_state_save,
 		"junction_items": junction_items_save,
 		"belt_unloader_state": belt_unloader_state_save,
+		"battery_stored": battery_stored_save,
+		"block_internal_battery": block_internal_battery_save,
+		"shield_states": shield_states_save,
+		"building_fires": building_fires_save,
+		"drone_inventory": drone_inventory_save,
+		"drone_heal_mode": drone_heal_mode_save,
+		"upgrader_state": upgrader_state_save,
+		"refit_state": refit_state_save,
+		"router_output_index": router_idx_save,
+		"sorter_side_index": sorter_idx_save,
+		"payload_router_idx": payload_router_idx_save,
+		"bridge_output_rr": bridge_rr_save,
+		"drill_timers": drill_timers_save,
+		"pump_timers": pump_timers_save,
+		"extractor_efficiency": extractor_eff_save,
+		"arc_charge": arc_charge_save,
 		# Session stats — persisted per-sector so the loss-screen totals
 		# survive scene reloads (e.g. planet menu → back). The map
 		# editor doesn't define these fields, so fall back to 0 via
@@ -1405,6 +1503,16 @@ func load_sector_from_path(path: String) -> bool:
 		building_sys_early.editor_sorter_filters.clear()
 		for key in sf_data:
 			building_sys_early.editor_sorter_filters[_str_to_vec2i(key)] = StringName(sf_data[key])
+
+	# --- Load recipe-select factory selections ---
+	# Recipe-select factories (Rod Shapper / Compound Mixer / etc.) stay idle
+	# until a recipe is picked, so this must round-trip or they reset to idle
+	# on load.
+	var frs_data = data.get("factory_recipe_state", {})
+	if logistics and "factory_recipe_state" in logistics:
+		logistics.factory_recipe_state.clear()
+		for key in frs_data:
+			logistics.factory_recipe_state[_str_to_vec2i(key)] = StringName(frs_data[key])
 
 	# --- Load Landing Pad filters ---
 	_deserialize_landing_pad_filters(data.get("landing_pad_filters", {}))
@@ -1663,6 +1771,26 @@ func load_sector_from_path(path: String) -> bool:
 						if spawned.has_method("apply_payload_state"):
 							spawned.apply_payload_state(unit_entry)
 
+	# --- Restore enemy (Ferox) units ---
+	# Mirrors the player-unit restore. spawn_enemy appends to unit_mgr.enemies
+	# and assigns a fresh path toward the base, so fabricator-made enemies
+	# (which the wave system never respawns) survive a save/load.
+	if unit_mgr and data.has("enemy_units") and data["enemy_units"] is Array:
+		for enemy_entry in data["enemy_units"]:
+			var eid: StringName = StringName(enemy_entry.get("unit_id", ""))
+			var ex: float = float(enemy_entry.get("x", 0))
+			var ey: float = float(enemy_entry.get("y", 0))
+			var ehp: float = float(enemy_entry.get("health", -1))
+			if eid != &"":
+				unit_mgr.spawn_enemy(Vector2(ex, ey), eid)
+				if not unit_mgr.enemies.is_empty():
+					var e_spawned = unit_mgr.enemies[-1]
+					if e_spawned and is_instance_valid(e_spawned):
+						if ehp >= 0:
+							e_spawned.health = ehp
+						if e_spawned.has_method("apply_payload_state"):
+							e_spawned.apply_payload_state(enemy_entry)
+
 	# --- Restore logistics state (block storage, conveyor items, factory buffers) ---
 	var load_logistics = get_node_or_null("/root/Main/LogisticsSystem")
 	if load_logistics:
@@ -1705,13 +1833,7 @@ func load_sector_from_path(path: String) -> bool:
 				if saved.has("eject_progress"):
 					entry["eject_progress"] = float(saved["eject_progress"])
 				if saved.has("held_payload") and saved["held_payload"] is Dictionary:
-					# held_payload uses plain string keys (see fabricator
-					# ejection code: {"type": "unit", "unit_id": ...}).
-					var hp_raw: Dictionary = saved["held_payload"]
-					var hp := {}
-					for k in hp_raw:
-						hp[str(k)] = hp_raw[k]
-					entry["held_payload"] = hp
+					entry["held_payload"] = _deser_payload(saved["held_payload"])
 				load_logistics.factory_buffers[origin] = entry
 
 		# --- Restore payload transport state ---
@@ -1720,18 +1842,8 @@ func load_sector_from_path(path: String) -> bool:
 			for key in data["payload_items"]:
 				var pos: Vector2i = _str_to_vec2i(key)
 				var saved = data["payload_items"][key]
-				var pd_raw = saved.get("payload_data", {})
-				var pd := {}
-				for k in pd_raw:
-					if k == "stored_items" or k == "stored_fluids":
-						var inner := {}
-						for ik in pd_raw[k]:
-							inner[StringName(ik)] = pd_raw[k][ik]
-						pd[k] = inner
-					else:
-						pd[k] = pd_raw[k]
 				load_logistics.payload_items[pos] = {
-					"payload_data": pd,
+					"payload_data": _deser_payload(saved.get("payload_data", {})),
 					"progress": float(saved.get("progress", 0.0)),
 					"entry_dir": int(saved.get("entry_dir", -1)),
 				}
@@ -1770,16 +1882,11 @@ func load_sector_from_path(path: String) -> bool:
 			for key in data["deconstructor_state"]:
 				var pos: Vector2i = _str_to_vec2i(key)
 				var saved = data["deconstructor_state"][key]
-				var payload = null
-				if saved.get("payload") != null:
-					payload = {}
-					for k in saved["payload"]:
-						payload[StringName(k)] = saved["payload"][k]
 				var pending := {}
 				for k in saved.get("pending_items", {}):
 					pending[StringName(k)] = int(saved["pending_items"][k])
 				load_logistics.deconstructor_state[pos] = {
-					"payload": payload,
+					"payload": _deser_payload(saved.get("payload")),
 					"phase": str(saved.get("phase", "idle")),
 					"timer": float(saved.get("timer", 0.0)),
 					"pending_items": pending,
@@ -1789,13 +1896,8 @@ func load_sector_from_path(path: String) -> bool:
 			for key in data["loader_state"]:
 				var pos: Vector2i = _str_to_vec2i(key)
 				var saved = data["loader_state"][key]
-				var payload = null
-				if saved.get("payload") != null:
-					payload = {}
-					for k in saved["payload"]:
-						payload[StringName(k)] = saved["payload"][k]
 				load_logistics.loader_state[pos] = {
-					"payload": payload,
+					"payload": _deser_payload(saved.get("payload")),
 					"phase": str(saved.get("phase", "idle")),
 				}
 		if "unloader_state" in load_logistics and data.has("unloader_state") and data["unloader_state"] is Dictionary:
@@ -1803,13 +1905,8 @@ func load_sector_from_path(path: String) -> bool:
 			for key in data["unloader_state"]:
 				var pos: Vector2i = _str_to_vec2i(key)
 				var saved = data["unloader_state"][key]
-				var payload = null
-				if saved.get("payload") != null:
-					payload = {}
-					for k in saved["payload"]:
-						payload[StringName(k)] = saved["payload"][k]
 				load_logistics.unloader_state[pos] = {
-					"payload": payload,
+					"payload": _deser_payload(saved.get("payload")),
 					"phase": str(saved.get("phase", "idle")),
 				}
 		# --- Mass driver state ---
@@ -1818,19 +1915,8 @@ func load_sector_from_path(path: String) -> bool:
 			for key in data["mass_driver_state"]:
 				var pos: Vector2i = _str_to_vec2i(key)
 				var saved = data["mass_driver_state"][key]
-				var payload = null
-				if saved.get("payload") != null:
-					payload = {}
-					for k in saved["payload"]:
-						if k == "stored_items" or k == "stored_fluids":
-							var inner := {}
-							for ik in saved["payload"][k]:
-								inner[StringName(ik)] = saved["payload"][k][ik]
-							payload[k] = inner
-						else:
-							payload[k] = saved["payload"][k]
 				load_logistics.mass_driver_state[pos] = {
-					"payload": payload,
+					"payload": _deser_payload(saved.get("payload")),
 					"head_angle": float(saved.get("head_angle", 0.0)),
 					"target_angle": float(saved.get("target_angle", 0.0)),
 					"recoil": float(saved.get("recoil", 0.0)),
@@ -1844,20 +1930,10 @@ func load_sector_from_path(path: String) -> bool:
 				if not (proj_raw is Dictionary):
 					continue
 				var saved: Dictionary = proj_raw
-				var pd_raw: Dictionary = saved.get("payload_data", {})
-				var pd := {}
-				for k in pd_raw:
-					if k == "stored_items" or k == "stored_fluids":
-						var inner := {}
-						for ik in pd_raw[k]:
-							inner[StringName(ik)] = pd_raw[k][ik]
-						pd[k] = inner
-					else:
-						pd[k] = pd_raw[k]
 				load_logistics.mass_driver_projectiles.append({
 					"from": Vector2(float(saved.get("from_x", 0.0)), float(saved.get("from_y", 0.0))),
 					"to": Vector2(float(saved.get("to_x", 0.0)), float(saved.get("to_y", 0.0))),
-					"payload_data": pd,
+					"payload_data": _deser_payload(saved.get("payload_data", {})),
 					"progress": float(saved.get("progress", 0.0)),
 					"source_origin": _str_to_vec2i(str(saved.get("source_origin", "0,0"))),
 					"target_origin": _str_to_vec2i(str(saved.get("target_origin", "0,0"))),
@@ -1906,6 +1982,116 @@ func load_sector_from_path(path: String) -> bool:
 					"round_robin": int(saved.get("round_robin", 0)),
 				}
 
+		# --- Restore unit upgrader / refit bay in-progress state ---
+		if "upgrader_state" in load_logistics and data.has("upgrader_state") and data["upgrader_state"] is Dictionary:
+			load_logistics.upgrader_state.clear()
+			for key in data["upgrader_state"]:
+				var saved = data["upgrader_state"][key]
+				var uq: Array = []
+				for qi in saved.get("queue", []):
+					uq.append(StringName(qi))
+				load_logistics.upgrader_state[_str_to_vec2i(key)] = {
+					"unit": _deser_payload(saved.get("unit")),
+					"queue": uq,
+					"applying": StringName(saved.get("applying", "")),
+					"timer": float(saved.get("timer", 0.0)),
+					"applied_session": int(saved.get("applied_session", 0)),
+				}
+		if "refit_state" in load_logistics and data.has("refit_state") and data["refit_state"] is Dictionary:
+			load_logistics.refit_state.clear()
+			for key in data["refit_state"]:
+				var saved = data["refit_state"][key]
+				var rp: Array = []
+				for pi in saved.get("pending", []):
+					rp.append(StringName(pi))
+				load_logistics.refit_state[_str_to_vec2i(key)] = {
+					"unit": _deser_payload(saved.get("unit")),
+					"pending": rp,
+					"timer": float(saved.get("timer", 0.0)),
+					"ejecting": bool(saved.get("ejecting", false)),
+				}
+
+		# --- Restore round-robin indices + extractor timers / efficiency ---
+		if "router_output_index" in load_logistics and data.has("router_output_index"):
+			load_logistics.router_output_index = _deser_pos_int(data["router_output_index"])
+		if "sorter_side_index" in load_logistics and data.has("sorter_side_index"):
+			load_logistics.sorter_side_index = _deser_pos_int(data["sorter_side_index"])
+		if "payload_router_idx" in load_logistics and data.has("payload_router_idx"):
+			load_logistics.payload_router_idx = _deser_pos_int(data["payload_router_idx"])
+		if "bridge_output_rr" in load_logistics and data.has("bridge_output_rr"):
+			load_logistics.bridge_output_rr = _deser_pos_int(data["bridge_output_rr"])
+		if "drill_timers" in load_logistics and data.has("drill_timers"):
+			load_logistics.drill_timers = _deser_pos_float(data["drill_timers"])
+		if "pump_timers" in load_logistics and data.has("pump_timers"):
+			load_logistics.pump_timers = _deser_pos_float(data["pump_timers"])
+		if "extractor_efficiency" in load_logistics and data.has("extractor_efficiency"):
+			load_logistics.extractor_efficiency = _deser_pos_float(data["extractor_efficiency"])
+
+	# --- Restore power battery charge ---
+	var power_sys_l = get_node_or_null("/root/Main/PowerSystem")
+	if power_sys_l:
+		if "_battery_stored" in power_sys_l and data.has("battery_stored"):
+			power_sys_l._battery_stored = _deser_pos_float(data["battery_stored"])
+		if "_block_internal_battery" in power_sys_l and data.has("block_internal_battery"):
+			power_sys_l._block_internal_battery = _deser_pos_float(data["block_internal_battery"])
+		if "_networks_dirty" in power_sys_l:
+			power_sys_l._networks_dirty = true
+
+	# --- Restore shield projector HP / cooldown ---
+	var shield_sys_l = get_node_or_null("/root/Main/ShieldSystem")
+	if shield_sys_l and "states" in shield_sys_l and data.has("shield_states") and data["shield_states"] is Dictionary:
+		for key in data["shield_states"]:
+			var ss = data["shield_states"][key]
+			shield_sys_l.states[_str_to_vec2i(key)] = {
+				"current_health": float(ss.get("current_health", 0.0)),
+				"is_broken": bool(ss.get("is_broken", false)),
+				"cooldown_remaining": float(ss.get("cooldown_remaining", 0.0)),
+				# Visual scale lerps back up from the saved logical state.
+				"visual_scale": 0.0 if bool(ss.get("is_broken", false)) else 1.0,
+				"target_scale": 0.0 if bool(ss.get("is_broken", false)) else 1.0,
+			}
+
+	# --- Restore building fires ---
+	var fire_sys_l = get_node_or_null("/root/Main/FireSystem")
+	if fire_sys_l and "building_fires" in fire_sys_l and data.has("building_fires") and data["building_fires"] is Dictionary:
+		fire_sys_l.building_fires.clear()
+		for key in data["building_fires"]:
+			var fanchor: Vector2i = _str_to_vec2i(key)
+			# Only restore fires on buildings that still exist (skip "gone"
+			# fires whose block was already destroyed).
+			if not main.placed_buildings.has(fanchor):
+				continue
+			var fs = data["building_fires"][key]
+			var contact: Dictionary = {}
+			for ck in fs.get("contact", {}):
+				contact[_str_to_vec2i(str(ck))] = float(fs["contact"][ck])
+			var fbd = Registry.get_block(main.placed_buildings[fanchor])
+			fire_sys_l.building_fires[fanchor] = {
+				"normal_burn": float(fs.get("normal_burn", 0.0)),
+				"dmg_acc": float(fs.get("dmg_acc", 0.0)),
+				"emit_acc": float(fs.get("emit_acc", 0.0)),
+				"gone": false,
+				"gone_timer": 0.0,
+				"contact": contact,
+				"last_top_left": main.grid_to_world(fanchor),
+				"last_gsz": fbd.grid_size if fbd else Vector2i.ONE,
+			}
+
+	# --- Restore drone carried inventory + heal/shoot mode ---
+	var drone_l = get_node_or_null("/root/Main/PlayerDrone")
+	if drone_l:
+		if "mined_inventory" in drone_l and data.has("drone_inventory") and data["drone_inventory"] is Dictionary:
+			drone_l.mined_inventory.clear()
+			for ik in data["drone_inventory"]:
+				drone_l.mined_inventory[StringName(ik)] = int(data["drone_inventory"][ik])
+		if "heal_mode" in drone_l and data.has("drone_heal_mode"):
+			drone_l.heal_mode = bool(data["drone_heal_mode"])
+
+	# --- Restore Arc turret charge wind-up ---
+	var combat_l = get_node_or_null("/root/Main/CombatSystem")
+	if combat_l and "arc_charge" in combat_l and data.has("arc_charge"):
+		combat_l.arc_charge = _deser_pos_float(data["arc_charge"])
+
 	# --- Restore fog-of-war explored set ---
 	var fog_node = get_node_or_null("/root/Main/FogSystem")
 	if fog_node and fog_node.has_method("load_state") and data.has("fog") and data["fog"] is Dictionary:
@@ -1922,16 +2108,11 @@ func load_sector_from_path(path: String) -> bool:
 		for key in data["crane_states"]:
 			var pos: Vector2i = _str_to_vec2i(key)
 			var saved = data["crane_states"][key]
-			var held = null
-			if saved.get("held_payload") != null:
-				held = {}
-				for k in saved["held_payload"]:
-					held[StringName(k)] = saved["held_payload"][k]
 			building_sys.crane_states[pos] = {
 				"arm_angle": float(saved.get("arm_angle", -PI / 2.0)),
 				"arm_extension": float(saved.get("arm_extension", 20.0)),
 				"grabber_open": bool(saved.get("grabber_open", true)),
-				"held_payload": held,
+				"held_payload": _deser_payload(saved.get("held_payload")),
 				"target_pos": Vector2.ZERO,
 			}
 
@@ -2101,6 +2282,92 @@ func _vec2i_to_str(v: Vector2i) -> String:
 func _str_to_vec2i(s: String) -> Vector2i:
 	var parts = s.split(",")
 	return Vector2i(int(parts[0]), int(parts[1]))
+
+
+## Serialise a {Vector2i -> scalar} dict to {"x,y" -> scalar}. For the simple
+## per-cell maps (round-robin indices, drill/pump timers, battery charge, …).
+func _ser_pos_map(d: Dictionary) -> Dictionary:
+	var out := {}
+	for k in d:
+		if k is Vector2i:
+			out[_vec2i_to_str(k)] = d[k]
+	return out
+
+func _deser_pos_float(src) -> Dictionary:
+	var out := {}
+	if src is Dictionary:
+		for k in src:
+			out[_str_to_vec2i(str(k))] = float(src[k])
+	return out
+
+func _deser_pos_int(src) -> Dictionary:
+	var out := {}
+	if src is Dictionary:
+		for k in src:
+			out[_str_to_vec2i(str(k))] = int(src[k])
+	return out
+
+
+## Serialise / restore a carried building-or-unit payload to a JSON-safe form.
+## Payloads nest arbitrarily deep (a crane held as a payload carries its own
+## crane_state — incl. a `target_pos` Vector2 — and its own held_payload, which
+## may be yet another crane). Plain JSON.stringify turns Vector2/Vector2i VALUES
+## into lossy strings ("(1.0, 2.0)"), so a carried crane reloads with a String
+## where a Vector2 is expected and breaks. These walk the whole tree and tag
+## vector values so they round-trip. Returns null for a null payload.
+func _ser_payload(pd):
+	if pd == null:
+		return null
+	return _payload_to_json(pd)
+
+func _deser_payload(src):
+	if src == null:
+		return null
+	return _payload_from_json(src)
+
+
+## Recursively converts a payload tree into JSON-safe data, tagging vectors.
+func _payload_to_json(v):
+	match typeof(v):
+		TYPE_DICTIONARY:
+			var out := {}
+			for k in v:
+				out[str(k)] = _payload_to_json(v[k])
+			return out
+		TYPE_ARRAY:
+			var arr := []
+			for e in v:
+				arr.append(_payload_to_json(e))
+			return arr
+		TYPE_VECTOR2I:
+			return {"__v2i": [v.x, v.y]}
+		TYPE_VECTOR2:
+			return {"__v2": [v.x, v.y]}
+		TYPE_STRING_NAME:
+			return str(v)
+		_:
+			return v
+
+
+## Inverse of `_payload_to_json` — rebuilds Vector2/Vector2i from their tags.
+func _payload_from_json(v):
+	match typeof(v):
+		TYPE_DICTIONARY:
+			if v.has("__v2i") and v["__v2i"] is Array and v["__v2i"].size() == 2:
+				return Vector2i(int(v["__v2i"][0]), int(v["__v2i"][1]))
+			if v.has("__v2") and v["__v2"] is Array and v["__v2"].size() == 2:
+				return Vector2(float(v["__v2"][0]), float(v["__v2"][1]))
+			var out := {}
+			for k in v:
+				out[k] = _payload_from_json(v[k])
+			return out
+		TYPE_ARRAY:
+			var arr := []
+			for e in v:
+				arr.append(_payload_from_json(e))
+			return arr
+		_:
+			return v
 
 
 
@@ -2339,6 +2606,20 @@ func _serialize_sorter_filters() -> Dictionary:
 			var filter_id = building_sys.editor_sorter_filters[grid_pos]
 			if filter_id != &"":
 				result[_vec2i_to_str(grid_pos)] = String(filter_id)
+	return result
+
+
+## Serializes the per-anchor recipe selection for recipe-select factories
+## (Rod Shapper / Compound Mixer / etc.) so a factory remembers which recipe
+## it was set to across save/load. Anchor → recipe id (StringName as String).
+func _serialize_factory_recipe_state() -> Dictionary:
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	var result := {}
+	if logistics != null and "factory_recipe_state" in logistics:
+		for grid_pos in logistics.factory_recipe_state:
+			var recipe_id = logistics.factory_recipe_state[grid_pos]
+			if recipe_id != &"":
+				result[_vec2i_to_str(grid_pos)] = String(recipe_id)
 	return result
 
 

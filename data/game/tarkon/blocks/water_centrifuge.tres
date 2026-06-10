@@ -1,35 +1,53 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://413we3dkahtg"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cx753tamflcp7" path="res://textures/blocks/factories/Water Centrifuge/WaterCentrifugeComplete.png" id="2_icon"]
+[ext_resource type="Texture2D" uid="uid://bhslhov0pltlo" path="res://textures/blocks/factories/Water Centrifuge/WaterCentrifugeTop.png" id="3_top"]
+[ext_resource type="Texture2D" uid="uid://cg8pb7t0jr2eu" path="res://textures/blocks/factories/Water Centrifuge/WaterCentrifugeBase.png" id="4_base"]
 
 [resource]
 script = ExtResource("1")
 id = &"water_centrifuge"
 display_name = "Water Centrifuge"
-description = "Spins dissolved solids out of brine. Pick a feed: salt water or sulfur water."
+description = "Removes various resources out of water."
+icon = ExtResource("2_icon")
 category = 2
-tags = PackedStringArray("production", "processing", "recipe_select", "omnidirectional")
+tags = PackedStringArray("production", "processing", "auto_recipe", "omnidirectional")
 color = Color(0.4, 0.55, 0.6, 1)
-grid_size = Vector2i(3, 3)
+grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("3_top")
+base_sprite = ExtResource("4_base")
+liquid_tint = true
 max_health = 320.0
 build_cost = {
-"copper": 160,
-"silicon": 50,
-"steel": 30
+"copper": 100,
+"silicon": 20,
+"steel": 15
 }
 build_time = 4.0
 production_time = 3.0
-electrical_power_use = 15.0
-liquid_capacity = 30.0
-max_stored_items = 40
 factory_recipes = [{
-"id": &"desalinate",
 "display_name": "Desalinate Salt Water",
-"input": {"mat_salt_water": 1},
-"output": {"mat_salt": 1, "mat_sand": 1, "mat_water": 1}
+"id": &"desalinate",
+"input": {
+"mat_salt_water": 1
+},
+"output": {
+"mat_salt": 1,
+"mat_sand": 1,
+"mat_water": 1
+}
 }, {
-"id": &"sulfur_split",
 "display_name": "Split Sulfur Water",
-"input": {"mat_sulfur_water": 1},
-"output": {"mat_sulfur": 1, "mat_water": 1}
+"id": &"sulfur_split",
+"input": {
+"mat_sulfur_water": 1
+},
+"output": {
+"mat_sulfur": 1,
+"mat_water": 1
+}
 }]
+electrical_power_use = 15.0
+max_stored_items = 40
+liquid_capacity = 30.0

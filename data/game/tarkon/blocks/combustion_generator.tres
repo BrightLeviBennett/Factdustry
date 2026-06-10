@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"combustion_generator"
 display_name = "Combustion Generator"
-description = "Burns coal to generate 20 power. Consumes 1 coal per cycle. Stops generating when out of fuel."
+description = "Burns coal to generate power. Stops generating when out of fuel."
 icon = ExtResource("1_8337r")
 category = 3
 tags = PackedStringArray("power", "fuel_powered", "omnidirectional")
@@ -16,8 +16,7 @@ grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("1_8337r")
 max_health = 240.0
 build_cost = {
-"copper": 100,
-"silicon": 30
+"copper": 60
 }
 build_time = 3.0
 input_items = {

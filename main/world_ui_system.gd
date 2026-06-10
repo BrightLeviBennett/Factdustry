@@ -92,6 +92,9 @@ func _build_menu_items(type: String, grid_pos: Vector2i) -> void:
 			var count: int = int(merged[item_id])
 			if count <= 0:
 				continue
+			# Fluids are tracked separately — keep them out of the item display.
+			if Registry.get_fluid(item_id) != null:
+				continue
 			var it = Registry.get_item(item_id)
 			world_menu_items.append({
 				"id": item_id,
@@ -306,6 +309,9 @@ func open_storage_panel(grid_pos: Vector2i) -> void:
 	for item_id in merged:
 		var count: int = int(merged[item_id])
 		if count <= 0:
+			continue
+		# Fluids are tracked separately — keep them out of the item display.
+		if Registry.get_fluid(item_id) != null:
 			continue
 		var it = Registry.get_item(item_id)
 		storage_panel_items.append({
@@ -708,6 +714,9 @@ func draw_storage_panel(ci: CanvasItem) -> void:
 		var count: int = int(merged[item_id])
 		if count <= 0:
 			continue
+		# Fluids are tracked separately — keep them out of the item display.
+		if Registry.get_fluid(item_id) != null:
+			continue
 		var it = Registry.get_item(item_id)
 		storage_panel_items.append({
 			"id": item_id,
@@ -811,6 +820,9 @@ func draw_world_menu(ci: CanvasItem) -> void:
 			var count: int = int(merged[item_id])
 			if count <= 0:
 				continue
+			# Fluids are tracked separately — keep them out of the item display.
+			if Registry.get_fluid(item_id) != null:
+				continue
 			var it = Registry.get_item(item_id)
 			world_menu_items.append({
 				"id": item_id,
@@ -838,6 +850,9 @@ func draw_world_menu(ci: CanvasItem) -> void:
 	var selected_duct_filter: StringName = &""
 	if world_menu_type == "duct_filter" and logistics:
 		selected_duct_filter = StringName(logistics.duct_bridge_filters.get(world_menu_pos, &""))
+	var selected_recipe: StringName = &""
+	if world_menu_type == "recipe_select" and logistics:
+		selected_recipe = StringName(logistics.factory_recipe_state.get(world_menu_pos, &""))
 
 	var bg_fill: Color = Color(0.08, 0.08, 0.1, 0.92)
 	var bg_border: Color = Color(0.4, 0.4, 0.5, 0.8)
@@ -870,7 +885,15 @@ func draw_world_menu(ci: CanvasItem) -> void:
 			is_selected = entry_id == selected_sorter and entry_id != &""
 		elif world_menu_type == "duct_filter":
 			is_selected = entry_id == selected_duct_filter and entry_id != &""
+		elif world_menu_type == "recipe_select":
+			is_selected = entry_id == selected_recipe and entry_id != &""
 		if is_selected:
+			# Fill the selected recipe row with a blue background so the
+			# active recipe reads at a glance (other pickers use just a
+			# border, but recipe rows are wide text rows that benefit from
+			# a solid highlight).
+			if world_menu_type == "recipe_select":
+				ci.draw_rect(cell_rect, Color(0.3, 0.5, 0.8, 0.55), true)
 			ci.draw_rect(cell_rect, Color(0.35, 0.65, 1.0, 1.0), false, 2.0)
 		elif world_menu_type == "launchpad" or world_menu_type == "landing_pad":
 			pass

@@ -70,14 +70,27 @@ func build(target_cell: Vector2i, astar: AStarGrid2D, w: int, h: int, cell_size:
 	var qhead: int = 0
 	var seed_cells: Array[Vector2i] = []
 	if astar != null and astar.is_point_solid(target_cell):
-		for d in range(8):
-			var nx: int = target_cell.x + _DIRS_X[d]
-			var ny: int = target_cell.y + _DIRS_Y[d]
-			if nx < 0 or ny < 0 or nx >= w or ny >= h:
-				continue
-			if astar.is_point_solid(Vector2i(nx, ny)):
-				continue
-			seed_cells.append(Vector2i(nx, ny))
+		# Target is solid (a building). Spiral outward in Chebyshev rings to the
+		# NEAREST ring that contains open cells, and seed from all of them. The
+		# 8-neighbour-only version failed for inland targets whose whole
+		# immediate ring is solid — notably naval targets, where every land cell
+		# around a coastal building is non-navigable, so units got no field and
+		# fell back to per-unit A*. Spiralling makes the shared field cover those
+		# too (units converge on the nearest navigable cell to the target).
+		var max_r: int = 48
+		for r in range(1, max_r + 1):
+			for dx in range(-r, r + 1):
+				for dy in range(-r, r + 1):
+					if maxi(absi(dx), absi(dy)) != r:
+						continue
+					var nx: int = target_cell.x + dx
+					var ny: int = target_cell.y + dy
+					if nx < 0 or ny < 0 or nx >= w or ny >= h:
+						continue
+					if not astar.is_point_solid(Vector2i(nx, ny)):
+						seed_cells.append(Vector2i(nx, ny))
+			if not seed_cells.is_empty():
+				break
 	else:
 		seed_cells.append(target_cell)
 

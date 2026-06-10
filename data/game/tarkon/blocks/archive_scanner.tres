@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"archive_scanner"
 display_name = "Archive Scanner"
-description = "Scans buried archive fragments and emits raw data over a data cable. Place near a recovered archive site to begin extraction."
+description = "Scans archives to be decoded."
 icon = ExtResource("1_b5pjh")
 category = 0
 tags = PackedStringArray("production", "archive", "archive_scanner")

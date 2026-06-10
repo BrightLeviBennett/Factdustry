@@ -44,6 +44,7 @@ wave_trail_y = -150.0
 trail_scl = 26.0
 max_health = 140.0
 attack_damage = 18.0
+attack_speed = 24.0
 attack_range = 832.0
 weapons = Array[ExtResource("2")]([SubResource("WeaponData_wade_turret")])
 immunities = PackedStringArray()

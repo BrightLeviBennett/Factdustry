@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"payload_conveyor"
 display_name = "Payload Conveyor"
-description = "Heavy-duty conveyor for large payloads."
+description = "A heavy-duty conveyor for large payloads."
 icon = ExtResource("1_cvckt")
 category = 6
 tags = PackedStringArray("payload", "transport")

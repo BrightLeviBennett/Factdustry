@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"huge_copper_platform"
 display_name = "Huge Copper Platform"
-description = "A huge copper platform."
+description = "A huge platform that lets you place blocks on water."
 icon = ExtResource("1_x4dvp")
 category = 5
 tags = PackedStringArray("platform")

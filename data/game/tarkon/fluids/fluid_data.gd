@@ -37,7 +37,7 @@ extends Resource
 ## 1.0 = normal (water-like), <1.0 = fast/thin, >1.0 = slow/thick
 @export var viscosity: float = 1.0
 ## Units stored per pipe segment (higher viscosity = less per segment)
-@export var units_per_segment: float = 100.0
+@export var units_per_segment: float = 20.0
 
 # --- PROPERTIES ---
 ## Whether this fluid is hazardous (damages buildings if leaked)

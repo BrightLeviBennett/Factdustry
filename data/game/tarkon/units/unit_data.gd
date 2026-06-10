@@ -165,6 +165,7 @@ func upgrade_slots() -> int:
 # HELPER METHODS
 # =========================
 
-## Calculates actual damage dealt after armor.
-func calc_damage_taken(raw_damage: float) -> float:
-	return max(raw_damage - armor, 1.0)
+## Calculates actual damage dealt after armor. `armor_mult` scales the flat
+## armor before subtraction (Embrittled passes 0.5 to halve its effectiveness).
+func calc_damage_taken(raw_damage: float, armor_mult: float = 1.0) -> float:
+	return max(raw_damage - armor * armor_mult, 1.0)

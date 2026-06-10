@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"vent_turbine"
 display_name = "Vent Turbine"
-description = "Harnesses thermal vents for passive power generation, condensing a trickle of water as a byproduct."
+description = "Harnesses vents for passive power generation, condensing a small amount of water as a byproduct."
 icon = ExtResource("2")
 category = 3
 tags = PackedStringArray("power", "vent_powered", "fluid", "transport", "pump", "condenser", "omnidirectional")

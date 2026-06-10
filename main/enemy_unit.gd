@@ -136,8 +136,9 @@ var _mine_timer: float = 0.0
 var _mine_target_cell: Vector2i = Vector2i(-9999, -9999)
 var _mine_deliver_cell: Vector2i = Vector2i(-9999, -9999)
 
-# --- BOTTLENECK YIELD / OSCILLATION BREAK ---
-# Set by `_compute_separation_force` when this unit loses a same-direction
+# --- BOTTLENECK YIELD / OSCILLATION BREAK (legacy; no longer set since
+# separation moved to the Mindustry penetration model in `_apply_separation`) ---
+# Was set when this unit lost a same-direction
 # overlap race against another unit closer to the shared goal. While > 0
 # the unit skips its movement step entirely (path stays, just doesn't
 # advance), letting the leader clear the chokepoint.
@@ -203,6 +204,11 @@ var _weapon_mounts: Array = []
 var facing_angle: float = 0.0
 var _prev_position: Vector2 = Vector2.ZERO
 var _facing_initialized: bool = false
+# Smoothed world velocity (px/sec), updated each frame from displacement. Read
+# by CombatSystem to lead this unit when aiming projectile turrets.
+var velocity: Vector2 = Vector2.ZERO
+var _vel_prev_pos: Vector2 = Vector2.ZERO
+var _vel_initialised: bool = false
 
 # --- WATER SUBMERSION ---
 # Tracks how long a ground/crawler unit has been standing in water. Used for
@@ -270,6 +276,12 @@ var _last_repath_time: float = -10.0 # Wall-clock seconds; throttled to REPATH_C
 var _skip_repath_on_unstick: bool = false
 const STUCK_TIME := 1.5
 const STUCK_RADIUS := 4.0    # Pixels — must move > this within STUCK_TIME or we're "stuck"
+# --- Unit separation (Mindustry PhysicsProcess `scl`) ---
+## Under-relaxation divisor for overlap correction. Each frame a pair only
+## resolves penetration ÷ SEP_RELAX of its overlap, so they ease apart and
+## settle instead of overshooting. Mindustry uses 1.25; raise for gentler/
+## floatier, lower (toward 1.0) for snappier.
+const SEP_RELAX := 1.25
 const REPATH_COOLDOWN := 1.0 # Per-unit floor on repath spam
 # Throttle for the wall-overlap rescue. Cheap enough we could do it
 # every tick but no need — a unit "phasing" into a wall via a building
@@ -490,6 +502,41 @@ func apply_status_effect(effect: StatusEffectData, duration_override: float = -1
 		}
 
 
+## Puts out this unit's fire — clears the Burning status. Used by the Spritz
+## turret's water firefighting. Returns true if the unit was burning.
+func douse() -> bool:
+	if active_statuses.has(&"burning"):
+		active_statuses.erase(&"burning")
+		return true
+	return false
+
+
+## True if this unit is currently on fire (has the Burning status).
+func is_burning() -> bool:
+	return active_statuses.has(&"burning")
+
+
+## Aggregate multiplier for a status-effect stat field across every active
+## status (e.g. &"aim_speed_modifier", &"attack_speed_modifier"). Mirrors the
+## move-speed stacking in _follow_path: each status amplifies its deviation
+## from 1.0 by its affinity `boost`, and the product is floored so a stack of
+## debuffs can't drop a stat to zero.
+func _status_stat_mult(field: StringName) -> float:
+	if active_statuses.is_empty():
+		return 1.0
+	var m: float = 1.0
+	for sid in active_statuses:
+		var ent: Dictionary = active_statuses[sid]
+		var se: StatusEffectData = ent["effect"]
+		if se == null:
+			continue
+		var base_mod: float = float(se.get(field))
+		if base_mod != 1.0:
+			var boost: float = float(ent.get("boost", 1.0))
+			m *= maxf(1.0 + (base_mod - 1.0) * boost, 0.05)
+	return m
+
+
 func _tick_status_effects(delta: float) -> void:
 	if active_statuses.is_empty():
 		return
@@ -537,6 +584,13 @@ func _process(delta: float) -> void:
 		_update_fog_visibility()
 	if main.world_paused:
 		return
+	# Track a smoothed world velocity (last frame's displacement) so turrets can
+	# lead this unit when aiming — see CombatSystem._intercept_point.
+	if not _vel_initialised:
+		_vel_prev_pos = position
+		_vel_initialised = true
+	velocity = (position - _vel_prev_pos) / maxf(delta, 0.0001)
+	_vel_prev_pos = position
 	_tick_status_effects(delta)
 	# Hovering-orbit motion for flying units that aren't currently
 	# under direct player control. Applied as a position delta so it
@@ -703,7 +757,9 @@ func _tick_aim_angle(delta: float) -> void:
 	if not have_target:
 		return
 	var desired: float = (target_pos - position).angle()
-	var turn_speed: float = data.head_turn_speed if data else 3.0
+	# Aim-speed status effects (Crystallized / Tarred) slow how fast the head
+	# swings onto a target.
+	var turn_speed: float = (data.head_turn_speed if data else 3.0) * _status_stat_mult(&"aim_speed_modifier")
 	aim_angle = _rotate_toward(aim_angle, desired, turn_speed * delta)
 
 
@@ -786,15 +842,26 @@ func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector
 			path_index += 1
 			moved = true   # progress — re-aim next frame
 		elif forward_step >= dist_to_waypoint and step_walkable.call(waypoint):
-			position = waypoint
+			# Swept hop to the waypoint (no raw snap → no tunnelling).
+			if unit_manager != null:
+				position = unit_manager.resolve_move(position, waypoint - position, unit_size, ml_walk, team)
+			else:
+				position = waypoint
 			path_index += 1
 			moved = true
 
 	if not moved:
 		var fwd: Vector2 = Vector2.RIGHT.rotated(facing_angle)
-		var cand: Vector2 = position + fwd * forward_step
-		if step_walkable.call(cand):
-			position = cand
+		# Swept forward thrust — stops at a wall so a fast tank can't tunnel.
+		var newp: Vector2 = position
+		if unit_manager != null:
+			newp = unit_manager.resolve_move(position, fwd * forward_step, unit_size, ml_walk, team)
+		else:
+			var cand: Vector2 = position + fwd * forward_step
+			if step_walkable.call(cand):
+				newp = cand
+		if newp.distance_squared_to(position) > 0.0001:
+			position = newp
 			moved = true
 
 	# Rotating-toward-goal still counts as progress (not stuck) so a tank
@@ -1159,8 +1226,10 @@ func _player_update(delta: float) -> void:
 		elif not _is_valid_attack_target(target_building):
 			target_building = null
 
-	# Decrement the shared attack timer so both path-following and auto-combat can fire.
-	attack_timer = maxf(attack_timer - delta, -1.0)
+	# Decrement the shared attack timer so both path-following and auto-combat can
+	# fire. Attack-speed status effects (Crystallized → 0.8×) tick it slower, so a
+	# debuffed unit fires less often.
+	attack_timer = maxf(attack_timer - delta * _status_stat_mult(&"attack_speed_modifier"), -1.0)
 
 	# 1. Pursue a manual target if we have one
 	if manual_target_unit != null or manual_target_building != null:
@@ -1168,12 +1237,19 @@ func _player_update(delta: float) -> void:
 	# 2. Otherwise, if the player issued a pure move order, just travel
 	elif move_target != null and path.size() > 0 and path_index < path.size():
 		_follow_path(delta)
-	# 3. Otherwise, fall through to auto-combat
+	# 3. Otherwise, fall through to auto-combat (acquire + pursue a nearby
+	#    target). EXCEPTION: a passive (non-controlled) Lumina shardling stands
+	#    down — it only fights when the player drives it directly.
 	else:
-		# Clear a completed move_target so auto-combat can re-engage
+		# Clear a completed move_target so auto-combat can re-engage.
 		if move_target != null and (path.size() == 0 or path_index >= path.size()):
 			move_target = null
-		_try_player_combat(delta)
+		if _is_passive_shardling():
+			# Drop any auto-acquired combat target so weapon mounts hold fire too.
+			target_unit = null
+			target_building = null
+		else:
+			_try_player_combat(delta)
 
 	# Always attempt an opportunistic shot at any in-range hostile.
 	_opportunistic_fire()
@@ -1220,6 +1296,14 @@ func _pursue_manual_target(delta: float) -> void:
 		_attack_ferox_building()
 
 
+## True for a Lumina Shardling that the player ISN'T currently driving. These
+## stand down completely — no defending, no hunting — so a parked shardling
+## doesn't wander off to fight; every other player unit auto-engages normally.
+func _is_passive_shardling() -> bool:
+	return not is_controlled and team == UnitData.Team.PLAYER \
+		and data != null and data.id == &"player_drone"
+
+
 ## Scans for any in-range hostile and fires a shot if the attack timer is ready.
 ## Does NOT move or change path. Runs every frame for all player units.
 func _opportunistic_fire() -> void:
@@ -1232,7 +1316,7 @@ func _opportunistic_fire() -> void:
 		return
 	var range_sq: float = atk_range * atk_range
 
-	# Prefer the currently-designated target if still valid and in range.
+	# Prefer the explicitly-ordered target if it's in range.
 	if manual_target_unit != null and is_instance_valid(manual_target_unit) and not manual_target_unit.is_dead:
 		if position.distance_squared_to(manual_target_unit.position) <= range_sq:
 			attack_timer = attack_cooldown
@@ -1240,19 +1324,22 @@ func _opportunistic_fire() -> void:
 			_attack_enemy_unit()
 			return
 
-	# Any nearby enemy unit
-	for e in unit_manager.enemies:
-		if not is_instance_valid(e) or e.is_dead:
-			continue
-		if e.team == UnitData.Team.PLAYER:
-			continue
-		if position.distance_squared_to(e.position) <= range_sq:
-			attack_timer = attack_cooldown
-			target_unit = e
-			_attack_enemy_unit()
-			return
+	# Auto-fire at any in-range enemy unit (defensive — no move/pursue here).
+	# Skipped for passive (non-controlled) Lumina shardlings, which stand down
+	# entirely unless the player drives them.
+	if not _is_passive_shardling():
+		for e in unit_manager.enemies:
+			if not is_instance_valid(e) or e.is_dead:
+				continue
+			if e.team == team:
+				continue
+			if position.distance_squared_to(e.position) <= range_sq:
+				attack_timer = attack_cooldown
+				target_unit = e
+				_attack_enemy_unit()
+				return
 
-	# Then any nearby FEROX building (opportunistic). Skip if the manual
+	# Then the ordered FEROX building target. Skip if the manual
 	# target is no longer a valid attack target (captured, converted to
 	# DERELICT, etc.) — `_player_update` clears it next frame, but we
 	# don't want to get one last free shot off at an ally.
@@ -1400,19 +1487,20 @@ func _follow_path(delta: float) -> void:
 		return
 	# -----------------------------------------------------------------------
 
-	# Continuous separation from nearby same-layer units so a clump of
-	# units slides past itself instead of pile-jamming until the 1.5 s
-	# stuck-timer fires. The force is mixed into the path direction and
-	# the resulting position is validated against the movement-layer
-	# walkability map — separation can never push a unit onto a wall or
-	# building.
-	var sep: Vector2 = _compute_separation_force()
+	# Mindustry-style soft-body separation: nudge out of overlapping neighbours
+	# by the exact penetration (mass-weighted, under-relaxed) so a clump eases
+	# apart instead of being flung. Applied directly to position; movement below
+	# follows the path tangent unmodified.
+	_apply_separation()
 	var move_dir: Vector2 = direction
-	if sep.length_squared() > 0.0001:
-		move_dir = (direction + sep * 0.6).normalized()
 
 	if step >= distance:
-		position = target_pos
+		# Reaching the waypoint — sweep-collide the hop (don't raw-snap) so a
+		# fast unit can't jump across a wall corner between cells.
+		if unit_manager != null:
+			position = unit_manager.resolve_move(position, target_pos - position, unit_size, (data.movement_layer if data else 0), team)
+		else:
+			position = target_pos
 		path_index += 1
 		_blocked_frames = 0
 	else:
@@ -1445,135 +1533,62 @@ func _follow_path(delta: float) -> void:
 				_blocked_frames = 0
 
 
-## Sums a soft repulsion vector from every same-layer unit within
-## `unit_size * 2`. Falloff is quadratic so neighbours right on top
-## push hard while distant ones barely register.
-##
-## When a neighbour is *overlapping* (within `unit_size`), the
-## behaviour splits three ways depending on who's heading where:
-##
-##   • Same-direction race (both moving with parallel intent_dirs):
-##     instead of pushing, the unit FARTHER from the shared goal
-##     yields — sets a short `_yield_timer` so it skips this frame's
-##     movement step. Breaks the oscillation at 1-tile chokepoints
-##     where a radial push just bounces both units back into the line.
-##     Repeated yields escalate to a hard 2-second freeze + repath
-##     so a unit that keeps losing the contest gets pushed onto a
-##     different route.
-##
-##   • Push-through (we're moving, they're roughly in front along our
-##     intent axis): bulldoze them along our travel direction.
-##
-##   • Otherwise: symmetric pair shove. The soft force returned here
-##     is projected onto the path-perpendicular axis (when we have an
-##     intent_dir) so it never fights the path tangent — that was
-##     the source of the "push apart then re-clump" oscillation.
-func _compute_separation_force() -> Vector2:
+## Soft-body separation — a faithful port of Mindustry's PhysicsProcess. For
+## every overlapping same-layer neighbour, push THIS unit out by the EXACT
+## penetration depth (sum of radii − centre distance), weighted by the
+## neighbour's mass fraction and under-relaxed by SEP_RELAX. Because each push
+## only ever resolves the real overlap — not a quadratic force that grows the
+## closer two units get — a dense pile (e.g. a squad move-ordered to one point)
+## eases apart and SETTLES instead of being flung. The neighbour pushes itself
+## out symmetrically in its own update, so the pair separates by penetration ÷
+## SEP_RELAX per frame total, exactly like Mindustry. Applied straight to
+## position, validated against the layer's walkability so it never shoves a unit
+## into a wall.
+func _apply_separation() -> void:
 	if data == null or unit_manager == null:
-		return Vector2.ZERO
+		return
 	var ml: int = data.movement_layer
-	var sep_radius: float = unit_size * 2.0
-	if sep_radius <= 0.0:
-		return Vector2.ZERO
-	var force: Vector2 = Vector2.ZERO
-	var overlap_thresh: float = unit_size
-	var my_id: int = get_instance_id()
-	# Our direction of intent — straight toward the next path waypoint.
-	var intent_dir: Vector2 = Vector2.ZERO
-	if path.size() > 0 and path_index < path.size():
-		var to_wp: Vector2 = path[path_index] - position
-		if to_wp.length_squared() > 0.01:
-			intent_dir = to_wp.normalized()
-	# Distance to our own final goal — used to break ties when two units
-	# in a same-direction race need to decide who yields.
-	var my_goal_dist: float = _goal_distance()
-	# Only consider units in the local neighbourhood (spatial hash) instead
-	# of every unit on the map. The 3×3-cell query is a superset of every
-	# unit within `sep_radius`, so behaviour is identical to the old full
-	# scan — just O(local) instead of O(n²). Falls back to the full list if
-	# the manager lacks the hash (older builds / safety).
-	var all_units: Array
+	var my_r: float = unit_size
+	if my_r <= 0.0:
+		return
+	var my_mass: float = my_r * my_r  # ∝ circle area; only the RATIO matters
+	var disp: Vector2 = Vector2.ZERO
+	var neighbours: Array
 	if unit_manager.has_method("get_nearby_units"):
-		all_units = unit_manager.get_nearby_units(position, ml)
+		neighbours = unit_manager.get_nearby_units(position, ml)
 	else:
-		all_units = unit_manager.enemies + unit_manager.player_units
-	for other in all_units:
+		neighbours = unit_manager.enemies + unit_manager.player_units
+	for other in neighbours:
 		if other == self or not is_instance_valid(other) or other.is_dead:
 			continue
 		if other.data == null or other.data.movement_layer != ml:
 			continue
-		# Don't try to yield to a stationary / controlled / yielding unit —
-		# they aren't competing for our cell.
-		var to_other: Vector2 = other.position - position
-		var d: float = to_other.length()
-		if d > sep_radius:
+		var other_r: float = other.unit_size
+		var rs: float = my_r + other_r
+		if rs <= 0.0:
 			continue
-		var dir: Vector2
-		if d < 0.001:
+		var to: Vector2 = position - other.position
+		var dst: float = to.length()
+		if dst >= rs:
+			continue
+		var pen: float = rs - dst
+		var push: Vector2
+		if dst < 0.001:
+			# Exactly stacked — shove out at a random angle (Mindustry does this).
 			var ang: float = randf() * TAU
-			dir = Vector2(cos(ang), sin(ang))
-			d = unit_size * 0.25
+			push = Vector2(cos(ang), sin(ang)) * pen
 		else:
-			dir = to_other / d
-		var t: float = 1.0 - d / sep_radius
-		var weight: float = t * t
-		force -= dir * weight
-		# Active shove on overlap.
-		if d < overlap_thresh:
-			# ---- (1) YIELD-TO-LEADER ----
-			# Both units moving with roughly parallel intent → break the
-			# oscillation by having the farther-from-goal unit yield
-			# instead of getting pushed sideways.
-			var other_intent: Vector2 = other._intent_dir_for_yield() if other.has_method("_intent_dir_for_yield") else Vector2.ZERO
-			if intent_dir != Vector2.ZERO and other_intent != Vector2.ZERO \
-					and intent_dir.dot(other_intent) > 0.5:
-				var other_goal_dist: float = other._goal_distance() if other.has_method("_goal_distance") else 0.0
-				if my_goal_dist > other_goal_dist:
-					# We're trailing → yield to the leader.
-					_register_pushback()
-					# Skip the symmetric shove this frame; the soft force
-					# stays in `force` so we still drift sideways slightly
-					# (projected to path-perpendicular below).
-					continue
-				elif my_goal_dist < other_goal_dist:
-					# We're the leader → make THEM yield. Mirror what we'd
-					# do to ourselves in the trailing branch.
-					if other.has_method("_register_pushback"):
-						other._register_pushback()
-					continue
-				# Exact tie — fall through to the push-through / symmetric
-				# branches so SOMEONE moves; otherwise both freeze.
-			# ---- Push-through ----
-			if intent_dir != Vector2.ZERO and dir.dot(intent_dir) > 0.3:
-				var shove_amt: float = overlap_thresh - d
-				var other_target: Vector2 = other.position + intent_dir * shove_amt
-				var other_ml: int = other.data.movement_layer
-				if other.unit_manager != null \
-						and other.unit_manager.is_world_pos_walkable(other_target, other_ml):
-					other.position = other_target
-				continue
-			# ---- Symmetric pair shove ----
-			if my_id < other.get_instance_id():
-				var shove_amt: float = (overlap_thresh - d) * 0.5
-				var other_target: Vector2 = other.position + dir * shove_amt
-				var other_ml: int = other.data.movement_layer
-				if other.unit_manager != null \
-						and other.unit_manager.is_world_pos_walkable(other_target, other_ml):
-					other.position = other_target
-				var my_target: Vector2 = position - dir * shove_amt
-				if unit_manager.is_world_pos_walkable(my_target, ml):
-					position = my_target
-	# ---- (2) PATH-TANGENT SEPARATION ----
-	# Project the soft repulsion onto the path-perpendicular axis so
-	# separation never fights forward progress. Without this, every
-	# push along the path direction gets immediately undone by the
-	# pathfinder pulling the unit back onto the optimal line — and
-	# adjacent units oscillate forever between push and re-pull.
-	if intent_dir != Vector2.ZERO and force.length_squared() > 0.0001:
-		var parallel: float = force.dot(intent_dir)
-		# Discard the parallel component entirely; keep only perpendicular.
-		force -= intent_dir * parallel
-	return force
+			push = (to / dst) * pen
+		var other_mass: float = other_r * other_r
+		# Heavier neighbour → we move more of the way (its mass fraction).
+		var m1: float = other_mass / (my_mass + other_mass)
+		disp += push * (m1 / SEP_RELAX)
+	if disp.length_squared() <= 0.0001:
+		return
+	var target: Vector2 = position + disp
+	# Never let separation push us into a wall / off navigable terrain.
+	if unit_manager.is_world_pos_walkable(target, ml, team):
+		position = target
 
 
 ## Distance from this unit to its effective "goal" — used to decide who
@@ -1600,8 +1615,7 @@ func _goal_distance() -> float:
 	return 0.0
 
 
-## Public read of the intent direction this unit is using right now —
-## same source as the local `intent_dir` in `_compute_separation_force`.
+## Public read of the intent direction this unit is using right now.
 ## Pulled into a method so peers can ask without recomputing.
 func _intent_dir_for_yield() -> Vector2:
 	if path.size() > 0 and path_index < path.size():
@@ -1882,6 +1896,33 @@ func capture_payload_state(payload: Dictionary) -> void:
 		payload["target_building"] = [target_building.x, target_building.y]
 	if manual_target_building is Vector2i:
 		payload["manual_target_building"] = [manual_target_building.x, manual_target_building.y]
+	# Active status effects (Burning / Embrittled / slowed / corroding …). The
+	# `effect` Resource itself can't serialise, so store its id + the live timing
+	# and re-resolve via Registry on load.
+	var statuses: Array = []
+	for sid in active_statuses:
+		var ent: Dictionary = active_statuses[sid]
+		statuses.append({
+			"id": String(sid),
+			"time_left": float(ent.get("time_left", 0.0)),
+			"stacks": int(ent.get("stacks", 1)),
+			"boost": float(ent.get("boost", 1.0)),
+			"dot_acc": float(ent.get("dot_acc", 0.0)),
+		})
+	payload["active_statuses"] = statuses
+	# Mining progress + carried ore (so a miner doesn't restart from scratch).
+	payload["mine_timer"] = _mine_timer
+	var mined: Dictionary = {}
+	for mk in mined_inventory:
+		mined[String(mk)] = int(mined_inventory[mk])
+	payload["mined_inventory"] = mined
+	# Squad membership + payload-entry intent + Ferox rebuild task.
+	payload["squad_anchor"] = [squad_anchor.x, squad_anchor.y]
+	payload["enter_payload_when_able"] = enter_payload_when_able
+	payload["payload_target_anchor"] = [payload_target_anchor.x, payload_target_anchor.y]
+	payload["rebuild_timer"] = rebuild_timer
+	if rebuild_target is Dictionary:
+		payload["rebuild_target"] = rebuild_target
 
 
 ## Restores runtime state previously captured by `capture_payload_state`
@@ -1927,6 +1968,44 @@ func apply_payload_state(payload: Dictionary) -> void:
 		var mtb: Array = payload["manual_target_building"]
 		if mtb.size() == 2:
 			manual_target_building = Vector2i(int(mtb[0]), int(mtb[1]))
+	# Status effects — re-resolve each effect Resource by id, keeping the saved
+	# timing so a burning unit keeps burning for the right remaining duration.
+	if payload.has("active_statuses"):
+		active_statuses.clear()
+		for s in payload["active_statuses"]:
+			var sid: StringName = StringName(s.get("id", ""))
+			if sid == &"":
+				continue
+			var eff = Registry.get_status_effect(sid)
+			if eff == null:
+				continue
+			active_statuses[sid] = {
+				"effect": eff,
+				"time_left": float(s.get("time_left", eff.duration)),
+				"stacks": int(s.get("stacks", 1)),
+				"boost": float(s.get("boost", 1.0)),
+				"dot_acc": float(s.get("dot_acc", 0.0)),
+			}
+	# Mining progress + carried ore.
+	if payload.has("mine_timer"):
+		_mine_timer = float(payload["mine_timer"])
+	if payload.has("mined_inventory"):
+		mined_inventory.clear()
+		for mk in payload["mined_inventory"]:
+			mined_inventory[StringName(mk)] = int(payload["mined_inventory"][mk])
+	# Squad membership + payload-entry intent + Ferox rebuild task.
+	if payload.has("squad_anchor"):
+		var sa: Array = payload["squad_anchor"]
+		if sa.size() == 2:
+			squad_anchor = Vector2i(int(sa[0]), int(sa[1]))
+	enter_payload_when_able = bool(payload.get("enter_payload_when_able", false))
+	if payload.has("payload_target_anchor"):
+		var pta: Array = payload["payload_target_anchor"]
+		if pta.size() == 2:
+			payload_target_anchor = Vector2i(int(pta[0]), int(pta[1]))
+	rebuild_timer = float(payload.get("rebuild_timer", 0.0))
+	if payload.has("rebuild_target") and payload["rebuild_target"] is Dictionary:
+		rebuild_target = payload["rebuild_target"]
 
 
 ## Per-frame mount tick: aim, decay reload/recoil, and fire when ready and
@@ -2168,7 +2247,9 @@ func _draw_weapon_mounts() -> void:
 # PLAYER UNIT COMBAT
 # =========================
 
-## Player units auto-target nearby FEROX enemies and buildings when idle.
+## Player units auto-target nearby FEROX enemies and buildings when idle, then
+## pursue + attack. Called from _player_update's idle branch for every player
+## unit EXCEPT passive (non-controlled) Lumina shardlings.
 ## NOTE: attack_timer is ticked by _player_update now (once per frame), so we
 ## don't decrement it again here.
 func _try_player_combat(_delta: float) -> void:
@@ -2758,10 +2839,17 @@ func _disperse_from_nearby_units() -> void:
 
 
 func take_damage(amount: float) -> void:
-	# Apply armor from .tres data
+	# Apply armor from .tres data, scaled by any armor-effectiveness debuff
+	# (Embrittled halves it). Multiple such statuses multiply.
 	var actual_damage = amount
 	if data:
-		actual_damage = data.calc_damage_taken(amount)
+		var armor_mult: float = 1.0
+		if not active_statuses.is_empty():
+			for sid in active_statuses:
+				var ase: StatusEffectData = active_statuses[sid]["effect"]
+				if ase != null and ase.armor_effectiveness_modifier != 1.0:
+					armor_mult *= ase.armor_effectiveness_modifier
+		actual_damage = data.calc_damage_taken(amount, armor_mult)
 	# Status-effect vulnerability: a status's `defense_modifier` scales ALL
 	# incoming damage (corroding = 1.3× more, freezing = 1.4×, etc.). Modifiers
 	# from multiple active statuses multiply together.

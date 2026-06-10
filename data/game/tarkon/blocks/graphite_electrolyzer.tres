@@ -1,7 +1,8 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d08u2pm1k4dpv"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://cf0ahstfw28v7" path="res://textures/blocks/factories/GraphiteElectrolyzer.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://drppwknpk3xdt" path="res://textures/blocks/factories/Graphite Electrolyzer/GraphiteElectrolyzer.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://djj4mjrha2ay" path="res://textures/blocks/factories/Graphite Electrolyzer/GraphiteElectrolyzerBase.png" id="3"]
 
 [resource]
 script = ExtResource("1")
@@ -10,25 +11,31 @@ display_name = "Graphite Electrolyzer"
 description = "Splits water across graphite electrodes into oxygen and hydrogen gas. Requires electrical power."
 icon = ExtResource("2")
 category = 2
-tags = PackedStringArray("production", "processing", "omnidirectional")
+tags = PackedStringArray("production", "processing")
 color = Color(0.45, 0.5, 0.55, 1)
 grid_size = Vector2i(3, 3)
 top_sprite = ExtResource("2")
+base_sprite = ExtResource("3")
+liquid_tint = true
+liquid_tint_fluid = &"mat_water"
 max_health = 320.0
 build_cost = {
-"copper": 160,
-"silicon": 60,
-"graphite": 40
+"copper": 80,
+"graphite": 60
 }
 build_time = 4.0
 input_items = {
 "mat_water": 2
 }
 output_items = {
-"mat_oxygen": 1,
-"mat_hydrogen": 2
+"mat_hydrogen": 2,
+"mat_oxygen": 1
 }
 production_time = 3.0
-electrical_power_use = 20.0
 liquid_capacity = 30.0
+electrical_power_use = 20.0
+output_sides = {
+&"mat_hydrogen": 0,
+&"mat_oxygen": 2
+}
 max_stored_items = 30

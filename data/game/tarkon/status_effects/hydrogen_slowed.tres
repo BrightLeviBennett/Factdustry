@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"hydrogen_slowed"
+display_name = "Hydrogen"
+description = "Engulfed in hydrogen gas — choking and sluggish. Takes damage over time and moves slower while inside the cloud."
+duration = 0.6
+stackable = false
+refresh_on_reapply = true
+effect_type = 2
+tint_color = Color(0.6, 0.8, 1, 1)
+particle_color = Color(0.7, 0.85, 1, 1)
+speed_modifier = 0.8
+tick_damage = 5.0
+tick_interval = 2.0
+tags = PackedStringArray("gas", "slow")

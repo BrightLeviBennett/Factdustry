@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="StatusEffectData" format=3]
+
+[ext_resource type="Script" uid="uid://bvnhtd25qss5v" path="res://data/game/tarkon/status_effects/status_effect_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"crystallized"
+display_name = "Crystallized"
+description = "Encrusted in salt crystals. Aims, moves, and fires sluggishly."
+duration = 5.0
+stackable = false
+refresh_on_reapply = true
+effect_type = 1
+tint_color = Color(0.8, 0.9, 1.0, 1)
+particle_color = Color(0.85, 0.95, 1.0, 1)
+speed_modifier = 0.6
+attack_speed_modifier = 0.8
+aim_speed_modifier = 0.4
+tags = PackedStringArray("slow")

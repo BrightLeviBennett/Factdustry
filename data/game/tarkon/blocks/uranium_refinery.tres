@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://cironuk24iwq0"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,15 +6,15 @@
 script = ExtResource("1")
 id = &"uranium_refinery"
 display_name = "Uranium Refinery"
-description = "Enriches raw uranium into reactor-grade pellets."
+description = "Enriches raw uranium into reactor-grade discs."
 category = 2
 tags = PackedStringArray("factory", "omnidirectional")
 color = Color(0.55, 0.95, 0.35, 1)
 max_health = 280.0
 build_cost = {
 "copper": 260,
-"steel": 100,
-"silicon": 60
+"silicon": 60,
+"steel": 100
 }
 build_time = 5.0
 input_items = {
