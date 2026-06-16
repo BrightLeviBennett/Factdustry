@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://p35rfaj2jagt"
-path="res://.godot/imported/CoreShardLumina_old.png-02d992ab0d402efcb231115408ed42cd.ctex"
+uid="uid://c6b8iroiup0to"
+path="res://.godot/imported/SaltWall.png-c2da4431a5cb2026d7dbfb684536a2b8.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/cores/CoreShard/CoreShardLumina_old.png"
-dest_files=["res://.godot/imported/CoreShardLumina_old.png-02d992ab0d402efcb231115408ed42cd.ctex"]
+source_file="res://textures/terrain/SaltWall.png"
+dest_files=["res://.godot/imported/SaltWall.png-c2da4431a5cb2026d7dbfb684536a2b8.ctex"]
 
 [params]
 

@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://crsycnqx1546a"
-path="res://.godot/imported/Water_old.png-8996beabc580e1e37d68ff12bf081989.ctex"
+uid="uid://c3few4jums28n"
+path="res://.godot/imported/SaltFloor.png-d16a41595cff7e7a56e50a15923a6d53.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/Water_old.png"
-dest_files=["res://.godot/imported/Water_old.png-8996beabc580e1e37d68ff12bf081989.ctex"]
+source_file="res://textures/terrain/SaltFloor.png"
+dest_files=["res://.godot/imported/SaltFloor.png-d16a41595cff7e7a56e50a15923a6d53.ctex"]
 
 [params]
 

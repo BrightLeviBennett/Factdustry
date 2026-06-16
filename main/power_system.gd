@@ -834,6 +834,13 @@ func _is_block_drawing_power(anchor: Vector2i, data: BlockData) -> bool:
 			return logistics.refabricator_state[anchor].get("phase", "") == "processing"
 		return false
 
+	# Constructors only draw while fabricating a payload building.
+	if data.tags.has("constructor"):
+		if "constructor_state" in logistics and logistics.constructor_state.has(anchor):
+			var st: Dictionary = logistics.constructor_state[anchor]
+			return st.get("phase", "") == "building" and float(st.get("timer", 0.0)) > 0.0
+		return false
+
 	# Regular factories / unit fabricators: consume only while in the
 	# processing/ejecting phase. Collecting-with-no-inputs counts as idle.
 	var is_factory: bool = not data.output_items.is_empty() or data.produced_unit != &""

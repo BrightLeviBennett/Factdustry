@@ -2325,6 +2325,15 @@ func _update_projectiles(delta: float) -> void:
 			var hit_unit: Node2D = _find_opposing_unit_on_segment(
 					proj["pos"], move_pos, src_team, unit_mgr)
 			if hit_unit:
+				if hit_unit.has_method("unit_shield_intercept"):
+					var shield_hit: Dictionary = hit_unit.unit_shield_intercept(
+							proj["pos"], move_pos, src_team)
+					if not shield_hit.is_empty():
+						if hit_unit.has_method("apply_unit_shield_damage"):
+							hit_unit.apply_unit_shield_damage(float(proj.get("damage", 0.0)))
+						proj["pos"] = shield_hit.get("hit_pos", move_pos)
+						to_remove.append(i)
+						continue
 				var orig_target = proj.get("target_ref")
 				var hit_is_target: bool = (proj.get("target_type", "") == "enemy" \
 						and orig_target == hit_unit)
@@ -2871,15 +2880,31 @@ func _find_nearest_enemy_building(from_pos: Vector2, range_px: float) -> Vector2
 ## the segment, or null.
 func _find_opposing_unit_on_segment(bullet_prev: Vector2, bullet_pos: Vector2,
 		source_team: int, unit_mgr: Node2D) -> Node2D:
+	var best_shield_unit: Node2D = null
+	var best_shield_dist := INF
 	for lst in [unit_mgr.enemies, unit_mgr.player_units]:
 		for u in lst:
 			if not is_instance_valid(u) or u.is_dead:
 				continue
 			if "team" in u and u.team == source_team:
 				continue
+			if u.has_method("unit_shield_intercept"):
+				var shield_hit: Dictionary = u.unit_shield_intercept(bullet_prev, bullet_pos, source_team)
+				if not shield_hit.is_empty():
+					var hit_pos: Vector2 = shield_hit.get("hit_pos", bullet_pos)
+					var shield_dist: float = bullet_prev.distance_squared_to(hit_pos)
+					if shield_dist < best_shield_dist:
+						best_shield_dist = shield_dist
+						best_shield_unit = u
 			var closest: Vector2 = Geometry2D.get_closest_point_to_segment(u.position, bullet_prev, bullet_pos)
 			if closest.distance_to(u.position) < hit_radius + u.unit_size:
+				if best_shield_unit != null:
+					var body_dist: float = bullet_prev.distance_squared_to(closest)
+					if best_shield_dist <= body_dist:
+						return best_shield_unit
 				return u
+	if best_shield_unit != null:
+		return best_shield_unit
 	return null
 
 

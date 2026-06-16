@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://xvvpx0eiw15e"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"verdant_grotto"
+display_name = "Verdant Grotto"
+description = "<Optional Sector>
+A sheltered green valley, unusually calm for Tarkon. Plentiful water and open ground make it an easy foothold."
+planet_id = &"Tarkon"
+hex_q = 5
+hex_r = 3
+available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_water")
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray()
+required_sectors = PackedStringArray("crash_site")
+tags = PackedStringArray("campaign", "sector")

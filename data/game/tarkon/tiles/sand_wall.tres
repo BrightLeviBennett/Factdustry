@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dsuxdr0ai3qvb"]
+
+[ext_resource type="Texture2D" uid="uid://bosgjai6pgckn" path="res://textures/terrain/SandWall.png" id="1_yft57"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_10ku4"]
+
+[resource]
+script = ExtResource("2_10ku4")
+id = &"sand_wall"
+display_name = "Sand Wall"
+icon = ExtResource("1_yft57")
+category = 1
+height = 1.0
+tags = PackedStringArray("sand")
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

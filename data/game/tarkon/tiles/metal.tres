@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3 uid="uid://dmt4maxrw5bk2"]
+
+[ext_resource type="Texture2D" uid="uid://dl1rjj28p8vmt" path="res://textures/terrain/Metal.png" id="1_metal"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2_metal"]
+
+[resource]
+script = ExtResource("2_metal")
+id = &"metal"
+display_name = "Metal"
+icon = ExtResource("1_metal")
+tags = PackedStringArray()
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

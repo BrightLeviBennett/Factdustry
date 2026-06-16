@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"missile_rack"
 display_name = "Missile Rack"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 2. Lets the unit fire sets of three homing missiles with a long cooldown."
 category = 10
 tags = PackedStringArray("module")
 color = Color(0.7, 0.3, 0.3, 1)

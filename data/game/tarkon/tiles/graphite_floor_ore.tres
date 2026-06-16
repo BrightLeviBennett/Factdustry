@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b4q1sv63un43b" path="res://textures/terrain/GraphiteOre.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"graphite_floor_ore"
+display_name = "Graphite Floor Ore"
+description = "A surface deposit of graphite. Place a floor miner over it to extract."
+icon = ExtResource("2")
+category = 2
+color = Color(0.32, 0.32, 0.36, 1)
+opacity = 0.9
+tags = PackedStringArray("ore", "mineral", "floor_ore")
+minable_resource = &"mat_graphite"

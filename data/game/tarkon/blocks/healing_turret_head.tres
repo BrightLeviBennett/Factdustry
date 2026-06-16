@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"healing_turret_head"
 display_name = "Healing Turret Head"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 1. Repairs blocks twice as fast and lets the unit heal other units, at the cost of halving movement speed."
 category = 10
 tags = PackedStringArray("module")
 color = Color(0.4, 0.85, 0.5, 1)

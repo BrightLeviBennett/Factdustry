@@ -14,7 +14,7 @@ extends Camera2D
 ## invisible near `max_zoom`; multiplicative keeps it uniform across
 ## the whole range.
 @export var zoom_step := 0.15
-@export var min_zoom := 0.05
+@export var min_zoom := 0.01
 @export var max_zoom := 12.0
 @export var zoom_smoothing := 8.0
 

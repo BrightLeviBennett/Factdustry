@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3]
+
+[ext_resource type="Texture2D" path="res://textures/terrain/SaltWall.png" id="1"]
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="2"]
+
+[resource]
+script = ExtResource("2")
+id = &"salt_wall"
+display_name = "Salt Wall"
+icon = ExtResource("1")
+category = 1
+height = 1.0
+tags = PackedStringArray("salt")
+metadata/_custom_type_script = "uid://ctm2t1g27ix6i"

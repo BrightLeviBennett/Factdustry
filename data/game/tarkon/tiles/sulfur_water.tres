@@ -9,6 +9,7 @@ script = ExtResource("1")
 id = &"sulfur_water"
 display_name = "Sulfur Water"
 icon = ExtResource("1_mo34l")
+color = Color(0.5, 0.52, 0.23, 1)
 speed_modifier = 0.5
 tags = PackedStringArray("liquid", "water")
 is_liquid = true

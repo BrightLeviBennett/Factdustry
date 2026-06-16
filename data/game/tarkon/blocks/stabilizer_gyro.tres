@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"stabilizer_gyro"
 display_name = "Stabilizer Gyro"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 2. Halves knockback, improves control while Afterburner boosting, and helps larger units turn faster."
 category = 10
 tags = PackedStringArray("module")
 color = Color(0.6, 0.55, 0.85, 1)

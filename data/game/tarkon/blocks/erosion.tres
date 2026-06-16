@@ -1,0 +1,46 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="2"]
+[ext_resource type="Resource" path="res://data/game/tarkon/status_effects/corroding.tres" id="3"]
+[ext_resource type="Texture2D" uid="uid://cnr74cpaunr6q" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelBase.png" id="4"]
+[ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="5"]
+[ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="6"]
+
+[sub_resource type="Resource" id="AmmoType_erosion_graphite"]
+script = ExtResource("2")
+item_id = &"mat_graphite"
+amount_per_shot = 1
+damage = 22.0
+pierce_armor = 4.0
+projectile_speed = 360.0
+projectile_lifetime = 1.8
+projectile_radius = 4.0
+status_effect = ExtResource("3")
+status_duration = 6.0
+projectile_color = Color(0.55, 0.78, 0.28, 1)
+trail_color = Color(0.45, 0.7, 0.22, 1)
+trail_length = 18.0
+
+[resource]
+script = ExtResource("1")
+id = &"erosion"
+display_name = "Erosion"
+description = "Precision corrosive turret that wears down armor with graphite-tipped rounds."
+icon = ExtResource("6")
+category = 4
+tags = PackedStringArray("turret", "defense")
+color = Color(0.55, 0.78, 0.28, 1)
+base_sprite = ExtResource("4")
+turret_head_sprite = ExtResource("5")
+max_health = 260.0
+build_cost = {
+"copper": 100,
+"silicon": 30
+}
+build_time = 3.0
+power_consumption = 3.0
+attack_speed = 1.6
+attack_range = 9.0
+ammo_types = Array[Resource]([SubResource("AmmoType_erosion_graphite")])
+max_stored_items = 30

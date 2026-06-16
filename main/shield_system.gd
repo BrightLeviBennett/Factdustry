@@ -55,16 +55,23 @@ const _WATER_FLUID_ID := &"mat_water"
 #   "target_scale":       float (1.0 when active, 0 when broken)
 var states: Dictionary = {}
 
+# Pausable animation clock fed into the merged-shield shader.
+var _shader_anim_time: float = 0.0
+
 
 @onready var main: Node2D = get_node_or_null("/root/Main")
 
 
 func _ready() -> void:
-	# Slightly below the BuildingSystem z so a shield reads as a wash
-	# under turret heads, but above the world fade layer.
 	z_index = 60
 	z_as_relative = false
 	process_mode = Node.PROCESS_MODE_PAUSABLE
+	# Apply the Mindustry-style merged-shield shader to this node.
+	# It runs once over all merged fill/rim draw calls produced by _draw(),
+	# adding animated diagonal stripes to fill pixels only.
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/shield_fill.gdshader")
+	material = mat
 
 
 func _process(delta: float) -> void:
@@ -72,15 +79,10 @@ func _process(delta: float) -> void:
 		return
 	var paused: bool = "world_paused" in main and bool(main.world_paused)
 	if not paused:
-		# Advance the shader clock only while the game is running.
-		# Pushing the new value to every active shield material here
-		# (rather than in _update_anim_visual) keeps the clock cheap
-		# even when no shield is being rebuilt this frame.
 		_shader_anim_time += delta
-		for a in _anim_visuals:
-			var spr: Sprite2D = _anim_visuals[a]
-			if spr.visible and spr.material is ShaderMaterial:
-				(spr.material as ShaderMaterial).set_shader_parameter("anim_time", _shader_anim_time)
+		if material is ShaderMaterial:
+			(material as ShaderMaterial).set_shader_parameter("anim_time", _shader_anim_time)
+			(material as ShaderMaterial).set_shader_parameter("animate", animate_shields)
 	if paused:
 		return
 	_tick(delta)
@@ -497,14 +499,13 @@ func _segment_boundary(prev: Vector2, next: Vector2, anchor: Vector2i, data: Blo
 # =========================
 
 func _draw() -> void:
-	# NB: don't early-return here when `states` is empty — the
-	# `_anim_visuals` GC at the bottom of this function is the ONLY
-	# place that frees the per-shield Sprite2D children, and bailing
-	# above would leak them when the last shield block on the map is
-	# destroyed (the shader-driven visual would stay frozen on screen
-	# with no shield underneath it). When there are zero active
-	# states the per-anchor draw loop simply iterates nothing and we
-	# proceed straight to the cleanup pass.
+	var pulse: float = 0.5 + 0.5 * sin(float(Time.get_ticks_msec()) * 0.004)
+	const _SHIELD_HUE := Color(1.0, 0.92, 0.25)
+	var fill: Color = Color(_SHIELD_HUE.r, _SHIELD_HUE.g, _SHIELD_HUE.b, 0.10 + 0.05 * pulse)
+	var rim: Color = Color(_SHIELD_HUE.r, _SHIELD_HUE.g, _SHIELD_HUE.b, 0.55 + 0.10 * pulse)
+	var merged_circles: Array = _collect_merged_circle_shields()
+	_draw_merged_circle_shields(merged_circles, fill, rim)
+
 	for anchor in states:
 		var state: Dictionary = states[anchor]
 		var vs: float = float(state.get("visual_scale", 0.0))
@@ -513,144 +514,136 @@ func _draw() -> void:
 		var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
 		if data == null or data.shield_shape == "":
 			continue
+		if data.shield_shape == "circle":
+			continue
 		var centre: Vector2 = _shield_centre(anchor, data)
 		var extent: Vector2 = _shield_extent_px(data, state)
-		# Always yellow with a slight time-keyed pulse so an idle
-		# shield isn't visually frozen. Same hue regardless of HP /
-		# faction / shape — matches the spec.
-		var pulse: float = 0.5 + 0.5 * sin(float(Time.get_ticks_msec()) * 0.004)
-		const _SHIELD_HUE := Color(1.0, 0.92, 0.25)
-		var fill: Color = Color(_SHIELD_HUE.r, _SHIELD_HUE.g, _SHIELD_HUE.b, 0.10 + 0.05 * pulse)
-		var rim: Color = Color(_SHIELD_HUE.r, _SHIELD_HUE.g, _SHIELD_HUE.b, 0.55 + 0.10 * pulse)
-		if animate_shields:
-			# Mindustry's `renderer.animateShields` path. Routed to a
-			# per-shield child Sprite2D running the ported shield.frag
-			# shader — the diagonal wavy stripe pattern + rim are done
-			# in GLSL, not approximated in _draw.
-			_ensure_anim_visual(anchor).visible = true
-			_update_anim_visual(anchor, data, state, centre, extent)
-			# Skip the static fill — the shader covers the fill area.
+		# Rotate the local-space rectangle by the block's facing
+		# so a directional shield (8 forward × 2 perpendicular)
+		# aligns with the block's rotation. Drawing through
+		# draw_set_transform avoids having to manually compute
+		# four rotated corner points.
+		var ang: float = _block_facing_angle(anchor)
+		draw_set_transform(centre, ang)
+		var rect := Rect2(-extent * 0.5, extent)
+		draw_rect(rect, fill, true)
+		draw_rect(rect, rim, false, 2.0)
+		draw_set_transform(Vector2.ZERO, 0.0)
+
+
+func _collect_merged_circle_shields() -> Array:
+	var out: Array = []
+	for anchor in states:
+		var state: Dictionary = states[anchor]
+		var vs: float = float(state.get("visual_scale", 0.0))
+		if vs <= _VANISH_SCALE:
 			continue
-		if data.shield_shape == "circle":
-			draw_circle(centre, extent.x, fill)
-			draw_arc(centre, extent.x, 0.0, TAU, 64, rim, 2.0, true)
-		else:
-			# Rotate the local-space rectangle by the block's facing
-			# so a directional shield (8 forward × 2 perpendicular)
-			# aligns with the block's rotation. Drawing through
-			# draw_set_transform avoids having to manually compute
-			# four rotated corner points.
-			var ang: float = _block_facing_angle(anchor)
-			draw_set_transform(centre, ang)
-			var rect := Rect2(-extent * 0.5, extent)
+		var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if data == null or data.shield_shape != "circle":
+			continue
+		out.append({
+			"key": anchor,
+			"centre": _shield_centre(anchor, data),
+			"radius": _shield_extent_px(data, state).x,
+			"time_offset": float(anchor.x * 13 + anchor.y * 47) * 0.31,
+		})
+
+	var unit_mgr = main.get_node_or_null("UnitManager") if main else null
+	if unit_mgr != null:
+		for pool_name in ["player_units", "enemies"]:
+			if not (pool_name in unit_mgr):
+				continue
+			for unit in unit_mgr.get(pool_name):
+				if unit == null or not is_instance_valid(unit):
+					continue
+				if "is_dead" in unit and unit.is_dead:
+					continue
+				if unit is CanvasItem and not (unit as CanvasItem).visible:
+					continue
+				if not ("unit_shield_visual_scale" in unit) or not ("unit_shield_max_health" in unit):
+					continue
+				var scale: float = float(unit.unit_shield_visual_scale)
+				if scale <= _VANISH_SCALE or float(unit.unit_shield_max_health) <= 0.0:
+					continue
+				if unit.has_method("_unit_shield_radius"):
+					out.append({
+						"key": unit,
+						"centre": unit.position,
+						"radius": float(unit._unit_shield_radius()) * scale,
+						"time_offset": float(unit.get_instance_id() % 997) * 0.017,
+					})
+	return out
+
+
+
+func _draw_merged_circle_shields(circles: Array, fill: Color, rim: Color) -> void:
+	if circles.is_empty():
+		return
+	_draw_merged_circle_fill(circles, fill)
+	const SEGMENTS := 96
+	for i in range(circles.size()):
+		var c: Dictionary = circles[i]
+		var centre: Vector2 = c["centre"]
+		var radius: float = float(c["radius"])
+		var run_start: int = -1
+		for s in range(SEGMENTS + 1):
+			var idx: int = s % SEGMENTS
+			var angle: float = float(idx) * TAU / float(SEGMENTS)
+			var outside: Vector2 = centre + Vector2(cos(angle), sin(angle)) * (radius + 1.5)
+			var covered := false
+			for j in range(circles.size()):
+				if j == i:
+					continue
+				var other: Dictionary = circles[j]
+				var other_radius: float = float(other["radius"])
+				if outside.distance_squared_to(other["centre"]) <= other_radius * other_radius:
+					covered = true
+					break
+			if not covered:
+				if run_start < 0:
+					run_start = s
+			elif run_start >= 0:
+				var start_angle: float = float(run_start) * TAU / float(SEGMENTS)
+				var end_angle: float = float(s) * TAU / float(SEGMENTS)
+				draw_arc(centre, radius, start_angle, end_angle, max(2, s - run_start), rim, 2.0, true)
+				run_start = -1
+		if run_start >= 0 and run_start < SEGMENTS:
+			draw_arc(centre, radius, float(run_start) * TAU / float(SEGMENTS), TAU, max(2, SEGMENTS - run_start), rim, 2.0, true)
+
+
+func _draw_merged_circle_fill(circles: Array, fill: Color) -> void:
+	var min_y := INF
+	var max_y := -INF
+	for c in circles:
+		var centre: Vector2 = c["centre"]
+		var radius: float = float(c["radius"])
+		min_y = minf(min_y, centre.y - radius)
+		max_y = maxf(max_y, centre.y + radius)
+	const STEP := 4.0
+	var y: float = floor(min_y / STEP) * STEP
+	while y <= max_y:
+		var intervals: Array = []
+		for c in circles:
+			var centre: Vector2 = c["centre"]
+			var radius: float = float(c["radius"])
+			var dy: float = absf(y - centre.y)
+			if dy > radius:
+				continue
+			var half_width: float = sqrt(maxf(radius * radius - dy * dy, 0.0))
+			intervals.append(Vector2(centre.x - half_width, centre.x + half_width))
+		intervals.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.x < b.x)
+		var merged: Array = []
+		for interval in intervals:
+			if merged.is_empty() or interval.x > (merged[-1] as Vector2).y:
+				merged.append(interval)
+			else:
+				var last: Vector2 = merged[-1]
+				last.y = maxf(last.y, interval.y)
+				merged[-1] = last
+		for interval in merged:
+			var rect := Rect2(Vector2(interval.x, y - STEP * 0.5), Vector2(interval.y - interval.x, STEP))
 			draw_rect(rect, fill, true)
-			draw_rect(rect, rim, false, 2.0)
-			draw_set_transform(Vector2.ZERO, 0.0)
-	# Garbage-collect any animated sprites whose shield is broken /
-	# unpowered / removed (so they don't keep rendering on top of
-	# nothing). Also hides them when the toggle is off.
-	var dead_visuals: Array = []
-	for a in _anim_visuals.keys():
-		var still_active: bool = false
-		var anchor_exists: bool = states.has(a) and main.placed_buildings.has(a)
-		if animate_shields and anchor_exists:
-			var s2: Dictionary = states[a]
-			var d2: BlockData = Registry.get_block(main.placed_buildings.get(a, &""))
-			if d2 != null and d2.shield_shape != "" \
-					and not bool(s2.get("is_broken", false)) \
-					and float(s2.get("visual_scale", 0.0)) > _VANISH_SCALE:
-				still_active = true
-		var node: Node2D = _anim_visuals[a]
-		if not still_active:
-			node.visible = false
-		# Free outright when the anchor is gone — no point hanging on
-		# to a sprite whose shield will never come back.
-		if not anchor_exists:
-			dead_visuals.append(a)
-	for a in dead_visuals:
-		var n: Node2D = _anim_visuals[a]
-		_anim_visuals.erase(a)
-		n.queue_free()
-
-
-# =========================
-# IDLE-ANIMATION VISUALS (Mindustry "animateShields")
-# =========================
-# When the `Shield Animation` setting is on we delegate the fill
-# render to a per-shield Sprite2D running a port of Mindustry's
-# `core/assets/shaders/shield.frag`. Sprite2D gives us 0..1 UVs over
-# the shield's bounding rect; the shader does its diagonal-stripe +
-# rim pattern in GLSL exactly the way Mindustry does.
-
-const _SHIELD_SHADER_PATH := "res://shaders/shield_shader.gdshader"
-# Pixels of empty padding on each side of the shield mask, inside the
-# sprite quad. Has to be ≥ the shader's WOBBLE_AMP_PX (2.0) + the rim
-# band so the breathing edge isn't sliced off at the quad boundary.
-const _SHIELD_VISUAL_PAD := 16.0
-# Pausable clock fed into every shield's shader. Advances by delta
-# each frame in `_process`, but only when the game isn't paused —
-# so the shield wobble freezes alongside the rest of the world.
-var _shader_anim_time: float = 0.0
-var _shield_shader: Shader = null
-var _white_pixel: Texture2D = null
-# anchor → Sprite2D
-var _anim_visuals: Dictionary = {}
-
-
-func _ensure_anim_visual(anchor: Vector2i) -> Sprite2D:
-	if _anim_visuals.has(anchor):
-		return _anim_visuals[anchor]
-	if _shield_shader == null:
-		_shield_shader = load(_SHIELD_SHADER_PATH)
-	if _white_pixel == null:
-		var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
-		img.set_pixel(0, 0, Color(1, 1, 1, 1))
-		_white_pixel = ImageTexture.create_from_image(img)
-	var spr := Sprite2D.new()
-	spr.texture = _white_pixel
-	spr.centered = true
-	# z slightly above the static draw so the shader output sits at
-	# the same depth as if we'd drawn it ourselves. Stays under
-	# turret heads (z 60-ish on parent already).
-	spr.z_as_relative = false
-	spr.z_index = z_index
-	var mat := ShaderMaterial.new()
-	mat.shader = _shield_shader
-	spr.material = mat
-	add_child(spr)
-	_anim_visuals[anchor] = spr
-	return spr
-
-
-func _update_anim_visual(
-		anchor: Vector2i,
-		data: BlockData,
-		_state: Dictionary,
-		centre: Vector2,
-		extent: Vector2) -> void:
-	var spr: Sprite2D = _anim_visuals[anchor]
-	spr.position = centre
-	# `shield_size_px` is the actual hit area; the sprite is rendered
-	# `_SHIELD_VISUAL_PAD` larger on each side so the wobble + rim
-	# swing into that padding instead of clipping at the quad edge.
-	var shield_size: Vector2
-	if data.shield_shape == "circle":
-		shield_size = Vector2(extent.x * 2.0, extent.x * 2.0)
-		spr.rotation = 0.0
-	else:
-		shield_size = extent
-		spr.rotation = _block_facing_angle(anchor)
-	var pad := Vector2(_SHIELD_VISUAL_PAD, _SHIELD_VISUAL_PAD) * 2.0
-	var sprite_size: Vector2 = shield_size + pad
-	spr.scale = sprite_size
-	var mat: ShaderMaterial = spr.material
-	mat.set_shader_parameter("shape_type", 0 if data.shield_shape == "circle" else 1)
-	mat.set_shader_parameter("shield_size_px", shield_size)
-	mat.set_shader_parameter("sprite_size_px", sprite_size)
-	mat.set_shader_parameter("shield_color", Color(1.0, 0.88, 0.18, 1.0))
-	# Per-shield phase offset so neighbouring shields don't sweep in
-	# lock-step. Derived from anchor — stable, no RNG.
-	mat.set_shader_parameter("time_offset", float(anchor.x * 13 + anchor.y * 47) * 0.31)
+		y += STEP
 
 
 # =========================

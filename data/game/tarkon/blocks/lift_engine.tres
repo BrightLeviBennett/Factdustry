@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"lift_engine"
 display_name = "Lift Engine"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 1. Hover/flying only. Increases payload capacity by 1.5x1.5 tiles, but makes the unit 25% slower."
 category = 10
 tags = PackedStringArray("module")
 module_unit_layers = [2, 3]

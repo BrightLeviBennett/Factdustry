@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://wdg6fy0kqyek"
-path="res://.godot/imported/BlackstoneWall_old.jpeg-72f3b85590704dbf4904f01162f62451.ctex"
+uid="uid://d0moeygl6v4ep"
+path="res://.godot/imported/BlackSand.png-1c993185e3cd45fd2529ce2a98c47071.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/BlackstoneWall_old.jpeg"
-dest_files=["res://.godot/imported/BlackstoneWall_old.jpeg-72f3b85590704dbf4904f01162f62451.ctex"]
+source_file="res://textures/terrain/BlackSand.png"
+dest_files=["res://.godot/imported/BlackSand.png-1c993185e3cd45fd2529ce2a98c47071.ctex"]
 
 [params]
 

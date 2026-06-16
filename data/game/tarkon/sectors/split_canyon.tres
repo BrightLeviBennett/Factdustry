@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://7qyluwwcldou"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"split_canyon"
+display_name = "Split Canyon"
+description = "Copper-rich ground fractured by narrow channels of water. A gentle step up from the Starting Grounds."
+planet_id = &"Tarkon"
+hex_q = 1
+available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_water")
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray("twin_crossing")
+required_sectors = PackedStringArray("starting_grounds")
+map_path = "res://data/game/tarkon/maps/SC.sector.json"
+tags = PackedStringArray("campaign", "sector")

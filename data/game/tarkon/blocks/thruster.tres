@@ -1,12 +1,12 @@
-[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bb0tmdf00m65x"]
 
-[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
 [resource]
 script = ExtResource("1")
 id = &"thruster"
 display_name = "Thruster"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 1. Makes hover/flying units 125% faster and allows ground-based units to boost when supported by boost behavior."
 category = 10
 tags = PackedStringArray("module")
 color = Color(0.6, 0.6, 0.65, 1)

@@ -94,6 +94,10 @@ var hold_fire: bool = false
 ## the unit has been ingested. The player can re-toggle it off before
 ## ingestion to abort.
 var enter_payload_when_able: bool = false
+## Ground/crawler Thruster command toggle. Hover/flying units get their
+## Thruster speed passively in `recompute_module_stats`; ground units use
+## this explicit boost command instead.
+var thruster_boost_enabled: bool = false
 ## When the player right-clicks a payload-accepting block (typically a
 ## deconstructor) with `enter_payload_when_able` enabled, this anchor
 ## is latched so the unit will path adjacent to that specific block
@@ -108,6 +112,10 @@ var payload_target_anchor: Vector2i = Vector2i(-9999, -9999)
 ## re-spawn. A Payload Refit Bay strips these back out; the Deconstructor
 ## refunds each one's build cost on top of the unit's.
 var applied_upgrades: Array[StringName] = []
+var unit_shield_health: float = 0.0
+var unit_shield_max_health: float = 0.0
+var unit_shield_cooldown: float = 0.0
+var unit_shield_visual_scale: float = 0.0
 ## Dummy test unit (spawned ENEMY/Ferox by a Payload Source). Runs NO
 ## autonomous AI — it sits inert until the player selects it and issues a
 ## command. `dummy_mode`: "idle" (obey move orders only), "attack_block"
@@ -236,8 +244,14 @@ var _wl_lastangle: float = -1.0
 var _wr_lastangle: float = -1.0
 var _wl_counter: float = 0.0
 var _wr_counter: float = 0.0
-# Wake colour — fixed foam tint (HEX 7b91ad @ 0.65 alpha).
+# Wake colour. Mindustry's WaterMoveComp eases this toward the current water
+# tile's map colour ×1.5 every frame (so the wake reads blue on water, yellow-
+# green over sulfur water, etc.). Starts at, and falls back to, the default
+# water tint (HEX 7b91ad = water.tres colour ×1.5) when a tile has no map colour.
+# Only RGB is eased; alpha (0.65) is left fixed for the foam translucency.
 var _wake_color := Color("7b91ad", 0.65)
+const _WAKE_FALLBACK_RGB := Color("7b91ad")
+const _WAKE_COLOR_MUL := 1.5
 var _wake_enabled: bool = false
 # Foam ring puffs trailing the stern (drawn as expanding circle OUTLINES).
 # Each: {pos: Vector2, age: float, r: float}. Stored in world space.
@@ -415,10 +429,9 @@ func _ready() -> void:
 ## max health) from the base UnitData plus `applied_upgrades`. Idempotent —
 ## always derives from `data`, so it can be re-run whenever the upgrade list
 ## changes. Stats that the game reads straight off the shared `data` resource
-## (attack_range, armor, turn speeds, knockback) and behaviour-based modules
-## (afterburner boost, shields, healing drones, cloaking, missiles, siege
-## lock) are NOT handled here — they need per-instance stat overrides / new
-## subsystems and are wired separately.
+## (attack_range, armor, turn speeds, knockback) and most behaviour-based
+## modules (afterburner boost, healing drones, cloaking, missiles, siege
+## lock) are wired separately. Shield Emitter refreshes its derived HP here.
 func recompute_module_stats() -> void:
 	if data == null:
 		return
@@ -436,10 +449,14 @@ func recompute_module_stats() -> void:
 					spd_mult *= 2.25
 			&"lift_engine":
 				spd_mult *= 0.75            # -25% speed
+			&"command_beacon":
+				spd_mult *= 0.75            # -25% speed while providing command aura behavior
 			&"healing_turret_head":
 				spd_mult *= 0.5             # 2× slower
 			&"cooling_system":
 				fire_rate_mult += 1.25      # +125% fire rate per apply
+			&"resistant_plating":
+				hp_mult *= 0.9              # -10% max HP per apply
 			&"armor_plate":
 				has_armor_plate = true
 	if has_armor_plate:
@@ -451,6 +468,16 @@ func recompute_module_stats() -> void:
 		max_health = new_max
 		if health > max_health:
 			health = max_health
+	_recompute_unit_shield_stats()
+
+
+func can_thruster_boost() -> bool:
+	if data == null:
+		return false
+	var ml: int = data.movement_layer
+	if ml != UnitData.MovementLayer.GROUND and ml != UnitData.MovementLayer.CRAWLER:
+		return false
+	return applied_upgrades.has(&"thruster")
 
 
 ## Applies a status effect to this unit, honouring opposites
@@ -571,6 +598,98 @@ func _tick_status_effects(delta: float) -> void:
 			_on_death()
 
 
+func _has_module(module_id: StringName) -> bool:
+	if applied_upgrades.has(module_id):
+		return true
+	if module_id == &"shield_emitter":
+		return applied_upgrades.has(&"shield_emmiter")
+	if module_id == &"shield_emmiter":
+		return applied_upgrades.has(&"shield_emitter")
+	return false
+
+
+func _recompute_unit_shield_stats() -> void:
+	var old_max: float = unit_shield_max_health
+	if not _has_module(&"shield_emitter"):
+		unit_shield_max_health = 0.0
+		unit_shield_health = 0.0
+		unit_shield_cooldown = 0.0
+		unit_shield_visual_scale = 0.0
+		return
+	unit_shield_max_health = float(_unit_shield_stats_for_tier()["health"])
+	if unit_shield_health <= 0.0 or old_max <= 0.0:
+		unit_shield_health = unit_shield_max_health
+	else:
+		unit_shield_health = minf(unit_shield_health, unit_shield_max_health)
+
+
+func _unit_shield_stats_for_tier() -> Dictionary:
+	var tier: int = clampi(int(data.tier) if data != null else 1, 1, 5)
+	match tier:
+		1:
+			return {"range_tiles": 3.5, "health": 400.0}
+		2:
+			return {"range_tiles": 4.5, "health": 500.0}
+		3:
+			return {"range_tiles": 6.0, "health": 650.0}
+		4:
+			return {"range_tiles": 8.0, "health": 950.0}
+		_:
+			return {"range_tiles": 11.0, "health": 1300.0}
+
+
+func _unit_shield_radius() -> float:
+	return float(main.GRID_SIZE) * float(_unit_shield_stats_for_tier()["range_tiles"])
+
+
+func _unit_shield_is_stationary() -> bool:
+	return velocity.length() <= float(main.GRID_SIZE) * 0.12
+
+
+func has_active_unit_shield() -> bool:
+	return _has_module(&"shield_emitter") \
+		and unit_shield_health > 0.0 \
+		and unit_shield_cooldown <= 0.0 \
+		and _unit_shield_is_stationary()
+
+
+func unit_shield_intercept(prev_pos: Vector2, next_pos: Vector2, source_team: int) -> Dictionary:
+	if source_team == team:
+		return {}
+	if not has_active_unit_shield():
+		return {}
+	var radius: float = _unit_shield_radius()
+	if prev_pos.distance_to(position) <= radius:
+		return {}
+	var closest: Vector2 = Geometry2D.get_closest_point_to_segment(position, prev_pos, next_pos)
+	if closest.distance_to(position) <= radius:
+		return {"unit": self, "hit_pos": closest}
+	return {}
+
+
+func apply_unit_shield_damage(amount: float) -> void:
+	if unit_shield_health <= 0.0:
+		return
+	unit_shield_health = maxf(0.0, unit_shield_health - amount)
+	if unit_shield_health <= 0.0:
+		unit_shield_cooldown = 8.0
+		unit_shield_visual_scale = 0.0
+
+
+func _tick_unit_shield(delta: float) -> void:
+	if not _has_module(&"shield_emitter"):
+		return
+	if unit_shield_max_health <= 0.0:
+		_recompute_unit_shield_stats()
+	if unit_shield_health <= 0.0:
+		if unit_shield_cooldown > 0.0:
+			unit_shield_cooldown = maxf(0.0, unit_shield_cooldown - delta)
+		if unit_shield_cooldown <= 0.0:
+			unit_shield_health = unit_shield_max_health
+	var target: float = 1.0 if has_active_unit_shield() else 0.0
+	unit_shield_visual_scale = move_toward(unit_shield_visual_scale, target, delta * 8.0)
+
+
 func _process(delta: float) -> void:
 	if is_dead:
 		return
@@ -592,6 +711,7 @@ func _process(delta: float) -> void:
 	velocity = (position - _vel_prev_pos) / maxf(delta, 0.0001)
 	_vel_prev_pos = position
 	_tick_status_effects(delta)
+	_tick_unit_shield(delta)
 	# Hovering-orbit motion for flying units that aren't currently
 	# under direct player control. Applied as a position delta so it
 	# composes naturally with regular movement (the orbit just adds a
@@ -1021,8 +1141,25 @@ func _tick_water_wake(delta: float) -> void:
 		_wake_foam[fi]["age"] += delta
 		if float(_wake_foam[fi]["age"]) >= _WAKE_FOAM_LIFE:
 			_wake_foam.remove_at(fi)
-	# Wake colour is a fixed foam tint (see `_wake_color`); no per-frame
-	# water-tile recolour.
+	# Floor-adaptive wake colour (port of Mindustry WaterMoveComp.draw): ease
+	# the wake toward the current floor tile's map colour ×1.5. Lerp rate
+	# matches Mindustry's `clamp(Time.delta * 0.04)` (≈ 2.4/sec at 60 fps).
+	var target_rgb: Color = _WAKE_FALLBACK_RGB
+	var terrain = _terrain_ref()
+	if terrain != null:
+		var grid: Vector2i = main.world_to_grid(position)
+		var fid: StringName = StringName(terrain.floor_tiles.get(grid, &""))
+		if fid != &"":
+			var fdata = Registry.get_tile(fid)
+			if fdata != null and fdata.color.a > 0.0:
+				target_rgb = Color(
+					minf(fdata.color.r * _WAKE_COLOR_MUL, 1.0),
+					minf(fdata.color.g * _WAKE_COLOR_MUL, 1.0),
+					minf(fdata.color.b * _WAKE_COLOR_MUL, 1.0))
+	var ease: float = clampf(delta * 2.4, 0.0, 1.0)
+	_wake_color.r = lerpf(_wake_color.r, target_rgb.r, ease)
+	_wake_color.g = lerpf(_wake_color.g, target_rgb.g, ease)
+	_wake_color.b = lerpf(_wake_color.b, target_rgb.b, ease)
 	queue_redraw()
 
 
@@ -1476,6 +1613,8 @@ func _follow_path(delta: float) -> void:
 			# Amplify the DEVIATION from 1.0 by the boost factor.
 			var effective: float = 1.0 + (base_mod - 1.0) * boost
 			speed_mult *= maxf(effective, 0.05)
+	if thruster_boost_enabled and can_thruster_boost():
+		speed_mult *= 2.25
 	var step = move_speed * speed_mult * delta
 
 	# --- Tank-style steering -----------------------------------------------
@@ -1878,6 +2017,9 @@ func capture_payload_state(payload: Dictionary) -> void:
 	payload["hold_fire"] = hold_fire
 	payload["is_rallying"] = is_rallying
 	payload["assist_player_build"] = assist_player_build
+	payload["thruster_boost_enabled"] = thruster_boost_enabled
+	payload["unit_shield_health"] = unit_shield_health
+	payload["unit_shield_cooldown"] = unit_shield_cooldown
 	payload["mining_request_id"] = String(mining_request_id)
 	payload["manual_target_building_block_id"] = String(manual_target_building_block_id)
 	# Per-mount turret rotations (and recoil) so the heads keep their aim.
@@ -1947,6 +2089,10 @@ func apply_payload_state(payload: Dictionary) -> void:
 	hold_fire = bool(payload.get("hold_fire", false))
 	is_rallying = bool(payload.get("is_rallying", false))
 	assist_player_build = bool(payload.get("assist_player_build", false))
+	thruster_boost_enabled = bool(payload.get("thruster_boost_enabled", false)) and can_thruster_boost()
+	if payload.has("unit_shield_health"):
+		unit_shield_health = clampf(float(payload["unit_shield_health"]), 0.0, unit_shield_max_health)
+	unit_shield_cooldown = maxf(0.0, float(payload.get("unit_shield_cooldown", 0.0)))
 	mining_request_id = StringName(payload.get("mining_request_id", ""))
 	manual_target_building_block_id = StringName(payload.get("manual_target_building_block_id", ""))
 	# Restore per-mount turret rotations onto the rebuilt mounts (index-matched).

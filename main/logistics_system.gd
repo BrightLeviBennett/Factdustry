@@ -151,6 +151,10 @@ var _puddle_overlay: Node2D = null
 # Key = Vector2i (grid position of a drill)
 # Value = float (seconds remaining until next item is produced)
 var drill_timers := {}
+## Cached terrain scan result per extractor anchor. Drill scan windows only
+## change when terrain, walls, block placement, or rotation changes, so the
+## slow drill tick can reuse the ore/wall hit + efficiency result.
+var _drill_scan_cache := {}
 
 # --- EXTRACTOR EFFICIENCY ---
 # Key = Vector2i (anchor of a drill / wall crusher / fluid pump)
@@ -396,6 +400,11 @@ func _ready() -> void:
 	_sector_script = get_node_or_null("/root/Main/SectorScript")
 	_building_sys = get_node_or_null("/root/Main/BuildingSystem")
 	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
+	if _terrain != null:
+		if _terrain.has_signal("terrain_changed") and not _terrain.terrain_changed.is_connected(_on_terrain_changed_for_drill_cache):
+			_terrain.terrain_changed.connect(_on_terrain_changed_for_drill_cache)
+		if _terrain.has_signal("walls_changed") and not _terrain.walls_changed.is_connected(_clear_drill_scan_cache):
+			_terrain.walls_changed.connect(_clear_drill_scan_cache)
 	main.building_placed.connect(_on_building_placed)
 	main.building_destroyed.connect(_on_building_destroyed)
 	# A finished build flips a pipe inactive→active (joins its network), so
@@ -429,6 +438,7 @@ func _process(delta: float) -> void:
 		_update_factories(_accum_factory)
 		_accum_factory = 0.0
 	# Item / fluid / payload motion stays at full frame rate for smoothness.
+	_update_fabricator_ejection_visuals(delta)
 	_update_conveyors(delta)
 	_update_payloads(delta)
 	_update_constructors(delta)
@@ -445,6 +455,31 @@ func _process(delta: float) -> void:
 	_update_storage_unloading(delta)
 	_update_belt_unloaders(delta)
 	queue_redraw()
+
+
+func _update_fabricator_ejection_visuals(delta: float) -> void:
+	# Production is intentionally slow-ticked, but the visible unit slide should
+	# still animate at frame rate.
+	var power_sys_f = _power_sys_ref()
+	for origin in factory_buffers.keys():
+		var state: Dictionary = factory_buffers[origin]
+		if state.get("phase", "") != "ejecting":
+			continue
+		if not main.placed_buildings.has(origin):
+			continue
+		var data = Registry.get_block(main.placed_buildings[origin])
+		if data == null or data.produced_unit == &"":
+			continue
+		var factory_power_eff: float = 1.0
+		if power_sys_f and (data.electrical_power_use > 0 or data.produced_unit != &""):
+			factory_power_eff = power_sys_f.get_electrical_efficiency(origin)
+			if factory_power_eff <= 0.0:
+				continue
+		var progress: float = maxf(
+			float(state.get("eject_progress", 0.0)),
+			float(state.get("eject_visual_progress", 0.0))
+		)
+		state["eject_visual_progress"] = minf(1.0, progress + delta * 1.6 * factory_power_eff)
 
 
 # =========================
@@ -638,10 +673,10 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 	var is_floor_miner: bool = data.tags.has("floor_miner")
 	# Floor miners (ground scraper) read every cell of their FOOTPRINT —
 	# not the front edge — because they strip topsoil straight down.
-	# Each covered ore cell after the first adds +25% throughput, so a
-	# 2×2 scraper sitting on four coal cells caps at 175%.
+	# Each covered source cell after the first adds +25% throughput, so a
+	# 2×2 floor miner sitting on four valid cells caps at 175%.
 	if is_floor_miner:
-		return _floor_miner_efficiency(origin, data.grid_size)
+		return _floor_miner_efficiency(origin, data.grid_size, data)
 	var front_cells := _get_front_edge(origin, data.grid_size, rot)
 	var dir: Vector2i
 	match rot:
@@ -691,13 +726,13 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 	return eff_sum / float(front_count)
 
 
-## Counts how many cells of `origin`'s footprint have a floor-ore
-## underneath, then converts to an efficiency multiplier:
+## Counts how many cells of `origin`'s footprint have a valid floor source,
+## then converts to an efficiency multiplier:
 ##   0 covered → 0.0   (idle — nothing to scrape)
 ##   1 covered → 1.0   (baseline)
 ##   N covered → 1.0 + 0.25 × (N - 1)
 ## So each tile beyond the first contributes +25% throughput.
-func _floor_miner_efficiency(origin: Vector2i, grid_size: Vector2i) -> float:
+func _floor_miner_efficiency(origin: Vector2i, grid_size: Vector2i, data: BlockData = null) -> float:
 	var terrain = _terrain_ref()
 	if terrain == null:
 		return 0.0
@@ -705,12 +740,75 @@ func _floor_miner_efficiency(origin: Vector2i, grid_size: Vector2i) -> float:
 	for x in range(grid_size.x):
 		for y in range(grid_size.y):
 			var cell: Vector2i = origin + Vector2i(x, y)
-			var ore: TerrainTileData = terrain.get_ore_at(cell)
-			if ore != null and ore.tags.has("floor_ore") and ore.minable_resource != &"":
+			if _floor_miner_resource_at(cell, data) != &"":
 				covered += 1
 	if covered <= 0:
 		return 0.0
 	return 1.0 + 0.25 * float(covered - 1)
+
+
+## Returns the item a floor miner can scrape from one footprint cell.
+## Ground Scraper treats sand-tagged floors as mat_sand, and Impact Drill
+## treats salt-tagged floors as mat_salt, without making either a generic ore.
+func _floor_miner_resource_at(cell: Vector2i, data: BlockData = null) -> StringName:
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return &""
+	var ore: TerrainTileData = terrain.get_ore_at(cell)
+	if _ore_is_minable_by(ore, true, data) and ore.minable_resource != &"":
+		return ore.minable_resource
+	if data != null and data.id == &"ground_scraper":
+		var floor_id: StringName = StringName(terrain.floor_tiles.get(cell, &""))
+		var floor_data: TerrainTileData = Registry.get_tile(floor_id)
+		if floor_data != null and floor_data.tags.has("sand"):
+			return &"mat_sand"
+	if data != null and data.id == &"impact_drill":
+		var floor_id_s: StringName = StringName(terrain.floor_tiles.get(cell, &""))
+		var floor_data_s: TerrainTileData = Registry.get_tile(floor_id_s)
+		if floor_data_s != null and floor_data_s.tags.has("salt"):
+			return &"mat_salt"
+	return &""
+
+
+func _wall_miner_source_wall(origin: Vector2i, data: BlockData, rot: int) -> StringName:
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return &""
+	var accepted_walls: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
+			else [&"blackstone_wall"]
+	var mine_cells: Array = _get_extended_front_edge(origin, data.grid_size, rot, data.mine_range)
+	for cell in mine_cells:
+		if terrain.get_ore_at(cell) != null:
+			continue
+		var wall_id: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+		if wall_id != &"" and accepted_walls.has(wall_id):
+			return wall_id
+	return &""
+
+
+func _wall_miner_outputs_for_wall(data: BlockData, wall_id: StringName) -> Dictionary:
+	var produced: Dictionary = {}
+	var total_per_cycle: int = 0
+	for raw_id in data.output_items:
+		total_per_cycle += int(data.output_items[raw_id])
+	if wall_id == &"salt_wall" and (data.id == &"wall_crusher" or data.id == &"wall_grinder"):
+		produced[&"mat_salt"] = maxi(total_per_cycle, 1)
+		return produced
+	for raw_id in data.output_items:
+		produced[StringName(raw_id)] = int(data.output_items[raw_id])
+	return produced
+
+
+func _extractor_amount_for_resource(data: BlockData, resource_key: StringName) -> int:
+	if data.output_items.has(resource_key):
+		return int(data.output_items[resource_key])
+	if data.output_items.has(String(resource_key)):
+		return int(data.output_items[String(resource_key)])
+	if data.output_items.has(&"ore"):
+		return int(data.output_items[&"ore"])
+	if data.output_items.has("ore"):
+		return int(data.output_items["ore"])
+	return 1
 
 
 ## Computes what an extractor / pump / condenser would output if placed
@@ -762,17 +860,21 @@ func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: in
 	var is_wall_miner: bool = data.tags.has("wall_miner")
 	var is_floor_miner: bool = data.tags.has("floor_miner")
 	if is_wall_miner:
+		var source_wall: StringName = _wall_miner_source_wall(origin, data, rot)
+		if source_wall == &"":
+			return blank
+		var wall_outputs: Dictionary = _wall_miner_outputs_for_wall(data, source_wall)
 		var first_id: StringName = &""
 		var total_per_cycle: int = 0
-		for raw_id in data.output_items:
+		for raw_id in wall_outputs:
 			if first_id == &"":
 				first_id = StringName(raw_id)
-			total_per_cycle += int(data.output_items[raw_id])
+			total_per_cycle += int(wall_outputs[raw_id])
 		if first_id == &"" or total_per_cycle <= 0:
 			return blank
 		return {"item_id": first_id, "per_sec": float(total_per_cycle) * efficiency / cycle}
-	# Regular drill / floor miner — sample one valid ore tile under the
-	# scan window and report its minable_resource.
+	# Regular drill / floor miner — sample one valid source tile under the
+	# scan window and report the produced resource.
 	if terrain == null:
 		return blank
 	var scan_cells: Array = []
@@ -783,19 +885,20 @@ func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: in
 	else:
 		scan_cells = _get_extended_front_edge(origin, data.grid_size, rot, data.mine_range)
 	for cell in scan_cells:
-		var ore: TerrainTileData = terrain.get_ore_at(cell)
-		if not _ore_is_minable_by(ore, is_floor_miner, data):
+		var resource_key: StringName = &""
+		if is_floor_miner:
+			resource_key = _floor_miner_resource_at(cell, data)
+		else:
+			var ore: TerrainTileData = terrain.get_ore_at(cell)
+			if not _ore_is_minable_by(ore, false, data):
+				continue
+			resource_key = ore.minable_resource
+		if resource_key == &"":
 			continue
-		if ore.minable_resource == &"":
-			continue
-		# Honor per-cycle output_items override (impact drill: 6/slam)
+		# Honor per-cycle output_items overrides, including generic "ore"
 		# — defaults to 1 ore per cycle if the block doesn't specify.
-		var per_cycle: int = 1
-		if data.output_items.has(ore.minable_resource):
-			per_cycle = int(data.output_items[ore.minable_resource])
-		elif data.output_items.has(String(ore.minable_resource)):
-			per_cycle = int(data.output_items[String(ore.minable_resource)])
-		return {"item_id": ore.minable_resource, "per_sec": float(per_cycle) * efficiency / cycle}
+		var per_cycle: int = _extractor_amount_for_resource(data, resource_key)
+		return {"item_id": resource_key, "per_sec": float(per_cycle) * efficiency / cycle}
 	return blank
 
 
@@ -821,6 +924,153 @@ func _ore_is_minable_by(ore_data: TerrainTileData, is_floor_miner: bool, data: B
 		if not data.accepted_ores.has(ore_data.id):
 			return false
 	return true
+
+
+func _clear_drill_scan_cache() -> void:
+	_drill_scan_cache.clear()
+
+
+func _on_terrain_changed_for_drill_cache(_grid_pos: Vector2i) -> void:
+	_clear_drill_scan_cache()
+
+
+func _get_drill_scan_result(origin: Vector2i, data: BlockData, rot: int) -> Dictionary:
+	var cached: Dictionary = _drill_scan_cache.get(origin, {})
+	if not cached.is_empty() \
+			and cached.get("block_id", &"") == data.id \
+			and int(cached.get("rot", -1)) == rot:
+		return cached
+
+	var result := {
+		"block_id": data.id,
+		"rot": rot,
+		"valid": false,
+		"efficiency": 0.0,
+		"produced": {},
+	}
+	var terrain = _terrain_ref()
+	if terrain == null:
+		_drill_scan_cache[origin] = result
+		return result
+
+	var is_wall_miner: bool = data.tags.has("wall_miner")
+	var is_floor_miner: bool = data.tags.has("floor_miner")
+	var is_geyser_miner: bool = data.tags.has("geyser_miner")
+	var produced: Dictionary = {}
+
+	if is_geyser_miner:
+		for raw_id in data.output_items:
+			produced[StringName(raw_id)] = int(data.output_items[raw_id])
+		result["valid"] = not produced.is_empty()
+		result["efficiency"] = 1.0
+		result["produced"] = produced
+		_drill_scan_cache[origin] = result
+		return result
+
+	var mine_cells: Array = []
+	if is_floor_miner:
+		for fx in range(data.grid_size.x):
+			for fy in range(data.grid_size.y):
+				mine_cells.append(origin + Vector2i(fx, fy))
+	else:
+		mine_cells = _get_extended_front_edge(origin, data.grid_size, rot, data.mine_range)
+
+	var ore: TerrainTileData = null
+	var floor_resource: StringName = &""
+	var source_wall: StringName = &""
+	var wall_found := false
+	var accepted_walls: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
+			else [&"blackstone_wall"]
+	if is_wall_miner:
+		for cell in mine_cells:
+			if terrain.get_ore_at(cell) != null:
+				continue
+			var wid: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+			if wid != &"" and accepted_walls.has(wid):
+				source_wall = wid
+				wall_found = true
+				break
+		if not wall_found:
+			_drill_scan_cache[origin] = result
+			return result
+	else:
+		for cell in mine_cells:
+			if is_floor_miner:
+				floor_resource = _floor_miner_resource_at(cell, data)
+				if floor_resource != &"":
+					break
+			else:
+				var candidate: TerrainTileData = terrain.get_ore_at(cell)
+				if not _ore_is_minable_by(candidate, false, data):
+					continue
+				if candidate.minable_resource == &"":
+					continue
+				ore = candidate
+				break
+		if is_floor_miner and floor_resource == &"":
+			_drill_scan_cache[origin] = result
+			return result
+		if not is_floor_miner and ore == null:
+			_drill_scan_cache[origin] = result
+			return result
+
+	var efficiency: float = 1.0
+	if is_floor_miner:
+		efficiency = _floor_miner_efficiency(origin, data.grid_size, data)
+	else:
+		var front_cells := _get_front_edge(origin, data.grid_size, rot)
+		var front_count: int = front_cells.size()
+		var dir: Vector2i
+		match rot:
+			0: dir = Vector2i(1, 0)
+			1: dir = Vector2i(0, 1)
+			2: dir = Vector2i(-1, 0)
+			3: dir = Vector2i(0, -1)
+			_: dir = Vector2i(1, 0)
+		var max_extend: int = maxi(data.mine_range, 1)
+		var accepted_walls_eff: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
+				else [&"blackstone_wall"]
+		var eff_sum: float = 0.0
+		for cell in front_cells:
+			var hit_mult: float = 0.0
+			if is_wall_miner:
+				var hit_wall: StringName = &""
+				var wid_e: StringName = StringName(terrain.wall_tiles.get(cell, &""))
+				if terrain.get_ore_at(cell) == null and accepted_walls_eff.has(wid_e):
+					hit_wall = wid_e
+				else:
+					for step in range(1, max_extend + 1):
+						var scan: Vector2i = cell + dir * step
+						var wid_s: StringName = StringName(terrain.wall_tiles.get(scan, &""))
+						if terrain.get_ore_at(scan) == null and accepted_walls_eff.has(wid_s):
+							hit_wall = wid_s
+							break
+				if hit_wall != &"":
+					hit_mult = float(data.wall_efficiency.get(hit_wall, 1.0))
+			else:
+				if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner, data):
+					hit_mult = 1.0
+				else:
+					for step in range(1, max_extend + 1):
+						if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
+							hit_mult = 1.0
+							break
+			eff_sum += hit_mult
+		efficiency = eff_sum / float(front_count) if front_count > 0 else 1.0
+
+	if is_wall_miner:
+		produced = _wall_miner_outputs_for_wall(data, source_wall)
+	elif is_floor_miner:
+		produced[floor_resource] = _extractor_amount_for_resource(data, floor_resource)
+	else:
+		var resource_key: StringName = ore.minable_resource
+		produced[resource_key] = _extractor_amount_for_resource(data, resource_key)
+
+	result["valid"] = efficiency > 0.0 and not produced.is_empty()
+	result["efficiency"] = efficiency
+	result["produced"] = produced
+	_drill_scan_cache[origin] = result
+	return result
 
 
 func _update_drills(delta: float) -> void:
@@ -855,128 +1105,11 @@ func _update_drills(delta: float) -> void:
 			continue
 
 		var rot: int = main.building_rotation.get(origin, 0)
-		var front_cells = _get_front_edge(origin, data.grid_size, rot)
-
-		# Wall miners (wall_crusher) mine blackstone walls into their configured
-		# output_items. Floor miners (ground scraper) mine surface ores tagged
-		# "floor_ore". Regular drills mine wall-embedded ores via
-		# ore.minable_resource. Each kind ignores ores that aren't theirs so a
-		# mechanical drill can't snipe coal from a patch the scraper is
-		# supposed to handle.
-		var is_wall_miner: bool = data.tags.has("wall_miner")
-		var is_floor_miner: bool = data.tags.has("floor_miner")
-		var is_geyser_miner: bool = data.tags.has("geyser_miner")
-
-		# Pick the right scan window. Wall/regular drills look at the
-		# front edge + one tile beyond (they reach forward into ore
-		# walls). Floor miners pull from straight under the footprint —
-		# their target is a coal patch the block is sitting on, not
-		# something it faces. Geyser miners ignore the scan window
-		# entirely: the geyser tile they sit on IS their resource, so
-		# they always extract their full output_items per cycle.
-		var mine_cells: Array
-		if is_floor_miner:
-			mine_cells = []
-			for fx in range(data.grid_size.x):
-				for fy in range(data.grid_size.y):
-					mine_cells.append(origin + Vector2i(fx, fy))
-		else:
-			mine_cells = _get_extended_front_edge(origin, data.grid_size, rot, data.mine_range)
-
-		var ore: TerrainTileData = null
-		var wall_found: bool = false
-		var accepted_walls: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
-				else [&"blackstone_wall"]
-		if is_geyser_miner:
-			# Placement gate already guarantees we're centered on a
-			# geyser tile; nothing to scan for. Skip ore/wall detection.
-			pass
-		elif is_wall_miner:
-			for cell in mine_cells:
-				if terrain.get_ore_at(cell) != null:
-					continue
-				var wid: StringName = StringName(terrain.wall_tiles.get(cell, &""))
-				if wid == &"":
-					continue
-				if accepted_walls.has(wid):
-					wall_found = true
-					break
-			if not wall_found:
-				extractor_efficiency[origin] = 0.0
-				continue
-		else:
-			for cell in mine_cells:
-				var candidate: TerrainTileData = terrain.get_ore_at(cell)
-				if not _ore_is_minable_by(candidate, is_floor_miner, data):
-					continue
-				if candidate.minable_resource == &"":
-					continue
-				ore = candidate
-				break
-			if ore == null:
-				extractor_efficiency[origin] = 0.0
-				continue
-
-		# Calculate efficiency. Floor miners (ground scraper) read every
-		# cell of their FOOTPRINT — not the front edge — and earn +25%
-		# per extra ore tile under them on top of a 100% baseline. Wall
-		# miners and standard drills keep the front-edge coverage
-		# fraction (direct hit + one tile ahead).
-		var efficiency: float = 1.0
-		if is_geyser_miner:
-			# Geyser tile = the resource; fixed 100 % output.
-			efficiency = 1.0
-		elif is_floor_miner:
-			efficiency = _floor_miner_efficiency(origin, data.grid_size)
-		else:
-			var front_count: int = front_cells.size()
-			var dir: Vector2i
-			match rot:
-				0: dir = Vector2i(1, 0)
-				1: dir = Vector2i(0, 1)
-				2: dir = Vector2i(-1, 0)
-				3: dir = Vector2i(0, -1)
-				_: dir = Vector2i(1, 0)
-			# Each front cell counts as a hit if there's matching ore /
-			# blackstone anywhere within mine_range beyond it — the
-			# same range the actual mining loop uses, so a plasma bore
-			# (mine_range=4) registers 100 % when ore is 4 tiles ahead.
-			var max_extend: int = maxi(data.mine_range, 1)
-			var accepted_walls_eff: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
-					else [&"blackstone_wall"]
-			# Wall miners use a per-wall efficiency multiplier (so a
-			# wall_crusher chews purple_wall at 0.75× vs blackstone's
-			# 1.0×). Each front-cell's contribution is the matched
-			# wall's multiplier (1.0 if unspecified), summed and
-			# averaged. Ore drills stay binary 0/1 per cell.
-			var eff_sum: float = 0.0
-			for cell in front_cells:
-				var hit_mult: float = 0.0
-				if is_wall_miner:
-					var hit_wall: StringName = &""
-					var wid_e: StringName = StringName(terrain.wall_tiles.get(cell, &""))
-					if terrain.get_ore_at(cell) == null and accepted_walls_eff.has(wid_e):
-						hit_wall = wid_e
-					else:
-						for step in range(1, max_extend + 1):
-							var scan: Vector2i = cell + dir * step
-							var wid_s: StringName = StringName(terrain.wall_tiles.get(scan, &""))
-							if terrain.get_ore_at(scan) == null and accepted_walls_eff.has(wid_s):
-								hit_wall = wid_s
-								break
-					if hit_wall != &"":
-						hit_mult = float(data.wall_efficiency.get(hit_wall, 1.0))
-				else:
-					if _ore_is_minable_by(terrain.get_ore_at(cell), is_floor_miner, data):
-						hit_mult = 1.0
-					else:
-						for step in range(1, max_extend + 1):
-							if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
-								hit_mult = 1.0
-								break
-				eff_sum += hit_mult
-			efficiency = eff_sum / float(front_count) if front_count > 0 else 1.0
+		var scan: Dictionary = _get_drill_scan_result(origin, data, rot)
+		var efficiency: float = float(scan.get("efficiency", 0.0))
 		extractor_efficiency[origin] = efficiency
+		if not bool(scan.get("valid", false)):
+			continue
 
 		# Electrical power: scale production speed by the network's
 		# efficiency. Over-drawn networks slow all consumers proportionally
@@ -997,22 +1130,9 @@ func _update_drills(delta: float) -> void:
 			continue
 
 		# Figure out which item(s) this cycle produces and how many of each.
-		# Regular drills produce 1 × minable_resource by default, but
-		# may override the per-cycle amount via output_items entry
-		# keyed by that resource (e.g. impact drill: 6 × mat_zinc per
-		# slam). Wall miners always use the full output_items dict.
-		var produced: Dictionary = {}
-		if is_wall_miner or is_geyser_miner:
-			for raw_id in data.output_items:
-				produced[StringName(raw_id)] = int(data.output_items[raw_id])
-		else:
-			var resource_key: StringName = ore.minable_resource
-			var amount: int = 1
-			if data.output_items.has(resource_key):
-				amount = int(data.output_items[resource_key])
-			elif data.output_items.has(String(resource_key)):
-				amount = int(data.output_items[String(resource_key)])
-			produced[resource_key] = amount
+		# The terrain-dependent part is cached by `_get_drill_scan_result`;
+		# storage fullness and output routing remain live checks below.
+		var produced: Dictionary = scan.get("produced", {})
 
 		# Don't produce if storage for any of these items is full — stall at 0.
 		var any_full: bool = false
@@ -1034,6 +1154,8 @@ func _update_drills(delta: float) -> void:
 		# has mined anything themselves.
 		var drill_is_lumina: bool = main.get_building_faction(origin) == main.Faction.LUMINA
 		var output_cells = _get_all_output_cells(origin, data.grid_size, rot)
+		if data.tags.has("omnidirectional"):
+			output_cells = _get_full_ring(origin, data.grid_size)
 		for item_id in produced:
 			var amount: int = int(produced[item_id])
 			for _i in range(amount):
@@ -2049,14 +2171,18 @@ func _router_exit_accepts(grid_pos: Vector2i, dir: int, item_id: StringName) -> 
 		# Cell currently holding an item is not accepting.
 		if conveyor_items.has(next_pos):
 			return false
+		if _is_junction_cell(next_pos):
+			var junction_entry: int = (dir + 2) % 4
+			return _junction_would_accept_item(next_pos, item_id, junction_entry)
 		# Dead-end check: a straight conveyor whose own downstream is
 		# bare terrain will trap any item we ship to it. Without this
 		# the picker happily commits to a stub conveyor (the user's
 		# "items go down half the time" complaint) — items would
 		# pile up there even though the side technically reads as
-		# "empty" right now. Special belts (router/sorter/junction/
-		# bridge/overflow/underflow) have non-trivial routing of their
-		# own and are always treated as accepting.
+		# "empty" right now. Most special belts (router/sorter/bridge/
+		# overflow/underflow) have non-trivial routing of their own and
+		# are treated as accepting; junctions are checked above because
+		# their straight-through far side can be blocked.
 		if _is_simple_conveyor(next_pos):
 			var next_rot: int = main.building_rotation.get(next_pos, 0)
 			var beyond: Vector2i = next_pos + DIR_VECTORS[next_rot]
@@ -2239,6 +2365,30 @@ func _is_junction_primary_axis(_grid_pos: Vector2i, entry_dir: int) -> bool:
 	# 0 = right, 2 = left → primary (horizontal)
 	# 1 = down, 3 = up   → perpendicular (vertical)
 	return entry_dir == 0 or entry_dir == 2
+
+
+## Non-mutating mirror of the junction accept path. Used by routers before
+## committing an exit so they ignore junctions that would immediately reject
+## the item because their straight-through far side is empty or occupied.
+func _junction_would_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int) -> bool:
+	if entry_dir < 0:
+		return false
+	var exit_dir: int = (entry_dir + 2) % 4
+	var exit_pos: Vector2i = grid_pos + DIR_VECTORS[exit_dir]
+	if not main.placed_buildings.has(exit_pos):
+		return false
+	if _is_cross_faction(grid_pos, exit_pos):
+		return false
+	if _is_junction_primary_axis(grid_pos, entry_dir):
+		if conveyor_items.has(grid_pos):
+			return false
+	else:
+		if junction_items.has(grid_pos):
+			return false
+	var next_entry: int = (exit_dir + 2) % 4
+	if _is_conveyor_cell(exit_pos):
+		return not conveyor_items.has(exit_pos)
+	return _could_block_accept_item(exit_pos, item_id, next_entry)
 
 
 ## Pass item straight through the junction (exit = opposite of entry).
@@ -2428,7 +2578,8 @@ func _update_payloads(delta: float) -> void:
 					_: next_pos = grid_pos + DIR_VECTORS[exit_dir]
 				var next_entry: int = (exit_dir + 2) % 4
 				if not _is_cross_faction(grid_pos, next_pos):
-					if _try_transfer_payload(next_pos, payload_data, next_entry):
+					if _try_handoff_payload_to_block(next_pos, payload_data, grid_pos) \
+							or _try_transfer_payload(next_pos, payload_data, next_entry):
 						payload_items.erase(grid_pos)
 				continue
 
@@ -2457,7 +2608,8 @@ func _update_payloads(delta: float) -> void:
 					var ce_pos: Vector2i = _payload_exit_cell(grid_pos, cached_exit)
 					var ce_entry: int = (cached_exit + 2) % 4
 					if not _is_cross_faction(grid_pos, ce_pos) \
-							and _try_transfer_payload(ce_pos, payload_data, ce_entry):
+							and (_try_handoff_payload_to_block(ce_pos, payload_data, grid_pos) \
+							or _try_transfer_payload(ce_pos, payload_data, ce_entry)):
 						var ce_idx: int = outputs.find(cached_exit)
 						if ce_idx >= 0:
 							payload_router_idx[grid_pos] = (ce_idx + 1) % outputs.size()
@@ -2471,7 +2623,8 @@ func _update_payloads(delta: float) -> void:
 						var next_entry: int = (out_dir + 2) % 4
 						if _is_cross_faction(grid_pos, next_pos):
 							continue
-						if _try_transfer_payload(next_pos, payload_data, next_entry):
+						if _try_handoff_payload_to_block(next_pos, payload_data, grid_pos) \
+								or _try_transfer_payload(next_pos, payload_data, next_entry):
 							payload_router_idx[grid_pos] = (idx + 1) % outputs.size()
 							transferred = true
 							break
@@ -2490,6 +2643,9 @@ func _update_payloads(delta: float) -> void:
 			for front_pos in front_cells:
 				if _is_cross_faction(grid_pos, front_pos):
 					continue
+				if _try_handoff_payload_to_block(front_pos, payload_data, grid_pos):
+					transferred = true
+					break
 				if _try_transfer_payload(front_pos, payload_data, next_entry):
 					transferred = true
 					break
@@ -2614,7 +2770,8 @@ func _try_push_payload(grid_pos: Vector2i, payload_data: Dictionary, entry_dir: 
 		var push_data = Registry.get_block(push_block_id)
 		if push_data and (push_data.tags.has("payload_loader") or push_data.tags.has("freight_loader") \
 			or push_data.tags.has("payload_unloader") or push_data.tags.has("freight_unloader") \
-			or push_data.tags.has("deconstructor") or push_data.tags.has("mass_driver")):
+			or push_data.tags.has("deconstructor") or push_data.tags.has("mass_driver") \
+			or push_data.tags.has("upgrader") or push_data.tags.has("refit_bay")):
 			return false
 
 	# Use anchor position — only 1 payload per conveyor block (even multi-tile)
@@ -2664,7 +2821,8 @@ func _try_transfer_payload(to: Vector2i, payload_data: Dictionary, entry_dir: in
 		if to_data and (to_data.tags.has("payload_loader") or to_data.tags.has("freight_loader") \
 			or to_data.tags.has("payload_unloader") or to_data.tags.has("freight_unloader") \
 			or to_data.tags.has("deconstructor") or to_data.tags.has("constructor") \
-			or to_data.tags.has("mass_driver")):
+			or to_data.tags.has("mass_driver") or to_data.tags.has("upgrader") \
+			or to_data.tags.has("refit_bay")):
 			return false
 	var to_anchor: Vector2i = main.building_origins.get(to, to)
 	if payload_items.has(to_anchor):
@@ -2816,6 +2974,11 @@ func _try_handoff_payload_to_block(out_pos: Vector2i, payload_data: Dictionary, 
 		st["timer"] = decon_time
 		return true
 
+	# --- UNIT UPGRADER input — accepts unit payloads and module-building
+	# payloads directly from adjacent payload blocks.
+	if data.tags.has("upgrader"):
+		return _try_accept_upgrader_payload(anchor, payload_data)
+
 	return false
 
 
@@ -2891,6 +3054,8 @@ func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float,
 ## module's `module_unit_layers` is empty it fits any unit; otherwise the
 ## unit's movement layer must be in the list (e.g. Lift Engine = [HOVER, FLYING]).
 func _module_fits_unit(up_data: BlockData, unit_data: UnitData) -> bool:
+	if unit_data.tier < maxi(1, up_data.module_min_tier):
+		return false
 	var layers: Array = up_data.module_unit_layers
 	if layers.is_empty():
 		return true
@@ -2907,8 +3072,14 @@ func _module_can_apply_to(up_data: BlockData, unit_data: UnitData, unit_payload:
 		return false
 	var count := 0
 	for u in (unit_payload.get("applied_upgrades", []) as Array):
-		if StringName(u) == up_data.id:
+		var existing_id := StringName(u)
+		if existing_id == up_data.id:
 			count += 1
+		if up_data.module_forbidden_modules.has(existing_id):
+			return false
+		var existing_data = Registry.get_block(existing_id)
+		if existing_data != null and existing_data.module_forbidden_modules.has(up_data.id):
+			return false
 	return count < maxi(1, up_data.module_max_applies)
 
 
@@ -2937,11 +3108,48 @@ func _build_module_payload(block_id: StringName) -> Dictionary:
 	}
 
 
+func _try_accept_upgrader_payload(anchor: Vector2i, payload_data: Dictionary) -> bool:
+	var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or not data.tags.has("upgrader"):
+		return false
+	if not upgrader_state.has(anchor):
+		upgrader_state[anchor] = {"unit": null, "queue": [], "applying": &"", "timer": 0.0, "applied_session": 0}
+	var state: Dictionary = upgrader_state[anchor]
+	var ptype: String = payload_data.get("type", "")
+	if ptype == "unit":
+		if state.get("unit") != null:
+			return false
+		if _unit_free_slots(payload_data) < 1:
+			return false
+		state["unit"] = payload_data
+		state["applied_session"] = 0
+		return true
+	if ptype == "building":
+		var bd = Registry.get_block(StringName(payload_data.get("block_id", "")))
+		if bd == null or not bd.tags.has("module"):
+			return false
+		if state.get("unit") != null:
+			var unit_payload: Dictionary = state["unit"]
+			var ud = Registry.get_unit(StringName(unit_payload.get("unit_id", "")))
+			if ud == null or not _module_can_apply_to(bd, ud, unit_payload):
+				return false
+		var queue: Array = state["queue"]
+		queue.append(StringName(payload_data.get("block_id", "")))
+		return true
+	return false
+
+
+func _upgrader_queue_module_id(entry: Variant) -> StringName:
+	if entry is Dictionary:
+		return StringName(entry.get("block_id", ""))
+	return StringName(entry)
+
+
 ## Unit Upgrader: holds one unit (accepted only with a free slot), buffers
 ## incoming compatible module payloads, and applies each over 4s + 25 power
 ## (scaled by power efficiency). Ejects the kitted unit once it has no free
-## slot left, or once ≥1 upgrade was applied and nothing compatible remains
-## queued. Inputs from the front edge, ejects to the other sides.
+## slot left, or once >=1 upgrade was applied and nothing compatible remains
+## queued. Inputs from the front edge, and ejects only through the front.
 func _update_unit_upgraders(delta: float) -> void:
 	for grid_pos in _bucket("upgrader"):
 		var origin: Vector2i = main.building_origins.get(grid_pos, grid_pos)
@@ -2957,7 +3165,7 @@ func _update_unit_upgraders(delta: float) -> void:
 		var state: Dictionary = upgrader_state[origin]
 		var rot: int = main.building_rotation.get(origin, 0)
 		var front_cells := _get_front_edge(origin, data.grid_size, rot)
-		var output_cells := _get_all_output_cells(origin, data.grid_size, rot)
+		var output_cells := _get_front_edge(origin, data.grid_size, rot)
 
 		# 1. Pull one payload from a front conveyor.
 		for edge in front_cells:
@@ -2967,24 +3175,9 @@ func _update_unit_upgraders(delta: float) -> void:
 			if float(payload_items[conv].get("progress", 0.0)) < 1.0:
 				continue
 			var pd: Dictionary = payload_items[conv]["payload_data"]
-			var ptype: String = pd.get("type", "")
-			if ptype == "unit":
-				if state["unit"] == null and _unit_free_slots(pd) >= 1:
-					state["unit"] = pd
-					state["applied_session"] = 0
-					payload_items.erase(conv)
-					break
-			elif ptype == "building":
-				var bd = Registry.get_block(StringName(pd.get("block_id", "")))
-				if bd != null and bd.tags.has("module"):
-					var take := true
-					if state["unit"] != null:
-						var ud = Registry.get_unit(StringName(state["unit"].get("unit_id", "")))
-						take = ud != null and _module_can_apply_to(bd, ud, state["unit"])
-					if take:
-						state["queue"].append(pd)
-						payload_items.erase(conv)
-						break
+			if _try_accept_upgrader_payload(origin, pd):
+				payload_items.erase(conv)
+				break
 
 		if state["unit"] == null:
 			continue
@@ -3012,12 +3205,13 @@ func _update_unit_upgraders(delta: float) -> void:
 			var idx: int = -1
 			if _unit_free_slots(state["unit"]) >= 1:
 				for i in range(state["queue"].size()):
-					var qbd = Registry.get_block(StringName(state["queue"][i].get("block_id", "")))
+					var queued_id: StringName = _upgrader_queue_module_id(state["queue"][i])
+					var qbd = Registry.get_block(queued_id)
 					if qbd != null and _module_can_apply_to(qbd, unit_data, state["unit"]):
 						idx = i
 						break
 			if idx >= 0:
-				state["applying"] = StringName(state["queue"][idx].get("block_id", ""))
+				state["applying"] = _upgrader_queue_module_id(state["queue"][idx])
 				state["queue"].remove_at(idx)
 				state["timer"] = 4.0
 			elif _unit_free_slots(state["unit"]) <= 0 or int(state["applied_session"]) > 0:
@@ -3187,7 +3381,10 @@ func _update_payload_sources(_delta: float) -> void:
 		# blocks.
 		var rot: int = main.building_rotation.get(origin, 0)
 		for out in _get_front_edge(origin, data.grid_size, rot):
-			if _try_push_payload(out, payload.duplicate(true)):
+			var out_payload := payload.duplicate(true)
+			if _try_handoff_payload_to_block(out, out_payload, origin):
+				break
+			if _try_push_payload(out, out_payload):
 				break   # one payload per frame; belt occupancy rate-limits us
 
 
@@ -4834,6 +5031,7 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 	# Structural change — the role buckets must be rebuilt before next use.
 	_buckets_dirty = true
 	_pipe_net_dirty = true
+	_clear_drill_scan_cache()
 	var data = Registry.get_block(block_id)
 	if data == null:
 		return
@@ -4900,6 +5098,7 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	# Structural change — the role buckets must be rebuilt before next use.
 	_buckets_dirty = true
 	_pipe_net_dirty = true
+	_clear_drill_scan_cache()
 	conveyor_items.erase(grid_pos)
 	pipe_contents.erase(grid_pos)
 	drill_timers.erase(grid_pos)
@@ -5217,6 +5416,15 @@ func _update_constructors(delta: float) -> void:
 					state["phase"] = "waiting"
 					state["selected_block"] = &""
 					continue
+				var effective_delta: float = delta
+				if float(state.get("timer", 0.0)) > 0.0 and data.electrical_power_use > 0.0:
+					var power_eff: float = 1.0
+					var power_sys = _power_sys_ref()
+					if power_sys and power_sys.has_method("get_electrical_efficiency"):
+						power_eff = clampf(float(power_sys.get_electrical_efficiency(origin)), 0.0, 1.0)
+					if power_eff <= 0.0:
+						continue
+					effective_delta = delta * power_eff
 				var bt: float = target_data_b.build_time if target_data_b.build_time > 0 else 2.0
 				if not state.has("paid") or not (state["paid"] is Dictionary):
 					state["paid"] = {}
@@ -5226,7 +5434,7 @@ func _update_constructors(delta: float) -> void:
 				# stall — the player gets a stalled-build visual without
 				# losing any items they haven't covered yet.
 				var bt_safe: float = maxf(bt, 0.0001)
-				var done_pct_next: float = clampf((bt - (state["timer"] - delta)) / bt_safe, 0.0, 1.0)
+				var done_pct_next: float = clampf((bt - (state["timer"] - effective_delta)) / bt_safe, 0.0, 1.0)
 				var to_pay: Dictionary = {}
 				var enough := true
 				for raw_id_b in target_data_b.build_cost:
@@ -5245,7 +5453,7 @@ func _update_constructors(delta: float) -> void:
 				if not enough:
 					# Hold the timer here — wait for the missing items.
 					continue
-				state["timer"] -= delta
+				state["timer"] -= effective_delta
 				for sn_pay in to_pay:
 					state["collected"][sn_pay] = int(state["collected"][sn_pay]) - int(to_pay[sn_pay])
 					if int(state["collected"][sn_pay]) <= 0:
@@ -5280,6 +5488,9 @@ func _update_constructors(delta: float) -> void:
 					for out_pos in front_cells:
 						if _is_cross_faction(origin, out_pos):
 							continue
+						if _try_handoff_payload_to_block(out_pos, payload, origin):
+							pushed = true
+							break
 						var entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
 						if _try_push_payload(out_pos, payload, entry_dir):
 							pushed = true
@@ -7423,6 +7634,7 @@ func _update_factories(delta: float) -> void:
 						state["timer"] = 0.0
 						state["phase"] = "ejecting"
 						state["eject_progress"] = 0.0
+						state["eject_visual_progress"] = 0.0
 					else:
 						state["phase"] = "outputting"
 						# Same tech-tree gating as the drill path: only the
@@ -7478,6 +7690,7 @@ func _update_factories(delta: float) -> void:
 				# speed while production was throttled.
 				var eject_speed: float = 1.6
 				state["eject_progress"] = minf(1.0, float(state.get("eject_progress", 0.0)) + delta * eject_speed * factory_power_eff)
+				state["eject_visual_progress"] = maxf(float(state.get("eject_visual_progress", 0.0)), float(state["eject_progress"]))
 				if state["eject_progress"] >= 1.0:
 					var payload_data := {
 						"type": "unit",
@@ -7486,6 +7699,7 @@ func _update_factories(delta: float) -> void:
 					if _try_deliver_fabricated_unit(origin, data, payload_data):
 						state["phase"] = "collecting"
 						state.erase("eject_progress")
+						state.erase("eject_visual_progress")
 					else:
 						state["phase"] = "holding"
 						state["held_payload"] = payload_data
@@ -7503,6 +7717,7 @@ func _update_factories(delta: float) -> void:
 				if held != null and _try_deliver_fabricated_unit(origin, data, held):
 					state.erase("held_payload")
 					state.erase("eject_progress")
+					state.erase("eject_visual_progress")
 					state["phase"] = "collecting"
 
 
@@ -7866,7 +8081,8 @@ func _conveyor_feeds_toward_building(conv_pos: Vector2i, origin: Vector2i, grid_
 ##
 ## Rules (applied per front cell, summarised across the whole front edge):
 ##   1. If any front cell is a payload-interacting block (payload/freight
-##      conveyor, mass driver, refabricator), try to hand the unit to it.
+##      conveyor, mass driver, refabricator, unit upgrader), try to hand the
+##      unit to it.
 ##      If at least one accepts, delivery succeeds.
 ##   2. If every payload target on the front is currently full/busy, the
 ##      fabricator holds — we don't spawn on the ground next to a payload
@@ -7954,9 +8170,10 @@ func _try_deliver_fabricated_unit(origin: Vector2i, data: BlockData, payload_dat
 ## target would actually accept the given unit right now. A refabricator
 ## configured for a different tier-2 (or not configured at all) reports
 ## false so the payload flow doesn't dead-lock waiting on a target that
-## would never pull. Other payload targets (payload/freight conveyor,
-## mass driver) report true whenever they're present, even when full —
-## those are queue-pressure cases the caller handles separately.
+## would never pull. Upgraders only report true when the unit has a slot.
+## Other payload targets (payload/freight conveyor, mass driver) report true
+## whenever they're present, even when full — those are queue-pressure cases
+## the caller handles separately.
 func _payload_target_accepts_unit(cell: Vector2i, unit_id: StringName) -> bool:
 	if not main.placed_buildings.has(cell):
 		return false
@@ -7978,11 +8195,17 @@ func _payload_target_accepts_unit(cell: Vector2i, unit_id: StringName) -> bool:
 		# Cap-full is a "payload target IS in front but not ready right
 		# now" case, which should hold the belt.
 		return _get_tier2_unit(unit_id) == sel
+	if d.tags.has("upgrader"):
+		var ud = Registry.get_unit(unit_id)
+		if ud == null:
+			return false
+		return ud.upgrade_slots() > 0
 	return d.tags.has("payload") or d.tags.has("freight") or d.tags.has("mass_driver")
 
 
 ## Returns true if the cell at `cell` contains a block that interacts with
-## unit payloads — payload/freight conveyor, mass driver, or refabricator.
+## unit payloads — payload/freight conveyor, mass driver, refabricator, or
+## unit upgrader.
 ## Used by the fabricator ejection logic to decide whether to push the
 ## produced unit into the block or spawn it on the ground.
 func _is_unit_payload_target(cell: Vector2i) -> bool:
@@ -7993,7 +8216,8 @@ func _is_unit_payload_target(cell: Vector2i) -> bool:
 	if d == null:
 		return false
 	return d.tags.has("payload") or d.tags.has("freight") \
-		or d.tags.has("refabricator") or d.tags.has("mass_driver")
+		or d.tags.has("refabricator") or d.tags.has("mass_driver") \
+		or d.tags.has("upgrader")
 
 
 ## Tries to deliver the produced unit to a payload-interacting block at
@@ -8003,6 +8227,7 @@ func _is_unit_payload_target(cell: Vector2i) -> bool:
 ##   - mass driver: loaded straight into the driver's own state slot so
 ##     its update loop sees it like a payload picked off an adjacent
 ##     conveyor, then rotates and launches it
+##   - unit upgrader: direct-feed into the upgrader's held-unit slot
 func _try_deliver_to_payload_target(cell: Vector2i, payload_data: Dictionary, unit_id: StringName, entry_dir: int) -> bool:
 	var anchor: Vector2i = main.building_origins.get(cell, cell)
 	var d = Registry.get_block(main.placed_buildings.get(anchor, &""))
@@ -8015,6 +8240,9 @@ func _try_deliver_to_payload_target(cell: Vector2i, payload_data: Dictionary, un
 
 	if d.tags.has("refabricator"):
 		return _try_feed_refabricator_direct(anchor, d, unit_id)
+
+	if d.tags.has("upgrader"):
+		return _try_accept_upgrader_payload(anchor, payload_data)
 
 	if _is_payload_cell(cell):
 		return _try_push_payload(cell, payload_data, entry_dir)
@@ -8070,20 +8298,21 @@ func _spawn_unit_at_building_front(origin: Vector2i, data: BlockData, unit_id: S
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr:
 		var faction: int = main.get_building_faction(origin)
+		var spawn_facing: float = rot * PI / 2.0
 		if faction == main.Faction.FEROX:
 			# Route through the fabricator-squad system: the new unit
 			# rallies a few tiles in front of its fabricator until the
 			# squad has enough firepower (or it's been waiting too long)
 			# to break through the player's defenses.
 			if unit_mgr.has_method("spawn_enemy_for_fabricator"):
-				unit_mgr.spawn_enemy_for_fabricator(spawn_world, unit_id, origin)
+				unit_mgr.spawn_enemy_for_fabricator(spawn_world, unit_id, origin, spawn_facing)
 			else:
 				unit_mgr.spawn_enemy(spawn_world, unit_id)
 		else:
 			# Check unit cap before spawning player units
 			if main.has_method("can_spawn_unit") and not main.can_spawn_unit(unit_id):
 				return  # At capacity for this unit type
-			unit_mgr.spawn_player_unit(spawn_world, unit_id)
+			unit_mgr.spawn_player_unit(spawn_world, unit_id, spawn_facing)
 		# Notify sector script of unit production (Lumina only)
 		if faction != main.Faction.FEROX:
 			if "stats_units_produced" in main:

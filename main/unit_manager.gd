@@ -2057,8 +2057,8 @@ func on_building_destroyed(grid_pos: Vector2i) -> void:
 ## itself strong enough to break through, or after a timeout.
 ##
 ## Returns the spawned unit, or null on failure.
-func spawn_enemy_for_fabricator(spawn_position: Vector2, unit_id: StringName, fab_anchor: Vector2i) -> Node2D:
-	var enemy: Node2D = _spawn_enemy_internal(spawn_position, unit_id)
+func spawn_enemy_for_fabricator(spawn_position: Vector2, unit_id: StringName, fab_anchor: Vector2i, spawn_facing: Variant = null) -> Node2D:
+	var enemy: Node2D = _spawn_enemy_internal(spawn_position, unit_id, spawn_facing)
 	if enemy == null:
 		return null
 	if "squad_anchor" in enemy:
@@ -2109,7 +2109,7 @@ func spawn_enemy(spawn_position: Vector2, unit_id: StringName = &"basic_cell") -
 ## Pathing is the caller's responsibility — wave / nest enemies pick the
 ## standard nearest-LUMINA-building target, fabricator enemies park at
 ## the squad rally point first.
-func _spawn_enemy_internal(spawn_position: Vector2, unit_id: StringName) -> Node2D:
+func _spawn_enemy_internal(spawn_position: Vector2, unit_id: StringName, spawn_facing: Variant = null) -> Node2D:
 	var unit_data = Registry.get_unit(unit_id)
 	if unit_data == null:
 		push_warning("UnitManager: Unit '%s' not found in Registry — using fallback stats." % unit_id)
@@ -2126,6 +2126,7 @@ func _spawn_enemy_internal(spawn_position: Vector2, unit_id: StringName) -> Node
 	enemy.main = main
 	enemy.unit_manager = self
 	enemy.position = corrected_e
+	_seed_unit_spawn_motion(enemy, spawn_facing)
 
 	add_child(enemy)
 	enemies.append(enemy)
@@ -2133,7 +2134,7 @@ func _spawn_enemy_internal(spawn_position: Vector2, unit_id: StringName) -> Node
 
 
 ## Spawns a player unit at the given position (produced by a fabricator).
-func spawn_player_unit(spawn_position: Vector2, unit_id: StringName) -> void:
+func spawn_player_unit(spawn_position: Vector2, unit_id: StringName, spawn_facing: Variant = null) -> void:
 	var unit_data = Registry.get_unit(unit_id)
 	if unit_data == null:
 		push_warning("UnitManager: Unit '%s' not found in Registry!" % unit_id)
@@ -2151,10 +2152,32 @@ func spawn_player_unit(spawn_position: Vector2, unit_id: StringName) -> void:
 	unit.main = main
 	unit.unit_manager = self
 	unit.position = corrected_p
+	_seed_unit_spawn_motion(unit, spawn_facing)
 
 	add_child(unit)
 	player_units.append(unit)
 	# Player units don't pathfind to buildings — they idle at spawn
+
+
+func _seed_unit_spawn_motion(unit: Node2D, spawn_facing: Variant = null) -> void:
+	if unit == null:
+		return
+	if spawn_facing != null:
+		var angle := float(spawn_facing)
+		if "facing_angle" in unit:
+			unit.facing_angle = angle
+		if "aim_angle" in unit:
+			unit.aim_angle = angle
+		if "_facing_initialized" in unit:
+			unit._facing_initialized = true
+	if "_prev_position" in unit:
+		unit._prev_position = unit.position
+	if "_vel_prev_pos" in unit:
+		unit._vel_prev_pos = unit.position
+	if "_vel_initialised" in unit:
+		unit._vel_initialised = true
+	if "velocity" in unit:
+		unit.velocity = Vector2.ZERO
 
 
 ## Spawns a unit for the given team (UnitData.Team — PLAYER/Lumina or

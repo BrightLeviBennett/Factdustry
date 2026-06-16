@@ -261,6 +261,21 @@ func _create_toolbar() -> void:
 	)
 	hbox.add_child(fade_btn)
 
+	# Hide Blocks toggle — fades placed blocks down so the terrain underneath
+	# is visible while authoring. Driven via the BuildingSystem canvas's
+	# modulate alpha, so it dims every block draw in one shot (overlays,
+	# grid, and terrain stay fully opaque).
+	var hide_btn = CheckButton.new()
+	hide_btn.text = "Hide Blocks"
+	hide_btn.button_pressed = false
+	hide_btn.tooltip_text = "Fade placed blocks so terrain shows through"
+	hide_btn.toggled.connect(func(pressed: bool):
+		var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+		if building_sys:
+			building_sys.modulate.a = 0.2 if pressed else 1.0
+	)
+	hbox.add_child(hide_btn)
+
 	# Spacer
 	var spacer = Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -467,8 +482,8 @@ func _create_building_palette() -> void:
 	faction_hbox.add_theme_constant_override("separation", 2)
 	vbox.add_child(faction_hbox)
 
-	_add_faction_btn(faction_hbox, "Lumina", main.Faction.LUMINA, Color(0.3, 0.7, 1.0))
-	_add_faction_btn(faction_hbox, "Ferox", main.Faction.FEROX, Color(1.0, 0.3, 0.3))
+	_add_faction_btn(faction_hbox, "Lumina", main.Faction.LUMINA, main.faction_color(main.Faction.LUMINA))
+	_add_faction_btn(faction_hbox, "Ferox", main.Faction.FEROX, main.faction_color(main.Faction.FEROX))
 	_add_faction_btn(faction_hbox, "Derelict", main.Faction.DERELICT, Color(0.55, 0.55, 0.55))
 	_update_faction_highlight()
 
@@ -568,12 +583,7 @@ func _select_faction(faction: int) -> void:
 func _update_faction_highlight() -> void:
 	for f in faction_buttons:
 		var btn: Button = faction_buttons[f]
-		var base_color: Color
-		match f:
-			main.Faction.LUMINA:  base_color = Color(0.3, 0.7, 1.0)
-			main.Faction.FEROX:   base_color = Color(1.0, 0.3, 0.3)
-			main.Faction.DERELICT: base_color = Color(0.55, 0.55, 0.55)
-			_:                    base_color = Color(0.7, 0.7, 0.7)
+		var base_color: Color = main.faction_color(f)
 		if f == main.selected_faction:
 			btn.add_theme_stylebox_override("normal", _panel_style(base_color.darkened(0.35)))
 		else:
@@ -798,7 +808,10 @@ func _on_new() -> void:
 		terrain.ore_tiles.clear()
 		terrain.tile_health.clear()
 		terrain.multi_tile_origins.clear()
-		terrain.queue_redraw()
+		if terrain.has_method("clear_render_caches"):
+			terrain.clear_render_caches()
+		else:
+			terrain.queue_redraw()
 	main.core_position = Vector2i(48, 48)
 	main.clear_buildings()
 	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
@@ -1304,9 +1317,9 @@ func _create_faction_popup() -> void:
 
 	var convert_faction_buttons: Dictionary = {}
 	var faction_specs := [
-		{"id": main.Faction.LUMINA, "label": "Lumina", "color": Color(0.3, 0.7, 1.0)},
-		{"id": main.Faction.FEROX, "label": "Ferox", "color": Color(1.0, 0.3, 0.3)},
-		{"id": main.Faction.DERELICT, "label": "Derelict", "color": Color(0.55, 0.55, 0.55)},
+		{"id": main.Faction.LUMINA, "label": "Lumina", "color": main.faction_color(main.Faction.LUMINA)},
+		{"id": main.Faction.FEROX, "label": "Ferox", "color": main.faction_color(main.Faction.FEROX)},
+		{"id": main.Faction.DERELICT, "label": "Derelict", "color": main.faction_color(main.Faction.DERELICT)},
 	]
 	for spec in faction_specs:
 		var btn := Button.new()

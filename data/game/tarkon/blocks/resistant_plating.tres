@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"resistant_plating"
+display_name = "Resistant Plating"
+description = "Unit module. Reduces fire, fume, and acid damage by 35% per apply, at the cost of 3 armor and 10% max health."
+category = 10
+tags = PackedStringArray("module")
+color = Color(0.45, 0.62, 0.58, 1)
+grid_size = Vector2i(2, 2)
+max_health = 1.0
+module_max_applies = 2

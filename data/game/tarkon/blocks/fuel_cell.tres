@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"fuel_cell"
 display_name = "Fuel Cell"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 1. Doubles Shield Emitter shield health, doubles ground-unit Thruster boost duration, and makes the unit explode more violently when destroyed."
 category = 10
 tags = PackedStringArray("module")
 color = Color(0.9, 0.3, 0.3, 1)

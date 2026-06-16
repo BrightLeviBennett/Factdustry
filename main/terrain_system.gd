@@ -16,6 +16,7 @@ extends Node2D
 # ============================================================
 
 signal walls_changed
+signal terrain_changed(grid_pos: Vector2i)
 
 @onready var main: Node2D = get_node("/root/Main")
 
@@ -661,6 +662,7 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 		_prune_water_cell_if_not_water(grid_pos)
 
 	queue_redraw()
+	terrain_changed.emit(grid_pos)
 
 
 func remove_tile(grid_pos: Vector2i) -> void:
@@ -716,6 +718,7 @@ func remove_tile(grid_pos: Vector2i) -> void:
 		return
 
 	queue_redraw()
+	terrain_changed.emit(grid_pos)
 
 
 
@@ -757,7 +760,9 @@ func _place_multi_tile(origin: Vector2i, tile_id: StringName) -> void:
 	# themselves), and any floor under the footprint may need refreshing.
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
-			_mark_floor_chunk_dirty(origin + Vector2i(dx, dy))
+			var dirty_cell := origin + Vector2i(dx, dy)
+			_mark_floor_chunk_dirty(dirty_cell)
+			terrain_changed.emit(dirty_cell)
 	queue_redraw()
 
 
@@ -770,6 +775,7 @@ func _remove_multi_tile(origin: Vector2i) -> void:
 			multi_tile_origins.erase(cell)
 			# Footprint cells revert to plain floor (or bare) — refresh meshes.
 			_mark_floor_chunk_dirty(cell)
+			terrain_changed.emit(cell)
 
 	floor_tiles.erase(origin)
 
@@ -877,7 +883,6 @@ func get_water_depth_at(grid_pos: Vector2i) -> int:
 
 
 
-
 # =========================
 # BACKWARD COMPATIBILITY
 # =========================
@@ -935,6 +940,7 @@ func _rebuild_water_depth() -> void:
 			land_cells[pos] = true
 
 	if water_cells.is_empty():
+		_rebuild_water_meshes()
 		return
 
 	# 2. Flood-fill land into connected islands so we can tag each land
@@ -1042,6 +1048,13 @@ func _rebuild_water_depth() -> void:
 		# land, 1 by the time we hit the deep tier. Renderer smoothly
 		# interpolates water/sand alpha across this.
 		_water_depth_t[pos] = clampf(float(d - 1) / maxf(deep_at - 1.0, 1.0), 0.0, 1.0)
+
+	# Water with no shoreline seed (e.g. editor bucket-fill into void) still
+	# needs to render immediately. Treat unreached water as fully deep.
+	for water_pos in water_cells:
+		if not _water_depth_map.has(water_pos):
+			_water_depth_map[water_pos] = 3
+			_water_depth_t[water_pos] = 1.0
 
 	# Bake per-corner depth by averaging the 4 tiles that share each
 	# corner. Non-water neighbours contribute t=0 (shore-adjacent), which
@@ -1294,32 +1307,18 @@ func _rebuild_floor_edge_cache() -> void:
 	_floor_edge_distance.clear()
 	var sector_script = _sector_script_ref()
 	# Seed: visible floor tiles adjacent to void or hidden tiles.
-	# Walls only block the fade if they have floor behind them (interior walls).
-	# Edge walls (walls with void on at least one side) let the fade through.
+	# Walls block the floor fade, even if the wall has void behind it.
 	var queue: Array[Vector2i] = []
 	for grid_pos in floor_tiles:
+		if wall_tiles.has(grid_pos):
+			continue
 		if sector_script and sector_script.is_tile_hidden(grid_pos):
 			continue
 		for offset in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
 			var nb = grid_pos + offset
 			var nb_is_void: bool = not floor_tiles.has(nb) and not wall_tiles.has(nb)
-			# A wall neighbor lets the fade through if the wall borders void OR
-			# a hidden tile on any side. Interior walls with visible floor on
-			# all sides still block the fade.
-			var nb_is_edge_wall := false
-			if wall_tiles.has(nb) and not floor_tiles.has(nb):
-				for wo in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
-					var wnb = nb + wo
-					# Void side
-					if not floor_tiles.has(wnb) and not wall_tiles.has(wnb):
-						nb_is_edge_wall = true
-						break
-					# Hidden side (hidden floor or hidden wall)
-					if sector_script and sector_script.is_tile_hidden(wnb):
-						nb_is_edge_wall = true
-						break
 			var nb_is_hidden: bool = sector_script != null and floor_tiles.has(nb) and not wall_tiles.has(nb) and sector_script.is_tile_hidden(nb)
-			if nb_is_void or nb_is_edge_wall or nb_is_hidden:
+			if nb_is_void or nb_is_hidden:
 				_floor_edge_distance[grid_pos] = 0
 				queue.append(grid_pos)
 				break
@@ -1331,7 +1330,7 @@ func _rebuild_floor_edge_cache() -> void:
 		var dist: int = _floor_edge_distance[pos]
 		for offset in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
 			var nb = pos + offset
-			if floor_tiles.has(nb) and not _floor_edge_distance.has(nb):
+			if floor_tiles.has(nb) and not wall_tiles.has(nb) and not _floor_edge_distance.has(nb):
 				if sector_script and sector_script.is_tile_hidden(nb):
 					continue
 				_floor_edge_distance[nb] = dist + 1
@@ -1371,6 +1370,8 @@ func _rebuild_floor_edge_cache() -> void:
 	# Pre-bake per-corner darkness for all visible floor tiles
 	_fade_darkness.clear()
 	for grid_pos in floor_tiles:
+		if wall_tiles.has(grid_pos):
+			continue
 		if sector_script and sector_script.is_tile_hidden(grid_pos):
 			continue
 		var cd: Array = _get_floor_corner_darkness(grid_pos)
@@ -1432,6 +1433,30 @@ func _chunk_of(cell: Vector2i) -> Vector2i:
 ## Flags the chunk owning `cell` for an incremental floor-mesh rebuild.
 func _mark_floor_chunk_dirty(cell: Vector2i) -> void:
 	_floor_dirty_chunks[_chunk_of(cell)] = true
+
+
+## Clears all cached render products after a bulk terrain wipe. Dictionary
+## contents are owned by callers; this only resets draw-time caches.
+func clear_render_caches() -> void:
+	_floor_edge_distance.clear()
+	_hidden_floor_distance.clear()
+	_fade_darkness.clear()
+	_water_depth_map.clear()
+	_water_depth_t.clear()
+	_water_corner_t.clear()
+	_water_meshes.clear()
+	_sand_meshes.clear()
+	_floor_chunk_meshes.clear()
+	_floor_dirty_chunks.clear()
+	_fade_mesh = null
+	_floor_edge_dirty = true
+	_water_depth_dirty = true
+	_floor_geom_dirty = true
+	if _water_canvas != null:
+		_water_canvas.queue_redraw()
+	if _fade_canvas != null:
+		_fade_canvas.queue_redraw()
+	queue_redraw()
 
 
 ## Rebuilds the batched floor meshes for ONE chunk by scanning only its cells
@@ -1610,14 +1635,13 @@ func _rebuild_fade_mesh() -> void:
 
 
 ## Returns the effective edge distance for a position (for per-corner interpolation).
-## Void/hidden tiles return 0 (edge). Walls contribute to fade if they border
-## void or hidden tiles themselves (edge walls); interior walls stay bright.
+## Void/hidden tiles return 0 (edge). Walls block floor fade and stay bright;
+## the wall renderer handles any wall-specific edge treatment.
 func _get_floor_eff_dist(pos: Vector2i) -> float:
 	var ss = _sector_script_ref()
+	if wall_tiles.has(pos):
+		return float(FLOOR_FADE_START)
 	if ss and ss.is_tile_hidden(pos):
-		# Hidden walls still count as walls for floor fade
-		if wall_tiles.has(pos):
-			return 0.0  # edge — let floor fade through
 		# Hidden floors only fade if directly adjacent to a visible floor (4-connected).
 		# Otherwise they're behind walls and shouldn't bleed darkness through diagonals.
 		if floor_tiles.has(pos):
@@ -1630,17 +1654,6 @@ func _get_floor_eff_dist(pos: Vector2i) -> float:
 			if not has_visible_floor_neighbor:
 				return float(FLOOR_FADE_START)
 		return 0.0
-	if wall_tiles.has(pos):
-		# Edge walls (bordering void or hidden) are treated as edges so the
-		# floor fade bleeds through them. Interior walls with visible floor
-		# on every side stay bright and don't affect adjacent fade.
-		for offset in [Vector2i(0,-1), Vector2i(0,1), Vector2i(-1,0), Vector2i(1,0)]:
-			var wnb = pos + offset
-			if not floor_tiles.has(wnb) and not wall_tiles.has(wnb):
-				return 0.0  # borders void
-			if ss and ss.is_tile_hidden(wnb):
-				return 0.0  # borders hidden
-		return float(FLOOR_FADE_START)  # interior wall — wall system handles its own fade
 	if not floor_tiles.has(pos):
 		return 0.0  # Void = edge (darkest)
 	if not _floor_edge_distance.has(pos):
@@ -1656,10 +1669,10 @@ func _get_floor_corner_darkness(grid_pos: Vector2i) -> Array:
 	var d_s: float = _get_floor_eff_dist(grid_pos + Vector2i(0, 1))
 	var d_e: float = _get_floor_eff_dist(grid_pos + Vector2i(1, 0))
 	var d_w: float = _get_floor_eff_dist(grid_pos + Vector2i(-1, 0))
-	var d_nw: float = _get_floor_eff_dist(grid_pos + Vector2i(-1, -1))
-	var d_ne: float = _get_floor_eff_dist(grid_pos + Vector2i(1, -1))
-	var d_se: float = _get_floor_eff_dist(grid_pos + Vector2i(1, 1))
-	var d_sw: float = _get_floor_eff_dist(grid_pos + Vector2i(-1, 1))
+	var d_nw: float = _get_diagonal_floor_eff_dist(grid_pos, Vector2i(-1, -1))
+	var d_ne: float = _get_diagonal_floor_eff_dist(grid_pos, Vector2i(1, -1))
+	var d_se: float = _get_diagonal_floor_eff_dist(grid_pos, Vector2i(1, 1))
+	var d_sw: float = _get_diagonal_floor_eff_dist(grid_pos, Vector2i(-1, 1))
 
 	var fade_start_f: float = float(FLOOR_FADE_START)
 	var tl_avg: float = (d0 + d_n + d_w + d_nw) / 4.0
@@ -1673,6 +1686,17 @@ func _get_floor_corner_darkness(grid_pos: Vector2i) -> Array:
 		return clampf(1.0 - avg / fade_start_f, 0.0, 1.0)
 
 	return [_to_dark.call(tl_avg), _to_dark.call(tr_avg), _to_dark.call(br_avg), _to_dark.call(bl_avg)]
+
+
+## Diagonal void should not darken a floor corner when a wall occupies either
+## orthogonal cell between that floor and the diagonal. This prevents fade
+## bleeding around/through wall corners.
+func _get_diagonal_floor_eff_dist(origin: Vector2i, diag: Vector2i) -> float:
+	var side_a := origin + Vector2i(diag.x, 0)
+	var side_b := origin + Vector2i(0, diag.y)
+	if wall_tiles.has(side_a) or wall_tiles.has(side_b):
+		return float(FLOOR_FADE_START)
+	return _get_floor_eff_dist(origin + diag)
 
 
 # =========================

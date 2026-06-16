@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = &"armor_plate"
 display_name = "Armor Plate"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 3. Adds 2 armor per apply, adds 25% max health on first apply, and halves knockback taken per apply."
 category = 10
 tags = PackedStringArray("module")
 color = Color(0.7, 0.7, 0.75, 1)

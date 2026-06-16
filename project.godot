@@ -20,7 +20,6 @@ config/auto_accept_quit=false
 config/features=PackedStringArray("4.6", "Mobile")
 config/icon="uid://bkmy08mybjtx8"
 config/macos_native_icon="uid://bkmy08mybjtx8"
-config/windows_native_icon="uid://bkmy08mybjtx8"
 
 [autoload]
 

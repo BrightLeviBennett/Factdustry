@@ -28,6 +28,12 @@ extends Resource
 ## Icon texture
 @export var icon: Texture2D
 
+## Representative "map colour" for this tile — the average/minimap tint, akin
+## to Mindustry's Block.mapColor. Used by the naval wake (water tiles tint the
+## wake to their colour × 1.5) and available for a minimap layer. Alpha 0 means
+## "unset" — consumers fall back to a sensible default.
+@export var color: Color = Color(0, 0, 0, 0)
+
 # --- CATEGORIZATION ---
 enum TileCategory {
 	FLOOR,    # Ground decoration, always walkable
@@ -71,18 +77,18 @@ enum TileCategory {
 @export var is_liquid: bool = false
 ## What item ID this liquid source yields when pumped (empty = no extraction)
 @export var extracted_liquid: StringName = &""
-## Optional texture for this liquid tile's shallow/shore underlay (the band
+## Optional texture for this liquid tile's shallow/shore und erlay (the band
 ## the water fades into at the edges). When null the global Sand texture is
 ## used. Lets e.g. sulfur water fade into a sulfur shore instead of sand.
 @export var shore_icon: Texture2D
 ## Water depth for liquid tiles. 0 = not water / safe ground.
 ##   1 = shallow (ankle-deep). Ground/crawler units can cross at half speed,
-##       accumulate submersion damage, take a blue tint. Pumps placeable.
-##       Any non-platform block is blocked from placement.
+##       accumulate submersion damage, take a blue tint. ANY block can be
+##       placed here directly — treated as buildable ground.
 ##   2 = waist-deep. Same as depth 1 for units. Pumps placeable.
 ##       Only platforms are placeable; other blocks require a platform on top.
 ##   3 = deep water. Units still traverse (same rules) but no blocks of any
-##       kind can be placed directly; platforms are required first.
+##       kind can be placed.
 @export_range(0, 3) var water_depth: int = 0
 
 

@@ -325,6 +325,10 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## may hold (independent of the unit's total slot count). e.g. Armor Plate
 ## = 3, Cooling System = 2, most others = 1.
 @export var module_max_applies: int = 1
+## Minimum unit tier this module can be installed on. 1 = any tier.
+@export var module_min_tier: int = 1
+## Module ids that cannot coexist with this module on the same unit.
+@export var module_forbidden_modules: Array[StringName] = []
 ## Status effect applied to nearby enemies (StatusEffectData).
 @export var applies_status: Resource
 ## Multiplier applied to neighbors of this category.

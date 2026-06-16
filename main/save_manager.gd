@@ -1218,7 +1218,10 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 				var us = logistics.upgrader_state[pos]
 				var uq := []
 				for qi in us.get("queue", []):
-					uq.append(str(qi))
+					if qi is Dictionary:
+						uq.append(str(qi.get("block_id", "")))
+					else:
+						uq.append(str(qi))
 				upgrader_state_save[_vec2i_to_str(pos)] = {
 					"unit": _ser_payload(us.get("unit")),
 					"queue": uq,

@@ -1,19 +1,21 @@
 [gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://dlk2bc082nxd6"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://ctjhbq1evrju8" path="res://textures/sectors/CrashSite.png" id="1_toits"]
 
 [resource]
 script = ExtResource("1")
 id = &"crash_site"
 display_name = "Crash Site"
 description = "<Optional Sector>
-While you were on Ferum Ridge, our sensors detected some strange seismic activity here; From our closer scans it appears to be a metorite that crash-landed.
+While you were on Ferum Ridge, our sensors detected some strange seismic activity here; From our closer scans it appears to be a small cluster of metorites that crash landed.
 Our sensors also detected a ferox scout group heading in this direction, so be careful."
+icon = ExtResource("1_toits")
 planet_id = &"Tarkon"
 hex_q = 3
 hex_r = 3
 available_resources = PackedStringArray("mat_copper", "mat_iron")
 wave_units_data = PackedStringArray()
-unlocks = PackedStringArray()
+unlocks = PackedStringArray("volcanic_wastelands", "verdant_grotto")
 required_sectors = PackedStringArray("ferrum_ridge")
 tags = PackedStringArray("campaign", "sector")

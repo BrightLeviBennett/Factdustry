@@ -7,6 +7,7 @@
 script = ExtResource("1")
 id = &"water"
 icon = ExtResource("1_uf7ph")
+color = Color(0.32, 0.38, 0.45, 1)
 speed_modifier = 0.5
 tags = PackedStringArray("liquid", "water")
 is_liquid = true

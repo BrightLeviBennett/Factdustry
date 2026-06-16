@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://clw7h25mnsw1v"
-path="res://.godot/imported/CoreShardBase_old.png-6f565b00388afc5b0710d7fdaddffd91.ctex"
+uid="uid://bnsfoakoj0www"
+path="res://.godot/imported/CopperMetal.png-e3414bded6cd572c27cf00f7fa112dd5.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/cores/CoreShard/CoreShardBase_old.png"
-dest_files=["res://.godot/imported/CoreShardBase_old.png-6f565b00388afc5b0710d7fdaddffd91.ctex"]
+source_file="res://textures/terrain/CopperMetal.png"
+dest_files=["res://.godot/imported/CopperMetal.png-e3414bded6cd572c27cf00f7fa112dd5.ctex"]
 
 [params]
 

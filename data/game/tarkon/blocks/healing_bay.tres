@@ -6,9 +6,10 @@
 script = ExtResource("1")
 id = &"healing_bay"
 display_name = "Healing Bay"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 1. Hover/flying only. Uses payload area to fabricate small healing drones that deploy near damaged blocks or units."
 category = 10
 tags = PackedStringArray("module")
+module_unit_layers = [2, 3]
 color = Color(0.35, 0.8, 0.45, 1)
 grid_size = Vector2i(2, 2)
 max_health = 1.0

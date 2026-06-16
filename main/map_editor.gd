@@ -22,8 +22,9 @@ const GRID_SIZE := 128
 const SPRITE_SCALE_FACTOR := float(GRID_SIZE) / 64.0
 ## Fog-of-war switches authored in the editor's Map Settings dialog.
 ## Serialized into the sector .json so the playtest scene's FogSystem
-## picks them up on load.
-var fog_enabled := true
+## picks them up on load. Defaults OFF for new maps in the editor — a
+## loaded map restores its own saved value via SaveManager.
+var fog_enabled := false
 var fog_darkness_mult := 1.0
 var GRID_WIDTH := 100
 var GRID_HEIGHT := 100
@@ -376,6 +377,19 @@ func get_building_faction(grid_pos: Vector2i) -> int:
 	return building_factions.get(grid_pos, Faction.LUMINA)
 
 
+## Mirrors Main.faction_color so editor HUD/overlays share one source of truth.
+func faction_color(faction: int) -> Color:
+	match faction:
+		Faction.LUMINA:
+			return Color("6f3198")
+		Faction.FEROX:
+			return Color("8a503a")
+		Faction.DERELICT:
+			return Color(0.55, 0.55, 0.55)
+		_:
+			return Color(0.7, 0.7, 0.7)
+
+
 func get_building_health_pct(_grid_pos: Vector2i) -> float:
 	return 1.0  # No damage in editor
 
@@ -623,6 +637,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				_flood_fill_at(grid_pos)
 				_undo_commit()
 				_overlay.queue_redraw()
+			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+				# Right-click = erase the touching group of walls/floors.
+				_undo_begin()
+				_flood_erase_at(grid_pos)
+				_undo_commit()
+				_overlay.queue_redraw()
 			return
 
 		# --- Line tool (terrain mode) ---
@@ -792,7 +812,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_paint_stroke_to(grid_pos, false)
 		elif _erasing:
 			_paint_stroke_to(grid_pos, true)
-		elif editor_mode == EditorMode.TERRAIN and current_tool == Tool.PENCIL:
+		elif editor_mode == EditorMode.TERRAIN and (current_tool == Tool.PENCIL or current_tool == Tool.LINE):
 			# Redraw so the brush-footprint preview tracks the cursor.
 			_hover_cell = grid_pos
 			_overlay.queue_redraw()
@@ -964,15 +984,20 @@ func undo() -> void:
 		return
 	var step: Array = _undo_stack.pop_back()
 	_undoing = true
+	var terrain_changed_cells: Dictionary = {}
 	for entry in step:
 		if entry.has("meta"):
 			linked_pairs = (entry["links_before"] as Array).duplicate(true)
 			core_position = entry["core_before"]
 		else:
-			_restore_cell_state(entry["cell"], entry["before"])
+			if _restore_cell_state(entry["cell"], entry["before"]):
+				terrain_changed_cells[entry["cell"]] = true
 	_undoing = false
 	_invalidate_anchor_cache()
-	_after_terrain_restore()
+	if terrain_changed_cells.is_empty():
+		_after_terrain_restore()
+	else:
+		_mark_direct_terrain_cells_changed(terrain_changed_cells)
 	_redo_stack.append(step)
 
 
@@ -982,15 +1007,20 @@ func redo() -> void:
 		return
 	var step: Array = _redo_stack.pop_back()
 	_undoing = true
+	var terrain_changed_cells: Dictionary = {}
 	for entry in step:
 		if entry.has("meta"):
 			linked_pairs = (entry["links_after"] as Array).duplicate(true)
 			core_position = entry["core_after"]
 		else:
-			_restore_cell_state(entry["cell"], entry["after"])
+			if _restore_cell_state(entry["cell"], entry["after"]):
+				terrain_changed_cells[entry["cell"]] = true
 	_undoing = false
 	_invalidate_anchor_cache()
-	_after_terrain_restore()
+	if terrain_changed_cells.is_empty():
+		_after_terrain_restore()
+	else:
+		_mark_direct_terrain_cells_changed(terrain_changed_cells)
 	_undo_stack.append(step)
 	if _undo_stack.size() > UNDO_LIMIT:
 		_undo_stack.pop_front()
@@ -1009,12 +1039,33 @@ func _after_terrain_restore() -> void:
 	_buildings_changed = true
 
 
+## Direct terrain restores/transforms bypass TerrainSystem.place_tile/remove_tile,
+## so they must manually refresh the incremental systems those APIs normally
+## touch: floor mesh chunks, water/fade caches, terrain listeners, and wall cache.
+func _mark_direct_terrain_cells_changed(cells: Dictionary) -> void:
+	if cells.is_empty():
+		return
+	var t = $TerrainSystem
+	t._floor_edge_dirty = true
+	t._water_depth_dirty = true
+	for cell in cells:
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				t._mark_floor_chunk_dirty(cell + Vector2i(dx, dy))
+		if t.has_signal("terrain_changed"):
+			t.terrain_changed.emit(cell)
+	_after_terrain_restore()
+
+
 ## Sets a cell's floor/wall/ore dictionaries directly to the captured
 ## snapshot. Bypasses TerrainSystem.place_tile/remove_tile so we
 ## restore the EXACT prior state (including ore-on-wall combinations
 ## that the normal placement path won't reproduce in a single call).
-func _restore_cell_state(cell: Vector2i, state: Dictionary) -> void:
+func _restore_cell_state(cell: Vector2i, state: Dictionary) -> bool:
 	var t = $TerrainSystem
+	var terrain_changed: bool = t.floor_tiles.get(cell, null) != state["floor"] \
+			or t.wall_tiles.get(cell, null) != state["wall"] \
+			or t.ore_tiles.get(cell, null) != state["ore"]
 	if state["floor"] == null:
 		t.floor_tiles.erase(cell)
 	else:
@@ -1027,9 +1078,8 @@ func _restore_cell_state(cell: Vector2i, state: Dictionary) -> void:
 		t.ore_tiles.erase(cell)
 	else:
 		t.ore_tiles[cell] = state["ore"]
-	t._floor_edge_dirty = true
-	t._water_depth_dirty = true
 	_restore_building_cell(cell, state)
+	return terrain_changed
 
 
 ## Restores the building-layer dicts for one cell from a captured
@@ -1258,6 +1308,25 @@ func _flood_fill_at(start: Vector2i) -> void:
 	_buildings_changed = true
 
 
+## Bucket right-click: erase the connected group UNDER the cursor. Picks the
+## layer from what's actually at the clicked cell (not the selected tile), so
+## right-clicking a wall clears the touching wall run and right-clicking bare
+## floor clears the touching floor region. No-op on an empty (void) cell.
+func _flood_erase_at(start: Vector2i) -> void:
+	if not is_within_bounds(start):
+		return
+	var terrain = $TerrainSystem
+	if terrain.has_method("has_wall") and terrain.has_wall(start):
+		_flood_fill_walls(start, &"")
+	elif StringName(terrain.floor_tiles.get(start, &"")) != &"":
+		_flood_fill_floor(start, &"")
+	else:
+		return
+	terrain.queue_redraw()
+	# Walls / ores render on the building layer — flag it for redraw.
+	_buildings_changed = true
+
+
 ## 4-connected flood fill over the FLOOR layer starting at `start`.
 ## Replaces every cell whose current floor tile id matches the start
 ## cell's with `target_tile`. When `target_tile` is empty, the fill
@@ -1329,7 +1398,12 @@ func _flood_fill_walls(start: Vector2i, target_tile: StringName) -> void:
 		if here != source_wall:
 			continue
 		_undo_capture(cell)
-		terrain.place_tile(cell, target_tile)
+		# Empty target = erase: drop the wall (remove_tile peels the top
+		# layer, leaving the floor underneath). Otherwise recolour/fill.
+		if target_tile == &"":
+			terrain.remove_tile(cell)
+		else:
+			terrain.place_tile(cell, target_tile)
 		filled += 1
 		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 			var nb: Vector2i = cell + d
@@ -1480,15 +1554,22 @@ func _capture_transform_region() -> void:
 			_transform_links.append([a - min_pos, b - min_pos])
 
 
-## Erases the original region content from the map.
-func _erase_transform_region() -> void:
+## Erases the original region content from the map. Returns terrain cells whose
+## render/cache state changed so callers can refresh dirty chunks once.
+func _erase_transform_region() -> Dictionary:
 	var terrain = $TerrainSystem
 	var min_pos := _transform_rect_min()
 	var max_pos := _transform_rect_max()
+	var terrain_changed_cells: Dictionary = {}
 
 	for x in range(min_pos.x, max_pos.x + 1):
 		for y in range(min_pos.y, max_pos.y + 1):
 			var cell := Vector2i(x, y)
+			if terrain.floor_tiles.has(cell) \
+					or terrain.wall_tiles.has(cell) \
+					or terrain.ore_tiles.has(cell) \
+					or terrain.multi_tile_origins.has(cell):
+				terrain_changed_cells[cell] = true
 			terrain.floor_tiles.erase(cell)
 			terrain.wall_tiles.erase(cell)
 			terrain.ore_tiles.erase(cell)
@@ -1508,25 +1589,31 @@ func _erase_transform_region() -> void:
 			if linked_pairs[i][0] == a and linked_pairs[i][1] == b:
 				linked_pairs.remove_at(i)
 				break
+	return terrain_changed_cells
 
 
-## Pastes captured data at the new position (min_pos + offset).
-func _paste_transform_data(dest_min: Vector2i) -> void:
+## Pastes captured data at the new position (min_pos + offset). Returns terrain
+## cells whose render/cache state changed so callers can refresh dirty chunks once.
+func _paste_transform_data(dest_min: Vector2i) -> Dictionary:
 	var terrain = $TerrainSystem
+	var terrain_changed_cells: Dictionary = {}
 
 	# Paste terrain
 	for offset in _transform_tiles_floor:
 		var cell = dest_min + offset
 		if is_within_bounds(cell):
 			terrain.floor_tiles[cell] = _transform_tiles_floor[offset]
+			terrain_changed_cells[cell] = true
 	for offset in _transform_tiles_wall:
 		var cell = dest_min + offset
 		if is_within_bounds(cell):
 			terrain.wall_tiles[cell] = _transform_tiles_wall[offset]
+			terrain_changed_cells[cell] = true
 	for offset in _transform_tiles_ore:
 		var cell = dest_min + offset
 		if is_within_bounds(cell):
 			terrain.ore_tiles[cell] = _transform_tiles_ore[offset]
+			terrain_changed_cells[cell] = true
 	for offset in _transform_tile_health:
 		var cell = dest_min + offset
 		if is_within_bounds(cell):
@@ -1536,6 +1623,7 @@ func _paste_transform_data(dest_min: Vector2i) -> void:
 		var origin_cell = dest_min + _transform_multi_origins[offset]
 		if is_within_bounds(cell):
 			terrain.multi_tile_origins[cell] = origin_cell
+			terrain_changed_cells[cell] = true
 
 	# Paste buildings
 	for offset in _transform_buildings:
@@ -1563,15 +1651,18 @@ func _paste_transform_data(dest_min: Vector2i) -> void:
 	# Paste links
 	for link in _transform_links:
 		linked_pairs.append([dest_min + link[0], dest_min + link[1]])
+	return terrain_changed_cells
 
 
 func _apply_transform_move() -> void:
 	var dest_min := _transform_rect_min() + _transform_current_offset
 
 	# Erase original
-	_erase_transform_region()
+	var terrain_changed_cells: Dictionary = _erase_transform_region()
 	# Paste at new location
-	_paste_transform_data(dest_min)
+	var pasted_cells: Dictionary = _paste_transform_data(dest_min)
+	for cell in pasted_cells:
+		terrain_changed_cells[cell] = true
 
 	# Update selection rect to new position
 	var size := _transform_rect_max() - _transform_rect_min()
@@ -1579,7 +1670,10 @@ func _apply_transform_move() -> void:
 	_transform_end = dest_min + size
 
 	_invalidate_anchor_cache()
-	$TerrainSystem.queue_redraw()
+	if terrain_changed_cells.is_empty():
+		$TerrainSystem.queue_redraw()
+	else:
+		_mark_direct_terrain_cells_changed(terrain_changed_cells)
 	var bs = get_node_or_null("BuildingSystem")
 	if bs:
 		bs.queue_redraw()
@@ -1595,7 +1689,7 @@ func transform_mirror_x() -> void:
 	var min_pos := _transform_rect_min()
 
 	# Erase the original region
-	_erase_transform_region()
+	var terrain_changed_cells: Dictionary = _erase_transform_region()
 
 	# Mirror all offset keys: new_x = region_w - old_x
 	_transform_tiles_floor = _mirror_dict_x(_transform_tiles_floor, region_w)
@@ -1656,12 +1750,17 @@ func transform_mirror_x() -> void:
 	_transform_links = new_links
 
 	# Paste back
-	_paste_transform_data(min_pos)
+	var pasted_cells: Dictionary = _paste_transform_data(min_pos)
+	for cell in pasted_cells:
+		terrain_changed_cells[cell] = true
 
 	# Re-capture so internal state is consistent
 	_capture_transform_region()
 
-	$TerrainSystem.queue_redraw()
+	if terrain_changed_cells.is_empty():
+		$TerrainSystem.queue_redraw()
+	else:
+		_mark_direct_terrain_cells_changed(terrain_changed_cells)
 	var bs = get_node_or_null("BuildingSystem")
 	if bs:
 		bs.queue_redraw()
@@ -1676,7 +1775,7 @@ func transform_mirror_y() -> void:
 	var region_h := _transform_rect_max().y - _transform_rect_min().y
 	var min_pos := _transform_rect_min()
 
-	_erase_transform_region()
+	var terrain_changed_cells: Dictionary = _erase_transform_region()
 
 	_transform_tiles_floor = _mirror_dict_y(_transform_tiles_floor, region_h)
 	_transform_tiles_wall = _mirror_dict_y(_transform_tiles_wall, region_h)
@@ -1727,10 +1826,15 @@ func transform_mirror_y() -> void:
 		])
 	_transform_links = new_links
 
-	_paste_transform_data(min_pos)
+	var pasted_cells: Dictionary = _paste_transform_data(min_pos)
+	for cell in pasted_cells:
+		terrain_changed_cells[cell] = true
 	_capture_transform_region()
 
-	$TerrainSystem.queue_redraw()
+	if terrain_changed_cells.is_empty():
+		$TerrainSystem.queue_redraw()
+	else:
+		_mark_direct_terrain_cells_changed(terrain_changed_cells)
 	var bs = get_node_or_null("BuildingSystem")
 	if bs:
 		bs.queue_redraw()
@@ -2017,12 +2121,64 @@ func _handle_link_click(grid_pos: Vector2i) -> void:
 			_overlay.queue_redraw()
 			return
 
-	# 1:1 link — drop any existing partner on either endpoint first.
-	_remove_links_for(link_source)
-	_remove_links_for(anchor)
+	# Bridge↔bridge links honour per-bridge caps (duct bridge = 3 outgoing /
+	# 3 incoming, belt / pipe bridge = 1 / 1) with FIFO replacement, matching
+	# the in-game BuildingSystem. Directed: pair[0] = source (outgoing),
+	# pair[1] = destination (incoming). Non-bridge linkables (mass drivers)
+	# stay strictly 1:1. Previously every bridge was capped at a single link,
+	# so duct bridges couldn't fan out in the editor.
+	if src_bridge and tgt_bridge:
+		var src_cap: int = _bridge_link_cap(source_data)
+		var dst_cap: int = _bridge_link_cap(data)
+		var out_dsts: Array = _links_as_source(link_source)
+		while out_dsts.size() >= src_cap and out_dsts.size() > 0:
+			_unlink_directed(link_source, out_dsts[0])
+			out_dsts.remove_at(0)
+		var in_srcs: Array = _links_as_destination(anchor)
+		while in_srcs.size() >= dst_cap and in_srcs.size() > 0:
+			_unlink_directed(in_srcs[0], anchor)
+			in_srcs.remove_at(0)
+		_unlink_directed(link_source, anchor)  # drop a duplicate of this exact link
+	else:
+		# Mass drivers / other 1:1 linkables — drop any partner on either end.
+		_remove_links_for(link_source)
+		_remove_links_for(anchor)
 	linked_pairs.append([link_source, anchor])
 	link_source = Vector2i(-1, -1)
 	_overlay.queue_redraw()
+
+
+## Per-bridge link cap (mirrors BuildingSystem._bridge_link_cap): duct bridges
+## fan out to 3 partners per role, everything else is 1:1.
+func _bridge_link_cap(bdata: BlockData) -> int:
+	if bdata != null and bdata.id == &"duct_bridge":
+		return 3
+	return 1
+
+
+## Destinations this anchor links to as a source (pair[0] == src).
+func _links_as_source(src: Vector2i) -> Array:
+	var out: Array = []
+	for pair in linked_pairs:
+		if pair[0] == src:
+			out.append(pair[1])
+	return out
+
+
+## Sources that link to this anchor as a destination (pair[1] == dst).
+func _links_as_destination(dst: Vector2i) -> Array:
+	var out: Array = []
+	for pair in linked_pairs:
+		if pair[1] == dst:
+			out.append(pair[0])
+	return out
+
+
+## Removes only the directed src→dst link, leaving the reverse role intact.
+func _unlink_directed(src: Vector2i, dst: Vector2i) -> void:
+	for i in range(linked_pairs.size() - 1, -1, -1):
+		if linked_pairs[i][0] == src and linked_pairs[i][1] == dst:
+			linked_pairs.remove_at(i)
 
 
 func _remove_links_for(grid_pos: Vector2i) -> void:
@@ -2155,7 +2311,7 @@ func _draw_pencil_preview() -> void:
 
 
 func _draw_line_preview() -> void:
-	if not _line_dragging:
+	if editor_mode != EditorMode.TERRAIN or current_tool != Tool.LINE:
 		return
 	var thickness: int = maxi(1, line_size)
 	var half: int = thickness / 2
@@ -2163,7 +2319,8 @@ func _draw_line_preview() -> void:
 	var border := color.lightened(0.3)
 	var seen: Dictionary = {}
 	var gs: float = float(GRID_SIZE)
-	for cell in _line_cells(_line_start, _line_end):
+	var base_cells: Array = _line_cells(_line_start, _line_end) if _line_dragging else [_hover_cell]
+	for cell in base_cells:
 		for dx in range(-half, -half + thickness):
 			for dy in range(-half, -half + thickness):
 				var p := Vector2i(cell.x + dx, cell.y + dy)
@@ -2305,10 +2462,8 @@ func _draw_building_preview() -> void:
 
 	var color: Color
 	if valid:
-		match selected_faction:
-			Faction.FEROX:    color = Color(1.0, 0.3, 0.3, 0.35)
-			Faction.DERELICT: color = Color(0.55, 0.55, 0.55, 0.35)
-			_:                color = Color(0.3, 0.7, 1.0, 0.35)
+		var fc: Color = faction_color(selected_faction)
+		color = Color(fc.r, fc.g, fc.b, 0.35)
 	else:
 		color = Color(1.0, 0.0, 0.0, 0.25)
 

@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ddsxf2xgs0rc8"
-path="res://.godot/imported/Sand_old.png-97b7afff378d40dfd7c94e10ae2c2845.ctex"
+uid="uid://c76hanfe8sxjx"
+path="res://.godot/imported/SmallBattery.png-83adcee7efca8d7097f305f155b91f57.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/terrain/Sand_old.png"
-dest_files=["res://.godot/imported/Sand_old.png-97b7afff378d40dfd7c94e10ae2c2845.ctex"]
+source_file="res://textures/blocks/power/SmallBattery.png"
+dest_files=["res://.godot/imported/SmallBattery.png-83adcee7efca8d7097f305f155b91f57.ctex"]
 
 [params]
 

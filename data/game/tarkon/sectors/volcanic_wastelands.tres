@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://cdngd0o78cldm"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"volcanic_wastelands"
+display_name = "Volcanic Wastelands"
+description = "<Optional Sector>
+Scorched, ash-choked badlands riddled with lava vents. The heat is brutal, but the ground is rich for those who can hold it."
+planet_id = &"Tarkon"
+hex_q = 4
+hex_r = 3
+available_resources = PackedStringArray("mat_copper", "mat_iron", "mat_coal")
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray()
+required_sectors = PackedStringArray("crash_site")
+tags = PackedStringArray("campaign", "sector")

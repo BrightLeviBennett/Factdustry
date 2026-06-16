@@ -1,17 +1,22 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bhmdkaa4q0cah"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://doymu3ukdv7ip" path="res://textures/blocks/power/CableTower.png" id="1_w0ng3"]
 
 [resource]
 script = ExtResource("1")
 id = &"cable_tower"
 display_name = "Cable Tower"
 description = "Extended-range power cable tower. Transmits electrical power in straight lines with a range of 10 tiles."
+icon = ExtResource("1_w0ng3")
 category = 3
-color = Color(0.2, 0.6, 1.0, 1)
-max_health = 640.0
-build_cost = { "copper": 200, "silicon": 80, "steel": 40 }
-build_time = 3.0
-electrical_power_gen = 0.0
-electrical_power_use = 0.0
 tags = PackedStringArray("power", "cable_node")
+color = Color(0.2, 0.6, 1, 1)
+top_sprite = ExtResource("1_w0ng3")
+max_health = 640.0
+build_cost = {
+"copper": 200,
+"silicon": 80,
+"steel": 40
+}
+build_time = 3.0

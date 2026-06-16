@@ -6,9 +6,10 @@
 script = ExtResource("1")
 id = &"siege_brace"
 display_name = "Siege Brace"
-description = "Unit module. Built in a constructor and attached to a unit. (Effect wired by the module system.)"
+description = "Unit module. Max applies: 1. Ground/crawler only. Locks the unit in place when activated, increasing fire rate by 125% and reducing weapon cooldown by 25%."
 category = 10
 tags = PackedStringArray("module")
+module_unit_layers = [0, 1]
 color = Color(0.75, 0.65, 0.5, 1)
 grid_size = Vector2i(2, 2)
 max_health = 1.0

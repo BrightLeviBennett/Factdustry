@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"bridge_projector"
+display_name = "Bridge Projector"
+description = "Unit module. Hover/flying role module that projects a temporary bridge over liquids for ground units. The unit cannot shoot while projecting; the bridge vanishes if projection stops."
+category = 10
+tags = PackedStringArray("module")
+module_unit_layers = [2, 3]
+color = Color(0.55, 0.8, 0.9, 1)
+grid_size = Vector2i(2, 2)
+max_health = 1.0

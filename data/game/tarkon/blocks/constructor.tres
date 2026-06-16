@@ -9,7 +9,7 @@
 script = ExtResource("1")
 id = &"constructor"
 display_name = "Constructor"
-description = "Creates buildings using resources."
+description = "Creates buildings using resources and electrical power."
 icon = ExtResource("2_2ouht")
 category = 6
 tags = PackedStringArray("construction", "constructor")
@@ -24,4 +24,5 @@ build_cost = {
 }
 build_time = 2.0
 max_payload_size = 3
+electrical_power_use = 15.0
 max_stored_items = 200

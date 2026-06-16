@@ -8,7 +8,7 @@
 script = ExtResource("1_6gdim")
 id = &"impact_drill"
 display_name = "Impact Drill"
-description = "Percussive drill that slams a heavy head into the deposit on every cycle, extracting a burst of ore per impact."
+description = "Percussive drill that slams a heavy head into the deposit on every cycle, extracting a burst of ore per impact. Salt floors yield salt."
 icon = ExtResource("2_idcom")
 category = 1
 tags = PackedStringArray("mining", "extraction", "floor_miner", "impact_head", "omnidirectional")

@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bgq2thd1urx8i"
-path="res://.godot/imported/CoreShardFerox_old.png-6791dcc613b55e0e9c35baa6a09b8dc7.ctex"
+uid="uid://ctjhbq1evrju8"
+path="res://.godot/imported/CrashSite.png-1df5075a38f138407148707e63cc7eb5.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/cores/CoreShard/CoreShardFerox_old.png"
-dest_files=["res://.godot/imported/CoreShardFerox_old.png-6791dcc613b55e0e9c35baa6a09b8dc7.ctex"]
+source_file="res://textures/sectors/CrashSite.png"
+dest_files=["res://.godot/imported/CrashSite.png-1df5075a38f138407148707e63cc7eb5.ctex"]
 
 [params]
 

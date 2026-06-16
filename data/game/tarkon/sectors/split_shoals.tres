@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://bw4nhgd8ssmqi"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"split_shoals"
+display_name = "Split Shoals"
+description = "A sprawling salt-water flood where only thin grassy banks and sandbars break the surface. Hold the scattered high ground and let naval and hover units command the open water."
+planet_id = &"Tarkon"
+hex_q = 3
+hex_r = -1
+available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_water")
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray("ferrum_ridge")
+required_sectors = PackedStringArray("crevice")
+map_path = "res://data/game/tarkon/maps/SSH.sector.json"
+tags = PackedStringArray("campaign", "sector")

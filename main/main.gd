@@ -1020,7 +1020,10 @@ func _terrain_accepts_at(grid_pos: Vector2i, data: BlockData) -> bool:
 			if is_platform and (depth <= 0 or depth >= 3):
 				return false
 			if depth > 0:
-				if is_platform:
+				# Shallow water (depth 1) is buildable by ANY block, like land.
+				if depth == 1:
+					pass
+				elif is_platform:
 					pass
 				elif is_pump and depth <= 2:
 					pass
@@ -1141,6 +1144,20 @@ func is_building_anchor(grid_pos: Vector2i) -> bool:
 ## Defaults to LUMINA if not set (backward compat with old saves).
 func get_building_faction(grid_pos: Vector2i) -> int:
 	return building_factions.get(grid_pos, Faction.LUMINA)
+
+
+## Canonical display colour for a faction — single source of truth so the HUD,
+## minimap, and editor overlays all agree. Lumina = #6f3198, Ferox = #8a503a.
+func faction_color(faction: int) -> Color:
+	match faction:
+		Faction.LUMINA:
+			return Color("6f3198")
+		Faction.FEROX:
+			return Color("8a503a")
+		Faction.DERELICT:
+			return Color(0.55, 0.55, 0.55)
+		_:
+			return Color(0.7, 0.7, 0.7)
 
 
 ## Returns every LUMINA core anchor currently on the grid. Used when the

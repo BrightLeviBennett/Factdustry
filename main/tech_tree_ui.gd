@@ -12,6 +12,7 @@ extends CanvasLayer
 
 var main: Node2D
 var is_open := false
+var _paused_world_for_ui := false
 var hovered_node_id: StringName = &""
 # Set true while the cursor is physically inside `tooltip_panel`.
 # Used to keep the tooltip open even after the cursor leaves the
@@ -926,6 +927,7 @@ func _show_ui() -> void:
 		_build_ui()
 	is_open = true
 	root_panel.visible = true
+	_pause_world_for_ui()
 	get_tree().paused = true
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	# Retroactively unlock event-only material nodes (mat_steel, …)
@@ -965,6 +967,27 @@ func _hide_ui() -> void:
 	var db_ui = get_node_or_null("/root/Main/DatabaseUI")
 	if db_ui == null or not db_ui.is_open:
 		get_tree().paused = false
+		_resume_world_from_ui()
+
+
+func _pause_world_for_ui() -> void:
+	if main == null:
+		main = get_node_or_null("/root/Main")
+	if main == null or not ("world_paused" in main):
+		_paused_world_for_ui = false
+		return
+	_paused_world_for_ui = not bool(main.world_paused)
+	main.world_paused = true
+
+
+func _resume_world_from_ui() -> void:
+	if not _paused_world_for_ui:
+		return
+	_paused_world_for_ui = false
+	if main == null:
+		main = get_node_or_null("/root/Main")
+	if main != null and "world_paused" in main:
+		main.world_paused = false
 
 func _make_style(color: Color, radius: int) -> StyleBoxFlat:
 	var s = StyleBoxFlat.new()

@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://c6a5dwen5hfc6"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 
@@ -6,25 +6,25 @@
 script = ExtResource("1")
 id = &"nuclear_reactor"
 display_name = "Nuclear Reactor"
-description = "Generates massive power by burning uranium rods. Requires graphite rod moderators and constant water cooling — running dry leads to a catastrophic explosion."
+description = "Generates massive power by burning uranium rods. Requires graphite rods and constant water cooling — running dry leads to a catastrophic explosion."
 category = 3
 tags = PackedStringArray("power", "nuclear_reactor")
 color = Color(0.55, 0.95, 0.3, 1)
 grid_size = Vector2i(3, 3)
 max_health = 600.0
 build_cost = {
+"aluminum": 50,
 "copper": 800,
-"steel": 250,
 "silicon": 150,
-"aluminum": 50
+"steel": 250
 }
 build_time = 8.0
-electrical_power_gen = 500.0
-liquid_capacity = 100.0
-max_stored_items = 8
 boosters = [{
 "item_id": &"mat_water",
 "multiplier": 1.0,
 "per_sec": 30.0,
 "stat": "Coolant"
 }]
+electrical_power_gen = 500.0
+max_stored_items = 8
+liquid_capacity = 100.0

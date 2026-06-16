@@ -74,6 +74,7 @@ var unit_mode_btn_payload: Button
 var unit_mode_btn_rebuild: Button
 var unit_mode_btn_mine: Button
 var unit_mode_btn_assist: Button
+var unit_mode_btn_boost: Button
 # Dummy test-unit commands (shown only when a dummy enemy is selected).
 var unit_mode_btn_attack_player: Button
 var unit_mode_btn_attack_block: Button
@@ -90,6 +91,10 @@ var paused_label: Label
 # Block info tooltip (shown when hovering over a placed block)
 var block_tooltip: PanelContainer
 var tooltip_vbox: VBoxContainer
+var unit_hover_panel: PanelContainer
+var unit_hover_vbox: VBoxContainer
+var _last_hovered_unit_id: int = 0
+var _unit_hover_refresh_timer: float = 0.0
 
 # Smoothed-power-display state. Keyed by the displayed building's anchor
 # so switching to a different block instantly snaps to that block's
@@ -167,6 +172,7 @@ var unit_mode_panel: PanelContainer
 # Objective panel (top-right, shows current script step conditions)
 var objective_panel: PanelContainer  # legacy alias = portrait_panel
 var objective_vbox: VBoxContainer
+
 # Container wrapping the unit-portrait widgets (icon, bars, name).
 # Hidden when nothing is being controlled so the panel collapses to
 # just the wave / objective / capture info.
@@ -313,12 +319,14 @@ func _ready() -> void:
 	_create_block_tooltip()
 	_create_build_cost_panel()
 	_create_unit_mode_panel()
+	_create_unit_hover_panel()
 	_create_objective_panel()
 	_create_network_info_panel()
 	_create_hint_panel()
 	_create_escape_menu()
 
 	_create_unlock_notify()
+	_create_minimap()
 
 	main.resources_changed.connect(_on_resources_changed)
 	main.building_selected.connect(_on_building_selected)
@@ -375,6 +383,9 @@ func _ready() -> void:
 
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel"):
+		if _close_minimap_fullscreen_if_open():
+			get_viewport().set_input_as_handled()
+			return
 		# Close UIs in priority order
 		var tech_tree_ui = get_node_or_null("/root/Main/TechTreeUI")
 		var database_ui = get_node_or_null("/root/Main/DatabaseUI")
@@ -685,6 +696,19 @@ func _process(delta: float) -> void:
 	# can't bleed in either.
 	var unit_mgr = _unit_mgr_ref()
 	var in_unit_mode: bool = unit_mgr != null and "unit_mode_active" in unit_mgr and unit_mgr.unit_mode_active
+	var hovered_unit: Node2D = null
+	if get_viewport().gui_get_hovered_control() == null:
+		hovered_unit = _get_hovered_unit(mouse_world, unit_mgr)
+	_unit_hover_refresh_timer -= delta
+	if hovered_unit != null:
+		var hovered_unit_id: int = hovered_unit.get_instance_id()
+		if hovered_unit_id != _last_hovered_unit_id or _unit_hover_refresh_timer <= 0.0:
+			_unit_hover_refresh_timer = TOOLTIP_REFRESH_INTERVAL
+			_update_unit_hover_panel(hovered_unit)
+	else:
+		if unit_hover_panel:
+			unit_hover_panel.visible = false
+		_last_hovered_unit_id = 0
 
 	# Custom mouse cursor:
 	#   - TargetMouse when in unit mode with units selected AND hovering
@@ -1637,6 +1661,24 @@ func _create_info_label() -> void:
 	add_child(info_label)
 
 
+## Mindustry-style corner minimap (self-contained — see minimap.gd).
+func _create_minimap() -> void:
+	var mm_script: Script = load("res://main/minimap.gd")
+	if mm_script == null:
+		return
+	var mm: Control = mm_script.new()
+	mm.name = "Minimap"
+	add_child(mm)
+
+
+func _close_minimap_fullscreen_if_open() -> bool:
+	var fs = get_node_or_null("MinimapFullscreen")
+	if fs == null or not fs.has_method("is_open") or not fs.is_open():
+		return false
+	fs.close()
+	return true
+
+
 # =========================
 # STYLE HELPERS
 # =========================
@@ -1685,6 +1727,44 @@ func _create_block_tooltip() -> void:
 	tooltip_vbox.add_theme_constant_override("separation", 4)
 	tooltip_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	block_tooltip.add_child(tooltip_vbox)
+
+
+func _create_unit_hover_panel() -> void:
+	unit_hover_panel = PanelContainer.new()
+	unit_hover_panel.anchor_left = 1.0
+	unit_hover_panel.anchor_right = 1.0
+	unit_hover_panel.anchor_top = 1.0
+	unit_hover_panel.anchor_bottom = 1.0
+	unit_hover_panel.offset_left = -350
+	unit_hover_panel.offset_right = -8
+	unit_hover_panel.offset_top = -520
+	unit_hover_panel.offset_bottom = -360
+	unit_hover_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	unit_hover_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	unit_hover_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_hover_panel.visible = false
+	var style = StyleBoxFlat.new()
+	style.bg_color = Color(0.05, 0.06, 0.08, 0.9)
+	style.border_color = Color(0.45, 0.62, 0.86, 0.65)
+	style.border_width_left = 1
+	style.border_width_top = 1
+	style.border_width_right = 1
+	style.border_width_bottom = 1
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	style.content_margin_left = 8
+	style.content_margin_right = 8
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
+	unit_hover_panel.add_theme_stylebox_override("panel", style)
+	add_child(unit_hover_panel)
+
+	unit_hover_vbox = VBoxContainer.new()
+	unit_hover_vbox.add_theme_constant_override("separation", 5)
+	unit_hover_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_hover_panel.add_child(unit_hover_vbox)
 
 
 func _update_block_tooltip(grid_pos: Vector2i) -> void:
@@ -1885,7 +1965,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		# long as they have power. Reading front-edge ore for these
 		# would always hit 0% and report a broken extractor.
 		var is_geyser_miner: bool = data.tags.has("geyser_miner")
-		# Floor miners (ground scraper) read every ore tile UNDER their
+		# Floor miners (ground scraper) read every source tile UNDER their
 		# footprint — not the front edge. Each extra tile adds 25%, so
 		# the tooltip needs the same `_floor_miner_efficiency` math
 		# the production tick uses; otherwise the front-edge scan
@@ -1932,7 +2012,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		if is_geyser_miner:
 			ore_eff = 1.0
 		elif is_floor_miner:
-			ore_eff = _logistics._floor_miner_efficiency(origin, data.grid_size) if _logistics else 0.0
+			ore_eff = _logistics._floor_miner_efficiency(origin, data.grid_size, data) if _logistics else 0.0
 		else:
 			ore_eff = eff_sum_outer / float(front_count) if front_count > 0 else 1.0
 		# Power efficiency multiplies ore efficiency so the displayed %/rate
@@ -2219,6 +2299,179 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					var prog: float = float(dstate.get("progress", 0.0))
 					var pct: int = int(clampf(prog / cycle, 0.0, 1.0) * 100.0)
 					_add_tooltip_progress_bar(pct, 100, "% Complete", Color(0.6, 0.4, 0.9))
+
+
+func _get_hovered_unit(world_pos: Vector2, unit_mgr) -> Node2D:
+	if unit_mgr == null:
+		return null
+	var best: Node2D = null
+	var best_dist := INF
+	var pools: Array = []
+	if "player_units" in unit_mgr:
+		pools.append(unit_mgr.player_units)
+	if "enemies" in unit_mgr:
+		pools.append(unit_mgr.enemies)
+	for pool in pools:
+		for unit in pool:
+			if unit == null or not is_instance_valid(unit):
+				continue
+			if "is_dead" in unit and unit.is_dead:
+				continue
+			if not unit.visible:
+				continue
+			var radius: float = maxf(float(unit.unit_size) * 2.0, 18.0) if "unit_size" in unit else 18.0
+			var dist: float = world_pos.distance_to(unit.position)
+			if dist <= radius and dist < best_dist:
+				best = unit
+				best_dist = dist
+	return best
+
+
+func _update_unit_hover_panel(unit: Node2D) -> void:
+	if unit_hover_panel == null or unit_hover_vbox == null:
+		return
+	for c in unit_hover_vbox.get_children():
+		c.queue_free()
+	if unit == null or not is_instance_valid(unit):
+		unit_hover_panel.visible = false
+		_last_hovered_unit_id = 0
+		return
+	var data = unit.data if "data" in unit else null
+	if data == null:
+		unit_hover_panel.visible = false
+		_last_hovered_unit_id = 0
+		return
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 8)
+	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_hover_vbox.add_child(header)
+
+	var preview := Control.new()
+	preview.custom_minimum_size = Vector2(48, 48)
+	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	preview.draw.connect(_draw_unit_hover_preview.bind(preview, unit))
+	header.add_child(preview)
+
+	var text_col := VBoxContainer.new()
+	text_col.add_theme_constant_override("separation", 2)
+	text_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	header.add_child(text_col)
+
+	var name_lbl := Label.new()
+	name_lbl.text = data.display_name
+	name_lbl.add_theme_font_size_override("font_size", 16)
+	name_lbl.add_theme_color_override("font_color", Color(0.9, 0.95, 1.0))
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text_col.add_child(name_lbl)
+
+	var tier_lbl := Label.new()
+	tier_lbl.text = "Tier %d" % int(data.tier)
+	tier_lbl.add_theme_font_size_override("font_size", 11)
+	tier_lbl.add_theme_color_override("font_color", Color(0.65, 0.72, 0.82))
+	tier_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text_col.add_child(tier_lbl)
+
+	var cur_hp: float = float(unit.health) if "health" in unit else float(data.max_health)
+	var max_hp: float = float(unit.max_health) if "max_health" in unit else float(data.max_health)
+	_add_unit_hover_health_bar(cur_hp, max_hp)
+	var upgrades: Array = unit.applied_upgrades if "applied_upgrades" in unit else []
+	_add_unit_hover_modules(upgrades)
+	unit_hover_panel.visible = true
+	_last_hovered_unit_id = unit.get_instance_id()
+
+
+func _draw_unit_hover_preview(ctrl: Control, unit: Node2D) -> void:
+	if unit == null or not is_instance_valid(unit):
+		return
+	var data = unit.data if "data" in unit else null
+	if data == null:
+		return
+	var center: Vector2 = ctrl.size * 0.5
+	if data.base_sprite != null or data.head_sprite != null:
+		var payload := {
+			"facing_angle": float(unit.facing_angle) if "facing_angle" in unit else 0.0,
+			"aim_angle": float(unit.aim_angle) if "aim_angle" in unit else 0.0,
+			"mount_rotations": [],
+		}
+		EnemyUnit.draw_unit_payload(ctrl, data, payload, center, 0.55, 0.0, 1.0)
+	elif data.icon != null:
+		ctrl.draw_texture_rect(data.icon, Rect2(center - Vector2(20, 20), Vector2(40, 40)), false)
+	else:
+		ctrl.draw_circle(center, 16.0, data.color)
+
+
+func _add_unit_hover_health_bar(current: float, max_hp: float) -> void:
+	var pct: float = clampf(current / maxf(max_hp, 0.0001), 0.0, 1.0)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_hover_vbox.add_child(row)
+	var bar := Control.new()
+	bar.custom_minimum_size = Vector2(190, 10)
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(bar)
+	var bg := ColorRect.new()
+	bg.color = Color(0.15, 0.05, 0.05, 0.85)
+	bg.size = Vector2(190, 10)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.add_child(bg)
+	var fill := ColorRect.new()
+	fill.color = Color(0.9, 0.18, 0.18)
+	fill.size = Vector2(190.0 * pct, 10)
+	fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.add_child(fill)
+	var lbl := Label.new()
+	lbl.text = "%.0f/%.0f" % [current, max_hp]
+	lbl.add_theme_font_size_override("font_size", 11)
+	lbl.add_theme_color_override("font_color", Color(0.72, 0.78, 0.84))
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(lbl)
+
+
+func _add_unit_hover_modules(upgrades: Array) -> void:
+	var sep := HSeparator.new()
+	sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_hover_vbox.add_child(sep)
+	var title := Label.new()
+	title.text = "Modules"
+	title.add_theme_font_size_override("font_size", 12)
+	title.add_theme_color_override("font_color", Color(0.75, 0.82, 0.92))
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_hover_vbox.add_child(title)
+	if upgrades.is_empty():
+		var none := Label.new()
+		none.text = "None"
+		none.add_theme_font_size_override("font_size", 11)
+		none.add_theme_color_override("font_color", Color(0.5, 0.55, 0.62))
+		none.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		unit_hover_vbox.add_child(none)
+		return
+	var row := HFlowContainer.new()
+	row.add_theme_constant_override("h_separation", 5)
+	row.add_theme_constant_override("v_separation", 5)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_hover_vbox.add_child(row)
+	for up in upgrades:
+		var bd = Registry.get_block(StringName(up))
+		var chip := HBoxContainer.new()
+		chip.add_theme_constant_override("separation", 4)
+		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(chip)
+		if bd != null and bd.icon != null:
+			var icon := TextureRect.new()
+			icon.texture = bd.icon
+			icon.custom_minimum_size = Vector2(18, 18)
+			icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			chip.add_child(icon)
+		var lbl := Label.new()
+		lbl.text = bd.display_name if bd != null else String(up)
+		lbl.add_theme_font_size_override("font_size", 11)
+		lbl.add_theme_color_override("font_color", Color(0.86, 0.9, 0.96))
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		chip.add_child(lbl)
 
 
 ## Renders the launchpad-specific tooltip section. While the mandatory
@@ -2956,6 +3209,8 @@ func _create_unit_mode_panel() -> void:
 	unit_mode_btn_mine.toggle_mode = true
 	unit_mode_btn_assist = _make_unit_cmd_button("Assist Player", _on_unit_cmd_assist)
 	unit_mode_btn_assist.toggle_mode = true
+	unit_mode_btn_boost = _make_unit_cmd_button("Boost", _on_unit_cmd_boost)
+	unit_mode_btn_boost.toggle_mode = true
 	unit_mode_btn_attack_player = _make_unit_cmd_button("Attack Player", _on_unit_cmd_attack_player)
 	unit_mode_btn_attack_block = _make_unit_cmd_button("Attack Nearest Block", _on_unit_cmd_attack_block)
 
@@ -2999,6 +3254,13 @@ func _selection_can_mine() -> bool:
 	for u in _selected_player_units():
 		var d = u.data if "data" in u else null
 		if d and d.category == UnitData.UnitCategory.BUILDER:
+			return true
+	return false
+
+
+func _selection_can_thruster_boost() -> bool:
+	for u in _selected_player_units():
+		if u.has_method("can_thruster_boost") and u.can_thruster_boost():
 			return true
 	return false
 
@@ -3047,6 +3309,15 @@ func _update_unit_mode_buttons() -> void:
 				any_payload = true
 				break
 		unit_mode_btn_payload.set_pressed_no_signal(any_payload)
+	if unit_mode_btn_boost:
+		unit_mode_btn_boost.visible = _selection_can_thruster_boost()
+		var any_boost := false
+		for u in units:
+			if u.has_method("can_thruster_boost") and u.can_thruster_boost() \
+					and "thruster_boost_enabled" in u and u.thruster_boost_enabled:
+				any_boost = true
+				break
+		unit_mode_btn_boost.set_pressed_no_signal(any_boost)
 
 
 # --- Button callbacks ---
@@ -3063,6 +3334,8 @@ func _on_unit_cmd_cancel_orders() -> void:
 			u.assist_player_build = false
 		if "enter_payload_when_able" in u:
 			u.enter_payload_when_able = false
+		if "thruster_boost_enabled" in u:
+			u.thruster_boost_enabled = false
 	_unit_mode_icons_signature = ""  # force a refresh next tick
 
 
@@ -3118,6 +3391,14 @@ func _on_unit_cmd_assist() -> void:
 	for u in _selected_player_units():
 		if "assist_player_build" in u:
 			u.assist_player_build = on
+
+
+func _on_unit_cmd_boost() -> void:
+	var on: bool = unit_mode_btn_boost.button_pressed
+	for u in _selected_player_units():
+		if u.has_method("can_thruster_boost") and u.can_thruster_boost() \
+				and "thruster_boost_enabled" in u:
+			u.thruster_boost_enabled = on
 
 
 func _on_unit_cmd_attack_player() -> void:

@@ -8,7 +8,7 @@
 script = ExtResource("1")
 id = &"wall_grinder"
 display_name = "Wall Grinder"
-description = "Three-headed grinder that pulverises blackstone walls into sand. Must face a blackstone wall. Requires electrical power."
+description = "Three-headed grinder that pulverises solid rock walls into sand, or salt walls into salt. Requires electrical power."
 icon = ExtResource("1_4i7rr")
 category = 1
 tags = PackedStringArray("mining", "extractor", "wall_miner", "grinder_heads")
@@ -25,10 +25,12 @@ output_items = {
 "mat_sand": 9
 }
 production_time = 10.0
-accepted_walls = Array[StringName]([&"blackstone_wall", &"purple_wall", &"sulfur_wall"])
+accepted_walls = Array[StringName]([&"blackstone_wall", &"purple_wall", &"sulfur_wall", &"sand_wall", &"salt_wall"])
 wall_efficiency = {
 &"purple_wall": 0.75,
-&"sulfur_wall": 1.25
+&"sulfur_wall": 1.25,
+&"sand_wall": 1.5,
+&"salt_wall": 1.5
 }
 electrical_power_use = 18.0
 max_stored_items = 20

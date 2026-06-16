@@ -2105,7 +2105,15 @@ func _add_drillables_section(block: BlockData) -> void:
 	var is_floor_miner: bool = block.tags.has("floor_miner")
 	var drillables: Array = []  # of {tile: TerrainTileData, item_id: StringName}
 	for tile in Registry.tiles_list:
-		if tile == null or tile.minable_resource == &"":
+		if tile == null:
+			continue
+		if block.id == &"ground_scraper" and tile.tags.has("sand"):
+			drillables.append({"tile": tile, "item_id": &"mat_sand"})
+			continue
+		if block.id == &"impact_drill" and tile.tags.has("salt"):
+			drillables.append({"tile": tile, "item_id": &"mat_salt"})
+			continue
+		if tile.minable_resource == &"":
 			continue
 		var is_floor_ore: bool = tile.tags.has("floor_ore")
 		if is_floor_miner and not is_floor_ore:

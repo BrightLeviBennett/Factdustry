@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"emp_emitter"
+display_name = "EMP Emitter"
+description = "Unit module. T3+ role module that charges, roots the unit, then emits an EMP pulse around itself. During and shortly after the pulse, the unit cannot shoot and its healing/shield functions are disabled."
+category = 10
+tags = PackedStringArray("module")
+color = Color(0.45, 0.7, 0.95, 1)
+grid_size = Vector2i(2, 2)
+max_health = 1.0
+module_min_tier = 3

@@ -1,17 +1,18 @@
-[gd_resource type="Resource" script_class="BlockData" format=3]
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://uujqak4o25ee"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://c76hanfe8sxjx" path="res://textures/blocks/power/SmallBattery.png" id="1_e8ilx"]
 
 [resource]
 script = ExtResource("1")
 id = &"small_battery"
 display_name = "Small Battery"
-description = "Stores surplus electrical power and releases it when generation can't cover demand."
+description = "Stores power and relases it when it is needed. Has a small capacitance."
+icon = ExtResource("1_e8ilx")
 category = 3
 tags = PackedStringArray("power", "battery")
 color = Color(0.55, 0.85, 0.45, 1)
-grid_size = Vector2i(1, 1)
-max_health = 100.0
+top_sprite = ExtResource("1_e8ilx")
 build_cost = {
 "copper": 30,
 "silicon": 10

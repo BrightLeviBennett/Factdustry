@@ -2894,9 +2894,12 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 				if is_platform and not has_platform_under and (depth <= 0 or depth >= 3):
 					return false
 				if depth > 0 and not has_platform_under:
-					# Platforms reach here only for depth 1-2 (deep water was
-					# already rejected above); they bridge that shallow water.
-					if is_platform:
+					# Shallow water (depth 1) is buildable by ANY block, like land.
+					if depth == 1:
+						pass
+					# Platforms reach here only for depth 2 (deep water and dry
+					# land were already rejected above); they bridge it.
+					elif is_platform:
 						pass
 					# Pumps can be placed on depth 1 or 2 water (needs to stand
 					# on the liquid surface to extract).
@@ -3574,14 +3577,14 @@ func _is_facing_ore(grid_pos: Vector2i, rotation: int, block_id: StringName = &"
 		3: dir = Vector2i(0, -1)
 		_: dir = Vector2i(1, 0)
 
-	# Floor miners only accept floor-ore patches (coal); regular drills
-	# only accept wall-embedded ores. Without this split, placing a
-	# mechanical drill next to a coal patch would succeed but the live
-	# tick would refuse to mine — confusing.
+	# Floor miners accept floor-ore patches plus block-specific floor
+	# sources; regular drills only accept wall-embedded ores. Without
+	# this split, placing a mechanical drill next to a coal patch would
+	# succeed but the live tick would refuse to mine — confusing.
 	var is_floor_miner: bool = data.tags.has("floor_miner")
-	# Floor miners (ground scraper) sit DIRECTLY on top of their ore —
-	# the front edge is past the ore patch, so check the FOOTPRINT cells
-	# instead. Any covered floor-ore tile passes placement; the
+	# Floor miners (ground scraper) sit DIRECTLY on top of their source —
+	# the front edge is past the patch, so check the FOOTPRINT cells
+	# instead. Any covered source tile passes placement; the
 	# efficiency calc determines how productive that ends up being.
 	if is_floor_miner:
 		for x in range(data.grid_size.x):
@@ -3605,6 +3608,16 @@ func _is_facing_ore(grid_pos: Vector2i, rotation: int, block_id: StringName = &"
 
 func _ore_matches_miner(terrain, cell: Vector2i, is_floor_miner: bool, data: BlockData = null) -> bool:
 	var ore_data: TerrainTileData = terrain.get_ore_at(cell)
+	if is_floor_miner and data != null and data.id == &"ground_scraper":
+		var floor_id: StringName = StringName(terrain.floor_tiles.get(cell, &""))
+		var floor_data: TerrainTileData = Registry.get_tile(floor_id)
+		if floor_data != null and floor_data.tags.has("sand"):
+			return true
+	if is_floor_miner and data != null and data.id == &"impact_drill":
+		var floor_id_s: StringName = StringName(terrain.floor_tiles.get(cell, &""))
+		var floor_data_s: TerrainTileData = Registry.get_tile(floor_id_s)
+		if floor_data_s != null and floor_data_s.tags.has("salt"):
+			return true
 	if ore_data == null:
 		return false
 	var is_floor_ore: bool = ore_data.tags.has("floor_ore")
@@ -5472,7 +5485,11 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 			alpha_mul = 1.0
 			unit_pos = center
 		"ejecting":
-			var ep: float = clampf(float(state.get("eject_progress", 0.0)), 0.0, 1.0)
+			var ep: float = clampf(
+				maxf(float(state.get("eject_progress", 0.0)), float(state.get("eject_visual_progress", 0.0))),
+				0.0,
+				1.0
+			)
 			unit_pos = center + dir_vec * (front_dist * ep)
 		"holding":
 			unit_pos = center + dir_vec * front_dist
@@ -6222,6 +6239,8 @@ func _transport_outputs_to(from_pos: Vector2i, to_pos: Vector2i) -> bool:
 
 	# Extractors (drills): output on all sides EXCEPT the front (mining) edge
 	if data.category == BlockData.BlockCategory.EXTRACTORS:
+		if data.tags.has("omnidirectional"):
+			return true
 		var is_front := false
 		match rot:
 			0: is_front = to_pos.x == origin.x + data.grid_size.x   # right face
@@ -9332,21 +9351,12 @@ func inject_unit_as_payload(anchor: Vector2i, payload: Dictionary) -> bool:
 		dst["timer"] = decon_time
 		return true
 
-	# Unit Upgrader: only takes a unit payload, and only if it still has a
-	# free upgrade slot. Goes into the upgrader's `unit` slot.
+	# Unit Upgrader: takes a unit payload into its held slot, or a module
+	# building payload into its queue.
 	if bdata.tags.has("upgrader"):
-		if payload.get("type", "") != "unit":
-			return false
-		if not _logistics.upgrader_state.has(anchor):
-			_logistics.upgrader_state[anchor] = {"unit": null, "queue": [], "applying": &"", "timer": 0.0, "applied_session": 0}
-		var ust: Dictionary = _logistics.upgrader_state[anchor]
-		if ust.get("unit") != null:
-			return false
-		if _logistics.has_method("_unit_free_slots") and _logistics._unit_free_slots(payload) < 1:
-			return false
-		ust["unit"] = payload
-		ust["applied_session"] = 0
-		return true
+		if _logistics.has_method("_try_accept_upgrader_payload"):
+			return _logistics._try_accept_upgrader_payload(anchor, payload)
+		return false
 
 	# Payload Refit Bay: only takes a unit payload that carries ≥1 upgrade.
 	if bdata.tags.has("refit_bay"):

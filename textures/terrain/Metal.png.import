@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bkmy08mybjtx8"
-path="res://.godot/imported/CoreShardComplete_old.png-1277b23c4342528b5465dfdeb58498a9.ctex"
+uid="uid://dl1rjj28p8vmt"
+path="res://.godot/imported/Metal.png-9f9e22a7a92392d2768caf39aa97ba69.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/blocks/cores/CoreShard/CoreShardComplete_old.png"
-dest_files=["res://.godot/imported/CoreShardComplete_old.png-1277b23c4342528b5465dfdeb58498a9.ctex"]
+source_file="res://textures/terrain/Metal.png"
+dest_files=["res://.godot/imported/Metal.png-9f9e22a7a92392d2768caf39aa97ba69.ctex"]
 
 [params]
 

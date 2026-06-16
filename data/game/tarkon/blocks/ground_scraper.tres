@@ -8,7 +8,7 @@
 script = ExtResource("1")
 id = &"ground_scraper"
 display_name = "Ground Scraper"
-description = "Industrial surface miner that strips topsoil for ores like coal. Produces 1 coal every 2 seconds at baseline; each extra ore tile under the footprint adds +25% throughput. Only mines floor-borne ore deposits — wall ores are out of reach."
+description = "Industrial surface miner that strips topsoil for sand and ores like coal. Produces 1 item every 2 seconds at baseline; each extra valid tile under the footprint adds +25% throughput. Only mines floor-borne deposits — wall ores are out of reach."
 icon = ExtResource("2_gscom")
 category = 1
 tags = PackedStringArray("mining", "extraction", "floor_miner", "scraper_head", "omnidirectional")

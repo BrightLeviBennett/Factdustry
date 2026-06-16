@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="BlockData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"drone_bay"
+display_name = "Drone Bay"
+description = "Unit module. Hover/flying t3+ role module that produces small attack drones near enemies, using the unit's payload area. Targeting Module bonuses also affect those drones."
+category = 10
+tags = PackedStringArray("module")
+module_unit_layers = [2, 3]
+color = Color(0.36, 0.68, 0.82, 1)
+grid_size = Vector2i(2, 2)
+max_health = 1.0
+module_min_tier = 3
