@@ -12,7 +12,7 @@ extends Resource
 
 ## Unique ID used in code (e.g. "archive_better_turrets").
 @export var id: StringName = &""
-## Display name shown to the player (e.g. "Archive: Better Turrets").
+## Display name shown to the player (e.g. "Archive: Advanced Turrets").
 @export var display_name: String = ""
 ## Icon texture shown in the tech tree / database (optional).
 @export var icon: Texture2D

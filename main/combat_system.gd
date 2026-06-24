@@ -78,6 +78,14 @@ const OXY_FIRE_FADE := 1.5          # then shrinks to nothing
 # Liquid-bullet puddle splats (Corrosion). Each: {pos, color, radius, age, life}.
 var _liquid_splashes: Array = []
 
+# Mindustry-style bullet FX, all short-lived and drawn on the projectile
+# overlay above the bullets. Shoot (muzzle), hit and despawn effects all feed
+# these shared pools, pruned by age like the flame particles below.
+var _muzzle_flashes: Array = []   # {pos, ang, age, life, scale, color}
+var _bullet_sparks: Array = []    # {pos, ang, len, age, life, color}
+var _bullet_smoke: Array = []     # {pos0, ang, reach, age, life, size}
+var _despawn_rings: Array = []    # {pos, age, life, scale, color}
+
 var _flame_particles: Array = []
 const _FLAME_LIGHT := Color(1.0, 0.867, 0.333)   # Pal.lightFlame
 const _FLAME_DARK := Color(1.0, 0.408, 0.251)    # Pal.darkFlame
@@ -88,6 +96,8 @@ const _FLAME_SPREAD_DEG := 12.0
 const _FLAME_CONE_DEG := 14.0
 # Per-flame-turret fuel meter: anchor -> seconds since last fuel was burned.
 var _flame_fuel_acc: Dictionary = {}
+# Per-flame-turret paid fuel type, kept active between fuel burn ticks.
+var _flame_active_ammo: Dictionary = {}
 
 # --- Eclipse continuous cutting beam state ---
 # anchor -> { phase:int, timer:float, start:Vector2, end:Vector2, active:bool }.
@@ -252,6 +262,17 @@ func _watchtower_range_bonus(turret_anchor: Vector2i) -> float:
 	if _watchtower_sys and _watchtower_sys.has_method("get_turret_range_bonus_tiles"):
 		return float(_watchtower_sys.get_turret_range_bonus_tiles(turret_anchor))
 	return 0.0
+
+
+func _flame_range_bonus_for_targeting(data: BlockData, turret_anchor: Vector2i) -> float:
+	if data == null or not data.tags.has("flame_emitter"):
+		return 0.0
+	var ammo: AmmoType = _flame_active_ammo.get(turret_anchor, null) as AmmoType
+	if ammo == null:
+		ammo = _select_affordable_flame_ammo(data, turret_anchor)
+	if ammo == null:
+		return 0.0
+	return ammo.flame_range_bonus_tiles
 
 
 ## Checks whether a turret currently has the required booster fluid /
@@ -435,6 +456,7 @@ func _process(delta: float) -> void:
 	_update_gas_clouds(delta)
 	_update_liquid_splashes(delta)
 	_update_flame_particles(delta)
+	_update_bullet_fx(delta)
 	_update_held_turrets(delta)
 	_update_held_units(delta)
 	_update_drone_combat(delta)
@@ -543,7 +565,7 @@ func _push_targeting_snapshot() -> void:
 		if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
 			continue
 		var turret_faction: int = main.get_building_faction(anchor)
-		var range_tiles: float = data.attack_range + _watchtower_range_bonus(anchor)
+		var range_tiles: float = data.attack_range + _watchtower_range_bonus(anchor) + _flame_range_bonus_for_targeting(data, anchor)
 		turrets_snap.append({
 			"grid_pos": anchor,
 			"faction": turret_faction,
@@ -980,8 +1002,9 @@ func _update_turrets(delta: float) -> void:
 			tgt_damage = float(profile["damage"]) * float(profile["unit_mult"])
 		emit_fire_pellets(fire_pos, base_shot_dir.angle(), shot_distance, shot_distance, profile, tgt_ref, tgt_type, tgt_damage, turret_faction)
 		# Muzzle flame cone (Flarecaster) — emitted once per shot along the aim axis.
+		# (The Mindustry shoot flash now lives INSIDE emit_fire_pellets.)
 		if bool(profile["muzzle_flame"]):
-			spawn_muzzle_flame(fire_pos, base_shot_dir.angle())
+			spawn_muzzle_flame(fire_pos, base_shot_dir.angle(), -1.0, _FLAME_COUNT, 1.0, float(profile["flame_cone_width_bonus_degrees"]) * 0.5)
 
 
 ## Unified dispatch for the special "emitter" weapons (fume / flame / lightning)
@@ -1111,7 +1134,8 @@ func _spritz_firefight(grid_pos: Vector2i, data, delta: float) -> bool:
 				barrel_len = maxf(hts.y - 14.0 * main.SPRITE_SCALE_FACTOR, 0.0)
 			# Visual douse spray with ZERO damage — it never harms the friendly
 			# building / unit it's putting out.
-			emit_fire_pellets(turret_world + aim_dir * barrel_len, turret_angles[grid_pos], best_d, range_px, profile, null, "none", 0.0, my_faction)
+			# Firefighter water spray: no muzzle flash (with_shoot_fx = false).
+			emit_fire_pellets(turret_world + aim_dir * barrel_len, turret_angles[grid_pos], best_d, range_px, profile, null, "none", 0.0, my_faction, false)
 			# Put the fire out.
 			if best.get("type") == "building":
 				if fire_sys != null:
@@ -1206,7 +1230,7 @@ func _emitter_target_world(grid_pos: Vector2i, data, turret_world: Vector2):
 		tw = main.grid_to_world(b) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 	if tw == null:
 		return null
-	var rng: float = (data.attack_range + _watchtower_range_bonus(grid_pos)) * main.GRID_SIZE
+	var rng: float = (data.attack_range + _watchtower_range_bonus(grid_pos) + _flame_range_bonus_for_targeting(data, grid_pos)) * main.GRID_SIZE
 	if turret_world.distance_to(tw) > rng:
 		return null
 	return tw
@@ -1960,6 +1984,11 @@ func _spawn_projectile(
 		"homing": float(extras.get("homing", 0.0)),
 		"knockback": float(extras.get("knockback", 0.0)),
 		"trail_color": extras.get("trail_color", color),
+		"front_color": extras.get("front_color", color),
+		"back_color": extras.get("back_color", color.darkened(0.35)),
+		"visual_width": float(extras.get("visual_width", 0.0)),
+		"visual_height": float(extras.get("visual_height", 0.0)),
+		"shrink_y": float(extras.get("shrink_y", 0.5)),
 		"projectile_sprite": extras.get("projectile_sprite", null),
 		"collides_air": bool(extras.get("collides_air", true)),
 		"collides_ground": bool(extras.get("collides_ground", true)),
@@ -1979,6 +2008,8 @@ func _spawn_projectile(
 		# `drag`, and leaves a puddle splat on despawn.
 		"liquid": bool(extras.get("liquid", false)),
 		"drag": float(extras.get("drag", 0.0)),
+		# Scales the Mindustry-style hit / despawn FX when this bullet ends.
+		"impact_scale": float(extras.get("impact_scale", 1.0)),
 	}
 	var sid: int = int(proj["shot_id"])
 	if sid != 0:
@@ -2036,6 +2067,11 @@ func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
 		"range_bonus": 0.0,
 		"status": null,
 		"trail_color": bdata.color.lightened(0.3),
+		"front_color": bdata.color.lightened(0.45),
+		"back_color": bdata.color.darkened(0.25),
+		"visual_width": 0.0,
+		"visual_height": 0.0,
+		"shrink_y": 0.5,
 		"collides_air": true,
 		"collides_ground": true,
 		"bldg_mult": 1.0,
@@ -2052,6 +2088,11 @@ func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
 		"drag": 0.0,
 		"velocity_rnd": 0.0,
 		"muzzle_flame": false,
+		"flame_range_bonus_tiles": 0.0,
+		"flame_cone_width_bonus_degrees": 0.0,
+		"muzzle_flash_scale": 1.0,
+		"muzzle_flash_circles": false,
+		"impact_effect_scale": 1.0,
 		"ammo_id": &"",
 	}
 	# A turret with NO ammo_types configured cannot fire (Mindustry-style: every
@@ -2062,7 +2103,6 @@ func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
 		if ammo == null or not (ammo is AmmoType):
 			continue
 		var ammo_data: AmmoType = ammo as AmmoType
-		var amt: int = maxi(ammo_data.amount_per_shot, 1)
 		# Powered ammo (the Arc) draws electricity instead of an item: it's
 		# "loaded" whenever the turret's network is supplying power.
 		if ammo_data.is_powered():
@@ -2073,6 +2113,11 @@ func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
 		p["damage"] = ammo_data.damage
 		p["reload_mult"] = ammo_data.reload_multiplier
 		p["color"] = ammo_data.projectile_color
+		p["front_color"] = ammo_data.get_projectile_front_color()
+		p["back_color"] = ammo_data.get_projectile_back_color()
+		p["visual_width"] = ammo_data.projectile_width
+		p["visual_height"] = ammo_data.projectile_height
+		p["shrink_y"] = ammo_data.projectile_shrink_y
 		p["projectile_sprite"] = ammo_data.projectile_sprite
 		p["status"] = ammo_data.status_effect
 		p["ammo_id"] = ammo_data.item_id
@@ -2105,6 +2150,11 @@ func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
 		p["drag"] = ammo_data.drag
 		p["velocity_rnd"] = ammo_data.velocity_rnd
 		p["muzzle_flame"] = ammo_data.muzzle_flame
+		p["flame_range_bonus_tiles"] = ammo_data.flame_range_bonus_tiles
+		p["flame_cone_width_bonus_degrees"] = ammo_data.flame_cone_width_bonus_degrees
+		p["muzzle_flash_scale"] = ammo_data.muzzle_flash_scale
+		p["muzzle_flash_circles"] = ammo_data.muzzle_flash_circles
+		p["impact_effect_scale"] = ammo_data.impact_effect_scale
 		p["found"] = true
 		break
 	return p
@@ -2117,7 +2167,7 @@ func read_ammo_profile(bdata, log_ref, anchor: Vector2i) -> Dictionary:
 ## shot direction (radians), `shot_distance` how far each pellet aims, and
 ## `max_range` the despawn cap. `damage` is the final per-hit damage (already
 ## multiplied by the unit/building modifier the caller chose).
-func emit_fire_pellets(fire_pos: Vector2, aim_angle: float, shot_distance: float, max_range: float, profile: Dictionary, target_ref, target_type: String, damage: float, source_faction: int) -> void:
+func emit_fire_pellets(fire_pos: Vector2, aim_angle: float, shot_distance: float, max_range: float, profile: Dictionary, target_ref, target_type: String, damage: float, source_faction: int, with_shoot_fx: bool = true) -> void:
 	var speed: float = float(profile["speed"])
 	var drag: float = float(profile["drag"])
 	var lifetime: float = float(profile["lifetime"])
@@ -2171,6 +2221,11 @@ func emit_fire_pellets(fire_pos: Vector2, aim_angle: float, shot_distance: float
 				"homing": float(profile["homing"]),
 				"knockback": float(profile["knockback"]),
 				"trail_color": profile["trail_color"],
+				"front_color": profile["front_color"],
+				"back_color": profile["back_color"],
+				"visual_width": float(profile["visual_width"]),
+				"visual_height": float(profile["visual_height"]),
+				"shrink_y": float(profile["shrink_y"]),
 				"projectile_sprite": profile.get("projectile_sprite", null),
 				"collides_air": bool(profile["collides_air"]),
 				"collides_ground": bool(profile["collides_ground"]),
@@ -2186,8 +2241,16 @@ func emit_fire_pellets(fire_pos: Vector2, aim_angle: float, shot_distance: float
 				"frag_range": float(profile["frag_range"]),
 				"liquid": bool(profile["liquid"]),
 				"drag": drag,
+				"impact_scale": float(profile.get("impact_effect_scale", 1.0)),
 			},
 		)
+	# Shoot FX (Mindustry-style muzzle flash + smoke cone) — emitted once per
+	# shot from INSIDE the shared emitter so EVERY caller (auto-fire, manual
+	# control, any future path) gets it without re-adding the call. Callers
+	# that shouldn't flash (e.g. the firefighter water spray) pass
+	# `with_shoot_fx = false`.
+	if with_shoot_fx:
+		spawn_shoot_fx(fire_pos, aim_angle, float(profile.get("muzzle_flash_scale", 1.0)), profile["color"], bool(profile.get("muzzle_flash_circles", false)))
 
 
 func _update_projectiles(delta: float) -> void:
@@ -2238,6 +2301,8 @@ func _update_projectiles(delta: float) -> void:
 				if is_liquid and bool(proj.get("aoe", false)):
 					proj["target_pos"] = proj["pos"]
 					_on_projectile_hit(proj, unit_mgr)
+				# Expired at max range without hitting → despawn puff, not a hit spark.
+				proj["fx_despawn"] = true
 				to_remove.append(i)
 				continue
 
@@ -2386,6 +2451,15 @@ func _update_projectiles(delta: float) -> void:
 			_feed_gas_cloud(dead_proj["pos"], "oxygen")
 		elif dead_ammo == &"mat_hydrogen":
 			_feed_gas_cloud(dead_proj["pos"], "hydrogen")
+		# Mindustry bullet end FX (skip liquids — they leave a puddle above):
+		# a spark + smoke burst on a hit, or a small fading puff when the
+		# round expired at max range without striking anything.
+		if not bool(dead_proj.get("liquid", false)):
+			var iscale: float = float(dead_proj.get("impact_scale", 1.0))
+			if bool(dead_proj.get("fx_despawn", false)):
+				spawn_despawn_fx(dead_proj["pos"], iscale, dead_proj["color"])
+			else:
+				spawn_impact_fx(dead_proj["pos"], iscale, dead_proj["color"])
 		_release_shot_id(int(dead_proj.get("shot_id", 0)))
 		projectiles.remove_at(to_remove[i])
 
@@ -2565,6 +2639,8 @@ func _apply_knockback(unit: Node2D, origin: Vector2, amount: float) -> void:
 	# pathological pile-ups (e.g. 15 diffuse pellets hitting in one
 	# frame) from teleporting the unit halfway across the map.
 	var gs: float = float(main.GRID_SIZE) if main else 32.0
+	if "knockback_taken_mult" in unit:
+		amount *= float(unit.knockback_taken_mult)
 	var travel: float = clampf(amount, 0.0, gs * 6.0)
 	# Pick the astar grid for the unit's movement layer so wall checks
 	# match how the unit actually pathfinds. Flying units skip the
@@ -3388,10 +3464,21 @@ func _draw_beams() -> void:
 			continue
 		var a: Vector2 = st["start"]
 		var b: Vector2 = st["end"]
-		draw_line(a, b, Color(0.6, 0.9, 1.0, 0.22), 11.0)
-		draw_line(a, b, Color(0.8, 0.95, 1.0, 0.55), 5.0)
-		draw_line(a, b, Color(1.0, 1.0, 1.0, 0.95), 2.0)
-		draw_circle(b, 6.0, Color(0.85, 0.96, 1.0, 0.5))
+		var beam_vec: Vector2 = b - a
+		var beam_len: float = beam_vec.length()
+		if beam_len <= 0.001:
+			continue
+		var beam_dir: Vector2 = beam_vec / beam_len
+		var cap_radius: float = 6.0
+		var line_end: Vector2 = b - beam_dir * maxf(cap_radius - 0.75, 0.0)
+		if a.distance_squared_to(line_end) < 1.0:
+			line_end = b
+		draw_line(a, line_end, Color(0.6, 0.9, 1.0, 0.22), 11.0)
+		draw_line(a, line_end, Color(0.8, 0.95, 1.0, 0.55), 5.0)
+		draw_line(a, line_end, Color(1.0, 1.0, 1.0, 0.95), 2.0)
+		draw_circle(b, cap_radius * 1.28, Color(0.6, 0.9, 1.0, 0.22))
+		draw_circle(b, cap_radius, Color(0.8, 0.95, 1.0, 0.55))
+		draw_circle(b, cap_radius * 0.72, Color(1.0, 1.0, 1.0, 0.95))
 
 
 ## Draws each active Blaster shockwave as an expanding, fading quarter-circle of
@@ -3432,10 +3519,12 @@ func _draw_blaster_charges() -> void:
 ## within ±_FLAME_SPREAD_DEG of `aim`. Mirrors Scorch's shootSmallFlame:
 ## 8 particles, random reach, that fan out, shrink, and recolour over ~0.5s.
 func spawn_muzzle_flame(pos: Vector2, aim: float, reach: float = -1.0,
-		count: int = _FLAME_COUNT, size_mult: float = 1.0) -> void:
+		count: int = _FLAME_COUNT, size_mult: float = 1.0,
+		spread_bonus_deg: float = 0.0) -> void:
 	var max_reach: float = reach if reach > 0.0 else float(main.GRID_SIZE) * 1.2
+	var spread_deg: float = maxf(_FLAME_SPREAD_DEG + spread_bonus_deg, 0.0)
 	for i in range(count):
-		var ang: float = aim + deg_to_rad(randf_range(-_FLAME_SPREAD_DEG, _FLAME_SPREAD_DEG))
+		var ang: float = aim + deg_to_rad(randf_range(-spread_deg, spread_deg))
 		_flame_particles.append({
 			"pos0": pos,
 			"ang": ang,
@@ -3446,45 +3535,195 @@ func spawn_muzzle_flame(pos: Vector2, aim: float, reach: float = -1.0,
 		})
 
 
+# =========================
+# MINDUSTRY BULLET FX (shoot / hit / despawn)
+# =========================
+
+## Shoot effect. Every turret gets the tapered flash cone (the "triangle").
+## `full = true` adds the round bits — a hot core circle, drifting smoke
+## puffs, spark lines and a flame burst — reserved for shotgun-style turrets
+## like the Diffuse (driven by the ammo's `muzzle_flash_circles` flag).
+## `scale` is the ammo's muzzle_flash_scale; 0 disables the effect entirely.
+func spawn_shoot_fx(pos: Vector2, aim: float, scale: float, color: Color, full: bool = false) -> void:
+	if scale <= 0.0 or main == null:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	# The flash cone is always drawn; `full` flags the core circle in the draw.
+	_muzzle_flashes.append({
+		"pos": pos, "ang": aim, "age": 0.0, "life": 0.16, "scale": scale, "color": color, "full": full,
+	})
+	if not full:
+		return
+	# Round extras — Diffuse only. Flame burst (proven render path) + smoke +
+	# sparks.
+	spawn_muzzle_flame(pos, aim, gs * 0.85 * scale, 7, scale * 1.15)
+	var cone: float = deg_to_rad(16.0)
+	for i in range(6):
+		_bullet_smoke.append({
+			"pos0": pos,
+			"ang": aim + randf_range(-cone, cone),
+			"reach": gs * 0.55 * scale * randf_range(0.45, 1.0),
+			"age": 0.0, "life": randf_range(0.3, 0.5), "size": 0.95 * scale,
+		})
+	for i in range(5):
+		_bullet_sparks.append({
+			"pos": pos,
+			"ang": aim + randf_range(-cone * 0.8, cone * 0.8),
+			"len": gs * 0.28 * scale * randf_range(0.7, 1.3),
+			"age": 0.0, "life": randf_range(0.16, 0.24), "color": color.lerp(Color(1, 0.9, 0.6, 1), 0.5),
+		})
+
+
+## Hit effect: short spark lines radiating from the impact point + a small
+## smoke puff (Mindustry's Fx.hitBulletSmall). `scale` = impact_effect_scale.
+func spawn_impact_fx(pos: Vector2, scale: float, color: Color) -> void:
+	if scale <= 0.0 or main == null:
+		return
+	var gs: float = float(main.GRID_SIZE)
+	for i in range(5):
+		_bullet_sparks.append({
+			"pos": pos,
+			"ang": randf() * TAU,
+			"len": gs * 0.17 * scale * randf_range(0.6, 1.2),
+			"age": 0.0, "life": randf_range(0.13, 0.22), "color": color,
+		})
+	for i in range(2):
+		_bullet_smoke.append({
+			"pos0": pos,
+			"ang": randf() * TAU,
+			"reach": gs * 0.13 * scale * randf(),
+			"age": 0.0, "life": randf_range(0.2, 0.32), "size": 0.7 * scale,
+		})
+
+
+## Despawn effect: a small fading expanding ring where a bullet expired at max
+## range without hitting anything.
+func spawn_despawn_fx(pos: Vector2, scale: float, color: Color) -> void:
+	if scale <= 0.0:
+		return
+	_despawn_rings.append({
+		"pos": pos, "age": 0.0, "life": 0.22, "scale": scale, "color": color,
+	})
+
+
+## Advance + prune the bullet-FX pools (age-based, like the flame particles).
+func _update_bullet_fx(delta: float) -> void:
+	for arr in [_muzzle_flashes, _bullet_sparks, _bullet_smoke, _despawn_rings]:
+		var write := 0
+		for read in range(arr.size()):
+			var p: Dictionary = arr[read]
+			p["age"] = float(p["age"]) + delta
+			if float(p["age"]) < float(p["life"]):
+				if write != read:
+					arr[write] = p
+				write += 1
+		if write != arr.size():
+			arr.resize(write)
+
+
+## Draws all bullet FX on the projectile overlay `canvas` (above the bullets).
+func _draw_bullet_fx(canvas: CanvasItem) -> void:
+	var gs: float = float(main.GRID_SIZE) if main else 32.0
+	# Smoke puffs: gray, drift outward, shrink + fade.
+	for p in _bullet_smoke:
+		var t: float = clampf(float(p["age"]) / maxf(float(p["life"]), 0.0001), 0.0, 1.0)
+		var dist: float = float(p["reach"]) * sqrt(t)
+		var spos: Vector2 = p["pos0"] + Vector2.from_angle(float(p["ang"])) * dist
+		var fout: float = 1.0 - t
+		var r: float = (0.55 + fout * 1.15) * gs * 0.03 * float(p.get("size", 1.0))
+		var sc := _FLAME_GRAY
+		sc.a = fout * 0.7
+		canvas.draw_circle(spos, r, sc)
+	# Muzzle flash: a hot white-yellow core + a bright tapered cone. Uses a
+	# fixed warm flash colour (not the bullet colour) so it always reads as a
+	# muzzle blast regardless of ammo tint.
+	for p in _muzzle_flashes:
+		var t: float = clampf(float(p["age"]) / maxf(float(p["life"]), 0.0001), 0.0, 1.0)
+		var fout: float = 1.0 - t
+		var msc: float = float(p["scale"])
+		var fwd := Vector2.from_angle(float(p["ang"]))
+		var side := Vector2(-fwd.y, fwd.x)
+		var base: Vector2 = p["pos"]
+		# Tapered flash cone (warm orange).
+		var length: float = gs * 0.7 * msc * fout
+		var width: float = gs * 0.2 * msc * fout
+		canvas.draw_colored_polygon(PackedVector2Array([
+			base + fwd * length, base + side * width, base - side * width,
+		]), Color(1.0, 0.82, 0.4, fout * 0.9))
+		# Hot near-white core right at the muzzle — only the "full" flash
+		# (Diffuse) gets the round core; other turrets show just the cone.
+		if bool(p.get("full", false)):
+			canvas.draw_circle(base + fwd * gs * 0.12 * msc, gs * 0.13 * msc * fout, Color(1.0, 0.96, 0.78, fout))
+	# Spark lines: short bright lines that extend then fade.
+	for p in _bullet_sparks:
+		var t: float = clampf(float(p["age"]) / maxf(float(p["life"]), 0.0001), 0.0, 1.0)
+		var fout: float = 1.0 - t
+		var dir := Vector2.from_angle(float(p["ang"]))
+		var ln: float = float(p["len"]) * (0.4 + 0.6 * t)
+		var spk: Color = (p["color"] as Color).lerp(_FLAME_GRAY, t).lerp(Color(1, 1, 1, 1), 0.3)
+		spk.a = fout
+		canvas.draw_line(p["pos"] + dir * (ln * 0.5), p["pos"] + dir * ln, spk, maxf(1.0, gs * 0.02 * fout), true)
+	# Despawn rings: a faint expanding circle that fades out.
+	for p in _despawn_rings:
+		var t: float = clampf(float(p["age"]) / maxf(float(p["life"]), 0.0001), 0.0, 1.0)
+		var fout: float = 1.0 - t
+		var r: float = gs * 0.06 * float(p["scale"]) * (0.5 + t)
+		var rc: Color = p["color"]
+		rc.a = fout * 0.5
+		canvas.draw_arc(p["pos"], r, 0.0, TAU, 16, rc, maxf(1.0, gs * 0.015 * fout), true)
+
+
 ## Flarecaster weapon tick: burns metered fuel and, while fuelled, sprays a
 ## flame jet out to `range_px` that damages + ignites every opposing unit
 ## inside the cone. The flame itself is the damage — no projectiles are fired.
+func _select_affordable_flame_ammo(data: BlockData, anchor: Vector2i) -> AmmoType:
+	for a in data.ammo_types:
+		if not (a is AmmoType):
+			continue
+		var ammo := a as AmmoType
+		if _has_turret_ammo(_logistics, anchor, ammo.item_id, float(maxi(ammo.amount_per_shot, 1))):
+			return ammo
+	return null
+
+
 func _update_flame_emitter(grid_pos: Vector2i, data: BlockData, turret_world: Vector2,
 		aim: float, range_px: float, faction: int, power_eff: float, delta: float) -> void:
 	if power_eff <= 0.0 or range_px <= 0.0:
 		return
 	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
-	var ammo: AmmoType = null
-	for a in data.ammo_types:
-		if a is AmmoType:
-			ammo = a
-			break
-	if ammo == null:
-		return
+	var ammo: AmmoType = _flame_active_ammo.get(grid_pos, null) as AmmoType
 	# Fuel meter: burn `amount_per_shot` fuel every `attack_speed` seconds of
 	# sustained firing. Between burns the flame runs on the already-paid tick.
 	var interval: float = maxf(data.attack_speed, 0.05)
 	var acc: float = float(_flame_fuel_acc.get(grid_pos, interval)) + delta * power_eff
 	if acc >= interval:
-		if _logistics and _consume_turret_ammo(_logistics, anchor, ammo.item_id, maxi(ammo.amount_per_shot, 1)):
+		ammo = _select_affordable_flame_ammo(data, anchor)
+		if ammo != null and _logistics and _consume_turret_ammo(_logistics, anchor, ammo.item_id, maxi(ammo.amount_per_shot, 1)):
 			acc -= interval
+			_flame_active_ammo[grid_pos] = ammo
 		else:
 			# Out of fuel — no flame this frame; stay "due" so it relights the
 			# instant fuel arrives.
 			_flame_fuel_acc[grid_pos] = interval
+			_flame_active_ammo.erase(grid_pos)
 			return
+	if ammo == null:
+		return
 	_flame_fuel_acc[grid_pos] = acc
 
 	# Spray the visible jet from the muzzle out to full range.
 	var muzzle: Vector2 = turret_world + Vector2.from_angle(aim) * (float(main.GRID_SIZE) * 0.5)
-	spawn_muzzle_flame(muzzle, aim, range_px, 6, 2.4)
+	var range_bonus_px: float = ammo.flame_range_bonus_tiles * float(main.GRID_SIZE)
+	var effective_range_px: float = range_px + range_bonus_px
+	var cone_half_bonus_deg: float = ammo.flame_cone_width_bonus_degrees * 0.5
+	spawn_muzzle_flame(muzzle, aim, effective_range_px, 6, 2.4, cone_half_bonus_deg)
 
 	# The flame deals the damage: hit every opposing unit within range + cone.
 	var unit_mgr := _unit_mgr_ref()
 	if unit_mgr == null:
 		return
 	var src_team: int = UnitData.Team.PLAYER if faction == main.Faction.LUMINA else UnitData.Team.ENEMY
-	var cone: float = deg_to_rad(_FLAME_CONE_DEG)
+	var cone: float = deg_to_rad(_FLAME_CONE_DEG + cone_half_bonus_deg)
 	var dps: float = ammo.damage
 	var burn: Resource = ammo.status_effect
 	for lst in [unit_mgr.enemies, unit_mgr.player_units]:
@@ -3495,7 +3734,7 @@ func _update_flame_emitter(grid_pos: Vector2i, data: BlockData, turret_world: Ve
 				continue
 			var to: Vector2 = u.position - muzzle
 			var d: float = to.length()
-			if d > range_px + u.unit_size:
+			if d > effective_range_px + u.unit_size:
 				continue
 			if d > 1.0 and absf(wrapf(to.angle() - aim, -PI, PI)) > cone:
 				continue
@@ -3512,7 +3751,7 @@ func _update_flame_emitter(grid_pos: Vector2i, data: BlockData, turret_world: Ve
 		for ray_off in [-cone * 0.7, 0.0, cone * 0.7]:
 			var rdir: Vector2 = Vector2.from_angle(aim + ray_off)
 			var dist: float = gs * 0.5
-			while dist <= range_px:
+			while dist <= effective_range_px:
 				var cell: Vector2i = main.world_to_grid(muzzle + rdir * dist)
 				if main.placed_buildings.has(cell):
 					var b_anchor: Vector2i = main.building_origins.get(cell, cell)
@@ -3537,7 +3776,7 @@ func _update_flame_emitter(grid_pos: Vector2i, data: BlockData, turret_world: Ve
 				continue
 			var to_c: Vector2 = (oc["center"] as Vector2) - muzzle
 			var along: float = to_c.dot(aim_dir)          # distance along the cone axis
-			if along < 0.0 or along > range_px + ocr:
+			if along < 0.0 or along > effective_range_px + ocr:
 				continue
 			if absf(to_c.cross(aim_dir)) > ocr:           # perpendicular distance to axis
 				continue
@@ -3782,19 +4021,20 @@ func _draw_projectiles(canvas: CanvasItem) -> void:
 		var color = proj["color"]
 		var radius = proj["radius"]
 
-		# Draw trail
+		# Draw trail — Mindustry-style tapered fade in the ammo's trail colour
+		# (falls back to the bullet colour). Width + alpha both ramp from the
+		# tail toward the head so it reads as a comet streak.
+		var tc: Color = proj.get("trail_color", color)
 		var trail = proj["trail"] as Array
 		if trail.size() > 1:
 			for t in range(trail.size() - 1):
-				var alpha = float(t) / trail.size() * 0.5
-				var trail_color = Color(color.r, color.g, color.b, alpha)
-				var width = radius * (float(t) / trail.size())
-				canvas.draw_line(trail[t], trail[t + 1], trail_color, width)
+				var f: float = float(t + 1) / float(trail.size())
+				var seg_col := Color(tc.r, tc.g, tc.b, f * 0.55)
+				canvas.draw_line(trail[t], trail[t + 1], seg_col, maxf(0.75, radius * f), true)
 
-		# Draw trail line from last trail point to current pos
+		# Bridge the last trail point to the live position (brightest segment).
 		if trail.size() > 0:
-			var trail_color = Color(color.r, color.g, color.b, 0.5)
-			canvas.draw_line(trail[trail.size() - 1], pos, trail_color, radius * 0.8)
+			canvas.draw_line(trail[trail.size() - 1], pos, Color(tc.r, tc.g, tc.b, 0.6), radius * 0.85, true)
 
 		var sprite: Texture2D = proj.get("projectile_sprite", null)
 		if sprite != null:
@@ -3818,16 +4058,57 @@ func _draw_projectiles(canvas: CanvasItem) -> void:
 			canvas.draw_circle(pos, radius + 1.5, Color(color.r, color.g, color.b, 0.25))
 			canvas.draw_circle(pos, radius, orb)
 		else:
-			# Draw the projectile itself — bright glowing circle
-			canvas.draw_circle(pos, radius + 1.0, Color(color.r, color.g, color.b, 0.3))
-			canvas.draw_circle(pos, radius, color)
-			canvas.draw_circle(pos, radius * 0.5, color.lightened(0.5))
+			# Mindustry BasicBulletType feel: a darker stretched back layer with
+			# a smaller bright front layer, both oriented along travel and
+			# shrinking lengthwise as the bullet nears the end of its life.
+			var heading: Vector2 = Vector2.ZERO
+			if trail.size() > 0:
+				heading = pos - trail[trail.size() - 1]
+			if heading.length_squared() < 0.01:
+				heading = proj["target_pos"] - pos
+			var bdir: Vector2 = heading.normalized() if heading.length_squared() > 0.0001 else Vector2.RIGHT
+			var bperp: Vector2 = Vector2(-bdir.y, bdir.x)
+			var front_col: Color = proj.get("front_color", color)
+			var back_col: Color = proj.get("back_color", color.darkened(0.35))
+			var life: float = maxf(float(proj.get("lifetime", 1.0)), 0.0001)
+			var fout: float = clampf(1.0 - float(proj.get("age", 0.0)) / life, 0.0, 1.0)
+			var shrink_y: float = clampf(float(proj.get("shrink_y", 0.5)), 0.0, 1.0)
+			var width: float = float(proj.get("visual_width", 0.0))
+			var height: float = float(proj.get("visual_height", 0.0))
+			if width <= 0.0:
+				width = radius * 1.9
+			if height <= 0.0:
+				height = radius * 4.2
+			height *= (1.0 - shrink_y) + shrink_y * fout
+			width = maxf(width, 1.0)
+			height = maxf(height, width * 1.25)
+			var half_w: float = width * 0.5
+			var half_h: float = height * 0.5
+			var tip: Vector2 = pos + bdir * half_h
+			var tail: Vector2 = pos - bdir * half_h
+			var side_a: Vector2 = pos + bperp * half_w
+			var side_b: Vector2 = pos - bperp * half_w
+			canvas.draw_circle(pos, width * 0.85, Color(back_col.r, back_col.g, back_col.b, 0.16))
+			canvas.draw_colored_polygon(PackedVector2Array([tip, side_a, tail, side_b]), back_col)
+
+			var front_half_w: float = half_w * 0.62
+			var front_half_h: float = half_h * 0.72
+			var front_center: Vector2 = pos + bdir * (half_h * 0.05)
+			canvas.draw_colored_polygon(PackedVector2Array([
+				front_center + bdir * front_half_h,
+				front_center + bperp * front_half_w,
+				front_center - bdir * front_half_h,
+				front_center - bperp * front_half_w,
+			]), front_col)
 
 		if main and main.show_hitboxes:
 			canvas.draw_arc(pos, radius, 0, TAU, 24, Color(1.0, 0.2, 0.9, 0.9), 1.5)
 			var aoe_r: float = float(proj.get("aoe_radius", 0.0))
 			if aoe_r > 0.0:
 				canvas.draw_arc(pos, aoe_r, 0, TAU, 48, Color(1.0, 0.5, 0.0, 0.7), 1.0)
+
+	# Shoot / hit / despawn FX on the same overlay, above the bullets.
+	_draw_bullet_fx(canvas)
 
 	# Arc lightning bolts — jagged polyline, fading over its short lifetime.
 	# Drawn as a wide soft glow, a mid stroke, and a thin white core.

@@ -1493,6 +1493,10 @@ func _add_ammo_entry(turret: BlockData, ammo: AmmoType) -> void:
 	if ammo.range_bonus != 0.0:
 		var effective_range: float = turret.attack_range + ammo.range_bonus
 		_add_stat("  Range", "%.0f (+%.0f)" % [effective_range, ammo.range_bonus], Color(0.4, 0.7, 1.0))
+	if ammo.flame_range_bonus_tiles != 0.0:
+		_add_stat("  Flame Range", "+%.1f tiles" % ammo.flame_range_bonus_tiles, Color(1.0, 0.5, 0.25))
+	if ammo.flame_cone_width_bonus_degrees != 0.0:
+		_add_stat("  Flame Cone", "+%.1f°" % ammo.flame_cone_width_bonus_degrees, Color(1.0, 0.5, 0.25))
 	if ammo.projectiles_per_shot > 1:
 		_add_stat("  Pellets", "%d /shot" % ammo.projectiles_per_shot, Color(0.7, 0.8, 1.0))
 	if ammo.inaccuracy > 0.0:
@@ -1693,6 +1697,14 @@ func _add_recipe_card(inputs: Dictionary, outputs: Dictionary, cycle: float, ran
 	outer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	card.add_child(outer)
 
+	if title != "":
+		var title_lbl = Label.new()
+		title_lbl.text = title
+		title_lbl.add_theme_font_size_override("font_size", 13)
+		title_lbl.add_theme_color_override("font_color", Color(0.95, 0.86, 0.45))
+		title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		outer.add_child(title_lbl)
+
 	var row = HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1797,18 +1809,18 @@ func _make_io_icon(item_id, amount: int, cycle: float, corner_override: String) 
 	# Amount badge, bottom-right (with a shadow so it reads over a bright icon).
 	var corner: String = corner_override if corner_override != "" else ("%d" % amount)
 	if corner != "":
-		var amt = Label.new()
-		amt.text = corner
-		amt.add_theme_font_size_override("font_size", 13)
-		amt.add_theme_color_override("font_color", Color.WHITE)
-		amt.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
-		amt.add_theme_constant_override("shadow_offset_x", 1)
-		amt.add_theme_constant_override("shadow_offset_y", 1)
-		amt.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		amt.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-		amt.set_anchors_preset(Control.PRESET_FULL_RECT)
-		amt.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		box.add_child(amt)
+		var amount_label = Label.new()
+		amount_label.text = corner
+		amount_label.add_theme_font_size_override("font_size", 13)
+		amount_label.add_theme_color_override("font_color", Color.WHITE)
+		amount_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+		amount_label.add_theme_constant_override("shadow_offset_x", 1)
+		amount_label.add_theme_constant_override("shadow_offset_y", 1)
+		amount_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		amount_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		amount_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		amount_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		box.add_child(amount_label)
 
 	# Route through the database's own tooltip panel (positioned above the
 	# cursor in _process) rather than Godot's built-in tooltip, which renders
@@ -1840,18 +1852,18 @@ func _make_power_icon(power: float) -> Control:
 	ir.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	box.add_child(ir)
 
-	var amt = Label.new()
-	amt.text = _fmt_num(power)
-	amt.add_theme_font_size_override("font_size", 13)
-	amt.add_theme_color_override("font_color", Color.WHITE)
-	amt.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
-	amt.add_theme_constant_override("shadow_offset_x", 1)
-	amt.add_theme_constant_override("shadow_offset_y", 1)
-	amt.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	amt.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-	amt.set_anchors_preset(Control.PRESET_FULL_RECT)
-	amt.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	box.add_child(amt)
+	var amount_label = Label.new()
+	amount_label.text = _fmt_num(power)
+	amount_label.add_theme_font_size_override("font_size", 13)
+	amount_label.add_theme_color_override("font_color", Color.WHITE)
+	amount_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	amount_label.add_theme_constant_override("shadow_offset_x", 1)
+	amount_label.add_theme_constant_override("shadow_offset_y", 1)
+	amount_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	amount_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	amount_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	amount_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(amount_label)
 
 	box.mouse_entered.connect(_show_text_tooltip.bind("Power — %s/sec" % _fmt_num(power)))
 	box.mouse_exited.connect(_on_tile_unhover)
@@ -2018,6 +2030,8 @@ func _derive_required_tiles(block: BlockData) -> Array:
 	for entry in block.required_tiles:
 		if typeof(entry) == TYPE_DICTIONARY:
 			out.append(entry)
+	if not out.is_empty():
+		return out
 	# Auto-derivation:
 	if block.tags.has("condenser"):
 		# Vent → 0.5x rate (4/s), Geyser → 1.0x (8/s).

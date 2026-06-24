@@ -80,8 +80,8 @@ var _used_respawn_cores: Array[Vector2i] = []
 # When a sector has multiple LUMINA cores, main.gd spawns one extra
 # PlayerDrone instance per non-primary core with ai_controlled = true.
 # Those AI shardlings skip player input + mining and instead run a
-# priority loop: assist with builds → shoot enemies → heal damaged
-# blocks → return to their spawn core when idle.
+# priority loop: assist with builds → heal damaged blocks → return to
+# their spawn core when idle.
 var ai_controlled: bool = false
 ## True when this shardling belongs to a FEROX core. Flips every
 ## faction-sensitive lookup in the AI tick: heal targets become FEROX
@@ -111,6 +111,7 @@ var _cached_build_age: float = 999.0
 const _AI_HEAL_CACHE_REFRESH: float = 0.5
 const _AI_ENEMY_CACHE_REFRESH: float = 0.2
 const _AI_BUILD_CACHE_REFRESH: float = 0.4
+const _FEROX_PRESSURE_RADIUS_TILES: float = 18.0
 
 # --- FEROX SHARDLING REBUILD TIMER ---
 # When a FEROX shardling is in build_range of its current rebuild
@@ -339,8 +340,6 @@ func _process(delta: float) -> void:
 	_handle_destroy()
 	_handle_mining(delta)
 	_handle_healing(delta)
-	if ai_controlled:
-		_ai_fire_tick(delta)
 	# Pulse phases freeze with the world — keeps the beams / thrusters
 	# visually still during pause instead of shimmering on a frozen scene.
 	var paused: bool = "world_paused" in main and main.world_paused
@@ -494,6 +493,8 @@ func _drone_in_control() -> bool:
 ## entirely — only the primary player-controlled drone takes on
 ## hostile buildings when no enemy units are around.
 func _ai_shoot_target_pos() -> Variant:
+	if ai_controlled:
+		return null
 	var unit_mgr = _unit_mgr_ref()
 	var combat = main.get_node_or_null("CombatSystem")
 	var range_px: float = 4.0 * main.GRID_SIZE
@@ -511,8 +512,6 @@ func _ai_shoot_target_pos() -> Variant:
 			nearest = e
 	if nearest != null:
 		return nearest.position
-	if ai_controlled:
-		return null
 	if combat and combat.has_method("_find_nearest_enemy_building"):
 		var nb: Vector2i = combat._find_nearest_enemy_building(position, range_px)
 		if nb != Vector2i(-9999, -9999):
@@ -1074,7 +1073,7 @@ func _clear_inventory() -> void:
 ## footprint, and registers the anchor in the cycle so the auto-cycle
 ## picks a different one next time.
 func respawn_at_core(anchor: Vector2i) -> void:
-	if not main.placed_buildings.has(anchor):
+	if main.has_method("is_lumina_core_anchor") and not main.is_lumina_core_anchor(anchor):
 		return
 	var core_data: BlockData = Registry.get_block(main.placed_buildings[anchor])
 	if core_data == null or not core_data.tags.has("core"):
@@ -1106,8 +1105,7 @@ func _move_to_core() -> void:
 		core_data = Registry.get_block(main.placed_buildings[anchor])
 		_used_respawn_cores.append(anchor)
 	else:
-		core_pos = main.core_position
-		core_data = Registry.get_block(&"core")
+		return
 	var core_size: Vector2i = core_data.grid_size if core_data else Vector2i(3, 3)
 	position = Vector2(
 		(core_pos.x + core_size.x / 2.0) * main.GRID_SIZE,
@@ -1175,13 +1173,11 @@ func _next_respawn_core_anchor(world_pos: Vector2) -> Vector2i:
 #   1. Assist with builds  — sit within range of a queued work_order
 #      anchor so _is_in_build_range counts the AI drone toward the
 #      build tick.
-#   2. Shoot enemy units   — move into firing range of the nearest
-#      hostile and fire via _ai_fire_tick.
-#   3. Heal blocks         — move into HEAL_RANGE_TILES of the most-
+#   2. Heal blocks         — move into HEAL_RANGE_TILES of the most-
 #      damaged friendly block. The existing _handle_healing flow
 #      handles the laser + HP application; the AI drone just provides
 #      proximity.
-#   4. Idle                — drift back to the spawn core and park.
+#   3. Idle                — drift back to the spawn core and park.
 # At each step the AI tries to take a single step toward the priority
 # target this frame, so the behaviour reads as smooth motion rather
 # than a state machine click.
@@ -1195,7 +1191,7 @@ func _park_on_spawn_core() -> void:
 	# inside the player's base.
 	var core_pos: Vector2i = spawn_core_anchor
 	var data_core: BlockData = null
-	if core_pos != Vector2i(-1, -1) and main.placed_buildings.has(core_pos):
+	if core_pos != Vector2i(-1, -1) and main.has_method("is_lumina_core_anchor") and main.is_lumina_core_anchor(core_pos):
 		data_core = Registry.get_block(main.placed_buildings[core_pos])
 	elif ferox_controlled:
 		var ferox_anchors: Array = main.get_ferox_core_anchors()
@@ -1207,8 +1203,13 @@ func _park_on_spawn_core() -> void:
 			queue_free()
 			return
 	else:
-		core_pos = main.core_position
-		data_core = Registry.get_block(&"core")
+		var lumina_anchors: Array = main.get_lumina_core_anchors()
+		if lumina_anchors.is_empty():
+			queue_free()
+			return
+		core_pos = lumina_anchors[0]
+		spawn_core_anchor = core_pos
+		data_core = Registry.get_block(main.placed_buildings[core_pos])
 	var sz: Vector2i = data_core.grid_size if data_core else Vector2i(3, 3)
 	position = Vector2(
 		(core_pos.x + sz.x / 2.0) * main.GRID_SIZE,
@@ -1231,20 +1232,13 @@ func _ai_movement_tick(delta: float) -> void:
 	# FEROX shardlings run a different priority loop: rebuild first
 	# (the user's directive), then heal damaged FEROX buildings, and
 	# only as a fallback drift toward their home core. They are NOT
-	# combat-focused — fire still happens via _ai_fire_tick if a
-	# LUMINA unit wanders into range, but pursuit isn't a priority.
+	# combat-focused; nearby LUMINA units only pause rebuild/heal work
+	# so the shardling doesn't repair through an active attack.
 	if ferox_controlled:
 		# Pause rebuild + heal while LUMINA units are pressing the base.
 		# The shardling falls back to "park on home core" so it doesn't
 		# wander into the fight or finish a rebuild mid-attack.
-		var threat: Node2D = _ai_find_enemy_in_world()
-		var threat_close: bool = false
-		if threat != null:
-			# 18 tiles is wide enough to cover a typical squad approach
-			# without making the shardling freeze for every distant scout.
-			var threat_dist: float = position.distance_to(threat.position) / float(main.GRID_SIZE)
-			threat_close = threat_dist <= 18.0
-		if not threat_close:
+		if not _ferox_has_nearby_lumina_threat():
 			var rebuild_anchor: Vector2i = _ferox_step_rebuild(delta)
 			if rebuild_anchor != Vector2i(-1, -1):
 				return
@@ -1269,18 +1263,13 @@ func _ai_movement_tick(delta: float) -> void:
 	if build_anchor != Vector2i(-1, -1):
 		_ai_step_toward_grid(build_anchor, _AI_BUILD_REACH_TILES, delta)
 		return
-	# Priority 2: hostile units (the auto-fire tick handles the trigger).
-	var enemy: Node2D = _ai_find_enemy_in_world()
-	if enemy != null:
-		_ai_step_toward_world(enemy.position, _AI_FIRE_REACH_TILES, delta)
-		return
-	# Priority 3: damaged friendlies — the heal handler does the rest.
+	# Priority 2: damaged friendlies — the heal handler does the rest.
 	var heal_anchor: Vector2i = _ai_find_heal_anchor()
 	if heal_anchor != Vector2i(-1, -1):
 		_ai_step_toward_grid(heal_anchor, _AI_HEAL_REACH_TILES, delta)
 		return
-	# Priority 4: drift back to spawn core and idle there.
-	if spawn_core_anchor != Vector2i(-1, -1) and main.placed_buildings.has(spawn_core_anchor):
+	# Priority 3: drift back to spawn core and idle there.
+	if spawn_core_anchor != Vector2i(-1, -1) and main.has_method("is_lumina_core_anchor") and main.is_lumina_core_anchor(spawn_core_anchor):
 		_ai_step_toward_grid(spawn_core_anchor, _AI_IDLE_REACH_TILES, delta)
 		return
 	# Spawn core gone — pick a fresh LUMINA core as the fallback home.
@@ -1504,29 +1493,30 @@ func _ferox_finish_rebuild() -> void:
 func _ai_find_build_target() -> Vector2i:
 	# Cached: only re-scan the work_order every _AI_BUILD_CACHE_REFRESH
 	# seconds. The cache validates that the cached anchor is still
-	# queued and not paused — if it isn't, force a fresh scan.
+	# queued, not paused, and still matches the queue-priority target.
 	if _cached_build_age < _AI_BUILD_CACHE_REFRESH and _cached_build_anchor != Vector2i(-1, -1):
 		if "work_order" in main and main.work_order.has(_cached_build_anchor):
 			var paused_c: Dictionary = main.work_paused if "work_paused" in main else {}
-			if not paused_c.has(_cached_build_anchor):
+			if not paused_c.has(_cached_build_anchor) and _cached_build_anchor == _ai_pick_priority_work_anchor():
 				return _cached_build_anchor
 	_cached_build_age = 0.0
+	_cached_build_anchor = _ai_pick_priority_work_anchor()
+	return _cached_build_anchor
+
+
+func _ai_pick_priority_work_anchor() -> Vector2i:
 	if not ("work_order" in main) or main.work_order.is_empty():
-		_cached_build_anchor = Vector2i(-1, -1)
-		return _cached_build_anchor
+		return Vector2i(-1, -1)
 	var paused: Dictionary = main.work_paused if "work_paused" in main else {}
-	var best := Vector2i(-1, -1)
-	var best_d2: float = INF
+	var first_unpaused := Vector2i(-1, -1)
 	for a in main.work_order:
 		if paused.has(a):
 			continue
-		var c: Vector2 = main.grid_to_world(a) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
-		var d2: float = position.distance_squared_to(c)
-		if d2 < best_d2:
-			best_d2 = d2
-			best = a
-	_cached_build_anchor = best
-	return best
+		if first_unpaused == Vector2i(-1, -1):
+			first_unpaused = a
+		if is_in_build_range(a):
+			return a
+	return first_unpaused
 
 
 func _ai_find_enemy_in_world() -> Node2D:
@@ -1575,6 +1565,16 @@ func _ai_find_enemy_in_world() -> Node2D:
 			best = e
 	_cached_enemy = best
 	return best
+
+
+func _ferox_has_nearby_lumina_threat() -> bool:
+	if not ferox_controlled or main == null:
+		return false
+	var threat: Node2D = _ai_find_enemy_in_world()
+	if threat == null:
+		return false
+	var threat_dist: float = position.distance_to(threat.position) / float(main.GRID_SIZE)
+	return threat_dist <= _FEROX_PRESSURE_RADIUS_TILES
 
 
 func _ai_find_heal_anchor() -> Vector2i:
@@ -1665,6 +1665,8 @@ func _ai_apply_facing(delta: float) -> void:
 
 
 func _ai_fire_tick(delta: float) -> void:
+	if ai_controlled:
+		return
 	if main.world_paused:
 		return
 	_ai_fire_cooldown -= delta
@@ -1980,6 +1982,16 @@ func _chassis_size() -> Vector2:
 	return drone_texture.get_size() * scale_mult
 
 
+## Returns the world-space center of the shardling's front edge. The work
+## diamond is centered here so half of it sits on the sprite and half
+## protrudes past the nose.
+func get_build_diamond_world_pos() -> Vector2:
+	var chassis: Vector2 = _chassis_size()
+	var offset_y: float = chassis.y * SPRITE_PIVOT_OFFSET
+	var front_local := Vector2(0.0, chassis.y * 0.5 + offset_y)
+	return position + front_local.rotated(facing_angle)
+
+
 ## Returns the offset (in chassis-local pre-rotation pixels) of the
 ## left or right turret head's center. Both sit on the chassis Y-axis
 ## center line, X-offset from the body edges by `TURRET_HEAD_INSET_PX`.
@@ -2110,6 +2122,11 @@ func _handle_healing(delta: float) -> void:
 	# it was already locked to so the world doesn't pop visually when
 	# the player pauses mid-heal.
 	if "world_paused" in main and main.world_paused:
+		return
+	if ferox_controlled and _ferox_has_nearby_lumina_threat():
+		heal_target = null
+		_heal_beam_active = false
+		_cached_heal_anchor = Vector2i(-1, -1)
 		return
 	var range_px: float = HEAL_RANGE_TILES * float(main.GRID_SIZE)
 	var aim_pos: Vector2

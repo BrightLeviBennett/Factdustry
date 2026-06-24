@@ -54,6 +54,7 @@ var _planet_select_scene: PackedScene
 var title_texture: Texture2D
 var button_texture: Texture2D
 var database_ui: CanvasLayer
+var settings_ui: CanvasLayer
 
 # --- LOADING SCREEN ---
 var _loading_screen: Control
@@ -410,6 +411,18 @@ func _on_button_pressed(label: String) -> void:
 		"Mods":
 			print("MainMenu: Mods — not yet implemented")
 		"Settings":
-			print("MainMenu: Settings — not yet implemented")
+			_open_settings()
 		"Multiplayer":
 			print("MainMenu: Multiplayer — not yet implemented")
+
+
+func _open_settings() -> void:
+	if settings_ui == null:
+		var script = load("res://main/settings_ui.gd")
+		if script == null:
+			push_warning("MainMenu: Settings UI script could not be loaded.")
+			return
+		settings_ui = CanvasLayer.new()
+		settings_ui.set_script(script)
+		add_child(settings_ui)
+	settings_ui.show_settings()

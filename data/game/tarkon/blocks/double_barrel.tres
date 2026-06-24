@@ -28,25 +28,14 @@ turret_chassis_sprite = ExtResource("6_chassis")
 barrel_count = 2
 barrel_spacing = 80.0
 max_health = 260.0
-shield_shape = null
-shield_size = null
-shield_offset = null
-shield_blocks = null
-shield_health = null
-shield_cooldown = null
-shield_idle_power = null
-shield_recharge_power = null
-shield_water_boost_mult = null
 build_cost = {
 "copper": 100,
 "silicon": 30
 }
 build_time = 3.0
-factory_recipes = null
 attack_speed = 0.5
 attack_range = 7.5
 ammo_types = Array[Resource]([SubResource("Resource_db_ammo")])
-liquid_capacity = 10.0
 boosters = [{
 "item_id": &"mat_water",
 "multiplier": 2.5,
@@ -54,5 +43,4 @@ boosters = [{
 "stat": "Fire Rate"
 }]
 max_stored_items = 30
-mend_radius = null
-mend_amount = null
+liquid_capacity = 10.0

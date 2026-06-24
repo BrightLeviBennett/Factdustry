@@ -1,0 +1,16 @@
+Godot Engine v4.6.2.stable.official.71f334935 - https://godotengine.org
+
+ERROR: Condition "ret != noErr" is true. Returning: ""
+   at: get_system_ca_certificates (platform/macos/os_macos.mm:1028)
+global_cursor ready
+TechTree loaded: 359 nodes
+SaveManager: Campaign loaded (15 sectors with resources)
+Registry: Essentials loaded — 24 items, 203 blocks, 31 units, 20 fluids, 33 tiles
+Registry: All loaded — 15 status_effects, 25 sectors, 3 planets
+SettingsUI: Loaded settings from user://settings.json
+MainMenu: PlanetSelect pre-built (hidden)
+MainMenu: Sector maps queued for pre-load
+MainMenu: PlanetSelect pre-instantiated + parked
+PlanetSelect: 24 sectors on 642-cell geodesic grid for 'Tarkon'
+WARNING: ObjectDB instances leaked at exit (run with --verbose for details).
+   at: cleanup (core/object/object.cpp:2641)

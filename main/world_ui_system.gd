@@ -50,6 +50,10 @@ var landing_pad_pick_slot: int = -1
 var payload_source_pending_id: StringName = &""
 var payload_source_pending_anchor: Vector2i = Vector2i.ZERO
 
+# Lane Shifter route sub-menu state.
+var lane_shifter_pending_bank: int = 0
+var lane_shifter_pending_route: int = 0
+
 
 @onready var main: Node2D = get_node_or_null("/root/Main")
 var _bsys: Node2D
@@ -108,6 +112,32 @@ func _build_menu_items(type: String, grid_pos: Vector2i) -> void:
 			if not item.conveyable:
 				continue
 			world_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name})
+	elif type == "lane_shifter":
+		var block_id_ls: StringName = main.placed_buildings.get(grid_pos, &"")
+		var block_data_ls = Registry.get_block(block_id_ls)
+		var bank_count: int = 2 if block_data_ls and block_data_ls.id == &"large_lane_shifter" else 1
+		for bank_idx in range(bank_count):
+			for route_idx in range(2):
+				var label_prefix: String = ""
+				if bank_count > 1:
+					label_prefix = "L " if bank_idx == 0 else "R "
+				world_menu_items.append({
+					"id": StringName("__ls_%d_%d" % [bank_idx, route_idx]),
+					"icon": null,
+					"name": "%sRoute %d" % [label_prefix, route_idx + 1],
+					"bank": bank_idx,
+					"route": route_idx,
+				})
+	elif type == "lane_shifter_route":
+		world_menu_items.append({"id": &"__clear", "icon": null, "name": "Clear", "kind": "clear"})
+		world_menu_items.append({"id": &"__mode_transfer", "icon": null, "name": "Transfer", "kind": "mode", "mode": "transfer"})
+		world_menu_items.append({"id": &"__mode_priority", "icon": null, "name": "Priority", "kind": "mode", "mode": "priority"})
+		world_menu_items.append({"id": &"__mode_overflow", "icon": null, "name": "Overflow", "kind": "mode", "mode": "overflow"})
+		world_menu_items.append({"id": &"__mode_balance", "icon": null, "name": "Balance", "kind": "mode", "mode": "balance"})
+		for item in Registry.items_list:
+			if not item.conveyable:
+				continue
+			world_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name, "kind": "item"})
 	elif type == "constructor":
 		var block_id = main.placed_buildings.get(grid_pos, &"")
 		var block_data = Registry.get_block(block_id)
@@ -397,6 +427,28 @@ func apply_selection(index: int) -> void:
 				logistics.duct_bridge_filters.erase(world_menu_pos)
 			else:
 				logistics.duct_bridge_filters[world_menu_pos] = selected_id
+	elif world_menu_type == "lane_shifter":
+		lane_shifter_pending_bank = int(world_menu_items[index].get("bank", 0))
+		lane_shifter_pending_route = int(world_menu_items[index].get("route", 0))
+		var anchor_ls: Vector2i = world_menu_pos
+		close()
+		open("lane_shifter_route", anchor_ls)
+		return
+	elif world_menu_type == "lane_shifter_route":
+		if logistics:
+			var kind_ls: String = str(world_menu_items[index].get("kind", ""))
+			if kind_ls == "clear":
+				logistics.set_lane_shifter_route(world_menu_pos, lane_shifter_pending_bank, lane_shifter_pending_route, &"")
+			elif kind_ls == "mode":
+				logistics.set_lane_shifter_route_mode(
+					world_menu_pos,
+					lane_shifter_pending_bank,
+					lane_shifter_pending_route,
+					str(world_menu_items[index].get("mode", "transfer")))
+			elif kind_ls == "item":
+				var current_route: Dictionary = logistics.get_lane_shifter_route(world_menu_pos, lane_shifter_pending_bank, lane_shifter_pending_route)
+				var current_mode: String = str(current_route.get("mode", "transfer"))
+				logistics.set_lane_shifter_route(world_menu_pos, lane_shifter_pending_bank, lane_shifter_pending_route, selected_id, current_mode)
 	elif world_menu_type == "constructor":
 		if logistics:
 			if logistics.constructor_state.has(world_menu_pos):
@@ -591,6 +643,10 @@ func cell_dim() -> Vector2:
 		return Vector2(140.0, 32.0) * ssf
 	if world_menu_type == "launchpad" or world_menu_type == "landing_pad":
 		return Vector2(220.0, 32.0) * ssf
+	if world_menu_type == "lane_shifter":
+		return Vector2(92.0, 32.0) * ssf
+	if world_menu_type == "lane_shifter_route":
+		return Vector2(112.0, 32.0) * ssf
 	return Vector2(world_menu_cell_size, world_menu_cell_size)
 
 
@@ -602,6 +658,8 @@ func col_count() -> int:
 	if world_menu_type == "landing_pad_slot":
 		return 1
 	if world_menu_type == "launchpad" or world_menu_type == "landing_pad":
+		return 1
+	if world_menu_type == "lane_shifter" or world_menu_type == "lane_shifter_route":
 		return 1
 	return world_menu_columns
 
@@ -902,7 +960,8 @@ func draw_world_menu(ci: CanvasItem) -> void:
 
 		var entry: Dictionary = world_menu_items[i]
 
-		if (world_menu_type == "sorter" or world_menu_type == "archive" or world_menu_type == "duct_filter") and i == 0:
+		if (world_menu_type == "sorter" or world_menu_type == "archive" or world_menu_type == "duct_filter"
+				or world_menu_type == "lane_shifter_route") and i == 0:
 			var cx := cell_pos.x + dim.x * 0.5
 			var cy := cell_pos.y + dim.y * 0.5
 			var hs: float = minf(dim.x, dim.y) * 0.25
@@ -928,7 +987,8 @@ func draw_world_menu(ci: CanvasItem) -> void:
 				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + font_size * 0.35)
 				ci.draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_LEFT, avail_w, font_size, Color.WHITE)
 			elif world_menu_type == "launchpad" or world_menu_type == "landing_pad" \
-					or world_menu_type == "recipe_select" or world_menu_type == "landing_pad_slot":
+					or world_menu_type == "recipe_select" or world_menu_type == "landing_pad_slot" \
+					or world_menu_type == "lane_shifter" or world_menu_type == "lane_shifter_route":
 				var lp_font_size := 13
 				var text_pos := cell_pos + Vector2(side_pad, dim.y * 0.5 + lp_font_size * 0.35)
 				ci.draw_string(font, text_pos, full_name, HORIZONTAL_ALIGNMENT_CENTER, avail_w, lp_font_size, Color.WHITE)

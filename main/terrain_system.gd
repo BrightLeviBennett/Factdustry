@@ -169,6 +169,10 @@ var _floor_dirty_chunks: Dictionary = {}
 ## (static) draw list and the GPU re-samples per frame.
 var _water_canvas: Node2D = null
 var _water_material: ShaderMaterial = null
+var _slag_canvas: Node2D = null
+var _slag_material: ShaderMaterial = null
+var _slag_meshes: Array = []
+var _slag_mesh_dirty := false
 ## Dedicated canvas for the sector-edge floor fade, sitting at z=2 — ABOVE the
 ## water canvas (z=1) so the dark gradient veils water tiles too. Drawn on the
 ## terrain canvas (z=0) it was painted UNDER the water and hidden on water
@@ -302,6 +306,19 @@ func _ready() -> void:
 	_water_canvas.z_index = 1   # above terrain (0), below building/logistics layers
 	_water_canvas.draw.connect(_draw_water_layer)
 	add_child(_water_canvas)
+	_slag_canvas = Node2D.new()
+	_slag_canvas.name = "SlagCanvas"
+	_slag_canvas.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	var slag_shader: Shader = load("res://shaders/slag_animated.gdshader") if ResourceLoader.exists("res://shaders/slag_animated.gdshader") else null
+	if slag_shader:
+		_slag_material = ShaderMaterial.new()
+		_slag_material.shader = slag_shader
+		_slag_material.set_shader_parameter("world_tile_size", float(main.GRID_SIZE))
+		_slag_canvas.material = _slag_material
+	_slag_canvas.z_as_relative = false
+	_slag_canvas.z_index = 1
+	_slag_canvas.draw.connect(_draw_slag_layer)
+	add_child(_slag_canvas)
 	# Sector-edge fade canvas — z=2 so the dark gradient overlays BOTH the
 	# floor (z=0) and the water surface (z=1), but still sits below buildings
 	# (z=50). Repainted in lockstep with the terrain canvas (see _draw).
@@ -334,6 +351,8 @@ func _process(delta: float) -> void:
 	if not w_paused and _water_material != null:
 		_water_anim_time += delta
 		_water_material.set_shader_parameter("anim_time", _water_anim_time)
+		if _slag_material != null:
+			_slag_material.set_shader_parameter("anim_time", _water_anim_time)
 	queue_redraw()
 
 
@@ -638,6 +657,7 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 	else:
 		var was_floor: bool = floor_tiles.has(grid_pos)
 		var was_water: bool = _cell_is_water(grid_pos)
+		var was_slag: bool = _cell_is_slag(grid_pos)
 		# Overwriting a vent/geyser footprint cell with a plain floor — dissolve
 		# the 3x3 first, else its stale origin keeps the multi-tile renderer
 		# drawing this new tile across the full 3x3.
@@ -654,6 +674,8 @@ func place_tile(grid_pos: Vector2i, tile_id: StringName) -> void:
 		# touches water — painting land away from water skips it entirely.
 		if was_water or _edit_touches_water(grid_pos, tile_id):
 			_water_depth_dirty = true
+		if was_slag or _edit_touches_slag(grid_pos, tile_id):
+			_slag_mesh_dirty = true
 		# Painting a non-water floor over a water cell: drop it from the
 		# water render NOW so the (z=1) water mesh stops drawing over the
 		# new floor. The full depth/shore recompute is deferred during an
@@ -696,6 +718,7 @@ func remove_tile(grid_pos: Vector2i) -> void:
 		walls_changed.emit()
 	elif floor_tiles.has(grid_pos):
 		var was_water_r: bool = _cell_is_water(grid_pos)
+		var was_slag_r: bool = _cell_is_slag(grid_pos)
 		floor_tiles.erase(grid_pos)
 		# Floor-ores (e.g. surface coal) sit ON the floor — once the
 		# floor is gone, the ore has nothing to rest on. Mirrors how
@@ -710,6 +733,8 @@ func remove_tile(grid_pos: Vector2i) -> void:
 		# Water depth only when the erased cell was water or borders water.
 		if was_water_r or _edit_touches_water(grid_pos, &""):
 			_water_depth_dirty = true
+		if was_slag_r or _edit_touches_slag(grid_pos, &""):
+			_slag_mesh_dirty = true
 		# See place_tile: erasing a water cell must immediately drop it from
 		# the water render so the stale water quad doesn't keep covering the
 		# now-bare cell mid-stroke (full recompute is deferred).
@@ -796,6 +821,28 @@ func _cell_is_water(cell: Vector2i) -> bool:
 		return false
 	var d = Registry.get_tile(floor_tiles[cell])
 	return d != null and d.is_liquid and d.tags.has("water")
+
+
+func _is_slag_tile(data: TerrainTileData) -> bool:
+	return data != null and data.is_liquid and data.tags.has("slag")
+
+
+func _cell_is_slag(cell: Vector2i) -> bool:
+	if not floor_tiles.has(cell):
+		return false
+	return _is_slag_tile(Registry.get_tile(floor_tiles[cell]))
+
+
+func _edit_touches_slag(cell: Vector2i, new_tile_id: StringName) -> bool:
+	if new_tile_id != &"":
+		var nd = Registry.get_tile(new_tile_id)
+		if _is_slag_tile(nd):
+			return true
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			if _cell_is_slag(cell + Vector2i(dx, dy)):
+				return true
+	return false
 
 
 ## True if an edit at `cell` could affect water-depth shading: the placed tile
@@ -1096,6 +1143,13 @@ func _draw_water_layer() -> void:
 		_water_canvas.draw_mesh(bucket["mesh"], bucket["texture"])
 
 
+func _draw_slag_layer() -> void:
+	if _slag_canvas == null:
+		return
+	for bucket in _slag_meshes:
+		_slag_canvas.draw_mesh(bucket["mesh"], bucket["texture"])
+
+
 ## Renders the batched sector-edge fade mesh onto `_fade_canvas` (z=2), above
 ## the water layer. `_ensure_white_pixel_tex()` instead of null: Godot 4's
 ## canvas path drops per-vertex Color modulation when no texture is supplied,
@@ -1189,6 +1243,27 @@ func _rebuild_water_meshes() -> void:
 	# this only fires on terrain change.
 	if _water_canvas != null:
 		_water_canvas.queue_redraw()
+
+
+func _rebuild_slag_meshes() -> void:
+	_slag_meshes.clear()
+	var ss := _sector_script_ref()
+	var by_tex: Dictionary = {}
+	for pos in floor_tiles:
+		if ss and ss.is_tile_hidden(pos):
+			continue
+		var data: TerrainTileData = Registry.get_tile(floor_tiles[pos])
+		if not _is_slag_tile(data) or data.icon == null:
+			continue
+		if not by_tex.has(data.icon):
+			by_tex[data.icon] = []
+		by_tex[data.icon].append([pos, data.opacity])
+	for tex in by_tex:
+		var mesh: ArrayMesh = _build_flat_quad_mesh(by_tex[tex])
+		if mesh != null:
+			_slag_meshes.append({"texture": tex, "mesh": mesh})
+	if _slag_canvas != null:
+		_slag_canvas.queue_redraw()
 
 
 ## Builds a batched textured quad mesh with uniform white vertex color
@@ -1446,14 +1521,18 @@ func clear_render_caches() -> void:
 	_water_corner_t.clear()
 	_water_meshes.clear()
 	_sand_meshes.clear()
+	_slag_meshes.clear()
 	_floor_chunk_meshes.clear()
 	_floor_dirty_chunks.clear()
 	_fade_mesh = null
 	_floor_edge_dirty = true
 	_water_depth_dirty = true
+	_slag_mesh_dirty = true
 	_floor_geom_dirty = true
 	if _water_canvas != null:
 		_water_canvas.queue_redraw()
+	if _slag_canvas != null:
+		_slag_canvas.queue_redraw()
 	if _fade_canvas != null:
 		_fade_canvas.queue_redraw()
 	queue_redraw()
@@ -1486,7 +1565,7 @@ func _rebuild_floor_chunk(chunk: Vector2i) -> void:
 ##   • hidden tiles (sector-script fog override)
 ##   • multi-tile origins (vents/geysers draw themselves)
 ##   • wall tiles (owned by the building/wall pass)
-##   • water tiles (drawn corner-shaded via `_water_meshes`) — tested on the
+##   • animated liquids (water / slag) — tested on the
 ##     ACTUAL tile data, not the deferred `_water_depth_t` set, so a freshly
 ##     painted non-water floor over an old water cell shows immediately.
 func _classify_floor_cell(grid_pos: Vector2i, ss, by_tex: Dictionary, ore_by_tex: Dictionary, colored_cells: Array) -> void:
@@ -1499,7 +1578,7 @@ func _classify_floor_cell(grid_pos: Vector2i, ss, by_tex: Dictionary, ore_by_tex
 		return
 	if data.is_wall():
 		return
-	if data.is_liquid and data.tags.has("water"):
+	if data.is_liquid and (data.tags.has("water") or data.tags.has("slag")):
 		return
 	if data.icon != null:
 		if not by_tex.has(data.icon):
@@ -1720,6 +1799,9 @@ func _draw() -> void:
 		# many cells the stroke painted over water this frame.
 		_water_mesh_dirty = false
 		_rebuild_water_meshes()
+	if _slag_mesh_dirty:
+		_slag_mesh_dirty = false
+		_rebuild_slag_meshes()
 	# Rebuild floor-tile geometry meshes so newly painted/erased tiles show up.
 	# A full rebuild (load / bulk edit / fog reveal) wins; otherwise only the
 	# chunks touched by recent tile edits are re-baked (~256 cells each), so a
@@ -1727,6 +1809,8 @@ func _draw() -> void:
 	if _floor_geom_dirty:
 		_floor_geom_dirty = false
 		_rebuild_floor_meshes()
+		_slag_mesh_dirty = false
+		_rebuild_slag_meshes()
 	elif not _floor_dirty_chunks.is_empty():
 		for ch in _floor_dirty_chunks:
 			_rebuild_floor_chunk(ch)

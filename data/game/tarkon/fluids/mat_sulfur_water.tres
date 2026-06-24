@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="FluidData" format=3 uid="uid://cxm1jrhwpehmf"]
 
 [ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/tarkon/fluids/fluid_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://bu8i8auir6v8" path="res://textures/resources/sulfurWater.png" id="1_apn4c"]
+[ext_resource type="Texture2D" uid="uid://pfp5fnodonyi" path="res://textures/resources/sulfurWater.png" id="1_apn4c"]
 
 [resource]
 script = ExtResource("1")

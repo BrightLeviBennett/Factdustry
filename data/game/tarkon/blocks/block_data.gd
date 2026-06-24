@@ -200,11 +200,19 @@ enum BlockCategory { CORE, EXTRACTORS, FACTORIES, POWER, TURRETS, WALLS, UNITS, 
 ## any cell of its footprint sits on a `vent_tile` floor tile, at `vent_rate`
 ## units/sec — generalising the built-in vent/geyser → water condenser.
 @export var vent_tile: StringName = &""
+## Additional floor tiles this vent extractor accepts besides `vent_tile`
+## (e.g. a Water Extractor that works on both sand and blackstone). Placement
+## and production both treat any of these as valid.
+@export var vent_tiles: PackedStringArray = []
 ## Fluid id this vent extractor produces (empty = use the default water
 ## condenser behaviour).
 @export var vent_fluid: StringName = &""
 ## Production rate (fluid units / second) on a matching vent tile.
 @export var vent_rate: float = 4.0
+
+## True if `tile_id` is a floor this vent extractor sits/produces on.
+func vent_accepts(tile_id: StringName) -> bool:
+	return tile_id != &"" and (tile_id == vent_tile or vent_tiles.has(String(tile_id)))
 
 
 @export_group("Combat")

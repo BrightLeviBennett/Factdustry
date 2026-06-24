@@ -23,10 +23,10 @@ var enemy_script = preload("res://main/enemy_unit.gd")
 # --- PATHFINDING ---
 var astar: AStarGrid2D              # GROUND layer pathfinding (main thread — WASD only)
 var astar_crawler: AStarGrid2D      # CRAWLER layer pathfinding (main thread — WASD only)
-var astar_hover: AStarGrid2D        # HOVER layer pathfinding (blocked only by large terrain walls)
+var astar_hover: AStarGrid2D        # HOVER layer pathfinding (blocked by buildings + terrain walls)
 var astar_naval: AStarGrid2D        # NAVAL layer pathfinding (ONLY navigable water is non-solid)
 var _crawler_passable_walls: Dictionary = {}  # Vector2i -> true (wall groups <= 8 thick)
-var _hover_passable_walls: Dictionary = {}    # Vector2i -> true (wall groups <= 8 thick)
+var _hover_passable_walls: Dictionary = {}    # Deprecated compatibility stub; hover no longer crosses terrain walls.
 var _path_worker: PathfindingWorker  # Background thread for enemy/unit pathfinding
 
 # --- WATER-PLATFORM RESERVATIONS ---
@@ -151,9 +151,10 @@ const _PRESSURE_PER_FAB: float = 0.08
 const _PRESSURE_SOFT_CAP: float = 10.0
 
 # --- COLLISION ---
-## Separation strength — how hard units push apart per frame
-## Separation strength — how hard units push apart per frame
-const SEPARATION_STRENGTH := 150.0
+## Manager-wide de-stack pass. Individual moving units also apply a local
+## separation step, but idle/controlled/special-path units can miss that path;
+## this keeps every same-layer unit from remaining overlapped.
+const ENABLE_GLOBAL_UNIT_COLLISION_RESOLVE := true
 ## Minimum distance to avoid division-by-zero; units closer than this get a random nudge
 const MIN_SEPARATION_DIST := 0.5
 
@@ -328,6 +329,8 @@ var _silhouette_material: ShaderMaterial = null
 # Set by `_paint_ctrl_overlay_for_unit` and consumed by the deferred
 # `_draw_ctrl_hover_silhouette` callback. Cleared each frame.
 var _silhouette_targets: Array = []
+const _CONTROL_SELECT_EFFECT_DURATION: float = 0.5
+var _control_select_effects: Array = []
 
 # --- COMMAND INDICATORS ---
 # The most recent right-click command. When a group is told to move,
@@ -350,6 +353,7 @@ func _process(delta: float) -> void:
 
 	# Spin the Ctrl-hover arrow ring CCW regardless of paused state.
 	_ctrl_hover_phase += delta * 1.5
+	_tick_control_select_effects(delta)
 	if _ctrl_hover_overlay:
 		_ctrl_hover_overlay.queue_redraw()
 
@@ -366,8 +370,9 @@ func _process(delta: float) -> void:
 		path_update_timer = path_update_interval
 		_update_all_enemy_paths()
 	_tick_enemy_squads(delta)
-	_resolve_unit_collisions(delta)
 	_update_controlled_entity(delta)
+	if ENABLE_GLOBAL_UNIT_COLLISION_RESOLVE:
+		_resolve_unit_collisions(delta)
 	queue_redraw()
 
 
@@ -391,9 +396,10 @@ func _input(event: InputEvent) -> void:
 		if main.placed_buildings.has(grid_pos):
 			var core_bid: StringName = main.placed_buildings[grid_pos]
 			var core_d: BlockData = Registry.get_block(core_bid)
+			var core_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 			if core_d and core_d.tags.has("core") \
-					and main.get_building_faction(grid_pos) == main.Faction.LUMINA:
-				var core_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+					and main.has_method("is_lumina_core_anchor") \
+					and main.is_lumina_core_anchor(core_anchor):
 				# If currently driving a unit/turret/crane, hand control back to
 				# the drone FIRST — otherwise `respawn_at_core` would teleport
 				# the (hidden) drone to the core while the player stayed locked
@@ -473,7 +479,7 @@ func _input(event: InputEvent) -> void:
 				return
 		var lm_world := get_global_mouse_position()
 		if event.pressed:
-			if controlled_entity == null and main.selected_building == &"":
+			if main.selected_building == &"":
 				_box_selecting = true
 				_box_start = lm_world
 				_box_end = lm_world
@@ -826,6 +832,7 @@ func _take_control_of_unit(unit: Node2D) -> void:
 	unit.target_building = null
 	unit.path = PackedVector2Array()
 	unit.path_index = 0
+	_spawn_control_select_effect_for_unit(unit)
 
 
 func _take_control_of_turret(grid_pos: Vector2i) -> void:
@@ -834,6 +841,7 @@ func _take_control_of_turret(grid_pos: Vector2i) -> void:
 	controlled_entity = grid_pos
 	controlled_type = "turret"
 	_control_attack_timer = 0.0
+	_spawn_control_select_effect_for_block(grid_pos)
 	# Tell CombatSystem to skip auto-targeting for this turret
 	var combat = _combat_sys_ref()
 	if combat:
@@ -845,6 +853,7 @@ func _take_control_of_crane(anchor: Vector2i) -> void:
 	_deselect_all()
 	controlled_entity = anchor
 	controlled_type = "crane"
+	_spawn_control_select_effect_for_block(anchor)
 	# Initialize crane state in building system
 	var building_sys = _building_sys_ref()
 	if building_sys and "crane_states" in building_sys:
@@ -1197,6 +1206,11 @@ func _update_controlled_unit(delta: float) -> void:
 	var move_x: float = Input.get_axis("move_left", "move_right")
 	var move_y: float = Input.get_axis("move_up", "move_down")
 	var velocity := Vector2(move_x, move_y)
+	var movement_speed: float = unit.move_speed
+	if unit.has_method("_module_rooted") and unit._module_rooted():
+		velocity = Vector2.ZERO
+	elif unit.has_method("_afterburner_active") and unit._afterburner_active():
+		movement_speed *= 3.0
 
 	# Tank steering: WASD picks a desired world-direction; the tank's motion
 	# is delegated to the unit's shared tank-steer helper so manual driving
@@ -1205,7 +1219,7 @@ func _update_controlled_unit(delta: float) -> void:
 	# tank into a blocked cell.
 	if unit.data and unit.data.tank_steering and velocity.length() > 0:
 		var desired_face: float = velocity.normalized().angle()
-		var forward_step: float = unit.move_speed * delta
+		var forward_step: float = movement_speed * delta
 		# Clear auto-targets while the player is actively driving.
 		unit.path = PackedVector2Array()
 		unit.path_index = 0
@@ -1223,11 +1237,8 @@ func _update_controlled_unit(delta: float) -> void:
 			unit.position.y = clampf(unit.position.y, 0.0, map_hf)
 		else:
 			# Revert translation (not rotation) if the new cell is solid.
-			var grid_chk: AStarGrid2D = _get_grid_for_unit(unit)
-			var cg: Vector2i = main.world_to_grid(unit.position)
-			cg.x = clampi(cg.x, 0, main.GRID_WIDTH - 1)
-			cg.y = clampi(cg.y, 0, main.GRID_HEIGHT - 1)
-			if grid_chk.is_point_solid(cg):
+			var radius_tank: float = unit.unit_size if "unit_size" in unit else main.GRID_SIZE * 0.4
+			if not is_circle_walkable(unit.position, radius_tank, unit.data.movement_layer, unit.team):
 				unit.position = pre_pos
 			else:
 				var map_wg: float = main.GRID_SIZE * main.GRID_WIDTH
@@ -1238,7 +1249,7 @@ func _update_controlled_unit(delta: float) -> void:
 
 	if velocity.length() > 0:
 		velocity = velocity.normalized()
-		var new_pos: Vector2 = unit.position + velocity * unit.move_speed * delta
+		var new_pos: Vector2 = unit.position + velocity * movement_speed * delta
 
 		# Movement layer restrictions
 		if unit.data and unit.data.movement_layer == UnitData.MovementLayer.FLYING:
@@ -1272,7 +1283,8 @@ func _update_controlled_unit(delta: float) -> void:
 		unit.target_building = null
 
 	# --- Fire on left mouse held (like the player drone does) ---
-	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &"":
+	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and main.selected_building == &"" \
+			and not unit_mode_active:
 		var mouse_pos: Vector2 = get_global_mouse_position()
 		# Mount-equipped units (e.g. Wade) fire through their weapon mounts —
 		# each ready head shoots from its own muzzle toward the cursor, so the
@@ -1284,9 +1296,11 @@ func _update_controlled_unit(delta: float) -> void:
 			if unit.has_method("fire_weapon_mounts_at"):
 				unit.fire_weapon_mounts_at(mouse_pos)
 		elif _control_attack_timer <= 0:
+			if unit.has_method("_module_weapons_disabled") and unit._module_weapons_disabled():
+				return
 			var combat = _combat_sys_ref()
 			if combat and unit.data:
-				_control_attack_timer = unit.attack_cooldown
+				_control_attack_timer = unit._effective_attack_cooldown() if unit.has_method("_effective_attack_cooldown") else unit.attack_cooldown
 				var direction: Vector2 = (mouse_pos - unit.position).normalized()
 				var fire_range: float = unit.data.detection_range
 				var target_pos: Vector2 = unit.position + direction * fire_range
@@ -1429,7 +1443,7 @@ func _update_controlled_turret(_delta: float) -> void:
 				combat.emit_fire_pellets(fire_pos, shot_dir.angle(), fire_max_range, fire_max_range, profile, null, "none", float(profile["damage"]) * float(profile["unit_mult"]), main.Faction.LUMINA)
 				# Muzzle flame cone (Flarecaster), aimed where the head points.
 				if bool(profile["muzzle_flame"]) and combat.has_method("spawn_muzzle_flame"):
-					combat.spawn_muzzle_flame(fire_pos, shot_dir.angle())
+					combat.spawn_muzzle_flame(fire_pos, shot_dir.angle(), -1.0, 8, 1.0, float(profile["flame_cone_width_bonus_degrees"]) * 0.5)
 
 
 # =========================
@@ -1457,7 +1471,8 @@ func is_world_pos_walkable(world_pos: Vector2, ml: int, team: int = -1) -> bool:
 		UnitData.MovementLayer.NAVAL:
 			astar_grid = astar_naval
 	if astar_grid != null and astar_grid.is_point_solid(grid):
-		return false
+		if not _is_projected_bridge_cell(grid, team, ml):
+			return false
 	# Hostile unit-blocking shields count as solid for the asking
 	# team. `team == -1` means "no faction filter" (legacy callers
 	# that don't care about shields).
@@ -1467,6 +1482,35 @@ func is_world_pos_walkable(world_pos: Vector2, ml: int, team: int = -1) -> bool:
 			if shield_sys.is_unit_blocked_at(world_pos, team):
 				return false
 	return true
+
+
+func _is_projected_bridge_cell(grid: Vector2i, asking_team: int, ml: int) -> bool:
+	if asking_team == -1:
+		return false
+	if ml != UnitData.MovementLayer.GROUND and ml != UnitData.MovementLayer.CRAWLER:
+		return false
+	var terrain = _terrain_ref()
+	if terrain == null or not terrain.has_method("get_liquid_at"):
+		return false
+	var liquid = terrain.get_liquid_at(grid)
+	if liquid == null or not liquid.is_liquid:
+		return false
+	var peers: Array = player_units if asking_team == UnitData.Team.PLAYER else enemies
+	var cell_center: Vector2 = main.grid_to_world(grid) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+	for u in peers:
+		if not is_instance_valid(u) or u.is_dead:
+			continue
+		if not u.has_method("is_bridge_projecting") or not u.is_bridge_projecting():
+			continue
+		var forward: Vector2 = Vector2.RIGHT.rotated(u.facing_angle if "facing_angle" in u else 0.0)
+		var rel: Vector2 = cell_center - u.position
+		var along: float = rel.dot(forward)
+		if along < 0.0 or along > float(main.GRID_SIZE) * 8.0:
+			continue
+		var side: float = absf(rel.dot(Vector2(-forward.y, forward.x)))
+		if side <= float(main.GRID_SIZE) * 1.5:
+			return true
+	return false
 
 
 ## Radius-aware walkability: true only if a unit of half-extent `radius`
@@ -1611,7 +1655,7 @@ var _cached_solidity: Dictionary = {}
 
 
 ## Single-pass scan of the grid that produces every solid set + the
-## water-bias weight list, all three movement layers at once.
+## water-bias weight list, all movement layers at once.
 ##
 ## Replaces what used to be ~6 independent full-grid loops scattered
 ## across `_setup_astar` and `_setup_path_worker` (each ~GRID_WIDTH ×
@@ -1662,7 +1706,8 @@ func _build_solidity_sets() -> Dictionary:
 	# the flag should let units pass through. Match the old behaviour
 	# exactly (old code applied this filter to all three layers).
 	# `_recompute_crawler_wall_passability` then prunes small wall
-	# segments out of the crawler / hover layers in a second pass.
+	# segments out of the crawler layer in a second pass. Hover keeps
+	# terrain walls solid.
 	if terrain_sys:
 		for grid_pos in wall_dict:
 			var tile_data = Registry.get_tile(wall_dict[grid_pos])
@@ -1776,9 +1821,9 @@ func _setup_astar() -> void:
 	for gp in naval_set:
 		astar_naval.set_point_solid(gp, true)
 
-	# Analyze terrain wall segments for crawler / hover passability.
-	# Mutates astar_crawler and astar_hover in place: small wall segments
-	# get flipped back to non-solid for crawlers, medium ones for hover.
+	# Analyze terrain wall segments for crawler passability.
+	# Mutates astar_crawler in place: small wall segments get flipped
+	# back to non-solid for crawlers. Hover keeps terrain walls solid.
 	_recompute_crawler_wall_passability()
 
 
@@ -1803,8 +1848,6 @@ func _setup_path_worker() -> void:
 	# participate in wall pruning — walls are always solid for it.)
 	for gp in _crawler_passable_walls:
 		crawler_set.erase(gp)
-	for gp in _hover_passable_walls:
-		hover_set.erase(gp)
 
 	# Flatten to typed arrays for the worker API.
 	var ground_solids: Array[Vector2i] = []
@@ -1860,24 +1903,26 @@ func _poll_path_results() -> void:
 			if not main.placed_buildings.has(target_bldg):
 				target_bldg = null
 
-		# Empty path + valid target = target unreachable (player walled off
-		# the base). Without a fallback the enemy parks forever:
-		# `_try_attack` rejects the range check, never re-requests a path,
-		# and the FEROX wave looks like it gave up. Retarget to the
-		# nearest LUMINA structure we CAN actually walk to (typically the
-		# closest segment of the wall the player just built) so the unit
-		# chews its way in instead of sitting idle.
-		if path.is_empty() and target_bldg != null and unit.team == UnitData.Team.ENEMY:
-			var reachable = _find_nearest_reachable_building(unit, main.Faction.LUMINA)
-			if reachable != null:
-				_path_worker.request_path(
-					unit.get_instance_id(),
-					main.world_to_grid(unit.position),
-					reachable as Vector2i,
-					unit.data.movement_layer if unit.data else 0,
-					_pack_grid_pos(reachable),
-				)
-				continue
+			# Empty path + valid target = target unreachable (player walled off
+			# the base). Without a fallback the enemy parks forever:
+			# `_try_attack` rejects the range check, never re-requests a path,
+			# and the FEROX wave looks like it gave up. Retarget to the
+			# nearest LUMINA structure we CAN actually walk to (typically the
+			# closest segment of the wall the player just built) so the unit
+			# chews its way in instead of sitting idle.
+			if path.is_empty() and target_bldg != null and unit.team == UnitData.Team.ENEMY:
+				var reachable = _find_nearest_reachable_building(unit, main.Faction.LUMINA)
+				if reachable == null:
+					reachable = _find_nearest_breach_building(unit, main.Faction.LUMINA)
+				if reachable != null:
+					_path_worker.request_path(
+						unit.get_instance_id(),
+						main.world_to_grid(unit.position),
+						reachable as Vector2i,
+						unit.data.movement_layer if unit.data else 0,
+						_pack_grid_pos(reachable),
+					)
+					continue
 
 		unit.set_path(path, target_bldg)
 
@@ -1900,7 +1945,7 @@ func _poll_path_results() -> void:
 ## a placed building of `target_faction` — first one found is returned
 ## as a guaranteed-reachable target. Returns null if the unit is
 ## genuinely walled into a void pocket.
-const REACHABLE_BFS_BUDGET := 4000
+const REACHABLE_BFS_BUDGET := 16000
 func _find_nearest_reachable_building(unit: Node2D, target_faction: int) -> Variant:
 	var grid: AStarGrid2D = _get_grid_for_unit(unit)
 	if grid == null:
@@ -2003,10 +2048,10 @@ func _on_building_placed(_block_id: StringName, grid_pos: Vector2i) -> void:
 						if _path_worker:
 							_path_worker.queue_set_solid(tile_pos, false, "crawler")
 							_path_worker.queue_set_weight(tile_pos, 1.0, "crawler")
-					# HOVER: same passability rule as ground. Hover units
-					# can't skim over a wall or a factory the way they used
-					# to — only over water (handled at setup time).
-					if is_passable:
+					# HOVER: passable buildings are open only when they are
+					# not covering a terrain wall. Hover can skim over
+					# water/platforms, but terrain walls still block it.
+					if is_passable and not _is_blocking_terrain_wall(tile_pos):
 						astar_hover.set_point_solid(tile_pos, false)
 						if _path_worker:
 							_path_worker.queue_set_solid(tile_pos, false, "hover")
@@ -2028,18 +2073,20 @@ func on_building_destroyed(grid_pos: Vector2i) -> void:
 	_base_dirty = true
 	# Always non-solid for ground / crawler (water is no longer hard-
 	# blocked). Water cells get their pathfinding penalty restored so
-	# units once again prefer dry routes around the cell. Hover ignores
-	# water — clears to walkable regardless of the floor.
-	astar.set_point_solid(grid_pos, false)
-	astar_crawler.set_point_solid(grid_pos, false)
-	astar_hover.set_point_solid(grid_pos, false)
+	# units once again prefer dry routes around the cell. If a pathfinding
+	# terrain wall exists underneath, restore its solidity for ground/hover
+	# immediately; crawler legality is recomputed by wall-thickness rules.
+	var terrain_wall_solid: bool = _is_blocking_terrain_wall(grid_pos)
+	astar.set_point_solid(grid_pos, terrain_wall_solid)
+	astar_crawler.set_point_solid(grid_pos, terrain_wall_solid and not _crawler_passable_walls.has(grid_pos))
+	astar_hover.set_point_solid(grid_pos, terrain_wall_solid)
 	var restored_weight: float = _water_cell_weight(grid_pos)
 	astar.set_point_weight_scale(grid_pos, restored_weight)
 	astar_crawler.set_point_weight_scale(grid_pos, restored_weight)
 	if _path_worker:
-		_path_worker.queue_set_solid(grid_pos, false, "ground")
-		_path_worker.queue_set_solid(grid_pos, false, "crawler")
-		_path_worker.queue_set_solid(grid_pos, false, "hover")
+		_path_worker.queue_set_solid(grid_pos, terrain_wall_solid, "ground")
+		_path_worker.queue_set_solid(grid_pos, terrain_wall_solid and not _crawler_passable_walls.has(grid_pos), "crawler")
+		_path_worker.queue_set_solid(grid_pos, terrain_wall_solid, "hover")
 		_path_worker.queue_set_weight(grid_pos, restored_weight, "ground")
 		_path_worker.queue_set_weight(grid_pos, restored_weight, "crawler")
 	# Drop any reservation on a destroyed platform cell.
@@ -2096,6 +2143,34 @@ func spawn_enemy_for_fabricator(spawn_position: Vector2, unit_id: StringName, fa
 	return enemy
 
 
+func _find_nearest_breach_building(unit: Node2D, target_faction: int) -> Variant:
+	var from: Vector2i = main.world_to_grid(unit.position)
+	from.x = clampi(from.x, 0, main.GRID_WIDTH - 1)
+	from.y = clampi(from.y, 0, main.GRID_HEIGHT - 1)
+	var best: Variant = null
+	var best_score: float = 1.0e20
+	for grid_pos in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+		if anchor != grid_pos:
+			continue
+		if main.get_building_faction(anchor) != target_faction:
+			continue
+		var bdata = Registry.get_block(main.placed_buildings[grid_pos])
+		if bdata == null or bdata.tags.has("platform") or bdata.tags.has("no_pathfinding"):
+			continue
+		var dx: int = absi(grid_pos.x - from.x)
+		var dy: int = absi(grid_pos.y - from.y)
+		var score: float = float(maxi(dx, dy))
+		if bdata.tags.has("wall"):
+			score -= 12.0
+		elif bdata.tags.has("defense"):
+			score -= 4.0
+		if score < best_score:
+			best_score = score
+			best = grid_pos
+	return best
+
+
 ## Spawns an enemy of the given UnitData ID at the given position.
 func spawn_enemy(spawn_position: Vector2, unit_id: StringName = &"basic_cell") -> void:
 	var enemy: Node2D = _spawn_enemy_internal(spawn_position, unit_id)
@@ -2117,7 +2192,7 @@ func _spawn_enemy_internal(spawn_position: Vector2, unit_id: StringName, spawn_f
 	var ml_e: int = unit_data.movement_layer if unit_data else 0
 	var corrected_e: Variant = _validate_spawn_position(spawn_position, ml_e)
 	if corrected_e == null:
-		push_warning("UnitManager: refused to spawn '%s' — no walkable cell near %s" % [unit_id, str(spawn_position)])
+		print_verbose("UnitManager: refused to spawn '%s' - no walkable cell near %s" % [unit_id, str(spawn_position)])
 		return null
 	var enemy = Node2D.new()
 	enemy.set_script(enemy_script)
@@ -2143,7 +2218,7 @@ func spawn_player_unit(spawn_position: Vector2, unit_id: StringName, spawn_facin
 	var ml_p: int = unit_data.movement_layer
 	var corrected_p: Variant = _validate_spawn_position(spawn_position, ml_p)
 	if corrected_p == null:
-		push_warning("UnitManager: refused to spawn '%s' — no walkable cell near %s" % [unit_id, str(spawn_position)])
+		print_verbose("UnitManager: refused to spawn '%s' - no walkable cell near %s" % [unit_id, str(spawn_position)])
 		return
 	var unit = Node2D.new()
 	unit.set_script(enemy_script)
@@ -3299,117 +3374,124 @@ func get_nearby_units(world_pos: Vector2, layer: int) -> Array:
 	return out
 
 
-func _resolve_unit_collisions(delta: float) -> void:
-	# Group units by movement layer — only same-layer units push apart
-	var layer_units: Dictionary = {}  # int -> Array of Node2D
+## Cross-layer neighbour query for the global body collision pass. Movement
+## layers decide terrain/path rules, not whether two visible unit bodies should
+## be allowed to occupy the same space.
+func get_nearby_units_any_layer(world_pos: Vector2) -> Array:
+	_ensure_spatial_hash()
+	var out: Array = []
+	var cx: int = int(floor(world_pos.x / _spatial_cell_size))
+	var cy: int = int(floor(world_pos.y / _spatial_cell_size))
+	for layer in range(UnitData.MovementLayer.size()):
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				var bucket = _spatial_hash.get(Vector3i(layer, cx + dx, cy + dy), null)
+				if bucket != null:
+					out.append_array(bucket)
+	return out
+
+
+func _resolve_unit_collisions(_delta: float) -> void:
+	# Manual control can move a unit after another unit has already touched
+	# the per-frame neighbour cache. Rebuild here so collision uses the
+	# current positions, not the pre-control-move snapshot.
+	_spatial_hash_frame = -1
+	var all_units: Array[Node2D] = []
 	for u in enemies:
 		if is_instance_valid(u) and not u.is_dead:
-			var layer: int = u.data.movement_layer if u.data else 0
-			if not layer_units.has(layer):
-				layer_units[layer] = []
-			layer_units[layer].append(u)
+			all_units.append(u)
 	for u in player_units:
 		if is_instance_valid(u) and not u.is_dead:
-			var layer: int = u.data.movement_layer if u.data else 0
-			if not layer_units.has(layer):
-				layer_units[layer] = []
-			layer_units[layer].append(u)
+			all_units.append(u)
+	var count := all_units.size()
+	if count < 2:
+		return
 
 	var map_w: float = main.GRID_SIZE * main.GRID_WIDTH
 	var map_h: float = main.GRID_SIZE * main.GRID_HEIGHT
 
-	# Resolve collisions within each layer independently
-	for layer in layer_units:
-		var units_in_layer: Array = layer_units[layer]
-		var count := units_in_layer.size()
-		if count < 2:
-			continue
+	var offsets: Array[Vector2] = []
+	offsets.resize(count)
+	for i in range(count):
+		offsets[i] = Vector2.ZERO
+	var idx_of: Dictionary = {}
+	for i in range(count):
+		idx_of[all_units[i].get_instance_id()] = i
 
-		var offsets: Array[Vector2] = []
-		offsets.resize(count)
-		for i in range(count):
-			offsets[i] = Vector2.ZERO
-		# Map each unit to its layer-array index so a spatial-hash neighbour
-		# (returned as a Node2D) can update the right `offsets[j]`.
-		var idx_of: Dictionary = {}
-		for i in range(count):
-			idx_of[units_in_layer[i].get_instance_id()] = i
+	for i in range(count):
+		var a: Node2D = all_units[i]
+		var radius_a: float = a.unit_size
+		var a_moving: bool = (a.path.size() > 0 and a.path_index < a.path.size()) \
+				or a == controlled_entity
+		var neighbours: Array = get_nearby_units_any_layer(a.position)
+		for b: Node2D in neighbours:
+			var j_v: int = idx_of.get(b.get_instance_id(), -1)
+			if j_v <= i:
+				continue
+			var j: int = j_v
+			var radius_b: float = b.unit_size
+			var b_moving: bool = (b.path.size() > 0 and b.path_index < b.path.size()) \
+					or b == controlled_entity
+			var min_dist := radius_a + radius_b
+			var diff := a.position - b.position
+			var dist := diff.length()
 
-		for i in range(count):
-			var a: Node2D = units_in_layer[i]
-			# Use 60% of visual size for collision so units don't lock as easily
-			var radius_a: float = a.unit_size
-			var a_moving: bool = a.path.size() > 0 and a.path_index < a.path.size()
-			# Only test local neighbours instead of every unit in the layer.
-			# The 3×3 cell query is a superset of all units within interaction
-			# range, so results match the old full O(n²) scan exactly — we
-			# still enforce the i<j rule below so each pair resolves once with
-			# the same radius/ordering semantics as before.
-			var neighbours: Array = get_nearby_units(a.position, layer)
-			for b: Node2D in neighbours:
-				var j_v: int = idx_of.get(b.get_instance_id(), -1)
-				if j_v <= i:
-					# Skip self (j == i) and pairs already handled when the
-					# lower-indexed unit was `a` (j < i).
+			if dist < min_dist:
+				var push_dir: Vector2
+				if dist < MIN_SEPARATION_DIST:
+					var angle := randf() * TAU
+					push_dir = Vector2(cos(angle), sin(angle))
+				else:
+					push_dir = diff / dist
+
+				var overlap := min_dist - dist
+				var pair_has_controlled: bool = a == controlled_entity or b == controlled_entity
+
+				if pair_has_controlled:
+					var shove := push_dir * (overlap + 1.0)
+					var controlled_share := 0.25
+					if a == controlled_entity:
+						offsets[i] += shove * controlled_share
+						offsets[j] -= shove * (1.0 - controlled_share)
+					else:
+						offsets[i] += shove * (1.0 - controlled_share)
+						offsets[j] -= shove * controlled_share
 					continue
-				var j: int = j_v
-				var radius_b: float = b.unit_size * 0.6
-				var b_moving: bool = b.path.size() > 0 and b.path_index < b.path.size()
-				var min_dist := radius_a + radius_b
-				var diff := a.position - b.position
-				var dist := diff.length()
 
-				if dist < min_dist:
-					var push_dir: Vector2
-					if dist < MIN_SEPARATION_DIST:
-						# Nearly perfectly stacked — random nudge direction
-						var angle := randf() * TAU
-						push_dir = Vector2(cos(angle), sin(angle))
-					else:
-						push_dir = diff / dist
+				if dist < min_dist * 0.3:
+					var snap := push_dir * (overlap * 0.5 + 1.0)
+					offsets[i] += snap * 0.5
+					offsets[j] -= snap * 0.5
+					continue
 
-					var overlap := min_dist - dist
+				var push := push_dir * (overlap / 1.5)
+				var a_share: float
+				var b_share: float
+				if a_moving and not b_moving:
+					a_share = 0.05
+					b_share = 0.95
+				elif b_moving and not a_moving:
+					a_share = 0.95
+					b_share = 0.05
+				elif a_moving and b_moving:
+					push *= 0.45
+					a_share = 0.5
+					b_share = 0.5
+				else:
+					a_share = 0.5
+					b_share = 0.5
 
-					# Deep overlap (> 70% inside each other): hard snap apart
-					# so units can never get permanently stuck inside each other.
-					if dist < min_dist * 0.3:
-						var snap := push_dir * (overlap * 0.5 + 1.0)
-						offsets[i] += snap * 0.5
-						offsets[j] -= snap * 0.5
-						continue
+				offsets[i] += push * a_share
+				offsets[j] -= push * b_share
 
-					var push := push_dir * overlap * SEPARATION_STRENGTH * delta
-
-					# Asymmetric push: moving units shove idle units out of the
-					# way; two moving units slip past each other easily.
-					var a_share: float
-					var b_share: float
-					if a_moving and not b_moving:
-						# A is moving, B is idle → A barely deflected, B shoved aside
-						a_share = 0.05
-						b_share = 0.95
-					elif b_moving and not a_moving:
-						# B is moving, A is idle → B barely deflected, A shoved aside
-						a_share = 0.95
-						b_share = 0.05
-					elif a_moving and b_moving:
-						# Both moving → weak push so they slip past each other
-						push *= 0.15
-						a_share = 0.5
-						b_share = 0.5
-					else:
-						# Both idle → normal symmetric push
-						a_share = 0.5
-						b_share = 0.5
-
-					offsets[i] += push * a_share
-					offsets[j] -= push * b_share
-
-		for i in range(count):
-			if offsets[i] != Vector2.ZERO:
-				units_in_layer[i].position += offsets[i]
-				units_in_layer[i].position.x = clampf(units_in_layer[i].position.x, 0.0, map_w)
-				units_in_layer[i].position.y = clampf(units_in_layer[i].position.y, 0.0, map_h)
+	for i in range(count):
+		if offsets[i] != Vector2.ZERO:
+			var u_apply: Node2D = all_units[i]
+			var ml_apply: int = u_apply.data.movement_layer if u_apply.data else 0
+			var team_apply: int = u_apply.team if "team" in u_apply else -1
+			u_apply.position = resolve_move(u_apply.position, offsets[i], u_apply.unit_size, ml_apply, team_apply)
+			u_apply.position.x = clampf(u_apply.position.x, 0.0, map_w)
+			u_apply.position.y = clampf(u_apply.position.y, 0.0, map_h)
 
 
 # =========================
@@ -3429,7 +3511,11 @@ func _is_ground_passable_building(grid_pos: Vector2i) -> bool:
 	# Platforms are also passable — they're the primary way for ground units
 	# to cross water bodies. The per-platform "one unit at a time" gate is
 	# enforced separately via _water_platform_reservation.
-	if data.transport_speed > 0 or data.transports_fluid:
+	if data.transport_speed > 0:
+		return true
+	var fluid_machine: bool = data.tags.has("pump") or data.tags.has("condenser") \
+			or data.tags.has("vent_powered")
+	if data.transports_fluid and not fluid_machine:
 		return true
 	if data.tags.has("platform"):
 		return true
@@ -3481,6 +3567,14 @@ func _is_water_floor(grid_pos: Vector2i) -> bool:
 	return td.is_liquid and td.tags.has("water")
 
 
+func _is_blocking_terrain_wall(grid_pos: Vector2i) -> bool:
+	var terrain = _terrain_ref()
+	if terrain == null or not terrain.wall_tiles.has(grid_pos):
+		return false
+	var td: TerrainTileData = Registry.get_tile(terrain.wall_tiles[grid_pos])
+	return td != null and td.blocks_pathfinding
+
+
 ## True if a "platform" building (tag = "platform") sits at `grid_pos`.
 ## Walking onto a platform cell that's over water is gated through the
 ## reservation system so only one ground unit crosses each cell at a time.
@@ -3521,10 +3615,10 @@ func _get_grid_for_unit(unit: Node2D) -> AStarGrid2D:
 
 
 # =========================
-# CRAWLER / HOVER WALL ANALYSIS
+# CRAWLER WALL ANALYSIS
 # =========================
 
-## Recomputes which terrain wall cells are passable for crawlers and hover units.
+## Recomputes which terrain wall cells are passable for crawlers.
 ## Building blocks never block crawlers — only terrain walls do.
 ## LOCAL thickness of one wall cell = the smallest of its four contiguous
 ## wall runs through that cell: horizontal, vertical, and both diagonals.
@@ -3598,8 +3692,8 @@ func _recompute_crawler_wall_passability() -> void:
 	# thick blob, and a convex corner exposes a thin diagonal run so the
 	# crawler can slice across the corner tip (you cross the thin slice, you
 	# don't care about the blob behind it). Mirrors Mindustry's "crawl over
-	# thin walls" rule, which is per-tile. Reset everything solid first, then
-	# carve out thin cells.
+	# thin walls" rule, which is per-tile. Hover units are intentionally not
+	# carved here: terrain walls remain solid for them.
 	_crawler_passable_walls.clear()
 	_hover_passable_walls.clear()
 	for wall_pos in all_wall_positions:
@@ -3611,9 +3705,6 @@ func _recompute_crawler_wall_passability() -> void:
 		if _wall_cell_thickness(wall_pos, all_wall_positions) <= 8:
 			astar_crawler.set_point_solid(wall_pos, false)
 			_crawler_passable_walls[wall_pos] = true
-			if astar_hover:
-				astar_hover.set_point_solid(wall_pos, false)
-				_hover_passable_walls[wall_pos] = true
 
 	# Also recompute the NAVAL grid's solids in lockstep (terrain edits can
 	# add/remove water and walls). Naval is the inverse of the others, so
@@ -3625,7 +3716,7 @@ func _recompute_crawler_wall_passability() -> void:
 		for gp in naval_set:
 			astar_naval.set_point_solid(gp, true)
 
-	# Sync worker thread grids — full rebuild for crawler + hover walls
+	# Sync worker thread grids — full rebuild for terrain-wall changes.
 	if _path_worker:
 		# Dedup with a Dictionary set — `Array.has()` here is O(n), so the
 		# old version was O(n²) over every wall and dominated sector-load
@@ -3651,9 +3742,11 @@ func _recompute_crawler_wall_passability() -> void:
 				crawler_solids.append(wall_pos)
 
 		var hover_solids: Array[Vector2i] = []
+		for grid_pos in main.placed_buildings:
+			if not _is_ground_passable_building(grid_pos):
+				hover_solids.append(grid_pos)
 		for wall_pos in all_wall_positions:
-			if not _hover_passable_walls.has(wall_pos):
-				hover_solids.append(wall_pos)
+			hover_solids.append(wall_pos)
 
 		var naval_solids: Array[Vector2i] = []
 		for gp in naval_set:
@@ -3705,6 +3798,7 @@ func _draw_ctrl_hover_on_overlay() -> void:
 	_silhouette_targets.clear()
 	if _ctrl_hover_silhouette:
 		_ctrl_hover_silhouette.queue_redraw()
+	_draw_control_select_effects()
 	# Only show the overlay while the modifier is held and the cursor is
 	# over a valid target — controlling an entity no longer paints it.
 	if main.is_ui_blocking():
@@ -3731,6 +3825,119 @@ func _draw_ctrl_hover_on_overlay() -> void:
 		return
 	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 	_paint_ctrl_overlay_for_block(anchor, bdata, 0.45)
+
+
+func _tick_control_select_effects(delta: float) -> void:
+	for i in range(_control_select_effects.size() - 1, -1, -1):
+		var e: Dictionary = _control_select_effects[i]
+		e["age"] = float(e.get("age", 0.0)) + delta
+		if float(e["age"]) >= float(e.get("duration", _CONTROL_SELECT_EFFECT_DURATION)):
+			_control_select_effects.remove_at(i)
+		else:
+			_control_select_effects[i] = e
+
+
+func _spawn_control_select_effect_for_unit(unit: Node2D) -> void:
+	if not is_instance_valid(unit):
+		return
+	var udata = unit.data if "data" in unit else null
+	var tex: Texture2D = null
+	var size := Vector2.ONE * maxf(float(unit.unit_size) * 2.0 if "unit_size" in unit else 36.0, 24.0)
+	var angle: float = float(unit.facing_angle) + PI * 0.5 if "facing_angle" in unit else 0.0
+	if udata != null:
+		var scale_f: float = (udata.sprite_scale if udata.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
+		var spr_off: float = udata.sprite_angle_offset if "sprite_angle_offset" in udata else 0.0
+		if udata.base_sprite:
+			tex = udata.base_sprite
+			size = tex.get_size() * scale_f
+			angle += spr_off
+		elif udata.head_sprite:
+			tex = udata.head_sprite
+			size = tex.get_size() * scale_f
+			angle += spr_off
+	_control_select_effects.append({
+		"kind": "unit",
+		"target": unit,
+		"pos": unit.position,
+		"tex": tex,
+		"size": size,
+		"angle": angle,
+		"radius": maxf(maxf(size.x, size.y) * 0.5, float(unit.unit_size) if "unit_size" in unit else 18.0),
+		"age": 0.0,
+		"duration": _CONTROL_SELECT_EFFECT_DURATION,
+	})
+
+
+func _spawn_control_select_effect_for_block(grid_pos: Vector2i) -> void:
+	if main == null or not main.placed_buildings.has(grid_pos):
+		return
+	var block_id: StringName = main.placed_buildings[grid_pos]
+	var bdata = Registry.get_block(block_id)
+	if bdata == null:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var gs: float = float(main.GRID_SIZE)
+	var size := Vector2(
+		float(maxi(bdata.grid_size.x, 1)) * gs,
+		float(maxi(bdata.grid_size.y, 1)) * gs,
+	)
+	var center: Vector2 = main.grid_to_world(anchor) + size * 0.5
+	var tex: Texture2D = bdata.base_sprite
+	if tex == null:
+		tex = bdata.icon
+	_control_select_effects.append({
+		"kind": "block",
+		"pos": center,
+		"tex": tex,
+		"size": size,
+		"angle": 0.0,
+		"radius": maxf(size.x, size.y) * 0.5,
+		"age": 0.0,
+		"duration": _CONTROL_SELECT_EFFECT_DURATION,
+	})
+
+
+func _draw_control_select_effects() -> void:
+	if _ctrl_hover_overlay == null:
+		return
+	for e in _control_select_effects:
+		var duration: float = maxf(float(e.get("duration", _CONTROL_SELECT_EFFECT_DURATION)), 0.001)
+		var progress: float = clampf(float(e.get("age", 0.0)) / duration, 0.0, 1.0)
+		var fout: float = 1.0 - progress
+		var slope: float = sin(progress * PI)
+		var pos: Vector2 = e.get("pos", Vector2.ZERO)
+		var target = e.get("target", null)
+		if target is Node2D and is_instance_valid(target):
+			pos = (target as Node2D).position
+		var size: Vector2 = e.get("size", Vector2.ONE * 32.0)
+		var tex: Texture2D = e.get("tex")
+		var icon_alpha: float = 0.85 * fout
+		if tex != null:
+			var angle: float = float(e.get("angle", 0.0))
+			_ctrl_hover_overlay.draw_set_transform(pos, angle, Vector2.ONE)
+			_ctrl_hover_overlay.draw_texture_rect(
+				tex,
+				Rect2(-size * 0.5, size),
+				false,
+				Color(1.0, 0.86, 0.22, icon_alpha)
+			)
+			_ctrl_hover_overlay.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		else:
+			_ctrl_hover_overlay.draw_circle(pos, maxf(size.x, size.y) * 0.5, Color(1.0, 0.86, 0.22, icon_alpha * 0.45))
+		var radius: float = maxf(float(e.get("radius", maxf(size.x, size.y) * 0.5)), 8.0)
+		var line_alpha: float = 0.90 * slope
+		_draw_control_select_diamond(pos, radius * 2.0 * fout, Color(1.0, 0.92, 0.25, line_alpha), maxf(1.0, slope * 2.0))
+		_draw_control_select_diamond(pos, radius * 3.0 * fout, Color(1.0, 0.92, 0.25, line_alpha * 0.85), maxf(1.0, slope * 4.0))
+
+
+func _draw_control_select_diamond(center: Vector2, radius: float, color: Color, width: float) -> void:
+	if _ctrl_hover_overlay == null or radius <= 0.25 or color.a <= 0.0:
+		return
+	var pts := PackedVector2Array()
+	for i in range(5):
+		var angle: float = float(i % 4) * PI * 0.5
+		pts.append(center + Vector2.from_angle(angle) * radius)
+	_ctrl_hover_overlay.draw_polyline(pts, color, width, true)
 
 
 ## Block-style overlay: a flat yellow rect at the block's exact
@@ -3774,7 +3981,7 @@ func _paint_ctrl_overlay_for_block(anchor: Vector2i, bdata: BlockData, alpha: fl
 		did_silhouette = true
 
 	if not did_silhouette:
-		var fill := Color(1.0, 0.85, 0.2, 1.0)
+		var fill := Color(1.0, 0.85, 0.2, alpha)
 		_ctrl_hover_overlay.draw_rect(Rect2(top_left, size), fill, true)
 	_paint_ctrl_hover_arrows(center, radius + 10.0)
 
@@ -3841,7 +4048,7 @@ func _paint_ctrl_overlay_for_unit(unit: Node2D, alpha: float) -> void:
 	if _ctrl_hover_overlay == null:
 		return
 	var udata = unit.data if "data" in unit else null
-	var fill := Color(1.0, 0.85, 0.2, 1.0)
+	var fill := Color(1.0, 0.85, 0.2, alpha)
 	var u_radius: float = float(unit.unit_size) if "unit_size" in unit else 18.0
 	if udata != null and (udata.base_sprite != null or udata.head_sprite != null):
 		var scale_f: float = (udata.sprite_scale if udata.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR

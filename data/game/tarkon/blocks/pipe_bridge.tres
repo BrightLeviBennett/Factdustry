@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"pipe_bridge"
 display_name = "Pipe Bridge"
-description = "Bridges fluid pipes over other infrastructure."
+description = "Bridges fluids over buildings."
 icon = ExtResource("1_l2ukh")
 category = 9
 tags = PackedStringArray("fluid", "transport", "bridge", "linkable")

@@ -808,6 +808,13 @@ func _update_tooltip(nid: StringName, screen_pos: Vector2) -> void:
 	if not is_open:
 		tooltip_panel.visible = false
 		return
+	# The description is an autowrap Label whose height depends on its width.
+	# The first reset_size() above runs before the label has been laid out to
+	# its final 260px width, so it measures the text as if wrapped narrower
+	# and over-reserves vertical space (the panel ends up much taller than the
+	# text). Now that layout has settled, re-measure so the panel hugs the
+	# real wrapped text height.
+	tooltip_panel.reset_size()
 	var vps = get_viewport().get_visible_rect().size
 	var ts = tooltip_panel.size
 	var tx = screen_pos.x + 16; var ty = screen_pos.y + 16
@@ -946,8 +953,23 @@ func _show_ui() -> void:
 	resource_panel.visible = true
 	_update_resource_panel()
 	await get_tree().process_frame
-	# Scroll to core_shard
-	if node_positions.has(&"core_shard"):
+	# Restore the pan + zoom the player left the tree at last time, so
+	# reopening returns to the same spot instead of snapping back to
+	# core_shard. First open (no saved view) still centers on core_shard.
+	var saved: Dictionary = SaveManager.tech_tree_view if "tech_tree_view" in SaveManager else {}
+	if saved.has("h") and saved.has("v"):
+		# Apply the saved zoom first so the canvas (and therefore the
+		# scrollbar range) is sized correctly before we set the offsets —
+		# otherwise the ScrollContainer clamps them to the old bounds.
+		if saved.has("zoom"):
+			zoom_level = clampf(float(saved["zoom"]), ZOOM_MIN, ZOOM_MAX)
+			tree_canvas.custom_minimum_size = canvas_size * zoom_level
+			tree_canvas.queue_redraw()
+			await get_tree().process_frame
+		tree_scroll.scroll_horizontal = int(saved["h"])
+		tree_scroll.scroll_vertical = int(saved["v"])
+	elif node_positions.has(&"core_shard"):
+		# Scroll to core_shard
 		var sp = node_positions[&"core_shard"] * zoom_level
 		var vs = tree_scroll.size
 		tree_scroll.scroll_horizontal = int(sp.x - vs.x / 2.0)
@@ -958,6 +980,14 @@ func _on_resources_changed(_res: Dictionary) -> void:
 
 
 func _hide_ui() -> void:
+	# Remember where the player was looking + their zoom so the next open
+	# returns here (persisted into campaign.json on the next save).
+	if tree_scroll != null and "tech_tree_view" in SaveManager:
+		SaveManager.tech_tree_view = {
+			"h": tree_scroll.scroll_horizontal,
+			"v": tree_scroll.scroll_vertical,
+			"zoom": zoom_level,
+		}
 	is_open = false
 	root_panel.visible = false
 	tooltip_panel.visible = false

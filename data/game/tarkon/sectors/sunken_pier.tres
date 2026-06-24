@@ -5,8 +5,8 @@
 [resource]
 script = ExtResource("1")
 id = &"sunken_pier"
-display_name = "Sunken Pier"
-description = "A half-drowned dock district. Rising water has swallowed most of the old defenses — what's left clings to the rotting piers."
+display_name = "Marshy Peaks"
+description = "A flooded highland basin where mossy ridges rise above the marsh. Old defenses cling to the peaks while shallow water swallows the valleys below."
 planet_id = &"Tarkon"
 hex_q = -19
 hex_r = 0

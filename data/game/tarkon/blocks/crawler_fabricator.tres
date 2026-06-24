@@ -1,9 +1,9 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://c2bfv72qidi2l"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://ctkk08r4leem3" path="res://textures/blocks/units/CarawlerFabricator/CrawlerFabricatorBase.png" id="1_yrmgy"]
-[ext_resource type="Texture2D" uid="uid://bli1l13n655qd" path="res://textures/blocks/units/CarawlerFabricator/CrawlerFabricatorComplete.png" id="2_yvh4u"]
-[ext_resource type="Texture2D" uid="uid://dfagm5yv1457h" path="res://textures/blocks/units/FabricatorTop.png" id="4_yvh4u"]
+[ext_resource type="Texture2D" uid="uid://b4sptg00xwt2g" path="res://textures/blocks/units/CrawlerFabricator/CrawlerFabricatorBase.png" id="1_yrmgy"]
+[ext_resource type="Texture2D" uid="uid://cxwdrstq1px5s" path="res://textures/blocks/units/CrawlerFabricator/CrawlerFabricatorComplete.png" id="2_yvh4u"]
+[ext_resource type="Texture2D" uid="uid://uhhvwyue44gg" path="res://textures/blocks/units/FabricatorTop.png" id="4_yvh4u"]
 
 [resource]
 script = ExtResource("1")

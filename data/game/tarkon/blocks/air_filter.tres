@@ -6,7 +6,7 @@
 [resource]
 script = ExtResource("1")
 id = &"air_filter"
-display_name = "Air Filter"
+display_name = "Atmospheric Separator"
 description = "Filters atmospheric gases for specific element extraction."
 icon = ExtResource("2")
 category = 2

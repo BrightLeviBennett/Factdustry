@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"pipe_junction"
 display_name = "Pipe Junction"
-description = "Merges three fluid inputs into one output pipe."
+description = "Lets two seperate fluids cross each other without the need for a bridge."
 icon = ExtResource("1_6l0ea")
 category = 9
 tags = PackedStringArray("fluid", "transport", "junction")

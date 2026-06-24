@@ -1,12 +1,14 @@
 [gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://dcjp1etulw78k"]
 
 [ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://cpmgh0dt3v7ol" path="res://textures/sectors/SaltFlats.png" id="1_18fr5"]
 
 [resource]
 script = ExtResource("1")
 id = &"salt_flats"
 display_name = "Salt Flats"
 description = "The remmanants of a huge lake, now reduced to a huge flat plain of sand and salt. The enemy seems to be well settled, so capturing this sector will be quite hard. Due to the lack of vents here, you will need to use solar panels and combustion generators"
+icon = ExtResource("1_18fr5")
 planet_id = &"Tarkon"
 hex_q = -16
 hex_r = 3
@@ -14,4 +16,5 @@ available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand"
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray("zinc_deposits")
 required_sectors = PackedStringArray("sunken_pier")
+map_path = "res://data/game/tarkon/maps/SF.sector.json"
 tags = PackedStringArray("campaign", "sector")

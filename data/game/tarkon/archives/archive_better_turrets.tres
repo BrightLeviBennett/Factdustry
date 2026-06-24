@@ -5,4 +5,4 @@
 [resource]
 script = ExtResource("1")
 id = &"archive_better_turrets"
-display_name = "Archive: Better Turrets"
+display_name = "Archive: Advanced Turrets"

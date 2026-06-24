@@ -42,13 +42,13 @@ const float STRIPE_BOOST = 1.7;
 //   - the RIM wobbles strongly so the silhouette reads as wavy
 //   - the INTERIOR stripes get only a gentle nudge so they don't
 //     turn into a chaotic mess.
-const float WOBBLE_PERIOD_PX = 32.0; // wavelength → spacing between rim peaks
+const float WOBBLE_PERIOD_PX = 48.0; // wavelength -> spacing between rim peaks
 const float WOBBLE_AMP_RIM_PX = 6.0;
 const float WOBBLE_AMP_INTERIOR_PX = 1.0;
 // Pattern drift speed along the down-right diagonal. Smaller = slower.
 const float DRIFT_SPEED = 0.25;
 // Wobble speed — visibly moving but not jittery.
-const float WOBBLE_SPEED = 0.5;
+const float WOBBLE_SPEED = 0.75;
 
 void fragment() {
 	// UV is 0..1 across the PADDED sprite quad — convert to centred
@@ -115,7 +115,7 @@ void fragment() {
 	// pushed toward a saturated shield colour (yellow, NOT white)
 	// and full alpha. Brightened slightly for visibility against
 	// the translucent interior.
-	float rim_band = 2.0;
+	float rim_band = 5.0;
 	float rim_strength = smoothstep(rim_band, 0.0, edge_dist);
 	if (rim_strength > 0.0) {
 		vec3 rim_col = min(shield_color.rgb * 1.4, vec3(1.0));

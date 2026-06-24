@@ -23,6 +23,7 @@ projectile_color = Color(1, 0.85, 0.55, 1)
 trail_color = Color(1, 0.55, 0.25, 1)
 trail_length = 14.0
 muzzle_flash_scale = 1.4
+muzzle_flash_circles = true
 impact_effect_scale = 0.8
 metadata/_custom_type_script = "uid://mlvivi0chx0p"
 
@@ -43,7 +44,7 @@ build_cost = {
 "silicon": 30
 }
 build_time = 3.0
-attack_speed = 0.8
+attack_speed = 0.5
 attack_range = 7.5
 ammo_types = Array[Resource]([SubResource("Resource_740hx")])
 bullet_spread = 8.0

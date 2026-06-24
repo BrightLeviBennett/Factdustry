@@ -65,9 +65,9 @@ var _step_wait_timer: float = 0.0
 var _script_running := false
 
 ## Active "delay" actions. Each entry: {remaining: float, text: String,
-## action: Dictionary}. Counted down every frame in `_tick_delays`; while a
+## actions: Array}. Counted down every frame in `_tick_delays`; while a
 ## delay is pending it shows "<text>: <remaining>" in the objective panel, and
-## when it hits zero its nested `action` runs. Survives step changes and save/
+## when it hits zero its nested actions run. Survives step changes and save/
 ## load so a long delay isn't lost.
 var _active_delays: Array = []
 
@@ -767,9 +767,14 @@ func _invalidate_caches() -> void:
 	var terrain = get_node_or_null("/root/Main/TerrainSystem")
 	if terrain:
 		terrain._floor_edge_dirty = true
+		# Hidden floor tiles are skipped when terrain chunks are baked.
+		# Revealing a script-hidden area must therefore rebuild the floor
+		# geometry too, not just the edge-fade overlay.
+		terrain._floor_geom_dirty = true
 		# Water meshes skip hidden cells, so toggling visibility also
 		# invalidates the water bake.
 		terrain._water_depth_dirty = true
+		terrain._slag_mesh_dirty = true
 		terrain.queue_redraw()
 	# Update pathfinding grids so hidden tiles become impassable
 	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
@@ -1308,18 +1313,18 @@ func _execute_action(action: Dictionary) -> void:
 		"delay":
 			# Waits `seconds` (starting now), shows "<text>: <remaining>" in
 			# the objective panel for the duration, then runs the nested
-			# `action`. Multiple delays can run at once.
+			# `actions`. Multiple delays can run at once.
 			var dly_seconds: float = float(action.get("seconds", 1.0))
 			var dly_entry: Dictionary = {
 				"remaining": dly_seconds,
 				"text": String(action.get("text", "")),
-				"action": action.get("action", {}),
+				"actions": _get_delay_actions(action),
 			}
 			_active_delays.append(dly_entry)
 
 
 ## Counts down every active `delay` action; when one reaches zero it's removed
-## and its nested `action` runs (which may itself queue another delay).
+## and its nested actions run.
 func _tick_delays(delta: float) -> void:
 	if _active_delays.is_empty():
 		return
@@ -1334,10 +1339,20 @@ func _tick_delays(delta: float) -> void:
 		dly["remaining"] = float(dly["remaining"]) - delta
 		if dly["remaining"] <= 0.0:
 			_active_delays.remove_at(i)
-			var act = dly.get("action", {})
-			if act is Dictionary and not (act as Dictionary).is_empty():
-				_execute_action(act)
+			for act in _get_delay_actions(dly):
+				if act is Dictionary and not (act as Dictionary).is_empty():
+					_execute_action(act)
 		i -= 1
+
+
+func _get_delay_actions(source: Dictionary) -> Array:
+	var actions_value = source.get("actions", [])
+	if actions_value is Array:
+		return (actions_value as Array).duplicate(true)
+	var legacy_action = source.get("action", {})
+	if legacy_action is Dictionary and not (legacy_action as Dictionary).is_empty():
+		return [(legacy_action as Dictionary).duplicate(true)]
+	return []
 
 
 ## Formats a delay's remaining seconds for the objective panel. Whole seconds,

@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://dtuc6joi0chca"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b6lff88iflntq" path="res://textures/blocks/item transportation/Unloader.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"sealed_unloader"
+display_name = "Sealed Unloader"
+description = "Draws fluid from adjacent sealed containers and outputs it into a pipe in front."
+icon = ExtResource("2")
+category = 9
+tags = PackedStringArray("fluid", "fluid_unloader")
+color = Color(0.3, 0.55, 0.8, 1)
+top_sprite = ExtResource("2")
+max_health = 180.0
+build_cost = {
+"copper": 30,
+"graphite": 15,
+"silicon": 10
+}
+build_time = 1.0
+transport_speed = 25.0

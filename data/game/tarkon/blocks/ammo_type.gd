@@ -204,6 +204,21 @@ func is_powered() -> bool:
 ## Color of the projectile body
 @export var projectile_color: Color = Color.YELLOW
 
+## Bright inner/front layer of the projectile. Transparent = projectile_color.
+@export var projectile_front_color: Color = Color(0, 0, 0, 0)
+
+## Darker outer/back layer of the projectile. Transparent = derived from color.
+@export var projectile_back_color: Color = Color(0, 0, 0, 0)
+
+## Visual bullet width in pixels. 0 = derived from projectile_radius.
+@export var projectile_width: float = 0.0
+
+## Visual bullet length in pixels. 0 = derived from projectile_radius.
+@export var projectile_height: float = 0.0
+
+## How much the bullet length shrinks over its lifetime, Mindustry-style.
+@export_range(0.0, 1.0, 0.01) var projectile_shrink_y: float = 0.5
+
 ## Color of the projectile's trail (defaults to projectile_color if Color.BLACK)
 @export var trail_color: Color = Color.BLACK
 
@@ -213,12 +228,23 @@ func is_powered() -> bool:
 ## Scale of the muzzle flash (0 = no flash)
 @export var muzzle_flash_scale: float = 1.0
 
+## When true, the muzzle flash also gets the round extras — a hot core
+## circle, drifting smoke puffs and spark lines (shotgun look, e.g. the
+## Diffuse). When false, only the flash cone triangle is drawn.
+@export var muzzle_flash_circles: bool = false
+
 ## Scale of the impact effect (0 = no impact effect)
 @export var impact_effect_scale: float = 1.0
 
 ## When true, firing spits a short cone of flame particles out the muzzle
 ## (Mindustry's Scorch "shootSmallFlame" look). Used by the Flarecaster.
 @export var muzzle_flame: bool = false
+
+## Extra reach, in tiles, for continuous flame-emitter weapons using this ammo.
+@export var flame_range_bonus_tiles: float = 0.0
+
+## Extra total cone width, in degrees, for continuous flame-emitter weapons.
+@export var flame_cone_width_bonus_degrees: float = 0.0
 
 
 # =========================
@@ -228,5 +254,19 @@ func is_powered() -> bool:
 ## Returns the trail color, defaulting to the projectile color if not set.
 func get_trail_color() -> Color:
 	if trail_color == Color.BLACK:
-		return projectile_color
+		return get_projectile_back_color()
 	return trail_color
+
+
+## Returns the bright front layer color for procedural bullets.
+func get_projectile_front_color() -> Color:
+	if projectile_front_color.a <= 0.0:
+		return projectile_color
+	return projectile_front_color
+
+
+## Returns the darker back layer color for procedural bullets.
+func get_projectile_back_color() -> Color:
+	if projectile_back_color.a <= 0.0:
+		return projectile_color.darkened(0.35)
+	return projectile_back_color

@@ -301,6 +301,7 @@ func _process(delta: float) -> void:
 	if _networks_dirty:
 		_rebuild_electrical_networks()
 		_networks_dirty = false
+		_notify_power_visuals_changed()
 		# Align the "active" totals with topology immediately so there's
 		# no one-frame flash of idle consumers being counted.
 		_recompute_active_totals()
@@ -451,6 +452,7 @@ func link_blocks(pos_a: Vector2i, pos_b: Vector2i) -> void:
 			return
 	linked_pairs.append([pos_a, pos_b])
 	_networks_dirty = true
+	_notify_power_visuals_changed()
 
 
 ## Removes a link between two blocks (in either direction).
@@ -461,6 +463,7 @@ func unlink_blocks(pos_a: Vector2i, pos_b: Vector2i) -> void:
 		   (pair[0] == pos_b and pair[1] == pos_a):
 			linked_pairs.remove_at(i)
 	_networks_dirty = true
+	_notify_power_visuals_changed()
 
 
 ## Removes only the directional pair (pos_a → pos_b). Used by bridges,
@@ -472,6 +475,13 @@ func unlink_directed(pos_a: Vector2i, pos_b: Vector2i) -> void:
 		if pair[0] == pos_a and pair[1] == pos_b:
 			linked_pairs.remove_at(i)
 	_networks_dirty = true
+	_notify_power_visuals_changed()
+
+
+func _notify_power_visuals_changed() -> void:
+	var building_sys = get_node_or_null("/root/Main/BuildingSystem")
+	if building_sys and building_sys.has_method("mark_power_visuals_dirty"):
+		building_sys.mark_power_visuals_dirty()
 
 
 ## Returns the block this position is linked to, or null.
@@ -825,6 +835,9 @@ func _is_block_drawing_power(anchor: Vector2i, data: BlockData) -> bool:
 	# category rather than EXTRACTORS, so check the tag too.
 	if data.category == BlockData.BlockCategory.EXTRACTORS or data.tags.has("pump"):
 		if logistics.has_method("_is_storage_full") and logistics._is_storage_full(anchor, data):
+			if data.tags.has("pump") and logistics.has_method("_pump_has_output_route") \
+					and logistics._pump_has_output_route(anchor, data):
+				return true
 			return false
 		return true
 

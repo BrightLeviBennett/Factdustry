@@ -8,7 +8,7 @@
 script = ExtResource("1")
 id = &"wall_crusher"
 display_name = "Wall Crusher"
-description = "Crushes solid rock walls into sand, or salt walls into salt. Requires electrical power."
+description = "Crushes sand out of walls. Requires electrical power."
 icon = ExtResource("1_k0j28")
 category = 1
 tags = PackedStringArray("mining", "extractor", "wall_miner", "crusher_heads")
@@ -28,9 +28,9 @@ production_time = 2.0
 accepted_walls = Array[StringName]([&"blackstone_wall", &"purple_wall", &"sulfur_wall", &"sand_wall", &"salt_wall"])
 wall_efficiency = {
 &"purple_wall": 0.75,
-&"sulfur_wall": 1.25,
+&"salt_wall": 1.5,
 &"sand_wall": 1.5,
-&"salt_wall": 1.5
+&"sulfur_wall": 1.25
 }
 electrical_power_use = 10.0
 max_stored_items = 15

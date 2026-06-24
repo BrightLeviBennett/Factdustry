@@ -32,6 +32,11 @@ const BUILDING_FLASH_DURATION := 0.08
 
 
 func _process(delta: float) -> void:
+	# Freeze the shake while the game is paused — no decay, so it resumes
+	# from where it left off on unpause (and `shake_offset` returns zero
+	# meanwhile, so the camera sits still rather than jittering).
+	if main and "world_paused" in main and main.world_paused:
+		return
 	if _shake_amp > 0.0:
 		_shake_amp = maxf(0.0, _shake_amp - _shake_decay * delta)
 
@@ -48,6 +53,10 @@ func add_shake(amount: float) -> void:
 ## reads as a real shake, not a sin wave.
 func shake_offset() -> Vector2:
 	if _shake_amp <= 0.05:
+		return Vector2.ZERO
+	# Hold the camera still while paused (the amplitude is preserved by the
+	# _process guard, so the shake picks back up on unpause).
+	if main and "world_paused" in main and main.world_paused:
 		return Vector2.ZERO
 	_shake_seed += 17.31
 	var t: float = _shake_seed

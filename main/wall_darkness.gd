@@ -138,7 +138,7 @@ func _rebuild_texture() -> void:
 			else:
 				r = 1.0 - minf((d_v + 0.5) / _MAX_DARKNESS, 1.0)
 			img.set_pixel(x, y, Color(r, r, r, 1.0))
-	if _texture == null:
+	if _texture == null or _texture.get_width() != w or _texture.get_height() != h:
 		_texture = ImageTexture.create_from_image(img)
 	else:
 		_texture.update(img)

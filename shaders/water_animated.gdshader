@@ -59,6 +59,15 @@ uniform float drift_speed = 1.5;
 // the coords fed into the caustic formula.
 uniform float overlay_wobble_amp = 4.0;   // Mindustry pixels of swing
 uniform float overlay_wobble_speed = 1.4; // oscillations per second × 2π
+// --- Light-diffraction wobble ---------------------------------------
+// A 2D domain warp (summed sines at different angles) layered on top of
+// the 1D horizontal ripple, simulating how sunlight bends as it passes
+// through the moving wave surface. Applied to BOTH the floor texture
+// sample and the caustic coords so the floor + the bright light streaks
+// shimmer together. Set `diffraction_amp` to 0 to disable.
+uniform float diffraction_amp = 1.6;      // displacement magnitude (Mindustry px)
+uniform float diffraction_scale = 9.0;    // ripple wavelength (Mindustry px)
+uniform float diffraction_speed = 1.1;    // shimmer speed
 // Pausable clock, ticked by terrain_system.gd and FROZEN when the
 // game is paused. Driven separately from Godot's built-in TIME so
 // the water stops animating when the rest of the world stops.
@@ -84,6 +93,17 @@ void fragment() {
 	vec2 drift = vec2(anim_time * drift_speed);
 	vec2 coords = v_world_px / mindustry_pixel_ratio - drift;
 
+	// --- Light-diffraction wobble. A 2D domain warp from summed sines at
+	// different angles + speeds. The result is a small (x, y) displacement
+	// in Mindustry pixels that shimmers like light refracting through the
+	// wave surface. `dtime` uses anim_time so it freezes on pause.
+	vec2 dcoords = coords / diffraction_scale;
+	float dtime = anim_time * diffraction_speed;
+	vec2 diffraction = vec2(
+		sin(dcoords.y + dtime)       + sin(dcoords.x * 0.7 - dtime * 1.3) * 0.6,
+		cos(dcoords.x + dtime * 0.9) + sin(dcoords.y * 0.8 + dtime * 1.1) * 0.6
+	) * diffraction_amp;
+
 	// --- 1. Horizontal wobble. Mindustry's `vec2(sin(...) * v.x, 0)`
 	// shifts the texture-sample x by ~1 pixel based on world y, so
 	// every horizontal row of pixels drifts left/right at a slightly
@@ -92,7 +112,12 @@ void fragment() {
 	// with the wave pattern.
 	float px_in_uv = wobble_amp_px / world_tile_size;
 	vec2 drift_uv = drift * mindustry_pixel_ratio / world_tile_size;
-	vec2 sample_uv = v_world_uv - drift_uv + vec2(
+	// The diffraction warp is in Mindustry px; convert to UV (× pixel ratio
+	// ÷ tile size). Applied at half strength to the floor sample so the
+	// seafloor refracts subtly while the light streaks (below) get the full
+	// shimmer.
+	vec2 diffraction_uv = diffraction * 0.5 * mindustry_pixel_ratio / world_tile_size;
+	vec2 sample_uv = v_world_uv - drift_uv + diffraction_uv + vec2(
 		sin(stime / 3.0 + coords.y / 0.75) * px_in_uv,
 		0.0
 	);
@@ -116,7 +141,7 @@ void fragment() {
 		sin(anim_time * overlay_wobble_speed)            * overlay_wobble_amp,
 		cos(anim_time * overlay_wobble_speed * 0.73)     * overlay_wobble_amp * 0.6
 	);
-	vec2 cc = coords + c_wobble;
+	vec2 cc = coords + c_wobble + diffraction;
 	float tester = mod(
 		(coords.x + coords.y * 1.1
 		 + sin(stime / 8.0 + cc.x / 5.0 - cc.y / 100.0) * 2.0)

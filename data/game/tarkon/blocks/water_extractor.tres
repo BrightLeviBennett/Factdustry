@@ -6,8 +6,8 @@
 script = ExtResource("1")
 id = &"water_extractor"
 display_name = "Water Extractor"
-description = "Pulls moisture out of sand. Must sit on a sand tile; with power it produces water steadily."
-category = 9
+description = "Pulls moisture out of the ground. Must sit on a sand or blackstone floor tile; with power it produces water steadily."
+category = 1
 tags = PackedStringArray("fluid", "transport", "pump", "condenser", "omnidirectional")
 color = Color(0.3, 0.6, 0.9, 1)
 grid_size = Vector2i(2, 2)
@@ -18,12 +18,17 @@ build_cost = {
 }
 build_time = 2.0
 vent_tile = &"sand"
+vent_tiles = PackedStringArray("blackstone_floor")
 vent_fluid = &"mat_water"
 vent_rate = 3.0
 required_tiles = [{
 "efficiency": 1.0,
 "label": "sand",
 "tile_id": &"sand"
+}, {
+"efficiency": 1.0,
+"label": "blackstone",
+"tile_id": &"blackstone_floor"
 }]
 transport_speed = 5.0
 transports_fluid = true

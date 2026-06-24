@@ -15,7 +15,6 @@ head_turn_speed = 5.0
 move_speed = 1.7
 movement_layer = 4
 tank_steering = true
-turn_radius = 2.5
 max_health = 360.0
 attack_damage = 45.0
 spawn_count = 1

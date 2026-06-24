@@ -1,0 +1,22 @@
+[gd_resource type="Resource" script_class="BlockData" format=3]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"large_lane_shifter"
+display_name = "Large Lane Shifter"
+description = "Large powered magnetic logistics block. Runs two independent lane-shifting banks for dense belt or duct routing."
+tags = PackedStringArray("transport", "lane_shifter", "powered")
+color = Color(0.14, 0.29, 0.52, 1)
+side_color = Color(0.06, 0.11, 0.18, 1)
+grid_size = Vector2i(2, 2)
+max_health = 520.0
+build_cost = {
+"copper": 90,
+"graphite": 45,
+"silicon": 35,
+"brass": 25
+}
+build_time = 2.0
+electrical_power_use = 32.0

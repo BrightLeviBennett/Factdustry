@@ -295,14 +295,14 @@ func start_launch(anchor: Vector2i) -> bool:
 	var pod_items: Dictionary = {}
 	var item_total: int = 0
 	for k in items.keys():
-		var amt: int = int(items[k])
-		if amt <= 0:
+		var stored_amount: int = int(items[k])
+		if stored_amount <= 0:
 			continue
-		var deliverable: int = mini(amt, PASSENGER_ITEM_CAP - item_total)
+		var deliverable: int = mini(stored_amount, PASSENGER_ITEM_CAP - item_total)
 		if deliverable <= 0:
 			break
 		pod_items[k] = deliverable
-		items[k] = amt - deliverable
+		items[k] = stored_amount - deliverable
 		item_total += deliverable
 		if int(items[k]) <= 0:
 			items.erase(k)
@@ -437,7 +437,7 @@ func _enumerate_landing_pad_anchors(sector_id: StringName) -> Array:
 			if main.placed_buildings.get(cell, &"") == &"landing_pad":
 				out.append("%d,%d" % [cell.x, cell.y])
 		return out
-	var path: String = SaveManager.SAVES_DIR + str(sector_id) + ".sector.json"
+	var path: String = SaveManager.sector_save_path(sector_id)
 	if not FileAccess.file_exists(path):
 		return out
 	var f := FileAccess.open(path, FileAccess.READ)
@@ -481,7 +481,7 @@ func _destination_has_landing_pad(sector_id: StringName) -> bool:
 				return true
 		return false
 	# Cross-sector: peek at the saved JSON. SaveManager exposes the path.
-	var path: String = SaveManager.SAVES_DIR + str(sector_id) + ".sector.json"
+	var path: String = SaveManager.sector_save_path(sector_id)
 	if not FileAccess.file_exists(path):
 		return false
 	var f := FileAccess.open(path, FileAccess.READ)

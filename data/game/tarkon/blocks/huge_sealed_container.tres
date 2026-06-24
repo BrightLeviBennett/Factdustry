@@ -1,0 +1,25 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://ca3jajug3li2o"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b3erwtojdskx2" path="res://textures/blocks/item transportation/HugeContainer.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"huge_sealed_container"
+display_name = "Huge Sealed Container"
+description = "An enormous sealed tank for storing fluids. Fill it from adjacent pipes and empty it with a sealed unloader."
+icon = ExtResource("2")
+category = 9
+tags = PackedStringArray("fluid_storage")
+color = Color(0.2, 0.45, 0.68, 1)
+grid_size = Vector2i(4, 4)
+top_sprite = ExtResource("2")
+max_health = 760.0
+build_cost = {
+"copper": 560,
+"graphite": 180,
+"silicon": 120,
+"steel": 45
+}
+build_time = 2.0
+liquid_capacity = 1600.0

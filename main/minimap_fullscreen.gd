@@ -43,8 +43,7 @@ func _ready() -> void:
 
 ## Forces the overlay rect to cover the entire viewport.
 func _fit_to_viewport() -> void:
-	position = Vector2.ZERO
-	size = get_viewport_rect().size
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
 
 func _process(_delta: float) -> void:
@@ -220,8 +219,45 @@ func _draw() -> void:
 		if not _draw_single_unit_cutout(drone, p, Color(1.0, 0.95, 0.4), scale, gs):
 			_draw_triangle_marker(p, 0.0, UNIT_MARKER_MIN + 1.0, Color(1.0, 0.95, 0.4))
 
+	# Pulsing red outlines around blocks taking damage.
+	_draw_damage_flashes(tl, scale, gs, map_rect)
+
 	# Camera viewport rectangle.
 	_draw_camera_rect(tl, scale, gs, map_rect)
+
+
+## Mirrors the corner minimap's damage pulses on the full-screen map. Reuses
+## the corner's shared flash dict + alpha curve so both views stay in sync.
+func _draw_damage_flashes(tl: Vector2, scale: float, _gs: float, clip: Rect2) -> void:
+	if corner == null or not corner.has_method("get_damage_flash"):
+		return
+	var flash: Dictionary = corner.get_damage_flash()
+	if flash.is_empty():
+		return
+	var now: int = Time.get_ticks_msec()
+	var expired: Array = []
+	for anchor in flash.keys():
+		var alpha: float = corner.damage_flash_alpha(int(flash[anchor]), now)
+		if alpha < 0.0:
+			expired.append(anchor)
+			continue
+		if not main.placed_buildings.has(anchor):
+			expired.append(anchor)
+			continue
+		var gsize := Vector2i.ONE
+		var data = Registry.get_block(main.placed_buildings[anchor])
+		if data != null:
+			gsize = data.grid_size
+		var s_tl: Vector2 = tl + Vector2(anchor) * scale
+		var s_br: Vector2 = tl + Vector2(anchor + gsize) * scale
+		var r := Rect2(s_tl, s_br - s_tl).grow(1.0).intersection(clip)
+		if r.size.x <= 0.0 or r.size.y <= 0.0:
+			continue
+		# Same red as the corner minimap's DAMAGE_FLASH_COLOR.
+		var col := Color(1.0, 0.18, 0.18, alpha)
+		draw_rect(r, col, false, 2.0)
+	for anchor in expired:
+		flash.erase(anchor)
 
 
 func _draw_unit_cutouts(units: Array, color: Color, tl: Vector2, scale: float, gs: float) -> void:
@@ -264,7 +300,7 @@ func _unit_cutout_scale(udata, map_scale: float, gs: float) -> float:
 	return base_scale * map_scale / gs
 
 
-func _texture_cutout_scale(tex: Texture2D, map_scale: float, gs: float, base_scale: float) -> float:
+func _texture_cutout_scale(_tex: Texture2D, map_scale: float, gs: float, base_scale: float) -> float:
 	return base_scale * map_scale / gs
 
 

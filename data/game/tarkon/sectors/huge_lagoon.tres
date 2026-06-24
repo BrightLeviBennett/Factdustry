@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="SectorData" format=3 uid="uid://658knoxs5mke"]
+
+[ext_resource type="Script" uid="uid://bhcu6tde5of1g" path="res://data/game/tarkon/sectors/sector_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"huge_lagoon"
+display_name = "Huge Lagoon"
+description = "A huge lake with a handful of scattered islands."
+planet_id = &"Tarkon"
+hex_q = -20
+hex_r = 2
+available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand")
+wave_units_data = PackedStringArray()
+unlocks = PackedStringArray("sulfur_springs")
+required_sectors = PackedStringArray("zinc_deposits")
+map_path = "res://data/game/tarkon/maps/HL.sector.json"
+tags = PackedStringArray("campaign", "sector")

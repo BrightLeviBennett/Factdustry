@@ -1,0 +1,28 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://d1ironsepr8r"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"iron_separator"
+display_name = "Iron Separator"
+description = "Separates trace iron from sand. Requires power."
+category = 2
+tags = PackedStringArray("production", "processing", "omnidirectional")
+color = Color(0.68, 0.49, 0.38, 1)
+grid_size = Vector2i(2, 2)
+max_health = 240.0
+build_cost = {
+"copper": 120,
+"silicon": 35
+}
+build_time = 2.5
+input_items = {
+"mat_sand": 2
+}
+output_items = {
+"mat_iron": 1
+}
+production_time = 1.0
+electrical_power_use = 15.0
+max_stored_items = 20

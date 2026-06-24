@@ -317,19 +317,22 @@ func _compute_path(req: Dictionary) -> Dictionary:
 	end.x = clampi(end.x, 0, _grid_width - 1)
 	end.y = clampi(end.y, 0, _grid_height - 1)
 
-	# If target cell is solid, find adjacent walkable
-	if grid.is_point_solid(end):
-		var adj := _find_adjacent_walkable(end, grid)
-		if adj != Vector2i(-1, -1):
-			end = adj
-		else:
-			return {"unit_id": unit_id, "path": PackedVector2Array(), "target_building_id": target_bldg_id}
-
 	# If start cell is solid, find adjacent walkable
 	if grid.is_point_solid(start):
 		var adj := _find_adjacent_walkable(start, grid)
 		if adj != Vector2i(-1, -1):
 			start = adj
+		else:
+			return {"unit_id": unit_id, "path": PackedVector2Array(), "target_building_id": target_bldg_id}
+
+	# If target cell is solid, pick a nearby open cell that is reachable
+	# from this start. A sealed base can have open cells on the inside of
+	# the wall; choosing one of those makes A* return an empty path and the
+	# attacker appears to give up instead of chewing through the wall.
+	if grid.is_point_solid(end):
+		var adj := _find_reachable_walkable_near(end, start, grid)
+		if adj != Vector2i(-1, -1):
+			end = adj
 		else:
 			return {"unit_id": unit_id, "path": PackedVector2Array(), "target_building_id": target_bldg_id}
 
@@ -373,4 +376,29 @@ func _find_adjacent_walkable(grid_pos: Vector2i, grid: AStarGrid2D, max_radius: 
 					best = n
 		if best != Vector2i(-1, -1):
 			return best
+	return Vector2i(-1, -1)
+
+
+func _find_reachable_walkable_near(grid_pos: Vector2i, start: Vector2i,
+		grid: AStarGrid2D, max_radius: int = 48) -> Vector2i:
+	for r: int in range(1, max_radius + 1):
+		var candidates: Array[Vector2i] = []
+		for dx: int in range(-r, r + 1):
+			for dy: int in range(-r, r + 1):
+				if maxi(abs(dx), abs(dy)) != r:
+					continue
+				var n: Vector2i = grid_pos + Vector2i(dx, dy)
+				if n.x < 0 or n.x >= _grid_width or n.y < 0 or n.y >= _grid_height:
+					continue
+				if grid.is_point_solid(n):
+					continue
+				candidates.append(n)
+		candidates.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+			return start.distance_squared_to(a) < start.distance_squared_to(b)
+		)
+		for n in candidates:
+			if n == start:
+				return n
+			if grid.get_point_path(start, n).size() > 0:
+				return n
 	return Vector2i(-1, -1)

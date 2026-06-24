@@ -658,6 +658,23 @@ static func load_keybindings() -> void:
 # =========================
 
 func _build_game_data_tab() -> void:
+	_add_section("Save Slot")
+	_add_label("Three independent campaigns. Switching slots returns you to the main menu; your current campaign is saved first.")
+	var slot_options: Array = []
+	for i in range(1, SaveManager.MAX_SAVE_SLOTS + 1):
+		var used: bool = SaveManager.slot_has_save(i)
+		slot_options.append("Slot %d%s" % [i, "" if used else "  (empty)"])
+	_add_dropdown("Active Save Slot", slot_options, SaveManager.current_save_slot - 1,
+		func(idx):
+			var target: int = int(idx) + 1
+			if target == SaveManager.current_save_slot:
+				return
+			# Close the settings overlay (and pause menu, if in-game) first
+			# so it isn't orphaned when switch_save_slot boots to the menu.
+			_close_settings_and_pause_menu()
+			SaveManager.switch_save_slot(target)
+	)
+
 	_add_section("Save Data")
 	_add_label("Manage your save data. Be careful — these actions cannot be undone!")
 
@@ -858,7 +875,7 @@ func _on_play_explosion_pressed() -> void:
 		push_warning("Play Explosion: no Main scene — open a sector first.")
 		return
 	var expl = main_node.get_node_or_null("ExplosionSystem")
-	if expl == null or not expl.has_method("explode"):
+	if expl == null or not expl.has_method("core_explosion"):
 		push_warning("Play Explosion: ExplosionSystem not found.")
 		return
 	var core_pos: Vector2i = main_node.core_position if "core_position" in main_node else Vector2i(-1, -1)
@@ -873,7 +890,11 @@ func _on_play_explosion_pressed() -> void:
 		if core_data:
 			core_size = Vector2(core_data.grid_size.x, core_data.grid_size.y)
 	var core_world: Vector2 = main_node.grid_to_world(core_pos) + Vector2(core_size.x * gs * 0.5, core_size.y * gs * 0.5)
-	expl.explode(core_world)
+	# Match the real core-death visuals: old ring + shrapnel burst UNDER the
+	# new Mindustry-style boom.
+	if expl.has_method("explode"):
+		expl.explode(core_world, maxf(core_size.x, core_size.y) * 2.5, 1.7, false)
+	expl.core_explosion(core_world, maxf(core_size.x, core_size.y))
 	_close_settings_and_pause_menu()
 
 

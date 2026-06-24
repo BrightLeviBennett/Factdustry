@@ -18,6 +18,11 @@ const DOT_RADIUS := 2.5
 const TERRAIN_DIRTY_RADIUS := 9
 const EDGE_FADE_START := 9.0
 const EDGE_FADE_STRENGTH := 0.72
+## How long after the last hit a block keeps pulsing its red damage outline.
+const DAMAGE_FLASH_MS := 750
+## Damage-pulse colour + cadence (Hz).
+const DAMAGE_FLASH_COLOR := Color(1.0, 0.18, 0.18)
+const DAMAGE_FLASH_HZ := 3.0
 
 var main: Node2D
 var _terrain: Node2D
@@ -37,6 +42,11 @@ var _dirty_cells := {}
 var _dirty_accum := 0.0
 var _needs_full_rebuild := true
 var _corner_zoom := 4.0
+
+## Anchor (Vector2i) → expiry tick (msec). A block in here pulses a red
+## outline until `Time.get_ticks_msec()` passes its expiry. Shared with the
+## full-screen overlay via `get_damage_flash()`.
+var _damage_flash := {}
 
 var _dragging := false
 var _owns_focus := false
@@ -66,6 +76,10 @@ func _connect_change_signals() -> void:
 			main.building_placed.connect(_on_building_placed)
 		if main.has_signal("building_destroyed") and not main.building_destroyed.is_connected(_on_building_destroyed):
 			main.building_destroyed.connect(_on_building_destroyed)
+		if main.has_signal("building_faction_changed") and not main.building_faction_changed.is_connected(_on_building_faction_changed):
+			main.building_faction_changed.connect(_on_building_faction_changed)
+		if main.has_signal("building_damaged") and not main.building_damaged.is_connected(_on_building_damaged):
+			main.building_damaged.connect(_on_building_damaged)
 	if _terrain != null:
 		if _terrain.has_signal("terrain_changed") and not _terrain.terrain_changed.is_connected(_mark_terrain_dirty):
 			_terrain.terrain_changed.connect(_mark_terrain_dirty)
@@ -76,6 +90,7 @@ func _connect_change_signals() -> void:
 func _process(delta: float) -> void:
 	if main == null or _terrain == null:
 		return
+	_layout()
 	if int(main.GRID_WIDTH) != _map_w or int(main.GRID_HEIGHT) != _map_h:
 		_needs_full_rebuild = true
 	if _needs_full_rebuild:
@@ -299,6 +314,40 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 
 func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	_mark_area_dirty(grid_pos, Vector2i(5, 5))
+	# A destroyed block can't keep pulsing — drop any pending flash on it.
+	var anchor: Vector2i = grid_pos
+	if main != null:
+		anchor = main.building_origins.get(grid_pos, grid_pos)
+	_damage_flash.erase(anchor)
+
+
+## A block took (non-fatal) combat damage — (re)arm its red pulse outline.
+func _on_building_damaged(anchor: Vector2i) -> void:
+	_damage_flash[anchor] = Time.get_ticks_msec() + DAMAGE_FLASH_MS
+
+
+## Shared with the full-screen overlay so it can draw the same pulses.
+func get_damage_flash() -> Dictionary:
+	return _damage_flash
+
+
+## Current pulse alpha [0..1] for a flash expiring at `expiry_ms`, or -1.0 if
+## it has already expired. Combines a sine pulse with a fade-out near expiry.
+func damage_flash_alpha(expiry_ms: int, now_ms: int) -> float:
+	var remaining: int = expiry_ms - now_ms
+	if remaining <= 0:
+		return -1.0
+	var pulse: float = 0.55 + 0.45 * sin(float(now_ms) / 1000.0 * TAU * DAMAGE_FLASH_HZ)
+	var fade: float = clampf(float(remaining) / float(DAMAGE_FLASH_MS), 0.0, 1.0)
+	return clampf(pulse * fade, 0.0, 1.0)
+
+
+## A building changed faction in place (DERELICT flip / capture). Recolour
+## its whole footprint — the cell colours are read live from
+## `get_building_faction`, so a dirty mark is all that's needed.
+func _on_building_faction_changed(anchor: Vector2i) -> void:
+	var data = Registry.get_block(main.placed_buildings.get(anchor, &"")) if main != null else null
+	_mark_area_dirty(anchor, data.grid_size if data != null else Vector2i(1, 1))
 
 
 func _in_bounds(c: Vector2i) -> bool:
@@ -398,22 +447,15 @@ func _average_texture_color(tex: Texture2D) -> Variant:
 # =========================
 
 func _layout() -> void:
-	if _map_w <= 0 or _map_h <= 0:
-		return
-	var aspect: float = float(_map_h) / float(_map_w)
-	var bw := VIEW_PX
-	var bh := VIEW_PX * aspect
-	if bh > VIEW_PX:
-		bh = VIEW_PX
-		bw = VIEW_PX / aspect
 	anchor_left = 1.0
 	anchor_right = 1.0
 	anchor_top = 0.0
 	anchor_bottom = 0.0
-	offset_left = -bw - MARGIN
+	offset_left = -VIEW_PX - MARGIN
 	offset_right = -MARGIN
 	offset_top = MARGIN
-	offset_bottom = MARGIN + bh
+	offset_bottom = MARGIN + VIEW_PX
+	custom_minimum_size = Vector2(VIEW_PX, VIEW_PX)
 
 
 func _visible_tile_rect() -> Rect2:
@@ -476,7 +518,44 @@ func _draw() -> void:
 			if not _draw_single_unit_cutout(drone, dp, Color(1.0, 0.95, 0.4), box.size.x / crop.size.x):
 				draw_circle(dp, DOT_RADIUS + 0.5, Color(1.0, 0.95, 0.4))
 
+	_draw_damage_flashes(crop, box)
 	_draw_camera_rect(crop, box)
+
+
+## Pulsing red outline around every block that recently took damage. Drawn as
+## an overlay (not baked into the texture) so it can animate. Prunes expired
+## entries as it goes.
+func _draw_damage_flashes(crop: Rect2, box: Rect2) -> void:
+	if _damage_flash.is_empty():
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var now: int = Time.get_ticks_msec()
+	var expired: Array = []
+	for anchor in _damage_flash.keys():
+		var alpha: float = damage_flash_alpha(int(_damage_flash[anchor]), now)
+		if alpha < 0.0:
+			expired.append(anchor)
+			continue
+		# Block may have been removed between the hit and now.
+		if main == null or not main.placed_buildings.has(anchor):
+			expired.append(anchor)
+			continue
+		var gsize := Vector2i.ONE
+		var data = Registry.get_block(main.placed_buildings[anchor])
+		if data != null:
+			gsize = data.grid_size
+		var b0: Vector2 = _world_to_box(Vector2(anchor) * gs, crop)
+		var b1: Vector2 = _world_to_box(Vector2(anchor + gsize) * gs, crop)
+		var r := Rect2(b0, b1 - b0).intersection(box)
+		if r.size.x <= 0.0 or r.size.y <= 0.0:
+			continue
+		# Grow by a pixel so the outline hugs the OUTSIDE of the footprint.
+		r = r.grow(1.0).intersection(box)
+		var col := DAMAGE_FLASH_COLOR
+		col.a = alpha
+		draw_rect(r, col, false, 1.5)
+	for anchor in expired:
+		_damage_flash.erase(anchor)
 
 
 func _draw_unit_cutouts(units: Array, color: Color, crop: Rect2, box: Rect2) -> void:
@@ -521,7 +600,7 @@ func _unit_cutout_scale(udata, px_per_tile: float) -> float:
 	return base_scale * px_per_tile / float(main.GRID_SIZE)
 
 
-func _texture_cutout_scale(tex: Texture2D, px_per_tile: float, base_scale: float) -> float:
+func _texture_cutout_scale(_tex: Texture2D, px_per_tile: float, base_scale: float) -> float:
 	return base_scale * px_per_tile / float(main.GRID_SIZE)
 
 

@@ -411,7 +411,9 @@ func _input(event: InputEvent) -> void:
 		# Crane link mode / filter menu owns Esc first — let
 		# BuildingSystem._input close those before we open the escape menu.
 		var bsys = get_node_or_null("/root/Main/BuildingSystem")
-		if bsys and (bsys._crane_filter_menu_open or bsys._crane_link_anchor != Vector2i(-1, -1)):
+		if bsys and (bsys._crane_filter_menu_open \
+				or bsys._crane_link_anchor != Vector2i(-1, -1) \
+				or bsys._lane_shifter_link_anchor != Vector2i(-1, -1)):
 			return
 		# Escape menu
 		if escape_menu_open:
@@ -722,11 +724,16 @@ func _process(delta: float) -> void:
 	if in_unit_mode:
 		block_tooltip.visible = false
 		build_cost_panel.visible = false
+		if unit_hover_panel:
+			unit_hover_panel.visible = false
+		_last_hovered_unit_id = 0
 		_last_hovered_grid = Vector2i(-9999, -9999)
 		_last_cost_building = &""
 	elif main.selected_building != &"":
 		# Placing a block — show build cost. Rebuilds when the block changes
 		# or when _cost_dirty is set (by the resources_changed signal).
+		if unit_hover_panel:
+			unit_hover_panel.visible = false
 		block_tooltip.visible = false
 		_last_hovered_grid = Vector2i(-9999, -9999)
 		if _last_cost_building != main.selected_building or _cost_dirty:
@@ -734,12 +741,21 @@ func _process(delta: float) -> void:
 			_cost_dirty = false
 			_update_build_cost_panel(main.selected_building)
 		build_cost_panel.visible = true
+	elif hovered_unit != null:
+		# Unit hover owns the info slot over block/tile hover so the two
+		# panels never stack when a unit is standing on a building.
+		block_tooltip.visible = false
+		build_cost_panel.visible = false
+		_last_hovered_grid = Vector2i(-9999, -9999)
+		_last_cost_building = &""
 	elif main.placed_buildings.has(hovered_grid) \
 			and main.get_building_faction(hovered_grid) == main.Faction.LUMINA:
 		# Hovering over one of the player's own placed blocks — show
 		# tooltip. Enemy / derelict blocks are excluded here so the
 		# empty PanelContainer (whose children _update_block_tooltip
 		# would have cleared) doesn't flash as a thin bar on hover.
+		if unit_hover_panel:
+			unit_hover_panel.visible = false
 		build_cost_panel.visible = false
 		_last_cost_building = &""
 		# Rebuild if hovered cell changed, or periodically for live data
@@ -756,6 +772,8 @@ func _process(delta: float) -> void:
 		# No placed building, but the hovered cell is an extractable
 		# terrain tile (ore, wall ore, liquid floor). Show the same
 		# tooltip panel populated with the tile's info instead.
+		if unit_hover_panel:
+			unit_hover_panel.visible = false
 		build_cost_panel.visible = false
 		_last_cost_building = &""
 		_tooltip_refresh_timer -= delta
@@ -767,6 +785,8 @@ func _process(delta: float) -> void:
 	else:
 		# Neither — hide both
 		block_tooltip.visible = false
+		if unit_hover_panel:
+			unit_hover_panel.visible = false
 		build_cost_panel.visible = false
 		_last_hovered_grid = Vector2i(-9999, -9999)
 		_last_cost_building = &""
@@ -780,7 +800,9 @@ func _process(delta: float) -> void:
 	# visible, so the block grid sits flush against the panel chrome when
 	# there's nothing above it.
 	if block_menu_info_separator:
-		block_menu_info_separator.visible = block_tooltip.visible or build_cost_panel.visible
+		block_menu_info_separator.visible = block_tooltip.visible \
+				or build_cost_panel.visible \
+				or (unit_hover_panel != null and unit_hover_panel.visible)
 
 	# Show unit mode panel when shift is held
 	# Unit mode panel — visible whenever the UnitManager is in unit mode.
@@ -1055,8 +1077,8 @@ func _update_portrait_panel() -> void:
 	var unit_mgr = _unit_mgr_ref()
 	var drone = _drone_ref()
 	var combat = _combat_sys_ref()
-
 	var is_controlling := unit_mgr != null and unit_mgr.controlled_entity != null
+
 	var ctrl_type: String = unit_mgr.controlled_type if unit_mgr else ""
 	# Portrait section is always visible — the default branch below
 	# falls through to drawing the player drone when nothing else is
@@ -1731,35 +1753,13 @@ func _create_block_tooltip() -> void:
 
 func _create_unit_hover_panel() -> void:
 	unit_hover_panel = PanelContainer.new()
-	unit_hover_panel.anchor_left = 1.0
-	unit_hover_panel.anchor_right = 1.0
-	unit_hover_panel.anchor_top = 1.0
-	unit_hover_panel.anchor_bottom = 1.0
-	unit_hover_panel.offset_left = -350
-	unit_hover_panel.offset_right = -8
-	unit_hover_panel.offset_top = -520
-	unit_hover_panel.offset_bottom = -360
-	unit_hover_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	unit_hover_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	unit_hover_panel.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
 	unit_hover_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	unit_hover_panel.visible = false
-	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.06, 0.08, 0.9)
-	style.border_color = Color(0.45, 0.62, 0.86, 0.65)
-	style.border_width_left = 1
-	style.border_width_top = 1
-	style.border_width_right = 1
-	style.border_width_bottom = 1
-	style.corner_radius_top_left = 6
-	style.corner_radius_top_right = 6
-	style.corner_radius_bottom_left = 6
-	style.corner_radius_bottom_right = 6
-	style.content_margin_left = 8
-	style.content_margin_right = 8
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
-	unit_hover_panel.add_theme_stylebox_override("panel", style)
-	add_child(unit_hover_panel)
+	# Same slot / background as block hover info, so unit and block info share
+	# one visual language and cannot collide on top of the world.
+	block_menu_outer_vbox.add_child(unit_hover_panel)
+	block_menu_outer_vbox.move_child(unit_hover_panel, 0)
 
 	unit_hover_vbox = VBoxContainer.new()
 	unit_hover_vbox.add_theme_constant_override("separation", 5)
@@ -1937,7 +1937,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				)
 
 	# --- Extractor Efficiency ---
-	if data.category == BlockData.BlockCategory.EXTRACTORS:
+	if data.category == BlockData.BlockCategory.EXTRACTORS and not data.tags.has("pump"):
 		var terrain = get_node_or_null("/root/Main/TerrainSystem")
 		var rot: int = main.building_rotation.get(origin, 0)
 		var front_cells: Array[Vector2i] = []
@@ -2041,9 +2041,30 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			eff_color = Color(0.9, 0.4, 0.4)
 		_add_tooltip_line("Efficiency: %d%% (%.2f/s)" % [eff_pct, rate], eff_color)
 	elif data.tags.has("pump"):
-		var cycle = data.production_time if data.production_time > 0 else 2.0
-		var rate: float = 1.0 / cycle
-		_add_tooltip_line("Efficiency: %.2f/s" % rate, Color(0.7, 0.9, 0.7))
+		var pump_eff: float = 1.0
+		var rate: float = 0.0
+		if _logistics and _logistics.has_method("compute_extractor_preview_efficiency"):
+			pump_eff = float(_logistics.compute_extractor_preview_efficiency(origin, data, main.building_rotation.get(origin, 0)))
+		if data.electrical_power_use > 0:
+			var pump_ps = _power_sys_ref()
+			if pump_ps:
+				pump_eff *= pump_ps.get_electrical_efficiency(origin)
+		if _logistics and _logistics.has_method("compute_extractor_preview_output"):
+			var pump_out: Dictionary = _logistics.compute_extractor_preview_output(origin, data, main.building_rotation.get(origin, 0))
+			rate = float(pump_out.get("per_sec", 0.0))
+			if data.electrical_power_use > 0:
+				var rate_ps = _power_sys_ref()
+				if rate_ps:
+					rate *= rate_ps.get_electrical_efficiency(origin)
+		var pump_eff_pct: int = int(round(pump_eff * 100.0))
+		var pump_eff_color: Color
+		if pump_eff_pct >= 100:
+			pump_eff_color = Color(0.7, 0.9, 0.7)
+		elif pump_eff_pct > 0:
+			pump_eff_color = Color(0.9, 0.7, 0.3)
+		else:
+			pump_eff_color = Color(0.9, 0.4, 0.4)
+		_add_tooltip_line("Efficiency: %d%% (%.2f/s)" % [pump_eff_pct, rate], pump_eff_color)
 
 	# (Generator "Generates:" line removed — production reads are in the
 	# network info panel.)
@@ -2309,11 +2330,11 @@ func _get_hovered_unit(world_pos: Vector2, unit_mgr) -> Node2D:
 	var pools: Array = []
 	if "player_units" in unit_mgr:
 		pools.append(unit_mgr.player_units)
-	if "enemies" in unit_mgr:
-		pools.append(unit_mgr.enemies)
 	for pool in pools:
 		for unit in pool:
 			if unit == null or not is_instance_valid(unit):
+				continue
+			if "team" in unit and unit.team != UnitData.Team.PLAYER:
 				continue
 			if "is_dead" in unit and unit.is_dead:
 				continue
@@ -2350,6 +2371,7 @@ func _update_unit_hover_panel(unit: Node2D) -> void:
 	var preview := Control.new()
 	preview.custom_minimum_size = Vector2(48, 48)
 	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	preview.clip_contents = true
 	preview.draw.connect(_draw_unit_hover_preview.bind(preview, unit))
 	header.add_child(preview)
 
@@ -2376,7 +2398,8 @@ func _update_unit_hover_panel(unit: Node2D) -> void:
 	var max_hp: float = float(unit.max_health) if "max_health" in unit else float(data.max_health)
 	_add_unit_hover_health_bar(cur_hp, max_hp)
 	var upgrades: Array = unit.applied_upgrades if "applied_upgrades" in unit else []
-	_add_unit_hover_modules(upgrades)
+	if not upgrades.is_empty():
+		_add_unit_hover_modules(upgrades)
 	unit_hover_panel.visible = true
 	_last_hovered_unit_id = unit.get_instance_id()
 
@@ -2394,11 +2417,40 @@ func _draw_unit_hover_preview(ctrl: Control, unit: Node2D) -> void:
 			"aim_angle": float(unit.aim_angle) if "aim_angle" in unit else 0.0,
 			"mount_rotations": [],
 		}
-		EnemyUnit.draw_unit_payload(ctrl, data, payload, center, 0.55, 0.0, 1.0)
+		EnemyUnit.draw_unit_payload(ctrl, data, payload, center, _unit_hover_preview_scale(data, ctrl.size), 0.0, 1.0)
 	elif data.icon != null:
-		ctrl.draw_texture_rect(data.icon, Rect2(center - Vector2(20, 20), Vector2(40, 40)), false)
+		var icon_size := _fit_size_inside(data.icon.get_size(), ctrl.size * 0.82)
+		ctrl.draw_texture_rect(data.icon, Rect2(center - icon_size * 0.5, icon_size), false)
 	else:
-		ctrl.draw_circle(center, 16.0, data.color)
+		ctrl.draw_circle(center, minf(ctrl.size.x, ctrl.size.y) * 0.34, data.color)
+
+
+func _unit_hover_preview_scale(data, box_size: Vector2 = Vector2(48, 48)) -> float:
+	var ssf := 2.0
+	if main != null and "SPRITE_SCALE_FACTOR" in main:
+		ssf = float(main.SPRITE_SCALE_FACTOR)
+	var base_scale: float = (data.sprite_scale if data.sprite_scale > 0.0 else 1.0) * ssf
+	var max_extent := 1.0
+	if data.base_sprite != null:
+		max_extent = maxf(max_extent, maxf(data.base_sprite.get_width(), data.base_sprite.get_height()) * base_scale)
+	if data.head_sprite != null:
+		max_extent = maxf(max_extent, maxf(data.head_sprite.get_width(), data.head_sprite.get_height()) * base_scale)
+	for w in data.weapons:
+		if w == null or w.sprite == null:
+			continue
+		var mount_extent: float = w.offset.length() * base_scale * 2.0
+		var sprite_extent: float = maxf(w.sprite.get_width(), w.sprite.get_height()) \
+				* (w.sprite_scale if w.sprite_scale > 0.0 else 1.0) * ssf
+		max_extent = maxf(max_extent, mount_extent + sprite_extent)
+	var target: float = minf(box_size.x, box_size.y) * 0.78
+	return minf(0.55, target / maxf(max_extent, 1.0))
+
+
+func _fit_size_inside(source_size: Vector2, target_size: Vector2) -> Vector2:
+	if source_size.x <= 0.0 or source_size.y <= 0.0:
+		return target_size
+	var scale: float = minf(target_size.x / source_size.x, target_size.y / source_size.y)
+	return source_size * scale
 
 
 func _add_unit_hover_health_bar(current: float, max_hp: float) -> void:
@@ -2430,6 +2482,8 @@ func _add_unit_hover_health_bar(current: float, max_hp: float) -> void:
 
 
 func _add_unit_hover_modules(upgrades: Array) -> void:
+	if upgrades.is_empty():
+		return
 	var sep := HSeparator.new()
 	sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	unit_hover_vbox.add_child(sep)
@@ -2439,14 +2493,6 @@ func _add_unit_hover_modules(upgrades: Array) -> void:
 	title.add_theme_color_override("font_color", Color(0.75, 0.82, 0.92))
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	unit_hover_vbox.add_child(title)
-	if upgrades.is_empty():
-		var none := Label.new()
-		none.text = "None"
-		none.add_theme_font_size_override("font_size", 11)
-		none.add_theme_color_override("font_color", Color(0.5, 0.55, 0.62))
-		none.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		unit_hover_vbox.add_child(none)
-		return
 	var row := HFlowContainer.new()
 	row.add_theme_constant_override("h_separation", 5)
 	row.add_theme_constant_override("v_separation", 5)
@@ -4079,7 +4125,7 @@ func _show_schematic_info(sname: String) -> void:
 	_selected_schematic_name = sname
 
 	var popup := PopupPanel.new()
-	popup.size = Vector2(540, 640)
+	popup.set_deferred("size", Vector2(540, 640))
 	var pstyle := StyleBoxFlat.new()
 	pstyle.bg_color = Color(0.08, 0.09, 0.12, 0.98)
 	pstyle.set_border_width_all(2)

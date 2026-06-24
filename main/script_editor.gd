@@ -106,6 +106,7 @@ const ACTION_TYPES := [
 	"spawn_unit",
 	"start_waves", 
 	"stop_waves",
+	"delay",
 	"capture_sector",
 ]
 const ACTION_LABELS := {
@@ -127,6 +128,7 @@ const ACTION_LABELS := {
 	"capture_sector": "Capture Sector",
 	"start_waves": "Start Waves",
 	"stop_waves": "Stop Waves",
+	"delay": "Delay Action",
 }
 
 # Colors for the color dropdown
@@ -754,7 +756,7 @@ func _refresh_step_detail() -> void:
 # ACTION LIST UI
 # =========================
 
-func _populate_actions_list(actions: Array, container: VBoxContainer) -> void:
+func _populate_actions_list(actions: Array, container: VBoxContainer, allow_delay: bool = true) -> void:
 	for i in range(actions.size()):
 		var action: Dictionary = actions[i]
 		var action_panel = PanelContainer.new()
@@ -773,17 +775,23 @@ func _populate_actions_list(actions: Array, container: VBoxContainer) -> void:
 		var type_option = OptionButton.new()
 		type_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		type_option.add_theme_font_size_override("font_size", 11)
+		var available_types: Array = []
 		for t in ACTION_TYPES:
+			if allow_delay or t != "delay":
+				available_types.append(t)
+		for t in available_types:
 			type_option.add_item(ACTION_LABELS[t])
-		type_option.selected = ACTION_TYPES.find(action.get("type", "pause"))
+		if not available_types.has(action.get("type", "pause")):
+			action["type"] = "start_waves" if available_types.has("start_waves") else available_types[0]
+		type_option.selected = available_types.find(action.get("type", "pause"))
 		var action_ref := action
 		var actions_ref := actions
 		var idx := i
 		type_option.item_selected.connect(func(sel: int):
 			var old_type: String = action_ref.get("type", "")
-			action_ref["type"] = ACTION_TYPES[sel]
+			action_ref["type"] = available_types[sel]
 			# Clear params when type changes
-			if old_type != ACTION_TYPES[sel]:
+			if old_type != available_types[sel]:
 				for key in action_ref.keys():
 					if key != "type":
 						action_ref.erase(key)
@@ -810,40 +818,96 @@ func _populate_actions_list(actions: Array, container: VBoxContainer) -> void:
 		top_hbox.add_child(del_btn)
 
 		# Parameters based on action type
-		var action_type: String = action.get("type", "pause")
-		match action_type:
-			"focus_camera":
-				_add_vec2i_fields(vbox, action, "pos", "Grid X,Y:")
-			"draw_box":
-				_add_string_field(vbox, action, "id", "Box ID:")
-				_add_vec2i_fields(vbox, action, "from", "From (x,y):")
-				_add_vec2i_fields(vbox, action, "to", "To (x,y):")
-				_add_color_dropdown(vbox, action)
-			"remove_box":
-				_add_string_field(vbox, action, "id", "Box ID:")
-			"draw_text":
-				_add_string_field(vbox, action, "id", "Text ID:")
-				_add_vec2i_fields(vbox, action, "from", "From (x,y):")
-				_add_vec2i_fields(vbox, action, "to", "To (x,y):")
-				_add_multiline_field(vbox, action, "text", "Text:")
-			"remove_text":
-				_add_string_field(vbox, action, "id", "Text ID:")
-			"disable_block", "enable_block":
-				_add_vec2i_fields(vbox, action, "pos", "Grid X,Y:")
-			"spawn_unit":
-				_add_vec2i_fields(vbox, action, "pos", "Grid X,Y:")
-				_add_faction_dropdown(vbox, action)
-				_add_unit_dropdown(vbox, action)
-				_add_int_field(vbox, action, "count", "Count:", 1)
-			"hide_region":
-				_add_vec2i_fields(vbox, action, "from", "From (x,y):")
-				_add_vec2i_fields(vbox, action, "to", "To (x,y):")
-				_add_checkbox(vbox, action, "include_floors", "Include Floors")
-			"reveal_region":
-				_add_vec2i_fields(vbox, action, "from", "From (x,y):")
-				_add_vec2i_fields(vbox, action, "to", "To (x,y):")
-			# capture_sector has no params — auto-detects current sector
-			# pause, unpause, release_camera, clear_boxes, clear_texts have no params
+		_add_action_parameter_fields(vbox, action, allow_delay)
+
+
+func _add_action_parameter_fields(parent: Control, action: Dictionary, allow_delay: bool) -> void:
+	var action_type: String = action.get("type", "pause")
+	match action_type:
+		"focus_camera":
+			_add_vec2i_fields(parent, action, "pos", "Grid X,Y:")
+		"draw_box":
+			_add_string_field(parent, action, "id", "Box ID:")
+			_add_vec2i_fields(parent, action, "from", "From (x,y):")
+			_add_vec2i_fields(parent, action, "to", "To (x,y):")
+			_add_color_dropdown(parent, action)
+		"remove_box":
+			_add_string_field(parent, action, "id", "Box ID:")
+		"draw_text":
+			_add_string_field(parent, action, "id", "Text ID:")
+			_add_vec2i_fields(parent, action, "from", "From (x,y):")
+			_add_vec2i_fields(parent, action, "to", "To (x,y):")
+			_add_multiline_field(parent, action, "text", "Text:")
+		"remove_text":
+			_add_string_field(parent, action, "id", "Text ID:")
+		"disable_block", "enable_block":
+			_add_vec2i_fields(parent, action, "pos", "Grid X,Y:")
+		"spawn_unit":
+			_add_vec2i_fields(parent, action, "pos", "Grid X,Y:")
+			_add_faction_dropdown(parent, action)
+			_add_unit_dropdown(parent, action)
+			_add_int_field(parent, action, "count", "Count:", 1)
+		"hide_region":
+			_add_vec2i_fields(parent, action, "from", "From (x,y):")
+			_add_vec2i_fields(parent, action, "to", "To (x,y):")
+			_add_checkbox(parent, action, "include_floors", "Include Floors")
+		"reveal_region":
+			_add_vec2i_fields(parent, action, "from", "From (x,y):")
+			_add_vec2i_fields(parent, action, "to", "To (x,y):")
+		"delay":
+			if allow_delay:
+				_add_delay_action_fields(parent, action)
+		# capture_sector has no params — auto-detects current sector
+		# pause, unpause, release_camera, clear_boxes, clear_texts have no params
+
+
+func _add_delay_action_fields(parent: Control, action: Dictionary) -> void:
+	_add_float_field(parent, action, "seconds", "Seconds:", 5.0)
+	_add_string_field(parent, action, "text", "Display:")
+
+	var nested_actions: Array = _ensure_delay_actions(action)
+
+	var header = Label.new()
+	header.text = "Then Run Actions:"
+	header.add_theme_font_size_override("font_size", 11)
+	header.add_theme_color_override("font_color", Color(0.65, 0.8, 1.0))
+	parent.add_child(header)
+
+	var nested_panel = PanelContainer.new()
+	nested_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.08, 0.11, 0.16, 0.85)))
+	parent.add_child(nested_panel)
+
+	var box = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
+	nested_panel.add_child(box)
+
+	_populate_actions_list(nested_actions, box, false)
+
+	var add_btn = Button.new()
+	add_btn.text = "+ Add Delayed Action"
+	add_btn.add_theme_font_size_override("font_size", 12)
+	add_btn.pressed.connect(func():
+		nested_actions.append({"type": "start_waves"})
+		_notify_change()
+		_refresh_step_detail()
+	)
+	parent.add_child(add_btn)
+
+
+func _ensure_delay_actions(action: Dictionary) -> Array:
+	if action.has("actions") and action["actions"] is Array:
+		var actions: Array = action["actions"]
+		if actions.is_empty():
+			actions.append({"type": "start_waves"})
+		return actions
+	var actions: Array = []
+	if action.has("action") and action["action"] is Dictionary:
+		actions.append(action["action"])
+	action.erase("action")
+	if actions.is_empty():
+		actions.append({"type": "start_waves"})
+	action["actions"] = actions
+	return actions
 
 
 # =========================
@@ -1428,6 +1492,18 @@ func _collect_draw_actions(actions: Array, sector: Node) -> void:
 				var to_pos: Vector2i = _parse_vec2i(action.get("to", "0,0"))
 				var text: String = String(action.get("text", ""))
 				sector.draw_text_overlay(text_id, from_pos, to_pos, text)
+			"delay":
+				_collect_draw_actions(_read_delay_actions(action), sector)
+
+
+func _read_delay_actions(action: Dictionary) -> Array:
+	var actions_value = action.get("actions", [])
+	if actions_value is Array:
+		return actions_value as Array
+	var legacy_action = action.get("action", {})
+	if legacy_action is Dictionary:
+		return [legacy_action]
+	return []
 
 
 func _parse_vec2i(raw: Variant) -> Vector2i:

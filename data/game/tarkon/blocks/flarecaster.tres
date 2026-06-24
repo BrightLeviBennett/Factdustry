@@ -24,6 +24,15 @@ damage = 30.0
 status_effect = SubResource("StatusEffectData_burn")
 projectile_color = Color(1, 0.55, 0.15, 1)
 
+[sub_resource type="Resource" id="AmmoType_oxidized_fuel"]
+script = ExtResource("2")
+item_id = &"mat_oxidized_fuel"
+damage = 30.0
+status_effect = SubResource("StatusEffectData_burn")
+projectile_color = Color(1, 0.36, 0.1, 1)
+flame_range_bonus_tiles = 1.5
+flame_cone_width_bonus_degrees = 5.0
+
 [resource]
 script = ExtResource("1")
 id = &"flarecaster"
@@ -44,5 +53,5 @@ build_cost = {
 build_time = 3.0
 attack_speed = 0.35
 attack_range = 8.0
-ammo_types = Array[Resource]([SubResource("AmmoType_fuel")])
+ammo_types = Array[Resource]([SubResource("AmmoType_oxidized_fuel"), SubResource("AmmoType_fuel")])
 max_stored_items = 30

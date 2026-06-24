@@ -23,5 +23,5 @@ input_items = {
 "mat_coal": 1
 }
 production_time = 3.0
-electrical_power_gen = 20.0
+electrical_power_gen = 80.0
 max_stored_items = 8

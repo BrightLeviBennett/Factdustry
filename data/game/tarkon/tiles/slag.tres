@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="TerrainTileData" format=3]
+
+[ext_resource type="Script" uid="uid://ctm2t1g27ix6i" path="res://data/game/tarkon/tiles/tile_data.gd" id="1"]
+[ext_resource type="Texture2D" path="res://textures/terrain/Slag.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"slag"
+display_name = "Slag"
+description = "Molten slag. Place a fluid pump on it to extract slag."
+icon = ExtResource("2")
+color = Color(0.68, 0.2, 0.06, 1)
+speed_modifier = 0.35
+contact_damage = 16.0
+tags = PackedStringArray("liquid", "slag")
+is_liquid = true
+extracted_liquid = &"mat_slag"

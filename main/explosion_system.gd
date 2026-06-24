@@ -81,7 +81,10 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_PAUSABLE
 
 
-func explode(world_pos: Vector2, ring_tiles_override: float = -1.0) -> void:
+## `effect_scale` grows the spokes + their thickness (the ring is sized by
+## `ring_tiles_override`). Cores pass a value > 1 so the ring/spokes punch
+## out past the new core boom's smoke; the reactor leaves it at 1.0.
+func explode(world_pos: Vector2, ring_tiles_override: float = -1.0, effect_scale: float = 1.0, show_ring: bool = true) -> void:
 	var gs: float = float(main.GRID_SIZE) if main else 16.0
 	var ring_tiles: float = ring_tiles_override
 	if ring_tiles <= 0.0:
@@ -90,7 +93,7 @@ func explode(world_pos: Vector2, ring_tiles_override: float = -1.0) -> void:
 	var spokes: Array = []
 	for i in range(spoke_count):
 		var angle: float = randf() * TAU
-		var len_tiles: float = randf_range(LINE_MIN_LEN_TILES, LINE_MAX_LEN_TILES)
+		var len_tiles: float = randf_range(LINE_MIN_LEN_TILES, LINE_MAX_LEN_TILES) * effect_scale
 		var palette := [Color.BLACK, Color(1.0, 0.5, 0.1), Color(1.0, 0.9, 0.2)]
 		spokes.append({
 			"angle": angle,
@@ -102,6 +105,8 @@ func explode(world_pos: Vector2, ring_tiles_override: float = -1.0) -> void:
 		"age": 0.0,
 		"ring_radius": ring_tiles * gs,
 		"spokes": spokes,
+		"line_scale": effect_scale,
+		"show_ring": show_ring,
 	})
 	queue_redraw()
 
@@ -129,7 +134,46 @@ func unit_death(world_pos: Vector2, unit_radius_px: float) -> void:
 	# intensity ≈ radius/8 in spirit; tuned so a typical small unit (~5 px
 	# radius) lands near 1.0. Clamped to Mindustry's natural blast range.
 	var intensity: float = clampf(unit_radius_px * 0.2, 0.6, 4.0)
+	_spawn_dynamic_explosion(world_pos, intensity, scl)
 
+
+## Mindustry-style CORE explosion. A core destructs through the SAME
+## `Fx.dynamicExplosion` the game uses for every other blast (gray smoke
+## puffs → expanding shockwave ring → orange spark lines) — a core is just
+## the biggest, longest-lived instance of it, plus a hard screen shake and a
+## few scattered satellite blasts so a multi-tile core reads as one big
+## chained boom rather than a single point pop. `size_tiles` is the core's
+## footprint (e.g. 3 for a Shard); larger cores throw larger blasts.
+func core_explosion(world_pos: Vector2, size_tiles: float = 3.0) -> void:
+	var gs: float = float(main.GRID_SIZE) if main else 16.0
+	var scl: float = gs / 16.0
+	# Mindustry's intensity = radius/8 with radius = tilesize*size/2; scaled
+	# up here so the core blast is the climactic one, and clamped so an
+	# oversized core can't run away.
+	var intensity: float = clampf(size_tiles * 1.4, 3.0, 6.0)
+	# Central blast.
+	_spawn_dynamic_explosion(world_pos, intensity, scl)
+	# Scattered satellite blasts across the footprint (Mindustry's big
+	# explosions spawn multiple sub-bursts at random points within the
+	# radius). Each is weaker; the natural per-burst smoke-timeline jitter
+	# keeps them from all peaking on the same frame.
+	var spread: float = size_tiles * gs * 0.34
+	for _i in range(4):
+		var off: Vector2 = Vector2.from_angle(randf() * TAU) * randf_range(0.25, 1.0) * spread
+		_spawn_dynamic_explosion(world_pos + off, intensity * randf_range(0.4, 0.65), scl)
+	# A modest screen shake — the core dying is a big event, but a softer
+	# kick than a max-cap slam so it reads without rattling the screen.
+	var fb = main.get_node_or_null("FeedbackSystem") if main else null
+	if fb and fb.has_method("add_shake"):
+		fb.add_shake(15.0)
+
+
+## Core of the Fx.dynamicExplosion port: builds the smoke / ring / spark
+## timelines for a blast of the given `intensity` (Mindustry radius/8) at
+## world scale `scl` (Mindustry-px → our-px) and queues it. Both unit_death
+## and core_explosion feed this — the only difference between a unit pop and
+## a core boom is the intensity + count handed in here.
+func _spawn_dynamic_explosion(world_pos: Vector2, intensity: float, scl: float) -> void:
 	# --- Smoke: 4 sub-bursts, each its own timeline (b.scaled(lifetime*lenScl)).
 	var lifetime: float = (43.0 + intensity * 35.0) / _DX_FPS
 	var smoke_count: int = maxi(1, roundi(3.0 * intensity))
@@ -197,19 +241,30 @@ func _process(delta: float) -> void:
 
 
 func _draw() -> void:
+	# Old ring + shrapnel-spoke bursts draw FIRST so they sit UNDER the
+	# Mindustry-style dynamicExplosion (cores layer both; the new boom reads
+	# on top of the old ring).
+	_draw_old_bursts()
 	_draw_unit_bursts()
+
+
+func _draw_old_bursts() -> void:
 	for b in _bursts:
 		var t: float = clampf(float(b["age"]) / EFFECT_LIFE, 0.0, 1.0)
 		var origin: Vector2 = b["pos"]
-		# --- Yellow ring ---
-		var ring_r: float = float(b["ring_radius"]) * ease(t, 1.6)
-		var ring_alpha: float = lerpf(1.0, 0.0, t)
-		if ring_r > 1.0:
-			draw_arc(origin, ring_r, 0.0, TAU, 48,
-				Color(1.0, 0.92, 0.2, ring_alpha), RING_THICKNESS, true)
-			# Faint outer glow so the ring reads thick at lower zoom.
-			draw_arc(origin, ring_r + RING_THICKNESS * 0.5, 0.0, TAU, 48,
-				Color(1.0, 0.7, 0.1, ring_alpha * 0.35), RING_THICKNESS * 0.75, true)
+		var line_scale: float = float(b.get("line_scale", 1.0))
+		# --- Yellow ring (skipped for core bursts, which layer the new
+		# boom's shockwave on top instead) ---
+		if bool(b.get("show_ring", true)):
+			var ring_w: float = RING_THICKNESS * line_scale
+			var ring_r: float = float(b["ring_radius"]) * ease(t, 1.6)
+			var ring_alpha: float = lerpf(1.0, 0.0, t)
+			if ring_r > 1.0:
+				draw_arc(origin, ring_r, 0.0, TAU, 48,
+					Color(1.0, 0.92, 0.2, ring_alpha), ring_w, true)
+				# Faint outer glow so the ring reads thick at lower zoom.
+				draw_arc(origin, ring_r + ring_w * 0.5, 0.0, TAU, 48,
+					Color(1.0, 0.7, 0.1, ring_alpha * 0.35), ring_w * 0.75, true)
 		# --- Spokes ---
 		# Phase 1: tip travels from origin → target endpoint.
 		# Phase 2: back catches up to that endpoint, line collapses.
@@ -226,7 +281,7 @@ func _draw() -> void:
 			var back: Vector2 = origin + dir * (max_len * back_t)
 			var col: Color = s["color"]
 			col.a = alpha
-			draw_line(back, tip, col, LINE_THICKNESS, true)
+			draw_line(back, tip, col, LINE_THICKNESS * line_scale, true)
 
 
 ## Renders the Mindustry `Fx.dynamicExplosion` ports. Three layers, drawn
@@ -275,14 +330,18 @@ func _draw_unit_bursts() -> void:
 					Color(_DX_GRAY.r, _DX_GRAY.g, _DX_GRAY.b, 0.9), ring_w, true)
 
 		# --- Layer C: orange spark lines (on top) ---
-		# Lives over baseLifetime = (26 + intensity*15) frames. offset grows
-		# with finpow (=fin^2) out to 40*intensity; each line shrinks as it
-		# ages (length 1 + (1-finpow)*4*(3+intensity)); colour lerps
-		# lighterOrange -> lightOrange -> gray over fin; stroke 1.7*fout*(...).
+		# Lives over baseLifetime = (26 + intensity*15) frames. Distance grows
+		# out to 40*intensity; each line shrinks as it ages (length
+		# 1 + (1-finpow)*4*(3+intensity)); colour lerps lighterOrange ->
+		# lightOrange -> gray over fin; stroke 1.7*fout*(...).
 		var base_dur: float = (26.0 + intensity * 15.0) / _DX_FPS
 		var base_fin: float = clampf(age / base_dur, 0.0, 1.0) if base_dur > 0.0 else 1.0
 		if base_fin < 1.0:
-			var finpow: float = base_fin * base_fin
+			# Fast-start ease-OUT (was fin^2, an ease-IN that left the sparks
+			# hovering at the origin for the first frames). pow2Out gives the
+			# sparks immediate outward velocity that decelerates, so they
+			# read as ejecta thrown the instant the blast spawns.
+			var finpow: float = _pow_out(base_fin, 2.0)
 			var base_fout: float = 1.0 - base_fin
 			var spark_col: Color = _lerp3(_DX_LIGHTER_ORANGE, _DX_LIGHT_ORANGE, _DX_GRAY, base_fin)
 			var spark_w: float = (1.7 * base_fout) * (1.0 + (intensity - 1.0) / 2.0) * scl

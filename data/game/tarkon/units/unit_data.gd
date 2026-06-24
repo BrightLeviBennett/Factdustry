@@ -13,13 +13,13 @@ enum UnitShape { CIRCLE, DIAMOND, TRIANGLE, HEXAGON }
 enum MovementLayer {
 	GROUND,   ## Normal pathfinding, blocked by all buildings + terrain walls
 	CRAWLER,  ## Ignores buildings; blocked only by terrain wall segments >= 4 cells
-	HOVER,    ## Ignores all terrain, direct movement
+	HOVER,    ## Hovers over liquid/rough floors, but terrain walls still block it
 	FLYING,   ## Ignores all terrain, direct movement (highest layer)
 	NAVAL,    ## Water-only: may ONLY occupy water floor with no platform on
 			  ## it. Everything else (land, walls, buildings, platforms) is
 			  ## impassable, so a naval unit treats the water's edge the way
-	          ## a tank treats a wall. Appended last to keep existing .tres
-	          ## integer movement_layer values stable.
+			  ## a tank treats a wall. Appended last to keep existing .tres
+			  ## integer movement_layer values stable.
 }
 enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 
@@ -65,8 +65,6 @@ enum TargetPriority { NEAREST, BUILDINGS, UNITS, WEAKEST, PLAYER_DRONE }
 @export_subgroup("Tank Steering")
 ## Must turn before moving, producing arcing trajectories.
 @export var tank_steering: bool = false
-## Turn radius in pixels. >0 arcs around a pivot; 0 pivots in place.
-@export var turn_radius: float = 0.0
 @export_subgroup("Naval Wake")
 ## Number of history points in each side wake-trail ribbon (Mindustry's
 ## `trailLength`). 0 = no wake. Higher = longer trail.

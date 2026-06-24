@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://bknj4cwfmnql5"]
+
+[ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://b8oc5ts5n5lcd" path="res://textures/blocks/item transportation/SmallContainer.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = &"small_sealed_container"
+display_name = "Small Sealed Container"
+description = "A sealed tank for storing fluids. Fill it from adjacent pipes and empty it with a sealed unloader."
+icon = ExtResource("2")
+category = 9
+tags = PackedStringArray("fluid_storage")
+color = Color(0.25, 0.5, 0.75, 1)
+grid_size = Vector2i(2, 2)
+top_sprite = ExtResource("2")
+max_health = 220.0
+build_cost = {
+"copper": 120,
+"graphite": 40
+}
+build_time = 1.0
+liquid_capacity = 200.0

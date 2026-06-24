@@ -89,6 +89,20 @@ const _BURST_PROFILES := {
 		"gravity": Vector2.ZERO,
 		"z_index": 4090,
 	},
+	# Incinerator burn-off: a small wisp of gray smoke drifting up off the
+	# block when it destroys an item. Narrow upward cone, slight upward
+	# gravity so it keeps rising, drawn above the building.
+	"incinerate_smoke": {
+		"color": Color(0.55, 0.55, 0.58, 0.5),
+		"count": 6,
+		"lifetime": 0.6,
+		"speed": 42.0,
+		"dir": Vector2(0, -1),
+		"spread_deg": 22.0,
+		"scale": 2.4,
+		"gravity": Vector2(0, -20.0),
+		"z_index": 4090,
+	},
 }
 
 # --- Ruin decals ---
@@ -256,7 +270,7 @@ func _profile_for(data: BlockData) -> Dictionary:
 ## factories check their factory_buffers phase; vent-powered blocks
 ## just need to be on a vent (the power network handles the rest);
 ## fall back to "powered" otherwise.
-func _is_block_active(anchor: Vector2i, data: BlockData) -> bool:
+func _is_block_active(anchor: Vector2i, _data: BlockData) -> bool:
 	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
 		return false
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
@@ -343,11 +357,19 @@ func _on_building_destroyed_by_enemy(grid_pos: Vector2i) -> void:
 	var center: Vector2 = main.grid_to_world(anchor) + Vector2(sz.x * gs * 0.5, sz.y * gs * 0.5)
 	var is_core: bool = bdata.tags.has("core")
 	var is_reactor: bool = bdata.tags.has("reactor") or bdata.id == &"nuclear_reactor"
-	if is_core or is_reactor:
+	if is_core:
+		# Cores get Mindustry's dynamicExplosion-style core boom, layered
+		# OVER the old ring + shrapnel-spoke burst (which draws underneath).
+		var expl_c = main.get_node_or_null("ExplosionSystem")
+		if expl_c:
+			if expl_c.has_method("explode"):
+				expl_c.explode(center, float(maxi(sz.x, sz.y)) * 2.5, 1.7, false)
+			if expl_c.has_method("core_explosion"):
+				expl_c.core_explosion(center, float(maxi(sz.x, sz.y)))
+	elif is_reactor:
 		var expl = main.get_node_or_null("ExplosionSystem")
 		if expl and expl.has_method("explode"):
-			var ring_tiles: float = 6.0 if is_core else -1.0
-			expl.explode(center, ring_tiles)
+			expl.explode(center, -1.0)
 	spawn_block_ruins(anchor, sz)
 
 

@@ -1,13 +1,13 @@
 [gd_resource type="Resource" script_class="FluidData" format=3 uid="uid://n1xgkuawt73v"]
 
 [ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/tarkon/fluids/fluid_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://b6fxv5b4ggxkf" path="res://textures/resources/oxygen.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://3olke3o2iq5h" path="res://textures/resources/oxygen.png" id="1_38fea"]
 
 [resource]
 script = ExtResource("1")
 id = &"mat_oxygen"
 display_name = "Oxygen"
 description = "Essential for combustion and life support."
-icon = ExtResource("2")
+icon = ExtResource("1_38fea")
 color = Color(0.9977433, 0.7656583, 1, 1)
 viscosity = 0.4

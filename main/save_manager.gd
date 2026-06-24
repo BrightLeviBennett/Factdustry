@@ -33,6 +33,16 @@ extends Node
 const SAVE_DIR := "user://maps/"
 const SAVES_DIR := "user://saves/"
 const SCHEMATIC_DIR := "user://schematics/"
+
+## Save slots. Each campaign + its per-sector autosaves live under
+## `user://saves/slot<N>/`, so 3 fully independent playthroughs coexist.
+## The active slot is chosen from Settings → Game Data and persisted in its
+## own tiny file (NOT in a slot, and NOT in settings.json, so it survives a
+## settings reset and is readable before SettingsUI loads). Sector TEMPLATES
+## in `user://maps/` and global settings are shared across all slots.
+const MAX_SAVE_SLOTS := 3
+const _ACTIVE_SLOT_FILE := "user://active_save_slot.txt"
+var current_save_slot: int = 1
 ## Global hints are authored once and active in every sector — stored
 ## here so any sector landing can pull the same list. Bundled fallback
 ## at `res://data/game/global_hints.json` is consulted when the user
@@ -248,9 +258,32 @@ func queue_launch_with_animation() -> void:
 	if la == null or not la.has_method("play_launch"):
 		swap_scene_to_main()
 		return
+	_force_unpause_for_sector_launch(main_node)
 	if not la.is_connected("launch_complete", swap_scene_to_main):
 		la.launch_complete.connect(swap_scene_to_main, CONNECT_ONE_SHOT)
 	la.play_launch()
+
+
+func _force_unpause_for_sector_launch(main_node: Node) -> void:
+	# LaunchAnimation intentionally freezes when Main.world_paused is true.
+	# If the player opened the planet map from a paused sector, clear that
+	# pause before playing the outgoing-sector launch so the scene swap can
+	# finish instead of getting stuck on the first frame.
+	get_tree().paused = false
+	if main_node == null:
+		return
+	if "world_paused" in main_node:
+		main_node.world_paused = false
+	if "_auto_paused_by_focus" in main_node:
+		main_node._auto_paused_by_focus = false
+	var hud = main_node.get_node_or_null("HUD")
+	if hud != null:
+		if hud.has_method("_close_escape_menu") and "escape_menu_open" in hud and hud.escape_menu_open:
+			hud._close_escape_menu()
+		elif "escape_menu_open" in hud:
+			hud.escape_menu_open = false
+			if "escape_menu" in hud and hud.escape_menu != null:
+				hud.escape_menu.visible = false
 
 
 ## Re-attaches the parked Main back into /root as the current scene.
@@ -478,6 +511,21 @@ var global_hints: Array = []
 ## of campaign.json.
 var global_hints_runtime: Dictionary = {}
 
+# --- UI view persistence (planet menu + tech tree) ---
+## Saved camera orientation per planet so reopening the planet menu lands
+## on the same view the player left. Keyed by String(planet_id) →
+## {yaw:float, pitch:float, distance:float}. Empty for a planet = use its
+## authored default framing.
+var planet_camera_views: Dictionary = {}
+## Saved tech-tree pan + zoom so reopening it returns to the same spot.
+## {h:int, v:int, zoom:float}. Empty = first open, center on core_shard.
+var tech_tree_view: Dictionary = {}
+## Set of sector ids already introduced via the planet-menu unlock-focus
+## animation. A sector that is accessible (`not TechTree.is_locked`) but
+## NOT in this set is "newly unlocked" and gets focused the next time the
+## planet menu opens. StringName(sector_id) → true.
+var seen_unlocked_sectors: Dictionary = {}
+
 
 ## Wipes every player save while leaving the editor's `/maps` directory
 ## untouched. Removes `campaign.json`, every `.save.json`, and every
@@ -499,6 +547,12 @@ func reset_campaign() -> void:
 	# the new one and stay hidden forever. Same dict that gets saved /
 	# loaded with `campaign.json`, so wipe it alongside the on-disk file.
 	global_hints_runtime.clear()
+	# Saved UI views + the introduced-sector set are campaign-scoped; a
+	# fresh campaign should start with no remembered framing and replay
+	# the intro for its starting sector.
+	planet_camera_views.clear()
+	tech_tree_view.clear()
+	seen_unlocked_sectors.clear()
 	# Drop any parked-Main left over from a planet-map round-trip.
 	# Without this the parked tree's `main.resources` survives the wipe
 	# and the next `sync_active_sector_resources` (e.g. from opening
@@ -531,8 +585,9 @@ func reset_campaign() -> void:
 		if power_sys and "_block_internal_battery" in power_sys \
 				and power_sys._block_internal_battery is Dictionary:
 			power_sys._block_internal_battery.clear()
-	# Wipe everything under /saves.
-	var dir = DirAccess.open(SAVES_DIR)
+	# Wipe everything under the ACTIVE slot (Reset only clears the slot
+	# you're playing, leaving the other slots untouched).
+	var dir = DirAccess.open(_saves_dir())
 	if dir != null:
 		dir.list_dir_begin()
 		var fname = dir.get_next()
@@ -540,7 +595,7 @@ func reset_campaign() -> void:
 			if fname.ends_with(".save.json") \
 					or fname.ends_with(".sector.json") \
 					or fname == "campaign.json":
-				DirAccess.remove_absolute(SAVES_DIR + fname)
+				DirAccess.remove_absolute(_saves_dir() + fname)
 			fname = dir.get_next()
 		dir.list_dir_end()
 	# If a live Main is still standing the player's terrain / placed
@@ -609,7 +664,7 @@ func _migrate_legacy_saves() -> void:
 ## Removes any `_default.sector.json` left over from the old fallback
 ## key. Runs on launch as a one-time cleanup; safe to call repeatedly.
 func _purge_default_sector_files() -> void:
-	for d in [SAVE_DIR, SAVES_DIR]:
+	for d in [SAVE_DIR, SAVES_DIR, _saves_dir()]:
 		var p: String = d + "_default.sector.json"
 		if FileAccess.file_exists(p):
 			DirAccess.remove_absolute(p)
@@ -625,6 +680,142 @@ const _AUTO_WIPE_INTERVAL: float = 1.0
 var _auto_wipe_timer: float = 0.0
 
 
+# =========================
+# SAVE SLOTS
+# =========================
+
+## Directory holding the ACTIVE slot's campaign + sector autosaves. Every
+## per-slot path goes through here.
+func _saves_dir() -> String:
+	return SAVES_DIR + "slot%d/" % current_save_slot
+
+
+## Public accessor for the active slot's directory (external callers).
+func current_saves_dir() -> String:
+	return _saves_dir()
+
+
+## Public helper: the active slot's autosave path for a sector. External
+## callers (PlanetSelect, LaunchpadSystem) must use this instead of building
+## `SAVES_DIR + id + ".sector.json"` themselves, so they stay slot-aware.
+func sector_save_path(sector_id) -> String:
+	return _saves_dir() + str(sector_id) + ".sector.json"
+
+
+## Reads the persisted active slot. Defaults to 1 on a fresh install or any
+## malformed/out-of-range value.
+func _load_active_slot() -> void:
+	if not FileAccess.file_exists(_ACTIVE_SLOT_FILE):
+		return
+	var fa := FileAccess.open(_ACTIVE_SLOT_FILE, FileAccess.READ)
+	if fa == null:
+		return
+	var n := int(fa.get_as_text().strip_edges())
+	fa.close()
+	if n >= 1 and n <= MAX_SAVE_SLOTS:
+		current_save_slot = n
+
+
+func _write_active_slot() -> void:
+	var fa := FileAccess.open(_ACTIVE_SLOT_FILE, FileAccess.WRITE)
+	if fa != null:
+		fa.store_string(str(current_save_slot))
+		fa.close()
+
+
+## One-time migration for pre-slot saves: anything sitting LOOSE directly in
+## `user://saves/` (from before slots existed) is moved into `slot1/` so an
+## existing player's progress becomes Slot 1 instead of vanishing.
+func _migrate_saves_to_slots() -> void:
+	var dir := DirAccess.open(SAVES_DIR)
+	if dir == null:
+		return
+	var loose: Array = []
+	dir.list_dir_begin()
+	var f := dir.get_next()
+	while f != "":
+		if not dir.current_is_dir() and (f == "campaign.json" \
+				or f.ends_with(".sector.json") or f.ends_with(".save.json")):
+			loose.append(f)
+		f = dir.get_next()
+	dir.list_dir_end()
+	if loose.is_empty():
+		return
+	var slot1: String = SAVES_DIR + "slot1/"
+	DirAccess.make_dir_recursive_absolute(slot1)
+	for fname in loose:
+		var dest: String = slot1 + fname
+		if not FileAccess.file_exists(dest):
+			DirAccess.rename_absolute(SAVES_DIR + fname, dest)
+		else:
+			DirAccess.remove_absolute(SAVES_DIR + fname)
+	print("SaveManager: migrated %d loose save file(s) into slot1/" % loose.size())
+
+
+## Returns true if the given slot has a campaign on disk (for "Slot N (empty)"
+## labelling in the settings dropdown).
+func slot_has_save(slot: int) -> bool:
+	return FileAccess.file_exists(SAVES_DIR + "slot%d/" % slot + "campaign.json")
+
+
+## Switches the active save slot. Persists the slot being left, drops live /
+## parked game state belonging to it, loads the new slot's campaign (or a
+## clean slate if empty), and — if a sector or planet view is live — returns
+## to the main menu so the scene tree isn't left showing the old slot's world.
+func switch_save_slot(new_slot: int) -> void:
+	new_slot = clampi(new_slot, 1, MAX_SAVE_SLOTS)
+	if new_slot == current_save_slot:
+		return
+	# Persist the slot we're leaving.
+	if active_sector_id != &"" and active_sector_id != &"_default":
+		sync_active_sector_resources()
+		save_sector(String(active_sector_id))
+	save_campaign()
+	# Live/parked Main + planet view belong to the old slot — drop them.
+	discard_parked_main()
+	discard_parked_planet_select()
+	# Flip to the new slot and remember the choice.
+	current_save_slot = new_slot
+	_write_active_slot()
+	DirAccess.make_dir_recursive_absolute(_saves_dir())
+	# Wipe in-memory campaign + tech-tree progress, then load the new slot.
+	# An empty slot leaves the cleared (new-game) state in place.
+	_clear_campaign_memory()
+	load_campaign()
+	# Any non-menu scene (in-game world, planet view) is still the OLD slot's
+	# scene tree — boot to the menu for a clean slate. Deferred so the
+	# settings overlay that triggered this finishes its input handler first.
+	var cur: Node = get_tree().current_scene
+	if cur == null or cur.scene_file_path != "res://main/MainMenu.tscn":
+		get_tree().change_scene_to_file.call_deferred("res://main/MainMenu.tscn")
+	print("SaveManager: switched to save slot %d" % current_save_slot)
+
+
+## Clears all in-memory campaign state (mirrors reset_campaign's in-memory
+## half) plus tech-tree progress, WITHOUT touching disk. Used when switching
+## slots so the new slot starts from its own saved data, not the old slot's.
+func _clear_campaign_memory() -> void:
+	sector_resources.clear()
+	sector_production_rates.clear()
+	sector_production_timestamps.clear()
+	_sector_production_fractions.clear()
+	sector_storage_caps.clear()
+	active_sector_id = &""
+	pending_sector_id = &""
+	pending_map_path = ""
+	pending_seed_pack.clear()
+	global_hints_runtime.clear()
+	planet_camera_views.clear()
+	tech_tree_view.clear()
+	seen_unlocked_sectors.clear()
+	pending_pod_deliveries.clear()
+	landing_pad_filters_by_sector.clear()
+	landing_pad_delivery_count.clear()
+	# Reset tech-tree unlocks to base (loading {} re-applies the always-
+	# researched roots + starting_grounds).
+	TechTree.load_save_data({})
+
+
 func _ready() -> void:
 	# Create the maps + saves directories if they don't exist.
 	# DirAccess is Godot's file system API.
@@ -636,6 +827,11 @@ func _ready() -> void:
 	# only contains sector files going forward. Skips silently if there's
 	# nothing to move (i.e. fresh install or already migrated).
 	_migrate_legacy_saves()
+	# Determine the active slot, then fold any pre-slot loose saves into
+	# slot1 and ensure the active slot's directory exists.
+	_load_active_slot()
+	_migrate_saves_to_slots()
+	DirAccess.make_dir_recursive_absolute(_saves_dir())
 	# Purge any leftover `_default.sector.json` files from the legacy
 	# fallback path that's been removed.
 	_purge_default_sector_files()
@@ -785,7 +981,7 @@ func delete_sector(sector_name: String) -> bool:
 	# Only delete the player's autosave — never touch the editor
 	# template under `user://maps/`, which is treated as read-only by
 	# gameplay code.
-	var path = SAVES_DIR + sector_name + ".sector.json"
+	var path = _saves_dir() + sector_name + ".sector.json"
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 		return true
@@ -1294,6 +1490,7 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 		"building_home_core": _serialize_home_core(main.building_home_core if "building_home_core" in main else {}),
 		"linked_pairs": _serialize_links(links),
 		"sorter_filters": _serialize_sorter_filters(),
+		"lane_shifter_state": _serialize_lane_shifter_state(),
 		"factory_recipe_state": _serialize_factory_recipe_state(),
 		"landing_pad_filters": landing_pad_filters_serialized,
 		"launchpad_state": _serialize_launchpad_state(),
@@ -1424,7 +1621,7 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 	# player is on the planet menu / in another sector / the game is closed.
 	capture_production_snapshot(StringName(sector_name), main)
 
-	var dir: String = SAVE_DIR if as_template else SAVES_DIR
+	var dir: String = SAVE_DIR if as_template else _saves_dir()
 	return _write_json(dir + sector_name + ".sector.json", data)
 
 
@@ -1442,6 +1639,7 @@ func load_sector_from_path(path: String) -> bool:
 	if main == null or terrain == null:
 		push_warning("SaveManager: Can't find Main or TerrainSystem!")
 		return false
+	var is_map_editor: bool = "editor_mode" in main
 
 	var data = _read_json(path)
 	if data == null:
@@ -1507,8 +1705,11 @@ func load_sector_from_path(path: String) -> bool:
 		for key in sf_data:
 			building_sys_early.editor_sorter_filters[_str_to_vec2i(key)] = StringName(sf_data[key])
 
+	# --- Load Lane Shifter route / suspended-item state ---
+	_deserialize_lane_shifter_state(data.get("lane_shifter_state", {}))
+
 	# --- Load recipe-select factory selections ---
-	# Recipe-select factories (Rod Shapper / Compound Mixer / etc.) stay idle
+	# Recipe-select factories (Rod Shaper / Compound Mixer / etc.) stay idle
 	# until a recipe is picked, so this must round-trip or they reset to idle
 	# on load.
 	var frs_data = data.get("factory_recipe_state", {})
@@ -1558,7 +1759,7 @@ func load_sector_from_path(path: String) -> bool:
 		if se_h and se_h.has_method("set_hints_data"):
 			se_h.set_hints_data(hints_data)
 		var sector_script_h = get_node_or_null("/root/Main/SectorScript")
-		if sector_script_h and sector_script_h.has_method("load_hints"):
+		if sector_script_h and not is_map_editor and sector_script_h.has_method("load_hints"):
 			sector_script_h.load_hints(hints_data)
 			print("SaveManager: SectorScript now has %d hints" % sector_script_h._hints.size())
 			var is_user_save_h: bool = path.begins_with(SAVE_DIR) or path.begins_with("user://")
@@ -1573,7 +1774,9 @@ func load_sector_from_path(path: String) -> bool:
 		_deserialize_script_steps(main, script_steps_data)
 		# In gameplay: load into SectorScript
 		var sector_script = get_node_or_null("/root/Main/SectorScript")
-		if sector_script and sector_script.has_method("load_script_steps"):
+		if sector_script and is_map_editor and sector_script.has_method("load_script_steps"):
+			sector_script.load_script_steps([])
+		elif sector_script and sector_script.has_method("load_script_steps"):
 			sector_script.load_script_steps(script_steps_data)
 			# Only restore runtime state when loading a USER autosave
 			# (under user://maps/). Bundled map_paths (res://…) can ship
@@ -1590,6 +1793,10 @@ func load_sector_from_path(path: String) -> bool:
 				sector_script.call_deferred("load_runtime_state", data["script_runtime"])
 			else:
 				sector_script.call_deferred("start_script")
+	else:
+		var sector_script_empty = get_node_or_null("/root/Main/SectorScript")
+		if sector_script_empty and is_map_editor and sector_script_empty.has_method("load_script_steps"):
+			sector_script_empty.load_script_steps([])
 
 	# --- Load authored wave bundle into WaveManager (gameplay) or onto
 	# the editor's staging fields (map editor). Fresh/empty bundle
@@ -2188,7 +2395,7 @@ func load_sector_from_path(path: String) -> bool:
 ## `user://saves/` so an in-progress run resumes; falls back to the
 ## editor template under `user://maps/` if no autosave exists.
 func load_sector(sector_name: String) -> bool:
-	var save_path: String = SAVES_DIR + sector_name + ".sector.json"
+	var save_path: String = _saves_dir() + sector_name + ".sector.json"
 	if FileAccess.file_exists(save_path):
 		return load_sector_from_path(save_path)
 	return load_sector_from_path(SAVE_DIR + sector_name + ".sector.json")
@@ -2612,8 +2819,139 @@ func _serialize_sorter_filters() -> Dictionary:
 	return result
 
 
+func _serialize_lane_shifter_state() -> Dictionary:
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	var result := {}
+	if logistics == null or not ("lane_shifter_state" in logistics):
+		return result
+	for anchor in logistics.lane_shifter_state:
+		var state: Dictionary = logistics.lane_shifter_state[anchor]
+		var inputs_out: Array = []
+		for spec in state.get("inputs", []):
+			if not (spec is Dictionary):
+				continue
+			var filter_out: Array = []
+			for fid in spec.get("filter", []):
+				filter_out.append(String(StringName(fid)))
+			inputs_out.append({
+				"pos": _vec2i_to_str(spec.get("pos", Vector2i.ZERO)),
+				"filter": filter_out,
+			})
+		var outputs_out: Array = []
+		for spec in state.get("outputs", []):
+			if not (spec is Dictionary):
+				continue
+			outputs_out.append({
+				"pos": _vec2i_to_str(spec.get("pos", Vector2i.ZERO)),
+			})
+		var banks_out: Array = []
+		for bank in state.get("banks", []):
+			var routes_out: Array = []
+			for route in bank.get("routes", []):
+				routes_out.append({
+					"item_id": String(StringName(route.get("item_id", &""))),
+					"mode": str(route.get("mode", "transfer")),
+					"enabled": bool(route.get("enabled", true)),
+					"source": _vec2i_to_str(route.get("source", Vector2i(-2147483648, -2147483648))),
+					"dest": _vec2i_to_str(route.get("dest", Vector2i(-2147483648, -2147483648))),
+					"stalled": float(route.get("stalled", 0.0)),
+				})
+			var suspended_out: Array = []
+			for transfer in bank.get("suspended", []):
+				suspended_out.append({
+					"item_id": String(StringName(transfer.get("item_id", &""))),
+					"route": int(transfer.get("route", 0)),
+					"source": _vec2i_to_str(transfer.get("source", Vector2i.ZERO)),
+					"dest": _vec2i_to_str(transfer.get("dest", Vector2i.ZERO)),
+					"progress": float(transfer.get("progress", 0.0)),
+					"state": str(transfer.get("state", "moving")),
+				})
+			banks_out.append({
+				"routes": routes_out,
+				"suspended": suspended_out,
+				"cooldown": float(bank.get("cooldown", 0.0)),
+				"route_rr": int(bank.get("route_rr", 0)),
+			})
+		result[_vec2i_to_str(anchor)] = {
+			"banks": banks_out,
+			"inputs": inputs_out,
+			"outputs": outputs_out,
+		}
+	return result
+
+
+func _deserialize_lane_shifter_state(raw) -> void:
+	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
+	if logistics == null or not ("lane_shifter_state" in logistics) or not (raw is Dictionary):
+		return
+	logistics.lane_shifter_state.clear()
+	for key in raw:
+		var anchor: Vector2i = _str_to_vec2i(str(key))
+		var saved = raw[key]
+		if not (saved is Dictionary):
+			continue
+		var inputs_out: Array = []
+		for spec in saved.get("inputs", []):
+			if not (spec is Dictionary):
+				continue
+			var filter_out: Array = []
+			for fid in spec.get("filter", []):
+				filter_out.append(StringName(fid))
+			inputs_out.append({
+				"pos": _str_to_vec2i(str(spec.get("pos", "0,0"))),
+				"filter": filter_out,
+			})
+		var outputs_out: Array = []
+		for spec in saved.get("outputs", []):
+			if not (spec is Dictionary):
+				continue
+			outputs_out.append({
+				"pos": _str_to_vec2i(str(spec.get("pos", "0,0"))),
+			})
+		var banks_in: Array = saved.get("banks", [])
+		var banks_out: Array = []
+		for bank in banks_in:
+			if not (bank is Dictionary):
+				continue
+			var routes_out: Array = []
+			for route in bank.get("routes", []):
+				if not (route is Dictionary):
+					continue
+				routes_out.append({
+					"item_id": StringName(route.get("item_id", "")),
+					"mode": str(route.get("mode", "transfer")),
+					"enabled": bool(route.get("enabled", true)),
+					"source": _str_to_vec2i(str(route.get("source", "-2147483648,-2147483648"))),
+					"dest": _str_to_vec2i(str(route.get("dest", "-2147483648,-2147483648"))),
+					"stalled": float(route.get("stalled", 0.0)),
+				})
+			var suspended_out: Array = []
+			for transfer in bank.get("suspended", []):
+				if not (transfer is Dictionary):
+					continue
+				suspended_out.append({
+					"item_id": StringName(transfer.get("item_id", "")),
+					"route": int(transfer.get("route", 0)),
+					"source": _str_to_vec2i(str(transfer.get("source", "0,0"))),
+					"dest": _str_to_vec2i(str(transfer.get("dest", "0,0"))),
+					"progress": float(transfer.get("progress", 0.0)),
+					"state": str(transfer.get("state", "moving")),
+				})
+			banks_out.append({
+				"routes": routes_out,
+				"suspended": suspended_out,
+				"cooldown": float(bank.get("cooldown", 0.0)),
+				"route_rr": int(bank.get("route_rr", 0)),
+			})
+		logistics.lane_shifter_state[anchor] = {
+			"banks": banks_out,
+			"inputs": inputs_out,
+			"outputs": outputs_out,
+		}
+
+
 ## Serializes the per-anchor recipe selection for recipe-select factories
-## (Rod Shapper / Compound Mixer / etc.) so a factory remembers which recipe
+## (Rod Shaper / Compound Mixer / etc.) so a factory remembers which recipe
 ## it was set to across save/load. Anchor → recipe id (StringName as String).
 func _serialize_factory_recipe_state() -> Dictionary:
 	var logistics = get_node_or_null("/root/Main/LogisticsSystem")
@@ -2926,8 +3264,8 @@ func take_from_global_pool(item_id: StringName, amount: int) -> int:
 	# Collect sectors that have this item, sorted by amount descending
 	var sectors_with_item: Array = []
 	for sid in sector_resources:
-		var amt: int = sector_resources[sid].get(item_id, 0)
-		if amt > 0:
+		var available_amount: int = sector_resources[sid].get(item_id, 0)
+		if available_amount > 0:
 			sectors_with_item.append(sid)
 	sectors_with_item.sort_custom(func(a, b):
 		return sector_resources[a].get(item_id, 0) > sector_resources[b].get(item_id, 0)
@@ -2949,6 +3287,53 @@ func take_from_global_pool(item_id: StringName, amount: int) -> int:
 				main.resources[key] = sector_resources[active_sector_id][key]
 
 	return amount - remaining
+
+
+## Deducts a resource cost from the currently active source sector.
+## `cost` must already use runtime resource ids (for example `mat_copper`).
+## Updates both the campaign cache and the live/parked Main stockpile so a
+## later sync during the outgoing launch animation cannot restore old values.
+func deduct_from_active_sector(cost: Dictionary) -> bool:
+	if active_sector_id == &"" or active_sector_id == &"_default":
+		return false
+	if cost.is_empty():
+		return true
+	if get_node_or_null("/root/Main") != null:
+		sync_active_sector_resources()
+	if not sector_resources.has(active_sector_id):
+		return false
+
+	var source: Dictionary = sector_resources[active_sector_id].duplicate()
+	for item_id in cost:
+		var need: int = int(cost[item_id])
+		if need <= 0:
+			continue
+		if int(source.get(item_id, 0)) < need:
+			return false
+
+	for item_id in cost:
+		var need: int = int(cost[item_id])
+		if need <= 0:
+			continue
+		source[item_id] = int(source.get(item_id, 0)) - need
+	sector_resources[active_sector_id] = source
+	_apply_resources_to_live_sector(active_sector_id, source)
+	return true
+
+
+func _apply_resources_to_live_sector(sector_id: StringName, source: Dictionary) -> void:
+	if sector_id == &"" or sector_id != active_sector_id:
+		return
+	var main = get_node_or_null("/root/Main")
+	if main == null and has_parked_main():
+		main = _parked_main
+	if main == null or not ("resources" in main):
+		return
+	main.resources.clear()
+	for item_id in source:
+		main.resources[item_id] = int(source[item_id])
+	if main.has_signal("resources_changed"):
+		main.resources_changed.emit(main.resources)
 
 
 # =========================
@@ -2973,8 +3358,29 @@ func save_campaign() -> bool:
 		"pending_pod_deliveries": _serialize_pending_pod_deliveries(),
 		"landing_pad_filters_by_sector": _serialize_landing_pad_filters_by_sector(),
 		"landing_pad_delivery_count": _serialize_landing_pad_delivery_count(),
+		"planet_camera_views": planet_camera_views.duplicate(true),
+		"tech_tree_view": tech_tree_view.duplicate(true),
+		"seen_unlocked_sectors": _serialize_seen_unlocked_sectors(),
 	}
-	return _write_json(SAVES_DIR + "campaign.json", data)
+	return _write_json(_saves_dir() + "campaign.json", data)
+
+
+## Flattens the seen-sector set to a plain String array for JSON.
+func _serialize_seen_unlocked_sectors() -> Array:
+	var out: Array = []
+	for sid in seen_unlocked_sectors:
+		out.append(String(sid))
+	return out
+
+
+## Marks every currently-accessible sector as already seen. Used to migrate
+## saves made before the unlock-focus feature existed.
+func _seed_seen_unlocked_sectors_from_tech_tree() -> void:
+	if Registry == null or not ("sectors_list" in Registry):
+		return
+	for s in Registry.sectors_list:
+		if not TechTree.is_locked(s.id):
+			seen_unlocked_sectors[s.id] = true
 
 
 func _serialize_landing_pad_filters_by_sector() -> Dictionary:
@@ -3265,7 +3671,7 @@ func _deserialize_production_timestamps(data: Dictionary) -> void:
 
 ## Loads campaign-level state. Called automatically on startup.
 func load_campaign() -> bool:
-	var path = SAVES_DIR + "campaign.json"
+	var path = _saves_dir() + "campaign.json"
 	if not FileAccess.file_exists(path):
 		return false
 	var data = _read_json(path)
@@ -3295,6 +3701,20 @@ func load_campaign() -> bool:
 		_deserialize_landing_pad_filters_by_sector(data["landing_pad_filters_by_sector"])
 	if data.has("landing_pad_delivery_count") and data["landing_pad_delivery_count"] is Dictionary:
 		_deserialize_landing_pad_delivery_count(data["landing_pad_delivery_count"])
+	if data.has("planet_camera_views") and data["planet_camera_views"] is Dictionary:
+		planet_camera_views = (data["planet_camera_views"] as Dictionary).duplicate(true)
+	if data.has("tech_tree_view") and data["tech_tree_view"] is Dictionary:
+		tech_tree_view = (data["tech_tree_view"] as Dictionary).duplicate(true)
+	seen_unlocked_sectors.clear()
+	if data.has("seen_unlocked_sectors") and data["seen_unlocked_sectors"] is Array:
+		for sid in data["seen_unlocked_sectors"]:
+			seen_unlocked_sectors[StringName(sid)] = true
+	else:
+		# Migration: an older save predates the unlock-focus feature. Seed
+		# the seen-set with everything currently accessible so loading it
+		# doesn't replay an intro animation across the whole map. New
+		# unlocks AFTER this load still focus normally.
+		_seed_seen_unlocked_sectors_from_tech_tree()
 	# Clamp any existing stockpile against its saved cap before the
 	# accrual pass — handles the "a core was destroyed last session"
 	# case, old saves that pre-date the cap, and any other over-cap

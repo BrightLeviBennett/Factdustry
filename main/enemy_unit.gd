@@ -18,11 +18,12 @@ var max_health: float
 var move_speed: float
 var damage: float
 var attack_cooldown: float
-# See `_ready` — high-z CanvasGroup that owns the flying-unit shadow
-# composition. Built on `_ready` only for flying units (movement_layer
-# == FLYING); ground units leave both refs null and never draw a shadow.
-var _shadow_canvas: CanvasGroup = null
-var _shadow_drawer: Node2D = null
+var armor: float = 0.0
+var attack_range_bonus: float = 0.0
+var aim_speed_mult: float = 1.0
+var repair_speed_mult: float = 1.0
+var knockback_taken_mult: float = 1.0
+var damage_taken_mult: float = 1.0
 var unit_color: Color
 var unit_size: float
 
@@ -42,7 +43,6 @@ var is_selected := false
 # id -> { "effect": StatusEffectData, "time_left": float, "stacks": int,
 #         "boost": float (1.0 default; >1.0 if amplified by an affinity) }
 var active_statuses: Dictionary = {}
-var _status_tick_acc: float = 0.0
 
 # --- FOG VISIBILITY CACHE ---
 # Refreshed by `_update_fog_visibility` once every _FOG_CHECK_INTERVAL
@@ -116,6 +116,15 @@ var unit_shield_health: float = 0.0
 var unit_shield_max_health: float = 0.0
 var unit_shield_cooldown: float = 0.0
 var unit_shield_visual_scale: float = 0.0
+var module_afterburner_heat: float = 0.0
+var module_activity_timer: float = 0.0
+var module_missile_timer: float = 0.0
+var module_healing_bay_timer: float = 0.0
+var module_drone_bay_timer: float = 0.0
+var module_emp_timer: float = 6.0
+var module_emp_charge_timer: float = 0.0
+var module_emp_disabled_timer: float = 0.0
+var module_emp_charging: bool = false
 ## Dummy test unit (spawned ENEMY/Ferox by a Payload Source). Runs NO
 ## autonomous AI — it sits inert until the player selects it and issues a
 ## command. `dummy_mode`: "idle" (obey move orders only), "attack_block"
@@ -351,6 +360,77 @@ func _is_valid_attack_target(grid_pos: Vector2i) -> bool:
 	return false
 
 
+func _try_attack_blocking_building() -> bool:
+	if team != UnitData.Team.ENEMY or main == null or data == null:
+		return false
+	if target_building == null or target_unit != null or move_target != null:
+		return false
+	var blocker: Variant = _find_blocking_attack_target()
+	if not (blocker is Vector2i):
+		return false
+	target_building = blocker
+	path = PackedVector2Array()
+	path_index = 0
+	_blocked_frames = 0
+	_stuck_timer = 0.0
+	_stuck_streak = 0
+	return true
+
+
+func _find_blocking_attack_target() -> Variant:
+	if main == null:
+		return null
+	var cells: Array[Vector2i] = []
+	var seen: Dictionary = {}
+	var current_cell: Vector2i = main.world_to_grid(position)
+	_add_blocker_probe_cells(cells, seen, current_cell)
+	var intent: Vector2 = _intent_dir_for_yield()
+	if intent.length_squared() <= 0.01 and target_building is Vector2i:
+		var target_world: Vector2 = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		intent = (target_world - position).normalized()
+	if intent.length_squared() > 0.01:
+		var probe_a: Vector2i = main.world_to_grid(position + intent * maxf(unit_size + 2.0, main.GRID_SIZE * 0.5))
+		var probe_b: Vector2i = main.world_to_grid(position + intent * (unit_size + main.GRID_SIZE * 1.15))
+		_add_blocker_probe_cells(cells, seen, probe_a)
+		_add_blocker_probe_cells(cells, seen, probe_b)
+
+	var best: Variant = null
+	var best_score: float = INF
+	for cell in cells:
+		if not main.building_origins.has(cell):
+			continue
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if not main.placed_buildings.has(anchor) or not _is_valid_attack_target(anchor):
+			continue
+		var block_id: StringName = main.placed_buildings.get(anchor, &"")
+		var bdata = Registry.get_block(block_id)
+		if bdata == null or bdata.tags.has("no_pathfinding"):
+			continue
+		var center: Vector2 = main.grid_to_world(cell) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		var score: float = position.distance_squared_to(center)
+		if bdata.category == BlockData.BlockCategory.WALLS:
+			score -= main.GRID_SIZE * main.GRID_SIZE * 20.0
+		if intent.length_squared() > 0.01:
+			var to_cell: Vector2 = center - position
+			var ahead: float = to_cell.dot(intent)
+			score -= maxf(ahead, 0.0) * main.GRID_SIZE
+			score += absf(to_cell.cross(intent)) * main.GRID_SIZE
+		if score < best_score:
+			best_score = score
+			best = anchor
+	return best
+
+
+func _add_blocker_probe_cells(out_cells: Array[Vector2i], seen: Dictionary, center: Vector2i) -> void:
+	for y in range(-1, 2):
+		for x in range(-1, 2):
+			var cell := center + Vector2i(x, y)
+			if seen.has(cell):
+				continue
+			seen[cell] = true
+			out_cells.append(cell)
+
+
 func _ready() -> void:
 	_terrain = get_node_or_null("/root/Main/TerrainSystem")
 	_combat_sys = get_node_or_null("/root/Main/CombatSystem")
@@ -376,8 +456,30 @@ func _ready() -> void:
 	# Stagger each flying unit's hover-orbit so a squad doesn't bob in
 	# lockstep — the random phase makes a group look organic.
 	_orbit_phase = randf() * TAU
+	_connect_unit_data_changed()
+	_refresh_unit_data_cache()
+	# Fold in any module upgrades this unit was spawned with (no-op when the
+	# list is empty; re-run by the spawn/restore paths after upgrades load).
+	recompute_module_stats()
+	health = max_health
+	# Build the live weapon mounts from the unit's weapon list (no-op when
+	# the .tres lists none — those units use the legacy single-shot path).
+	_setup_weapon_mounts()
+	# Naval wake: enabled flag only — the trail is painted directly in the
+	# unit's own `_draw()` (the proven path the flying shadow uses), so no
+	# separate canvas node is needed.
+	if data and data.movement_layer == UnitData.MovementLayer.NAVAL and data.trail_length > 0:
+		_wake_enabled = true
+
+
+func _connect_unit_data_changed() -> void:
+	if data != null and not data.changed.is_connected(_on_unit_data_changed):
+		data.changed.connect(_on_unit_data_changed)
+
+
+func _refresh_unit_data_cache() -> void:
 	# Load stats from the UnitData resource. UnitData.move_speed is stored in
-	# tiles/sec; convert once here into pixels/sec (what _tick_movement uses).
+	# tiles/sec; convert here into pixels/sec (what _tick_movement uses).
 	if data:
 		max_health = data.max_health
 		move_speed = data.move_speed * float(main.GRID_SIZE)
@@ -410,19 +512,18 @@ func _ready() -> void:
 		attack_cooldown = 1.0
 		unit_color = Color(1.0, 0.3, 0.3)
 		unit_size = 8.0
+	_wake_enabled = data != null and data.movement_layer == UnitData.MovementLayer.NAVAL and data.trail_length > 0
 
-	health = max_health
-	# Fold in any module upgrades this unit was spawned with (no-op when the
-	# list is empty; re-run by the spawn/restore paths after upgrades load).
+
+func _on_unit_data_changed() -> void:
+	if is_dead:
+		return
+	var health_ratio: float = health / maxf(max_health, 0.0001)
+	_refresh_unit_data_cache()
 	recompute_module_stats()
-	# Build the live weapon mounts from the unit's weapon list (no-op when
-	# the .tres lists none — those units use the legacy single-shot path).
+	health = clampf(max_health * health_ratio, 0.0, max_health)
 	_setup_weapon_mounts()
-	# Naval wake: enabled flag only — the trail is painted directly in the
-	# unit's own `_draw()` (the proven path the flying shadow uses), so no
-	# separate canvas node is needed.
-	if data and data.movement_layer == UnitData.MovementLayer.NAVAL and data.trail_length > 0:
-		_wake_enabled = true
+	queue_redraw()
 
 
 ## Recomputes the cached, per-instance stats (move speed, fire-rate cooldown,
@@ -438,6 +539,12 @@ func recompute_module_stats() -> void:
 	var spd_mult := 1.0
 	var fire_rate_mult := 1.0
 	var hp_mult := 1.0
+	var armor_bonus := 0.0
+	var armor_penalty := 0.0
+	var targeting_count := 0
+	var armor_plate_count := 0
+	var resistant_count := 0
+	var stabilizer_count := 0
 	var ml: int = data.movement_layer
 	var has_armor_plate := false
 	for up in applied_upgrades:
@@ -453,14 +560,30 @@ func recompute_module_stats() -> void:
 				spd_mult *= 0.75            # -25% speed while providing command aura behavior
 			&"healing_turret_head":
 				spd_mult *= 0.5             # 2× slower
+				repair_speed_mult = 2.0
 			&"cooling_system":
 				fire_rate_mult += 1.25      # +125% fire rate per apply
 			&"resistant_plating":
+				resistant_count += 1
 				hp_mult *= 0.9              # -10% max HP per apply
+				armor_penalty += 3.0
 			&"armor_plate":
 				has_armor_plate = true
+				armor_plate_count += 1
+				armor_bonus += 2.0
+			&"targeting_module":
+				targeting_count += 1
+			&"stabilizer_gyro":
+				stabilizer_count += 1
 	if has_armor_plate:
 		hp_mult *= 1.25                     # +25% max HP (first apply only)
+	# Reset derived per-instance modifiers every recompute.
+	repair_speed_mult = 2.0 if applied_upgrades.has(&"healing_turret_head") else 1.0
+	attack_range_bonus = float(targeting_count) * 3.0 * float(main.GRID_SIZE)
+	aim_speed_mult = pow(2.25, float(targeting_count))
+	knockback_taken_mult = pow(0.5, float(armor_plate_count + stabilizer_count))
+	damage_taken_mult = pow(0.65, float(resistant_count))
+	armor = maxf(0.0, data.armor + armor_bonus - armor_penalty)
 	move_speed = data.move_speed * float(main.GRID_SIZE) * spd_mult
 	attack_cooldown = data.attack_speed / maxf(0.01, fire_rate_mult)
 	var new_max: float = data.max_health * hp_mult
@@ -469,15 +592,168 @@ func recompute_module_stats() -> void:
 		if health > max_health:
 			health = max_health
 	_recompute_unit_shield_stats()
+	_refresh_weapon_mount_reload_stats()
+
+
+func _refresh_weapon_mount_reload_stats() -> void:
+	if _weapon_mounts.is_empty() or data == null:
+		return
+	for i in range(_weapon_mounts.size()):
+		var m: Dictionary = _weapon_mounts[i]
+		var w: WeaponData = m.get("weapon", null)
+		if w == null:
+			continue
+		var old_max: float = maxf(float(m.get("reload_max", 0.0)), 0.0001)
+		var pct: float = clampf(float(m.get("reload", 0.0)) / old_max, 0.0, 1.0)
+		var base_reload: float = w.effective_reload(_effective_attack_cooldown())
+		var new_max: float = base_reload * (2.0 if bool(m.get("other", -1) >= 0) else 1.0)
+		m["reload_max"] = new_max
+		m["reload"] = pct * new_max
+		_weapon_mounts[i] = m
 
 
 func can_thruster_boost() -> bool:
 	if data == null:
 		return false
+	if applied_upgrades.has(&"afterburner") or applied_upgrades.has(&"siege_brace") or applied_upgrades.has(&"bridge_projector"):
+		return true
 	var ml: int = data.movement_layer
 	if ml != UnitData.MovementLayer.GROUND and ml != UnitData.MovementLayer.CRAWLER:
 		return false
 	return applied_upgrades.has(&"thruster")
+
+
+func _afterburner_active() -> bool:
+	return thruster_boost_enabled and applied_upgrades.has(&"afterburner") and module_afterburner_heat < 1.0
+
+
+func is_siege_braced() -> bool:
+	return thruster_boost_enabled and applied_upgrades.has(&"siege_brace")
+
+
+func is_bridge_projecting() -> bool:
+	return thruster_boost_enabled and applied_upgrades.has(&"bridge_projector")
+
+
+func _module_weapons_disabled() -> bool:
+	return is_bridge_projecting() or module_emp_charging or module_emp_disabled_timer > 0.0
+
+
+func _module_functions_disabled() -> bool:
+	return module_emp_charging or module_emp_disabled_timer > 0.0
+
+
+func _module_rooted() -> bool:
+	return is_siege_braced() or module_emp_charging
+
+
+func _module_turn_mult() -> float:
+	var mult := 1.0
+	var stabilizers: int = _module_count(&"stabilizer_gyro")
+	if _afterburner_active():
+		mult *= 0.35 + minf(float(stabilizers) * 0.25, 0.5)
+	if data != null and data.tier >= 3 and stabilizers > 0:
+		mult *= 1.0 + minf(float(stabilizers) * 0.25, 0.5)
+	return mult
+
+
+func is_cloaked() -> bool:
+	if not applied_upgrades.has(&"cloaking_mesh"):
+		return false
+	if module_activity_timer > 0.0:
+		return false
+	if enter_payload_when_able or payload_target_anchor != Vector2i(-9999, -9999):
+		return false
+	return not _is_cloak_revealed()
+
+
+func _is_cloak_revealed() -> bool:
+	if unit_manager == null or main == null:
+		return false
+	var peers: Array = unit_manager.enemies if team == UnitData.Team.PLAYER else unit_manager.player_units
+	for u in peers:
+		if not is_instance_valid(u) or u.is_dead:
+			continue
+		if not ("applied_upgrades" in u):
+			continue
+		var count: int = 0
+		for up in u.applied_upgrades:
+			if up == &"targeting_module":
+				count += 1
+		if count <= 0:
+			continue
+		var reveal_range: float = float(main.GRID_SIZE) * (12.0 if count >= 2 else 8.0)
+		if position.distance_squared_to(u.position) <= reveal_range * reveal_range:
+			return true
+	return false
+
+
+func _module_count(module_id: StringName) -> int:
+	var count := 0
+	for up in applied_upgrades:
+		if up == module_id:
+			count += 1
+	return count
+
+
+func _effective_attack_range() -> float:
+	if data == null:
+		return 0.0
+	var range_px: float = data.attack_range + attack_range_bonus
+	var ml: int = data.movement_layer
+	if ml == UnitData.MovementLayer.NAVAL:
+		range_px += _nearby_command_beacon_range_bonus()
+	return range_px
+
+
+func _effective_attack_cooldown() -> float:
+	var cd: float = attack_cooldown
+	if is_siege_braced():
+		cd = (cd * 0.75) / 2.25
+	if data != null:
+		var ml: int = data.movement_layer
+		if ml == UnitData.MovementLayer.GROUND or ml == UnitData.MovementLayer.CRAWLER:
+			cd /= _nearby_command_beacon_reload_mult()
+	return cd
+
+
+func _nearby_command_beacon_reload_mult() -> float:
+	return 1.1 if _has_nearby_allied_command_beacon() else 1.0
+
+
+func _nearby_command_beacon_range_bonus() -> float:
+	return 2.0 * float(main.GRID_SIZE) if _has_nearby_allied_command_beacon() else 0.0
+
+
+func _nearby_command_beacon_move_mult() -> float:
+	if data == null:
+		return 1.0
+	var ml: int = data.movement_layer
+	if ml != UnitData.MovementLayer.HOVER and ml != UnitData.MovementLayer.FLYING:
+		return 1.0
+	return 1.25 if _has_nearby_allied_command_beacon() else 1.0
+
+
+func _nearby_command_beacon_heal_mult() -> float:
+	if data == null or data.category != UnitData.UnitCategory.SUPPORT:
+		return 1.0
+	return 1.15 if _has_nearby_allied_command_beacon() else 1.0
+
+
+func _has_nearby_allied_command_beacon() -> bool:
+	if unit_manager == null or main == null:
+		return false
+	var radius: float = 8.0 * float(main.GRID_SIZE)
+	var radius_sq: float = radius * radius
+	var peers: Array = unit_manager.player_units if team == UnitData.Team.PLAYER else unit_manager.enemies
+	for u in peers:
+		if u == self or not is_instance_valid(u) or u.is_dead:
+			continue
+		if not ("applied_upgrades" in u) or not u.applied_upgrades.has(&"command_beacon"):
+			continue
+		if position.distance_squared_to(u.position) <= radius_sq:
+			return true
+	return false
 
 
 ## Applies a status effect to this unit, honouring opposites
@@ -583,7 +859,10 @@ func _tick_status_effects(delta: float) -> void:
 			var acc: float = float(ent.get("dot_acc", 0.0)) + delta
 			while acc >= se.tick_interval:
 				acc -= se.tick_interval
-				dot_total += se.tick_damage * float(ent.get("stacks", 1)) * float(ent.get("boost", 1.0))
+				var tick_amount: float = se.tick_damage * float(ent.get("stacks", 1)) * float(ent.get("boost", 1.0))
+				if se.id == &"burning" or se.id == &"corroding" or se.id == &"tarred":
+					tick_amount *= damage_taken_mult
+				dot_total += tick_amount
 			ent["dot_acc"] = acc
 	for sid in expire:
 		active_statuses.erase(sid)
@@ -625,17 +904,26 @@ func _recompute_unit_shield_stats() -> void:
 
 func _unit_shield_stats_for_tier() -> Dictionary:
 	var tier: int = clampi(int(data.tier) if data != null else 1, 1, 5)
+	var regulator_count: int = _module_count(&"shield_regulator")
+	var fuel_mult: float = 2.0 if applied_upgrades.has(&"fuel_cell") else 1.0
+	var range_bonus: float = float(regulator_count) * 1.5
+	var health_bonus: float = float(regulator_count) * 450.0
+	var base: Dictionary
 	match tier:
 		1:
-			return {"range_tiles": 3.5, "health": 400.0}
+			base = {"range_tiles": 3.5, "health": 400.0}
 		2:
-			return {"range_tiles": 4.5, "health": 500.0}
+			base = {"range_tiles": 4.5, "health": 500.0}
 		3:
-			return {"range_tiles": 6.0, "health": 650.0}
+			base = {"range_tiles": 6.0, "health": 650.0}
 		4:
-			return {"range_tiles": 8.0, "health": 950.0}
+			base = {"range_tiles": 8.0, "health": 950.0}
 		_:
-			return {"range_tiles": 11.0, "health": 1300.0}
+			base = {"range_tiles": 11.0, "health": 1300.0}
+	return {
+		"range_tiles": float(base["range_tiles"]) + range_bonus,
+		"health": (float(base["health"]) + health_bonus) * fuel_mult,
+	}
 
 
 func _unit_shield_radius() -> float:
@@ -650,7 +938,12 @@ func has_active_unit_shield() -> bool:
 	return _has_module(&"shield_emitter") \
 		and unit_shield_health > 0.0 \
 		and unit_shield_cooldown <= 0.0 \
+		and not _module_functions_disabled() \
 		and _unit_shield_is_stationary()
+
+
+func unit_shield_blocks_units() -> bool:
+	return has_active_unit_shield() and _module_count(&"shield_regulator") >= 2
 
 
 func unit_shield_intercept(prev_pos: Vector2, next_pos: Vector2, source_team: int) -> Dictionary:
@@ -690,6 +983,221 @@ func _tick_unit_shield(delta: float) -> void:
 	unit_shield_visual_scale = move_toward(unit_shield_visual_scale, target, delta * 8.0)
 
 
+func _tick_modules(delta: float) -> void:
+	if module_activity_timer > 0.0:
+		module_activity_timer = maxf(0.0, module_activity_timer - delta)
+	if module_emp_disabled_timer > 0.0:
+		module_emp_disabled_timer = maxf(0.0, module_emp_disabled_timer - delta)
+	_tick_afterburner(delta)
+	_tick_emp_emitter(delta)
+	if _module_functions_disabled():
+		return
+	_tick_missile_rack(delta)
+	_tick_healing_bay(delta)
+	_tick_drone_bay(delta)
+
+
+func _tick_afterburner(delta: float) -> void:
+	if not applied_upgrades.has(&"afterburner"):
+		module_afterburner_heat = 0.0
+		return
+	if _afterburner_active():
+		module_afterburner_heat = minf(1.0, module_afterburner_heat + delta * 0.22)
+		module_activity_timer = maxf(module_activity_timer, 0.35)
+	else:
+		module_afterburner_heat = maxf(0.0, module_afterburner_heat - delta * 0.16)
+
+
+func _tick_missile_rack(delta: float) -> void:
+	var racks: int = _module_count(&"missile_rack")
+	if racks <= 0 or _module_weapons_disabled():
+		return
+	module_missile_timer = maxf(0.0, module_missile_timer - delta)
+	if module_missile_timer > 0.0:
+		return
+	var target: Variant = _find_module_attack_target(_effective_attack_range() + float(main.GRID_SIZE) * 4.0)
+	if target == null:
+		return
+	module_missile_timer = 4.5 / float(racks)
+	for i in range(3):
+		_fire_module_projectile(target, 18.0, 250.0, Color(1.0, 0.78, 0.22, 1.0), true, 0.35, i)
+	module_activity_timer = maxf(module_activity_timer, 1.25)
+
+
+func _tick_healing_bay(delta: float) -> void:
+	if not applied_upgrades.has(&"healing_bay") or data == null:
+		return
+	if data.movement_layer != UnitData.MovementLayer.HOVER and data.movement_layer != UnitData.MovementLayer.FLYING:
+		return
+	module_healing_bay_timer = maxf(0.0, module_healing_bay_timer - delta)
+	if module_healing_bay_timer > 0.0:
+		return
+	module_healing_bay_timer = 0.8
+	if _heal_module_target(float(main.GRID_SIZE) * 6.0, 18.0):
+		module_activity_timer = maxf(module_activity_timer, 1.25)
+
+
+func _tick_drone_bay(delta: float) -> void:
+	if not applied_upgrades.has(&"drone_bay") or data == null or data.tier < 3:
+		return
+	if data.movement_layer != UnitData.MovementLayer.HOVER and data.movement_layer != UnitData.MovementLayer.FLYING:
+		return
+	if _module_weapons_disabled():
+		return
+	module_drone_bay_timer = maxf(0.0, module_drone_bay_timer - delta)
+	if module_drone_bay_timer > 0.0:
+		return
+	var target: Variant = _find_module_attack_target(_effective_attack_range() + float(main.GRID_SIZE) * 5.0)
+	if target == null:
+		return
+	module_drone_bay_timer = 2.0
+	_fire_module_projectile(target, 12.0, 220.0, Color(1.0, 0.62, 0.18, 1.0), true, 0.25, 0)
+	module_activity_timer = maxf(module_activity_timer, 1.25)
+
+
+func _tick_emp_emitter(delta: float) -> void:
+	if not applied_upgrades.has(&"emp_emitter") or data == null or data.tier < 3:
+		module_emp_charging = false
+		module_emp_charge_timer = 0.0
+		return
+	if module_emp_charging:
+		module_emp_charge_timer -= delta
+		if module_emp_charge_timer > 0.0:
+			return
+		module_emp_charging = false
+		module_emp_disabled_timer = 2.5
+		module_emp_timer = 12.0
+		_emit_emp_pulse(float(main.GRID_SIZE) * 8.5, 2)
+		return
+	module_emp_timer -= delta
+	if module_emp_timer <= 0.0:
+		module_emp_charging = true
+		module_emp_charge_timer = 2.0
+		module_activity_timer = maxf(module_activity_timer, 3.0)
+
+
+func _find_module_attack_target(radius: float) -> Variant:
+	if unit_manager == null or main == null:
+		return null
+	var best: Variant = null
+	var best_d: float = radius * radius
+	var hostile_units: Array = unit_manager.enemies if team == UnitData.Team.PLAYER else unit_manager.player_units
+	for u in hostile_units:
+		if not is_instance_valid(u) or u.is_dead:
+			continue
+		if u.has_method("is_cloaked") and u.is_cloaked():
+			continue
+		var d: float = position.distance_squared_to(u.position)
+		if d < best_d:
+			best_d = d
+			best = u
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if anchor != cell:
+			continue
+		if main.get_building_faction(anchor) == (main.Faction.LUMINA if team == UnitData.Team.PLAYER else main.Faction.FEROX):
+			continue
+		var bd = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if bd == null:
+			continue
+		var center: Vector2 = main.grid_to_world(anchor) + Vector2(bd.grid_size) * float(main.GRID_SIZE) * 0.5
+		var d2: float = position.distance_squared_to(center)
+		if d2 < best_d:
+			best_d = d2
+			best = anchor
+	return best
+
+
+func _fire_module_projectile(target: Variant, shot_damage: float, speed: float, color: Color, homing: bool, homing_strength: float, index: int) -> void:
+	var combat = _combat_sys_ref()
+	if combat == null or main == null:
+		return
+	var src_faction: int = main.Faction.FEROX if team == UnitData.Team.ENEMY else main.Faction.LUMINA
+	var source_str: String = "enemy" if team == UnitData.Team.ENEMY else "player_unit"
+	var muzzle: Vector2 = position + Vector2(6.0 + float(index) * 2.5, -8.0).rotated(facing_angle)
+	var target_pos: Vector2 = position
+	var target_type := "none"
+	var target_ref: Variant = null
+	if target is Node2D:
+		target_ref = target
+		target_pos = target.position
+		target_type = "enemy"
+	elif target is Vector2i:
+		target_ref = target
+		target_pos = main.grid_to_world(target) + Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+		target_type = "building"
+	var rng: float = maxf(_effective_attack_range(), position.distance_to(target_pos) + float(main.GRID_SIZE))
+	combat._spawn_projectile(
+		muzzle, target_ref, target_pos, target_type, speed, shot_damage, color, source_str,
+		false, 0.0, src_faction,
+		{"homing": homing_strength if homing else 0.0, "max_range": rng, "radius": 4.0, "trail_color": color},
+	)
+
+
+func _heal_module_target(radius: float, heal: float) -> bool:
+	if unit_manager == null or main == null:
+		return false
+	var peers: Array = unit_manager.player_units if team == UnitData.Team.PLAYER else unit_manager.enemies
+	var best_unit: Node2D = null
+	var best_d: float = radius * radius
+	for u in peers:
+		if not is_instance_valid(u) or u.is_dead:
+			continue
+		if not ("health" in u) or not ("max_health" in u):
+			continue
+		if float(u.health) >= float(u.max_health):
+			continue
+		if u.has_method("blocks_healing") and u.blocks_healing():
+			continue
+		var d: float = position.distance_squared_to(u.position)
+		if d < best_d:
+			best_d = d
+			best_unit = u
+	if best_unit != null:
+		best_unit.health = minf(float(best_unit.max_health), float(best_unit.health) + heal * repair_speed_mult * _nearby_command_beacon_heal_mult())
+		return true
+	var best_cell: Vector2i = Vector2i(-99999, -99999)
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if anchor != cell or main.get_building_faction(anchor) != (main.Faction.LUMINA if team == UnitData.Team.PLAYER else main.Faction.FEROX):
+			continue
+		var bd = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if bd == null or bd.max_health <= 0.0:
+			continue
+		var hp: float = float(main.building_health.get(anchor, bd.max_health))
+		if hp >= bd.max_health:
+			continue
+		var center: Vector2 = main.grid_to_world(anchor) + Vector2(bd.grid_size) * float(main.GRID_SIZE) * 0.5
+		var d2: float = position.distance_squared_to(center)
+		if d2 < best_d:
+			best_d = d2
+			best_cell = anchor
+	if best_cell.x == -99999:
+		return false
+	var bd2 = Registry.get_block(main.placed_buildings.get(best_cell, &""))
+	main.building_health[best_cell] = minf(float(bd2.max_health), float(main.building_health.get(best_cell, bd2.max_health)) + heal * repair_speed_mult * _nearby_command_beacon_heal_mult())
+	return true
+
+
+func _emit_emp_pulse(radius: float, category: int) -> void:
+	if unit_manager == null:
+		return
+	var hostile_units: Array = unit_manager.enemies if team == UnitData.Team.PLAYER else unit_manager.player_units
+	for u in hostile_units:
+		if not is_instance_valid(u) or u.is_dead:
+			continue
+		if position.distance_to(u.position) > radius:
+			continue
+		if "module_emp_disabled_timer" in u:
+			u.module_emp_disabled_timer = maxf(float(u.module_emp_disabled_timer), 3.5 if category >= 3 else 2.5)
+			u.module_emp_charging = false
+		if "unit_shield_cooldown" in u:
+			u.unit_shield_cooldown = maxf(float(u.unit_shield_cooldown), 3.0 if category >= 3 else 2.0)
+	var overlay = main.get_node_or_null("ParticleOverlay") if main else null
+	if overlay and overlay.has_method("spawn_shockwave"):
+		overlay.spawn_shockwave(position, radius, Color(0.55, 0.85, 1.0, 0.75))
+
+
 func _process(delta: float) -> void:
 	if is_dead:
 		return
@@ -712,6 +1220,7 @@ func _process(delta: float) -> void:
 	_vel_prev_pos = position
 	_tick_status_effects(delta)
 	_tick_unit_shield(delta)
+	_tick_modules(delta)
 	# Hovering-orbit motion for flying units that aren't currently
 	# under direct player control. Applied as a position delta so it
 	# composes naturally with regular movement (the orbit just adds a
@@ -770,6 +1279,8 @@ func _process(delta: float) -> void:
 				queue_redraw()
 				return
 		if path.size() > 0 and path_index < path.size():
+			if target_building != null:
+				_try_attack(delta)
 			_follow_path(delta)
 		elif _is_rebuilder():
 			_try_rebuild(delta)
@@ -842,7 +1353,7 @@ func _tick_facing_angle(delta: float) -> void:
 	if velocity.length_squared() < 0.25:
 		return
 	var desired: float = velocity.angle()
-	var turn_speed: float = data.body_turn_speed if data else 2.0
+	var turn_speed: float = (data.body_turn_speed if data else 2.0) * _module_turn_mult()
 	facing_angle = _rotate_toward(facing_angle, desired, turn_speed * delta)
 
 
@@ -879,7 +1390,7 @@ func _tick_aim_angle(delta: float) -> void:
 	var desired: float = (target_pos - position).angle()
 	# Aim-speed status effects (Crystallized / Tarred) slow how fast the head
 	# swings onto a target.
-	var turn_speed: float = (data.head_turn_speed if data else 3.0) * _status_stat_mult(&"aim_speed_modifier")
+	var turn_speed: float = (data.head_turn_speed if data else 3.0) * _status_stat_mult(&"aim_speed_modifier") * _module_turn_mult()
 	aim_angle = _rotate_toward(aim_angle, desired, turn_speed * delta)
 
 
@@ -910,10 +1421,9 @@ func _rotate_toward(from: float, to: float, max_step: float) -> float:
 ##   large the forward thrust is scaled down (so a tank facing ~backwards
 ##   barely creeps while it swings around) but never fully stops, matching
 ##   the emergent `cos(error)`-ish slowdown Mindustry gets from drag.
-##   `turn_radius` is no longer used (the arc emerges from the turn rate vs
-##   forward speed); it's kept on the data model for authoring back-compat.
+##   The arc emerges from turn rate versus forward speed.
 func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector2, dist_to_waypoint: float) -> void:
-	var turn_speed: float = data.body_turn_speed if data and data.body_turn_speed > 0.0 else 2.0
+	var turn_speed: float = _effective_tank_turn_speed()
 	var ml_walk: int = data.movement_layer if data else 0
 	# Radius-aware face test (matches the omni resolver) so a tank's flank
 	# can't clip into a wall. Tanks are locked to their facing axis (no free
@@ -984,11 +1494,26 @@ func _tank_steer_step(desired_face: float, forward_step: float, waypoint: Vector
 			position = newp
 			moved = true
 
+	# Tank steering returns before the regular `_follow_path` separation block,
+	# so run the same overlap correction here after the tank has moved.
+	_apply_separation()
+
 	# Rotating-toward-goal still counts as progress (not stuck) so a tank
 	# swinging around a corner doesn't trigger the repath timer.
 	if not moved and err > deg_to_rad(8.0):
 		moved = true
 	_tank_track_blocked(moved)
+
+
+func _effective_tank_turn_speed() -> float:
+	var authored_turn: float = data.body_turn_speed if data and data.body_turn_speed > 0.0 else 2.0
+	authored_turn *= _module_turn_mult()
+	# Keep the turning circle proportional to the unit's footprint. Without
+	# this, a tiny scout and a heavy tank with the same speed/turn values carve
+	# identical arcs, and large tanks appear to pivot around their centre.
+	var desired_radius: float = maxf(unit_size * 2.0, float(main.GRID_SIZE) * 0.75)
+	var size_limited_turn: float = move_speed / maxf(desired_radius, 1.0)
+	return minf(authored_turn, maxf(size_limited_turn, 0.05))
 
 
 ## Tank counterpart of the omnidirectional step's blocked-frames track.
@@ -1023,6 +1548,8 @@ func _find_nearest_hostile_pos() -> Variant:
 		if not is_instance_valid(u) or u.is_dead:
 			continue
 		if u.team == team:
+			continue
+		if u.has_method("is_cloaked") and u.is_cloaked():
 			continue
 		var d: float = position.distance_squared_to(u.position)
 		if d < best_dist_sq:
@@ -1395,7 +1922,7 @@ func _player_update(delta: float) -> void:
 ## Pursues whatever manual target is set: path toward it, stop in range, attack.
 func _pursue_manual_target(delta: float) -> void:
 	var target_pos: Vector2
-	var atk_range: float = data.attack_range if data else main.GRID_SIZE / 2.0
+	var atk_range: float = _effective_attack_range() if data else main.GRID_SIZE / 2.0
 	var effective_range: float = atk_range
 
 	if manual_target_unit != null:
@@ -1426,7 +1953,7 @@ func _pursue_manual_target(delta: float) -> void:
 		return
 	if attack_timer > 0:
 		return
-	attack_timer = attack_cooldown
+	attack_timer = _effective_attack_cooldown()
 	if manual_target_unit != null:
 		_attack_enemy_unit()
 	elif manual_target_building != null:
@@ -1448,17 +1975,32 @@ func _opportunistic_fire() -> void:
 		return
 	if attack_timer > 0:
 		return
-	var atk_range: float = data.attack_range if data else 0.0
+	var atk_range: float = _effective_attack_range() if data else 0.0
 	if atk_range <= 0.0:
 		return
 	var range_sq: float = atk_range * atk_range
 
-	# Prefer the explicitly-ordered target if it's in range.
-	if manual_target_unit != null and is_instance_valid(manual_target_unit) and not manual_target_unit.is_dead:
-		if position.distance_squared_to(manual_target_unit.position) <= range_sq:
-			attack_timer = attack_cooldown
-			target_unit = manual_target_unit
+	# Prefer the current attack target if it's in range, even while the unit
+	# is still walking to its preferred firing spot or being pushed around.
+	var preferred_unit: Variant = manual_target_unit if manual_target_unit != null else target_unit
+	if preferred_unit != null and is_instance_valid(preferred_unit) and not preferred_unit.is_dead:
+		if position.distance_squared_to(preferred_unit.position) <= range_sq:
+			attack_timer = _effective_attack_cooldown()
+			target_unit = preferred_unit
 			_attack_enemy_unit()
+			return
+
+	var preferred_building_v: Variant = manual_target_building if manual_target_building != null else target_building
+	if preferred_building_v is Vector2i:
+		var preferred_building: Vector2i = preferred_building_v
+		var bw_pref: Vector2 = main.grid_to_world(preferred_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
+		var building_range: float = maxf(atk_range, main.GRID_SIZE * 1.5)
+		if main.placed_buildings.has(preferred_building) \
+				and _is_valid_attack_target(preferred_building) \
+				and position.distance_squared_to(bw_pref) <= building_range * building_range:
+			attack_timer = _effective_attack_cooldown()
+			target_building = preferred_building
+			_attack_ferox_building()
 			return
 
 	# Auto-fire at any in-range enemy unit (defensive — no move/pursue here).
@@ -1471,24 +2013,10 @@ func _opportunistic_fire() -> void:
 			if e.team == team:
 				continue
 			if position.distance_squared_to(e.position) <= range_sq:
-				attack_timer = attack_cooldown
+				attack_timer = _effective_attack_cooldown()
 				target_unit = e
 				_attack_enemy_unit()
 				return
-
-	# Then the ordered FEROX building target. Skip if the manual
-	# target is no longer a valid attack target (captured, converted to
-	# DERELICT, etc.) — `_player_update` clears it next frame, but we
-	# don't want to get one last free shot off at an ally.
-	if manual_target_building != null \
-			and main.placed_buildings.has(manual_target_building) \
-			and _is_valid_attack_target(manual_target_building):
-		var bw: Vector2 = main.grid_to_world(manual_target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-		if position.distance_squared_to(bw) <= range_sq:
-			attack_timer = attack_cooldown
-			target_building = manual_target_building
-			_attack_ferox_building()
-			return
 
 
 func _follow_path(delta: float) -> void:
@@ -1518,7 +2046,7 @@ func _follow_path(delta: float) -> void:
 	if data and target_unit != null:
 		if is_instance_valid(target_unit) and not target_unit.is_dead:
 			var dist_to_enemy := position.distance_to(target_unit.position)
-			if data.attack_range > 0 and dist_to_enemy <= data.attack_range:
+			if _effective_attack_range() > 0 and dist_to_enemy <= _effective_attack_range():
 				path = PackedVector2Array()
 				path_index = 0
 				return
@@ -1530,7 +2058,7 @@ func _follow_path(delta: float) -> void:
 	if data and target_building != null and target_unit == null and move_target == null:
 		var bldg_world: Vector2 = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 		var dist_to_bldg: float = position.distance_to(bldg_world)
-		var effective_range: float = maxf(data.attack_range, main.GRID_SIZE * 1.5) if data.attack_range > 0 else 0.0
+		var effective_range: float = maxf(_effective_attack_range(), main.GRID_SIZE * 1.5) if _effective_attack_range() > 0 else 0.0
 		if effective_range > 0.0 and dist_to_bldg <= effective_range:
 			path = PackedVector2Array()
 			path_index = 0
@@ -1613,14 +2141,18 @@ func _follow_path(delta: float) -> void:
 			# Amplify the DEVIATION from 1.0 by the boost factor.
 			var effective: float = 1.0 + (base_mod - 1.0) * boost
 			speed_mult *= maxf(effective, 0.05)
-	if thruster_boost_enabled and can_thruster_boost():
+	if _module_rooted():
+		speed_mult = 0.0
+	elif _afterburner_active():
+		speed_mult *= 3.0
+	elif thruster_boost_enabled and can_thruster_boost():
 		speed_mult *= 2.25
+	speed_mult *= _nearby_command_beacon_move_mult()
 	var step = move_speed * speed_mult * delta
 
 	# --- Tank-style steering -----------------------------------------------
-	# Moves the tank along its current facing; when the desired direction
-	# diverges from that facing, the motion arcs around a pivot point
-	# perpendicular to the chassis (turn_radius) instead of pivoting in place.
+	# Moves the tank along its current facing while rotating toward the desired
+	# direction, producing a natural arc from turn speed vs forward speed.
 	if data and data.tank_steering:
 		_tank_steer_step(direction.angle(), step, target_pos, distance)
 		return
@@ -1666,6 +2198,8 @@ func _follow_path(delta: float) -> void:
 		if moved_this_frame:
 			_blocked_frames = 0
 		else:
+			if _try_attack_blocking_building():
+				return
 			_blocked_frames += 1
 			if _blocked_frames >= _BLOCKED_FRAMES_REPATH:
 				_request_repath()
@@ -1816,7 +2350,7 @@ func _dummy_update(delta: float) -> void:
 		return
 	var bworld: Vector2 = main.grid_to_world(target_building) \
 		+ Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-	var atk_range: float = maxf(data.attack_range if data else main.GRID_SIZE * 0.5, main.GRID_SIZE * 1.5)
+	var atk_range: float = maxf(_effective_attack_range() if data else main.GRID_SIZE * 0.5, main.GRID_SIZE * 1.5)
 	if position.distance_to(bworld) > atk_range:
 		_dummy_repath_accum += delta
 		if (path.size() == 0 or path_index >= path.size()) and _dummy_repath_accum >= 0.5:
@@ -1833,9 +2367,9 @@ func _dummy_update(delta: float) -> void:
 		# unit) and never re-targets, unlike `_try_attack`.
 		attack_timer -= delta
 		if attack_timer <= 0.0:
-			attack_timer = attack_cooldown
+			attack_timer = _effective_attack_cooldown()
 			var combat = _combat_sys_ref()
-			if data and data.attack_range > 0 and combat:
+			if data and _effective_attack_range() > 0 and combat:
 				combat.enemy_ranged_attack(self, target_building, damage, 300.0, unit_color.lightened(0.3))
 			else:
 				main.damage_building(target_building, damage)
@@ -1874,6 +2408,8 @@ func _dummy_pick_target() -> Variant:
 func _try_attack(delta: float) -> void:
 	if not main.enemies_attack:
 		return
+	if hold_fire or _module_weapons_disabled():
+		return
 	attack_timer -= delta
 	if attack_timer > 0:
 		return
@@ -1897,12 +2433,12 @@ func _try_attack(delta: float) -> void:
 	# infinite attack range. Suppress the shot when we're more than the
 	# unit's effective range from the target.
 	var bldg_world: Vector2 = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-	var atk_range: float = data.attack_range if data else main.GRID_SIZE / 2.0
+	var atk_range: float = _effective_attack_range() if data else main.GRID_SIZE / 2.0
 	var effective_range: float = maxf(atk_range, main.GRID_SIZE * 1.5)
 	if position.distance_to(bldg_world) > effective_range:
 		return
 
-	attack_timer = attack_cooldown
+	attack_timer = _effective_attack_cooldown()
 
 	# Mount-equipped units fire through their weapon mounts (ticked in
 	# _process) — skip the legacy single-shot here so we don't double-fire.
@@ -1912,7 +2448,7 @@ func _try_attack(delta: float) -> void:
 
 	# Check if this enemy has ranged attacks
 	# attack_range > 0 in the .tres means it shoots projectiles
-	if data and data.attack_range > 0:
+	if data and _effective_attack_range() > 0:
 		# RANGED ATTACK: Fire a projectile via CombatSystem
 		var combat = _combat_sys_ref()
 		if combat:
@@ -1951,7 +2487,7 @@ func _setup_weapon_mounts() -> void:
 	for w in data.weapons:
 		if w == null:
 			continue
-		var base_reload: float = w.effective_reload(attack_cooldown)
+		var base_reload: float = w.effective_reload(_effective_attack_cooldown())
 		var barrels: int = maxi(1, w.barrel_count)
 		if w.mirror:
 			# Two mounts. Each runs on a DOUBLED reload, but the second
@@ -2183,13 +2719,15 @@ func _tick_weapon_mounts(delta: float, aim_world: Variant, aim_only: bool = fals
 			desired = (facing_angle - PI / 2.0) + w.base_rotation
 		# Rotate the mount toward the desired angle at rotate_speed.
 		if w.rotate:
-			rot_step = deg_to_rad(w.rotate_speed) * delta
+			rot_step = deg_to_rad(w.rotate_speed) * aim_speed_mult * delta
 			m["rotation"] = _rotate_toward(float(m["rotation"]), desired, rot_step)
 		else:
 			m["rotation"] = desired
 		_weapon_mounts[i] = m
 		# Fire?  (Manual control aims only — the player's input fires.)
 		if aim_only:
+			continue
+		if hold_fire or _module_weapons_disabled():
 			continue
 		if not has_target:
 			continue
@@ -2200,7 +2738,7 @@ func _tick_weapon_mounts(delta: float, aim_world: Variant, aim_only: bool = fals
 		if aim_err > deg_to_rad(w.shoot_cone):
 			continue
 		# Range gate.
-		var rng: float = w.effective_range(data.attack_range if data else 0.0)
+		var rng: float = w.effective_range(_effective_attack_range() if data else 0.0)
 		if mount_world.distance_to(aim_world) > rng:
 			continue
 		_fire_weapon_mount(i, mount_world, aim_world)
@@ -2213,6 +2751,8 @@ func _tick_weapon_mounts(delta: float, aim_world: Variant, aim_only: bool = fals
 ## been aimed this frame via `_tick_weapon_mounts(..., aim_only=true)`.
 func fire_weapon_mounts_at(aim_world: Vector2) -> bool:
 	if _weapon_mounts.is_empty():
+		return false
+	if hold_fire or _module_weapons_disabled():
 		return false
 	var fired := false
 	for i in range(_weapon_mounts.size()):
@@ -2262,6 +2802,7 @@ func _fire_weapon_mount(idx: int, mount_world: Vector2, aim_world: Vector2) -> v
 	m["reload"] = float(m["reload_max"]) / float(barrels)
 	m["recoil"] = w.recoil
 	_weapon_mounts[idx] = m
+	module_activity_timer = maxf(module_activity_timer, 1.25)
 
 
 ## TURRET behavior: spawn a projectile from the muzzle toward the target,
@@ -2281,7 +2822,7 @@ func _fire_turret_weapon(w: WeaponData, muzzle: Vector2, aim_world: Vector2) -> 
 	# despawn there if they hit nothing — like turrets/the drone. `aim_world`
 	# is only a DIRECTION hint (the target or the mouse): we extend it to the
 	# end-of-range point so the shot doesn't stop short at the cursor/target.
-	var rng: float = w.effective_range(data.attack_range if data else 0.0)
+	var rng: float = w.effective_range(_effective_attack_range() if data else 0.0)
 	var aim_dir: Vector2 = (aim_world - muzzle)
 	if aim_dir.length_squared() < 0.0001:
 		aim_dir = Vector2.RIGHT.rotated(facing_angle - PI / 2.0)  # fallback: forward
@@ -2314,7 +2855,9 @@ func _fire_turret_weapon(w: WeaponData, muzzle: Vector2, aim_world: Vector2) -> 
 func _fire_repair_weapon(w: WeaponData, mount_world: Vector2) -> void:
 	if team != UnitData.Team.PLAYER:
 		return  # repair is a friendly-only behaviour for now
-	var rng: float = w.effective_range(data.attack_range if data else 0.0)
+	if _module_functions_disabled():
+		return
+	var rng: float = w.effective_range(_effective_attack_range() if data else 0.0)
 	var best: Vector2i = Vector2i(-99999, -99999)
 	var best_d: float = rng
 	for gp in main.placed_buildings:
@@ -2331,14 +2874,44 @@ func _fire_repair_weapon(w: WeaponData, mount_world: Vector2) -> void:
 				best_d = d
 				best = gp
 	if best.x == -99999:
+		_fire_repair_weapon_at_unit(w, mount_world)
 		return
 	# Heal per fire = rate × reload interval, so HP/sec stays at
 	# `repair_per_second` regardless of how fast the mount cycles.
-	var interval: float = w.reload if w.reload > 0.0 else maxf(0.05, attack_cooldown)
-	var heal: float = w.repair_per_second * interval
+	var interval: float = w.reload if w.reload > 0.0 else maxf(0.05, _effective_attack_cooldown())
+	var heal: float = w.repair_per_second * interval * repair_speed_mult * _nearby_command_beacon_heal_mult()
 	var bd2 = Registry.get_block(main.placed_buildings[best])
 	var maxh2: float = bd2.max_health if bd2 else 0.0
 	main.building_health[best] = minf(float(main.building_health.get(best, maxh2)) + heal, maxh2)
+	module_activity_timer = maxf(module_activity_timer, 1.25)
+
+
+func _fire_repair_weapon_at_unit(w: WeaponData, mount_world: Vector2) -> void:
+	if not applied_upgrades.has(&"healing_turret_head"):
+		return
+	var rng: float = w.effective_range(_effective_attack_range() if data else 0.0)
+	var best: Node2D = null
+	var best_d: float = rng
+	var peers: Array = unit_manager.player_units if team == UnitData.Team.PLAYER else unit_manager.enemies
+	for u in peers:
+		if u == self or not is_instance_valid(u) or u.is_dead:
+			continue
+		if not ("health" in u) or not ("max_health" in u):
+			continue
+		if float(u.health) >= float(u.max_health):
+			continue
+		if u.has_method("blocks_healing") and u.blocks_healing():
+			continue
+		var d: float = mount_world.distance_to(u.position)
+		if d <= best_d:
+			best_d = d
+			best = u
+	if best == null:
+		return
+	var interval: float = w.reload if w.reload > 0.0 else maxf(0.05, _effective_attack_cooldown())
+	var heal: float = w.repair_per_second * interval * repair_speed_mult * _nearby_command_beacon_heal_mult()
+	best.health = minf(float(best.health) + heal, float(best.max_health))
+	module_activity_timer = maxf(module_activity_timer, 1.25)
 
 
 ## POINT_DEFENSE behavior: damage / remove the nearest hostile projectile in
@@ -2347,7 +2920,7 @@ func _fire_point_defense_weapon(w: WeaponData, mount_world: Vector2) -> void:
 	var combat = _combat_sys_ref()
 	if combat == null or not ("projectiles" in combat):
 		return
-	var rng: float = w.effective_range(data.attack_range if data else 0.0)
+	var rng: float = w.effective_range(_effective_attack_range() if data else 0.0)
 	var my_faction: int = main.Faction.FEROX if team == UnitData.Team.ENEMY else main.Faction.LUMINA
 	for proj in combat.projectiles:
 		if not (proj is Dictionary):
@@ -2399,9 +2972,11 @@ func _draw_weapon_mounts() -> void:
 ## NOTE: attack_timer is ticked by _player_update now (once per frame), so we
 ## don't decrement it again here.
 func _try_player_combat(_delta: float) -> void:
+	if _module_weapons_disabled():
+		return
 	# Validate current targets
 	if target_unit != null:
-		if not is_instance_valid(target_unit) or target_unit.is_dead:
+		if not is_instance_valid(target_unit) or target_unit.is_dead or (target_unit.has_method("is_cloaked") and target_unit.is_cloaked()):
 			target_unit = null
 	if target_building != null:
 		if not main.placed_buildings.has(target_building):
@@ -2422,7 +2997,7 @@ func _try_player_combat(_delta: float) -> void:
 		target_pos = main.grid_to_world(target_building) + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
 
 	var dist := position.distance_to(target_pos)
-	var atk_range: float = data.attack_range if data else main.GRID_SIZE / 2.0
+	var atk_range: float = _effective_attack_range() if data else main.GRID_SIZE / 2.0
 
 	# Buildings occupy solid cells so units can't stand on them.
 	# Ensure the effective range is at least 1.5 grid cells so units
@@ -2443,11 +3018,11 @@ func _try_player_combat(_delta: float) -> void:
 	if path.size() > 0:
 		path = PackedVector2Array()
 		path_index = 0
-	if hold_fire:
+	if hold_fire or _module_weapons_disabled():
 		return
 	if attack_timer > 0:
 		return
-	attack_timer = attack_cooldown
+	attack_timer = _effective_attack_cooldown()
 	if target_unit != null:
 		_attack_enemy_unit()
 	elif target_building != null:
@@ -2464,6 +3039,8 @@ func _find_player_target() -> void:
 			var target_id: int = result["target_id"]
 			var obj = instance_from_id(target_id)
 			if obj != null and is_instance_valid(obj) and not obj.is_dead:
+				if obj.has_method("is_cloaked") and obj.is_cloaked():
+					return
 				target_unit = obj
 				return
 		elif result["target_type"] == "building":
@@ -2481,6 +3058,8 @@ func _find_player_target() -> void:
 		if not is_instance_valid(e) or e.is_dead:
 			continue
 		if e.data and e.team == UnitData.Team.PLAYER:
+			continue
+		if e.has_method("is_cloaked") and e.is_cloaked():
 			continue
 		if position.distance_squared_to(e.position) <= detect_range_sq:
 			target_unit = e
@@ -2509,6 +3088,8 @@ func _find_player_target() -> void:
 
 ## Fire a projectile at the targeted enemy unit.
 func _attack_enemy_unit() -> void:
+	if _module_weapons_disabled():
+		return
 	# Mount-equipped units fire through their mounts (ticked in _process);
 	# suppress the legacy single-shot so they don't double-fire.
 	if has_weapon_mounts():
@@ -2528,6 +3109,7 @@ func _attack_enemy_unit() -> void:
 		)
 	else:
 		target_unit.take_damage(damage)
+	module_activity_timer = maxf(module_activity_timer, 1.25)
 
 
 # =========================
@@ -2541,7 +3123,7 @@ func _attack_enemy_unit() -> void:
 func _ferox_find_engageable_player_unit() -> Node2D:
 	if data == null:
 		return null
-	var atk_range: float = data.attack_range
+	var atk_range: float = _effective_attack_range()
 	if atk_range <= 0.0:
 		# Melee enemies engage at melee range.
 		atk_range = main.GRID_SIZE * 1.2
@@ -2555,6 +3137,8 @@ func _ferox_find_engageable_player_unit() -> Node2D:
 		if u == null or not is_instance_valid(u):
 			continue
 		if "is_dead" in u and u.is_dead:
+			continue
+		if u.has_method("is_cloaked") and u.is_cloaked():
 			continue
 		var d2: float = position.distance_squared_to(u.position)
 		if d2 > range_sq:
@@ -2570,6 +3154,8 @@ func _ferox_find_engageable_player_unit() -> Node2D:
 ## dies / leaves range, the regular path-following branch picks back
 ## up next frame.
 func _ferox_engage_unit(target: Node2D, delta: float) -> void:
+	if hold_fire or _module_weapons_disabled():
+		return
 	# Stop moving — engagements are stationary fire.
 	if path.size() > 0:
 		path = PackedVector2Array()
@@ -2579,10 +3165,10 @@ func _ferox_engage_unit(target: Node2D, delta: float) -> void:
 	attack_timer -= delta
 	if attack_timer > 0.0:
 		return
-	var atk_range: float = data.attack_range if data else 0.0
+	var atk_range: float = _effective_attack_range() if data else 0.0
 	if atk_range > 0.0:
 		# Ranged FEROX: spawn a projectile.
-		attack_timer = attack_cooldown
+		attack_timer = _effective_attack_cooldown()
 		var combat = _combat_sys_ref()
 		if combat and combat.has_method("enemy_attack_unit"):
 			var proj_speed := 300.0
@@ -2590,16 +3176,20 @@ func _ferox_engage_unit(target: Node2D, delta: float) -> void:
 			combat.enemy_attack_unit(self, target, damage, proj_speed, proj_color)
 		elif target.has_method("take_damage"):
 			target.take_damage(damage)
+		module_activity_timer = maxf(module_activity_timer, 1.25)
 	else:
 		# Melee FEROX: punch directly if in range.
 		if position.distance_to(target.position) <= main.GRID_SIZE * 1.2:
-			attack_timer = attack_cooldown
+			attack_timer = _effective_attack_cooldown()
 			if target.has_method("take_damage"):
 				target.take_damage(damage)
+			module_activity_timer = maxf(module_activity_timer, 1.25)
 
 
 ## Fire a projectile at the targeted FEROX building.
 func _attack_ferox_building() -> void:
+	if _module_weapons_disabled():
+		return
 	# Mount-equipped units fire through their mounts (ticked in _process).
 	if has_weapon_mounts():
 		return
@@ -2618,6 +3208,7 @@ func _attack_ferox_building() -> void:
 		)
 	else:
 		main.damage_building(target_building, damage)
+	module_activity_timer = maxf(module_activity_timer, 1.25)
 
 
 # =========================
@@ -2767,6 +3358,8 @@ func _check_stuck(delta: float) -> void:
 
 	if _stuck_timer >= STUCK_TIME:
 		if position.distance_to(_stuck_origin) < STUCK_RADIUS:
+			if _try_attack_blocking_building():
+				return
 			_stuck_streak += 1
 			# Always try the cheap, local fix first.
 			_disperse_from_nearby_units()
@@ -2984,7 +3577,7 @@ func _disperse_from_nearby_units() -> void:
 	position.y = clampf(position.y, 0.0, map_h)
 
 
-func take_damage(amount: float) -> void:
+func take_damage(amount: float, damage_kind: StringName = &"") -> void:
 	# Apply armor from .tres data, scaled by any armor-effectiveness debuff
 	# (Embrittled halves it). Multiple such statuses multiply.
 	var actual_damage = amount
@@ -2995,7 +3588,11 @@ func take_damage(amount: float) -> void:
 				var ase: StatusEffectData = active_statuses[sid]["effect"]
 				if ase != null and ase.armor_effectiveness_modifier != 1.0:
 					armor_mult *= ase.armor_effectiveness_modifier
-		actual_damage = data.calc_damage_taken(amount, armor_mult)
+		actual_damage = max(amount - armor * armor_mult, 1.0)
+	if damage_kind == &"fire" or damage_kind == &"fume" or damage_kind == &"acid":
+		actual_damage *= damage_taken_mult
+	if _afterburner_active():
+		actual_damage *= 2.0
 	# Status-effect vulnerability: a status's `defense_modifier` scales ALL
 	# incoming damage (corroding = 1.3× more, freezing = 1.4×, etc.). Modifiers
 	# from multiple active statuses multiply together.
@@ -3020,6 +3617,10 @@ func take_damage(amount: float) -> void:
 		_on_death()
 
 
+func blocks_healing() -> bool:
+	return applied_upgrades.has(&"kamikaze_package") and max_health > 0.0 and health / max_health < 0.3
+
+
 func _on_death() -> void:
 	# Free up any water-platform reservation so the next unit in line
 	# doesn't stall forever waiting on a corpse.
@@ -3039,6 +3640,17 @@ func _on_death() -> void:
 	var expl_u = main.get_node_or_null("ExplosionSystem") if main else null
 	if expl_u and expl_u.has_method("unit_death"):
 		expl_u.unit_death(position, vis_size * 0.5)
+	if applied_upgrades.has(&"emp_emitter") and module_emp_charging:
+		_emit_emp_pulse(6.0 * float(main.GRID_SIZE), 3)
+	if applied_upgrades.has(&"kamikaze_package"):
+		var kamikaze_radius: float = 4.0 * float(main.GRID_SIZE)
+		var kamikaze_damage: float = 80.0
+		if applied_upgrades.has(&"fuel_cell"):
+			kamikaze_radius += 3.0 * float(main.GRID_SIZE)
+			kamikaze_damage += 20.0
+		_module_death_blast(kamikaze_radius, kamikaze_damage)
+	if applied_upgrades.has(&"fuel_cell"):
+		_module_death_blast(2.5 * float(main.GRID_SIZE), 45.0)
 	var overlay = main.get_node_or_null("ParticleOverlay") if main else null
 	if overlay and overlay.has_method("spawn_unit_ruins"):
 		overlay.spawn_unit_ruins(position, vis_size)
@@ -3048,6 +3660,36 @@ func _on_death() -> void:
 	else:
 		unit_manager.on_enemy_died(self)
 	queue_free()
+
+
+func _module_death_blast(radius: float, blast_damage: float) -> void:
+	if unit_manager == null or main == null:
+		return
+	var hostile_units: Array = unit_manager.enemies if team == UnitData.Team.PLAYER else unit_manager.player_units
+	for u in hostile_units:
+		if not is_instance_valid(u) or u.is_dead:
+			continue
+		var d: float = position.distance_to(u.position)
+		if d > radius:
+			continue
+		var mult: float = 1.0 - clampf(d / radius, 0.0, 1.0) * 0.65
+		if u.has_method("take_damage"):
+			u.take_damage(blast_damage * mult)
+	for cell in main.placed_buildings:
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if anchor != cell:
+			continue
+		if main.get_building_faction(anchor) == (main.Faction.LUMINA if team == UnitData.Team.PLAYER else main.Faction.FEROX):
+			continue
+		var bdata = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if bdata == null:
+			continue
+		var center: Vector2 = main.grid_to_world(anchor) + Vector2(bdata.grid_size) * float(main.GRID_SIZE) * 0.5
+		var d2: float = position.distance_to(center)
+		if d2 > radius:
+			continue
+		var mult2: float = 1.0 - clampf(d2 / radius, 0.0, 1.0) * 0.65
+		main.damage_building(anchor, blast_damage * mult2)
 
 
 func set_path(new_path: PackedVector2Array, target: Variant) -> void:
@@ -3396,8 +4038,10 @@ func _draw() -> void:
 	# covers their origin. Drawn on the unit's OWN canvas (the proven path
 	# the flying shadow uses) rather than a separate node. Skipped when the
 	# unit is off-screen (the batched ribbon is still hundreds of verts).
-	if _wake_enabled and _wake_on_screen():
-		_draw_water_wake()
+		if _wake_enabled and _wake_on_screen():
+			_draw_water_wake()
+		if _afterburner_active():
+			_draw_afterburner_flame()
 
 	# Textured rendering (turret-style: base + rotating head) takes precedence
 	# over the primitive-shape fallbacks whenever the .tres supplies sprites.
@@ -3427,6 +4071,16 @@ func _draw() -> void:
 	_draw_selection_ring()
 	if main and main.show_hitboxes:
 		draw_arc(Vector2.ZERO, unit_size, 0, TAU, 32, Color(1.0, 0.2, 0.9, 0.9), 1.5)
+
+
+func _draw_afterburner_flame() -> void:
+	var back: Vector2 = -velocity.normalized() if velocity.length_squared() > 4.0 else Vector2.RIGHT.rotated(facing_angle + PI)
+	for i in range(6):
+		var t: float = float(i) / 5.0
+		var pos: Vector2 = back * (unit_size * (0.7 + t * 2.0))
+		var r: float = unit_size * (0.45 - t * 0.25)
+		var a: float = 0.55 * (1.0 - t)
+		draw_circle(pos, maxf(1.5, r), Color(1.0, 0.28 + t * 0.35, 0.02, a))
 
 
 ## Per-frame hover orbit for flying units (Mindustry-style).

@@ -21,6 +21,9 @@ build_cost = {
 }
 build_time = 1.5
 accepted_walls = Array[StringName]([])
-liquid_capacity = 50.0
+vent_tiles = PackedStringArray()
+vent_rate = 8.0
 transport_speed = 5.0
 transports_fluid = true
+electrical_power_use = 20.0
+liquid_capacity = 50.0

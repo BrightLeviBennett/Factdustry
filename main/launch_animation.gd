@@ -1029,6 +1029,12 @@ func _tick_ring_sweep(_delta: float) -> void:
 		# unhidden so we don't leave permanent ghosts.
 		_hidden_until_hit.clear()
 		_restore_camera()
+		var ps = main.get_node_or_null("PowerSystem") if main else null
+		if ps and "_networks_dirty" in ps:
+			ps._networks_dirty = true
+		var building_sys = main.get_node_or_null("BuildingSystem") if main else null
+		if building_sys and building_sys.has_method("mark_power_visuals_dirty"):
+			building_sys.mark_power_visuals_dirty()
 		land_complete.emit()
 
 
@@ -1150,8 +1156,6 @@ func _draw_pods() -> void:
 				* (shadow_off_t * 250.0)
 		var shadow_color := Color(0.0, 0.0, 0.0, 0.22 * alpha)
 		if _pod_tex:
-			var srect := Rect2(center + shadow_vec - Vector2(size * 0.5, size * 0.5),
-				Vector2(size, size))
 			# Rotated draw via a transform — Godot has no rotation arg on
 			# draw_texture_rect, so set a transform around the shadow's
 			# center, draw, then reset.

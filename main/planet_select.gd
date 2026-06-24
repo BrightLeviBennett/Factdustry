@@ -87,6 +87,20 @@ const _DRAG_DECAY_RATE := 2.5
 # actually comes to rest instead of asymptoting forever.
 const _DRAG_VELOCITY_EPSILON := 1.0
 
+# --- Newly-unlocked-sector focus animation ---
+# When the planet menu opens, any sector that became accessible since the
+# last open gets centered for FOCUS_DWELL_TIME (Mindustry-style intro),
+# one after another, then the camera returns to the saved view. While the
+# sequence plays, player pan/zoom is locked.
+const FOCUS_TRAVEL_TIME := 0.7   # Seconds to pan between targets
+const FOCUS_DWELL_TIME := 2.5    # Seconds held centered on each new sector
+const FOCUS_DISTANCE := 8.5      # Zoom level while focusing a sector (higher = more zoomed out)
+## True while the unlock-focus sequence owns the camera. Blocks pan/zoom
+## input and the drag-inertia + view-persistence passes.
+var _focus_active := false
+## The active focus tween, kept so it can be killed if the scene leaves.
+var _focus_tween: Tween = null
+
 ## Maps StaticBody3D → PlanetData (for planet clicking in solar view)
 var planet_bodies: Dictionary = {}
 ## Maps PlanetData.id → Node3D (the planet's root node)
@@ -176,6 +190,13 @@ var _launchpad_pick_mode: bool = false
 func refresh_for_reentry() -> void:
 	_launchpad_pick_mode = "launchpad_pick_request" in SaveManager \
 		and not SaveManager.launchpad_pick_request.is_empty()
+	# Clear any focus sequence that was still in flight when the player
+	# left (e.g. hit Back mid-intro). Leaving `_focus_active` set on a
+	# parked instance would permanently suppress future intros.
+	if _focus_tween != null and _focus_tween.is_valid():
+		_focus_tween.kill()
+	_focus_tween = null
+	_focus_active = false
 	# Drop any stale selection / hover so the cards aren't highlighted
 	# from the previous visit.
 	selected_sector = null
@@ -205,6 +226,13 @@ func refresh_for_reentry() -> void:
 		var show_back: bool = SaveManager.return_to_game or SaveManager.return_to_menu
 		back_btn.text = "← Back to Map" if SaveManager.return_to_game else "← Back to Menu"
 		back_btn.visible = show_back
+	# Re-apply the saved framing for the parked planet, then play the
+	# unlock-focus intro for any sector unlocked while we were away (e.g.
+	# the player just captured a sector and bounced back to the map).
+	if current_planet != null:
+		_apply_saved_view_for_planet(current_planet)
+		_update_camera()
+		_maybe_run_unlock_focus()
 
 
 func _ready() -> void:
@@ -242,10 +270,7 @@ func _frame_default_planet_for_first_render() -> void:
 	if target == null:
 		return
 	current_planet = target
-	camera_focus = target.get_orbit_position()
-	camera_pitch = target.camera_pitch
-	camera_distance = target.camera_distance
-	camera_yaw = 0.0
+	_apply_saved_view_for_planet(target)
 	# Sector container exists already (created by _build_planet); make
 	# it visible so the placeholder shows up on the first frame too.
 	# The actual cell meshes inside are built lazily by
@@ -271,7 +296,7 @@ func _on_launchpad_pick_pressed() -> void:
 	var src: StringName = StringName(req.get("source_sector", &""))
 	if src != &"":
 		SaveManager.pending_sector_id = src
-		var save_path: String = SaveManager.SAVES_DIR + str(src) + ".sector.json"
+		var save_path: String = SaveManager.sector_save_path(src)
 		if FileAccess.file_exists(save_path):
 			SaveManager.pending_map_path = save_path
 		else:
@@ -289,6 +314,7 @@ func _deferred_zoom_to_planet() -> void:
 	if target != null:
 		_zoom_to_planet(target)
 		_update_planet_tab_highlight()
+		_maybe_run_unlock_focus()
 
 
 func _on_registry_loaded() -> void:
@@ -299,6 +325,7 @@ func _on_registry_loaded() -> void:
 	if target != null:
 		_zoom_to_planet(target)
 		_update_planet_tab_highlight()
+		_maybe_run_unlock_focus()
 
 
 ## Returns the planet that should be focused when the screen opens.
@@ -952,10 +979,7 @@ func _zoom_to_planet(planet: PlanetData) -> void:
 	if sector_containers.has(planet.id):
 		sector_containers[planet.id].visible = true
 
-	camera_focus = planet.get_orbit_position()
-	camera_pitch = planet.camera_pitch
-	camera_distance = planet.camera_distance
-	camera_yaw = 0.0
+	_apply_saved_view_for_planet(planet)
 	selected_sector = null
 	hovered_sector = null
 	_hovered_cell = -1
@@ -977,6 +1001,164 @@ func _update_camera() -> void:
 	camera_pivot.position = camera_focus
 	camera_pivot.rotation = Vector3(camera_pitch, camera_yaw, 0)
 	camera.position = Vector3(0, 0, camera_distance)
+	# Continuously remember the player's framing so reopening the menu (or
+	# the next session) restores it. Skipped while the unlock-focus tween
+	# drives the camera — those transient angles aren't the player's view.
+	if not _focus_active and current_planet != null:
+		_persist_camera_view()
+
+
+## Sets camera_focus/yaw/pitch/distance for `planet` from the saved view if
+## the player has one, otherwise the planet's authored default framing.
+func _apply_saved_view_for_planet(planet: PlanetData) -> void:
+	camera_focus = planet.get_orbit_position()
+	var saved: Dictionary = {}
+	if "planet_camera_views" in SaveManager:
+		saved = SaveManager.planet_camera_views.get(String(planet.id), {})
+	if saved.has("yaw"):
+		camera_yaw = float(saved["yaw"])
+		camera_pitch = float(saved["pitch"])
+		camera_distance = float(saved["distance"])
+	else:
+		camera_pitch = planet.camera_pitch
+		camera_distance = planet.camera_distance
+		camera_yaw = 0.0
+
+
+## Writes the current camera orientation into SaveManager for current_planet.
+func _persist_camera_view() -> void:
+	if "planet_camera_views" not in SaveManager:
+		return
+	SaveManager.planet_camera_views[String(current_planet.id)] = {
+		"yaw": camera_yaw,
+		"pitch": camera_pitch,
+		"distance": camera_distance,
+	}
+
+
+# =========================
+# NEWLY-UNLOCKED SECTOR FOCUS
+# =========================
+
+## Computes the camera yaw/pitch that centers the view on `sector` for the
+## current planet. Returns {} if the sector hasn't been assigned a grid cell
+## yet (grid not built). The cell center is a planet-local direction; because
+## the planet node is unrotated (see `_find_nearest_cell`), it doubles as the
+## world direction from the planet centre, and the camera's +Z axis is what
+## faces the planet, so we just solve R·(0,0,1) = dir for yaw/pitch.
+func _camera_angles_for_sector(sector: SectorData) -> Dictionary:
+	var pid: StringName = current_planet.id
+	if not _sector_to_cell.has(pid) or not _dual_mesh_cache.has(pid):
+		return {}
+	var cell_idx: int = _sector_to_cell[pid].get(sector.id, -1)
+	var centers = _dual_mesh_cache[pid].cell_centers
+	if cell_idx < 0 or cell_idx >= centers.size():
+		return {}
+	var dir: Vector3 = (centers[cell_idx] as Vector3).normalized()
+	var pitch: float = clampf(-asin(clampf(dir.y, -1.0, 1.0)), -1.4, 1.4)
+	var yaw: float = atan2(dir.x, dir.z)
+	return {"yaw": yaw, "pitch": pitch}
+
+
+## Returns the angle equivalent to `target` (mod 2π) nearest to `reference`,
+## so a yaw tween rotates the short way instead of unwinding several turns.
+func _nearest_angle(reference: float, target: float) -> float:
+	var two_pi := TAU
+	var delta: float = fposmod(target - reference + PI, two_pi) - PI
+	return reference + delta
+
+
+## If any accessible sector on the current planet hasn't been introduced yet,
+## play the focus sequence over each in turn. Requires the geodesic grid to be
+## built (so sector→cell mapping exists). Safe to call repeatedly — it no-ops
+## when already running or when there's nothing new.
+func _maybe_run_unlock_focus() -> void:
+	if _focus_active or current_planet == null:
+		return
+	if not _sector_to_cell.has(current_planet.id):
+		return
+	var newly: Array = []
+	for sector in _get_planet_sectors(current_planet.id):
+		if TechTree.is_locked(sector.id):
+			continue
+		if SaveManager.seen_unlocked_sectors.has(sector.id):
+			continue
+		# Only focusable if it actually mapped onto a grid cell.
+		if not _camera_angles_for_sector(sector).is_empty():
+			newly.append(sector)
+	if not newly.is_empty():
+		_begin_unlock_focus(newly)
+
+
+## Builds the tween that pans to each newly-unlocked sector (dwelling on it),
+## then returns to the player's saved view, then unlocks input.
+func _begin_unlock_focus(newly: Array) -> void:
+	_focus_active = true
+	_drag_velocity = Vector2.ZERO
+	# Where to end up: the player's current (saved) framing.
+	var restore := {"yaw": camera_yaw, "pitch": camera_pitch, "distance": camera_distance}
+	if _focus_tween != null and _focus_tween.is_valid():
+		_focus_tween.kill()
+	var tw := create_tween()
+	tw.set_trans(Tween.TRANS_SINE)
+	tw.set_ease(Tween.EASE_IN_OUT)
+	var prev_yaw: float = camera_yaw
+	for sector in newly:
+		var ang: Dictionary = _camera_angles_for_sector(sector)
+		if ang.is_empty():
+			continue
+		var ty: float = _nearest_angle(prev_yaw, ang["yaw"])
+		prev_yaw = ty
+		tw.tween_property(self, "camera_yaw", ty, FOCUS_TRAVEL_TIME)
+		tw.parallel().tween_property(self, "camera_pitch", ang["pitch"], FOCUS_TRAVEL_TIME)
+		tw.parallel().tween_property(self, "camera_distance", FOCUS_DISTANCE, FOCUS_TRAVEL_TIME)
+		# On arrival: mark it seen (so an interrupted sequence still records
+		# what it showed) and pull up its info menu (launch button suppressed
+		# via _focus_active) for the duration of the dwell.
+		tw.tween_callback(_focus_show_sector.bind(sector))
+		tw.tween_interval(FOCUS_DWELL_TIME)
+	# Glide back to the player's saved framing.
+	var ry: float = _nearest_angle(prev_yaw, restore["yaw"])
+	tw.tween_property(self, "camera_yaw", ry, FOCUS_TRAVEL_TIME)
+	tw.parallel().tween_property(self, "camera_pitch", restore["pitch"], FOCUS_TRAVEL_TIME)
+	tw.parallel().tween_property(self, "camera_distance", restore["distance"], FOCUS_TRAVEL_TIME)
+	tw.tween_callback(_end_unlock_focus)
+	_focus_tween = tw
+
+
+func _mark_sector_seen(sector_id: StringName) -> void:
+	SaveManager.seen_unlocked_sectors[sector_id] = true
+
+
+## Called as the camera arrives on a focused sector: records it as seen,
+## highlights its cell, and opens its info menu (the launch button stays
+## hidden while `_focus_active`).
+func _focus_show_sector(sector: SectorData) -> void:
+	_mark_sector_seen(sector.id)
+	selected_sector = sector
+	if _sector_to_cell.has(current_planet.id):
+		_selected_cell = _sector_to_cell[current_planet.id].get(sector.id, -1)
+	_rebuild_outline_mesh(current_planet.id)
+	_update_info_panel()
+
+
+func _end_unlock_focus() -> void:
+	_focus_active = false
+	_focus_tween = null
+	# The intro is over — drop the auto-presented selection so the screen
+	# returns to its neutral "nothing selected" state (info menu hidden).
+	selected_sector = null
+	_selected_cell = -1
+	if current_planet != null:
+		_rebuild_outline_mesh(current_planet.id)
+	_update_info_panel()
+	# Snap yaw back into [-π, π] so the persisted/saved value stays tidy.
+	camera_yaw = _nearest_angle(0.0, camera_yaw)
+	_persist_camera_view()
+	# Persist the seen-set + restored view to disk so a reload doesn't
+	# replay the intro for sectors we just showed.
+	if SaveManager.has_method("save_campaign"):
+		SaveManager.save_campaign()
 
 
 func _input(event: InputEvent) -> void:
@@ -984,6 +1166,9 @@ func _input(event: InputEvent) -> void:
 	# should fully own the viewport, so wheel and trackpad pinch
 	# gestures don't dolly the camera underneath it.
 	if launch_overlay and launch_overlay.visible:
+		return
+	# The unlock-focus intro owns the camera — ignore zoom until it ends.
+	if _focus_active:
 		return
 	# Scroll zoom always works (even over UI panels)
 	if event is InputEventMouseButton:
@@ -1001,6 +1186,9 @@ func _input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# The unlock-focus intro locks out player panning/selection.
+	if _focus_active:
+		return
 	# Left-click and drag go through _unhandled_input so UI buttons
 	# consume the event first (prevents deselecting sectors when
 	# clicking the Launch button or other HUD elements).
@@ -1042,7 +1230,8 @@ func _process(_delta: float) -> void:
 	# Drag-release inertia: keep spinning yaw/pitch from the residual
 	# `_drag_velocity` and exp-decay it to zero. Only ticks while NOT
 	# actively dragging — a live drag is already steering directly.
-	if not is_dragging and _drag_velocity.length() > _DRAG_VELOCITY_EPSILON:
+	# Suppressed during the unlock-focus tween, which owns the camera.
+	if not _focus_active and not is_dragging and _drag_velocity.length() > _DRAG_VELOCITY_EPSILON:
 		camera_yaw -= _drag_velocity.x * ORBIT_SENSITIVITY * _delta
 		camera_pitch -= _drag_velocity.y * ORBIT_SENSITIVITY * _delta
 		_drag_velocity *= exp(-_DRAG_DECAY_RATE * _delta)
@@ -1126,8 +1315,9 @@ func _update_hover() -> void:
 		return
 	# Freeze hover updates while the launch overlay is open — moving the
 	# cursor over the planet shouldn't keep re-highlighting hex cells
-	# behind the modal.
-	if launch_overlay and launch_overlay.visible:
+	# behind the modal. Same during the unlock-focus intro, which owns the
+	# camera and presents sectors on its own.
+	if (launch_overlay and launch_overlay.visible) or _focus_active:
 		return
 
 	var result = _raycast_planet_surface()
@@ -1422,7 +1612,7 @@ func _on_back_pressed() -> void:
 		SaveManager.pending_launchpad_pick_result = {}
 		if src != &"":
 			SaveManager.pending_sector_id = src
-			var save_path: String = SaveManager.SAVES_DIR + str(src) + ".sector.json"
+			var save_path: String = SaveManager.sector_save_path(src)
 			if FileAccess.file_exists(save_path):
 				SaveManager.pending_map_path = save_path
 			else:
@@ -1446,7 +1636,7 @@ func _on_back_pressed() -> void:
 		# manual same-frame swap so we don't reintroduce the black flash.
 		var sector_id: StringName = SaveManager.active_sector_id
 		if sector_id != &"" and sector_id != &"_default":
-			var autosave_path: String = SaveManager.SAVES_DIR + str(sector_id) + ".sector.json"
+			var autosave_path: String = SaveManager.sector_save_path(sector_id)
 			if FileAccess.file_exists(autosave_path):
 				SaveManager.pending_map_path = autosave_path
 			else:
@@ -1494,8 +1684,13 @@ func _update_info_panel() -> void:
 			unlock_names.append(node_data["name"] if node_data else str(uid))
 		_add_stat_colored("Unlocks", ", ".join(unlock_names), Color(0.95, 0.82, 0.2))
 
-	# Only show launch for unlocked/researched sectors
-	if selected_sector != null and not TechTree.is_locked(selected_sector.id):
+	# Only show launch for unlocked/researched sectors. While the unlock-
+	# focus intro is auto-presenting sectors, the info menu is shown but the
+	# launch button is suppressed — the player is being shown the sector,
+	# not invited to launch into it mid-animation.
+	if _focus_active:
+		launch_btn.visible = false
+	elif selected_sector != null and not TechTree.is_locked(selected_sector.id):
 		launch_btn.visible = true
 		if _launchpad_pick_mode:
 			# Pick mode: the button just records the selection and reloads
@@ -1526,7 +1721,7 @@ func _update_info_panel() -> void:
 func _launch_state(sector) -> String:
 	if sector == null:
 		return "LAUNCH"
-	var save_path: String = SaveManager.SAVES_DIR + str(sector.id) + ".sector.json"
+	var save_path: String = SaveManager.sector_save_path(sector.id)
 	var has_save: bool = FileAccess.file_exists(save_path)
 	if not has_save:
 		# First-ever launch: starting_grounds is free; anything else needs
@@ -1638,7 +1833,7 @@ func _on_launch_pressed() -> void:
 ## player confirms the resource cost.
 func _do_launch(sector) -> void:
 	SaveManager.pending_sector_id = sector.id
-	var autosave_path: String = SaveManager.SAVES_DIR + str(sector.id) + ".sector.json"
+	var autosave_path: String = SaveManager.sector_save_path(sector.id)
 	if FileAccess.file_exists(autosave_path):
 		SaveManager.pending_map_path = autosave_path
 	elif sector.map_path != "":
@@ -2031,11 +2226,14 @@ func _on_launch_confirm() -> void:
 	# Deduct from the source sector's pool and persist it back to the
 	# SaveManager. This is the sector the player is "launching from", so
 	# the resources leave that sector's stockpile for good.
+	var resolved_cost: Dictionary = {}
 	for short_id in cost:
 		var need2: int = int(cost[short_id])
 		var key2: StringName = _resolve_cost_key(str(short_id))
-		src[key2] = int(src.get(key2, 0)) - need2
-	SaveManager.sector_resources[src_id] = src
+		resolved_cost[key2] = int(resolved_cost.get(key2, 0)) + need2
+	if not SaveManager.deduct_from_active_sector(resolved_cost):
+		_refresh_launch_overlay_requirements()
+		return
 	# Hand the per-slider amounts off to Main. Cost was already
 	# deducted from the source sector above, so all that's left is for
 	# the destination sector to actually receive the materials on

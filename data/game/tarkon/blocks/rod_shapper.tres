@@ -5,7 +5,7 @@
 [resource]
 script = ExtResource("1")
 id = &"rod_shapper"
-display_name = "Rod Shapper"
+display_name = "Rod Shaper"
 description = "Re-shapes graphite and uranium discs into reactor-grade rods."
 category = 2
 tags = PackedStringArray("factory", "recipe_select", "omnidirectional")

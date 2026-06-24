@@ -325,6 +325,20 @@ var _auto_paused_by_focus := false
 @warning_ignore("unused_signal") signal building_selected(block_id: StringName)
 signal building_placed(block_id: StringName, grid_pos: Vector2i)
 signal building_destroyed(grid_pos: Vector2i)
+## Fires when an already-placed building's faction changes in place — i.e.
+## without a place/destroy event. Emitted with the building's ANCHOR so
+## listeners can refresh its whole footprint. Cases: orphaned blocks
+## flipping to DERELICT when their home core dies, the wholesale FEROX→
+## DERELICT flip when the last enemy core falls, and DERELICT→LUMINA
+## capture. The minimap listens for this to recolour the affected tiles —
+## without it, faction recolours never reach the cached minimap image.
+@warning_ignore("unused_signal") signal building_faction_changed(anchor: Vector2i)
+## Fires each time a placed building actually takes combat damage (and
+## survives the hit). Emitted with the building's ANCHOR. The minimap uses
+## it to pulse a red outline around blocks under fire. Not emitted for the
+## killing blow (building_destroyed covers that) or for invulnerable
+## platforms.
+@warning_ignore("unused_signal") signal building_damaged(anchor: Vector2i)
 ## Fires only when a building is destroyed by enemy fire (HP-driven
 ## destroy_building call with `by_enemy = true`). Player deconstruction
 ## / swaps don't emit this. Used by particle_overlay so ruin decals
@@ -931,6 +945,18 @@ func _resolve_resource_key(cost_key: String) -> StringName:
 	return sn  # Fallback — will miss, but at least doesn't crash
 
 
+## Deconstructing pre-placed / captured blocks should not bootstrap
+## resources the player has never obtained. Normal material resources use
+## their tech-tree node as the "has been discovered before" marker; odd
+## cost keys without a tech node are allowed so special costs don't vanish.
+func can_refund_deconstruct_resource(resource_id: StringName) -> bool:
+	if resource_id == &"":
+		return false
+	if not TechTree.nodes.has(resource_id):
+		return true
+	return TechTree.is_researched(resource_id)
+
+
 func can_afford(block_id: StringName) -> bool:
 	if not require_resources:
 		return true
@@ -987,7 +1013,7 @@ func _terrain_accepts_at(grid_pos: Vector2i, data: BlockData) -> bool:
 		var on_vent_tile: bool = false
 		for vx in range(data.grid_size.x):
 			for vy in range(data.grid_size.y):
-				if StringName(terrain.floor_tiles.get(grid_pos + Vector2i(vx, vy), &"")) == data.vent_tile:
+				if data.vent_accepts(StringName(terrain.floor_tiles.get(grid_pos + Vector2i(vx, vy), &""))):
 					on_vent_tile = true
 					break
 			if on_vent_tile:
@@ -1181,6 +1207,26 @@ func get_lumina_core_anchors() -> Array:
 			continue
 		anchors.append(grid_pos)
 	return anchors
+
+
+func is_lumina_core_anchor(anchor: Vector2i) -> bool:
+	if not placed_buildings.has(anchor):
+		return false
+	if building_origins.get(anchor, anchor) != anchor:
+		return false
+	if get_building_faction(anchor) != Faction.LUMINA:
+		return false
+	var data = Registry.get_block(placed_buildings[anchor])
+	if data == null or not data.tags.has("core"):
+		return false
+	return not is_building_inactive(anchor)
+
+
+func is_lumina_core_cell(grid_pos: Vector2i) -> bool:
+	if not placed_buildings.has(grid_pos):
+		return false
+	var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+	return is_lumina_core_anchor(anchor)
 
 
 
@@ -1654,6 +1700,8 @@ func _swap_building_in_place(grid_pos: Vector2i, old_data: BlockData, new_data: 
 	if old_data and not old_data.build_cost.is_empty():
 		for raw_id in old_data.build_cost:
 			var rk: StringName = _resolve_resource_key(str(raw_id))
+			if not can_refund_deconstruct_resource(rk):
+				continue
 			refund_pool[rk] = int(old_data.build_cost[raw_id])
 	var build_time: float = new_data.build_time if new_data.build_time > 0.0 else 1.0
 	pending_swaps[grid_pos] = {
@@ -1684,6 +1732,8 @@ func _refund_pending_swap(grid_pos: Vector2i, also_consumed: bool = false) -> vo
 	var pool: Dictionary = entry.get("refund_pool", {})
 	var refunded: Dictionary = entry.get("refunded", {})
 	for rk in pool:
+		if not can_refund_deconstruct_resource(StringName(rk)):
+			continue
 		var remaining: int = int(pool[rk]) - int(refunded.get(rk, 0))
 		if remaining > 0:
 			_grant_resource_capped(rk, remaining)
@@ -1969,8 +2019,9 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 				return false
 
 	# Extractors must face ore — or, for wall miners, a blackstone wall.
-	# Geyser miners must be on a geyser (not face ore).
-	if data.category == BlockData.BlockCategory.EXTRACTORS:
+	# Geyser miners must be on a geyser (not face ore). Fluid extractors carry
+	# a pump tag and are validated by their terrain/vent tile rules instead.
+	if data.category == BlockData.BlockCategory.EXTRACTORS and not data.tags.has("pump"):
 		if data.tags.has("geyser_miner"):
 			if terrain:
 				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
@@ -1986,14 +2037,16 @@ func try_place_building(grid_pos: Vector2i) -> bool:
 					if not building_sys._is_facing_ore(grid_pos, placement_rotation):
 						return false
 
-	# Pumps must be on liquid
+	# Pumps must be on liquid. Data-driven ground vent extractors, like the
+	# Water Extractor on sand/blackstone, are already checked by
+	# _terrain_accepts_at via data.vent_accepts().
 	if data.tags.has("pump"):
 		var building_sys = _building_sys_ref()
 		# Condensers extract from steam, not liquid — they need a vent or
 		# geyser tile centered under their footprint instead of a water
 		# source.
 		if data.tags.has("condenser"):
-			if terrain:
+			if terrain and data.vent_tile == &"":
 				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
 				var tid = terrain.floor_tiles.get(center, &"")
 				if tid != &"vent" and tid != &"geyser":
@@ -2140,6 +2193,9 @@ func damage_building(grid_pos: Vector2i, amount: float) -> void:
 	# nuclear_reactor_system on destruction.
 	if building_health[anchor] <= 0:
 		destroy_building(anchor, true)
+	else:
+		# Survived the hit — pulse the minimap outline for this block.
+		building_damaged.emit(anchor)
 
 
 # Queues a building for deconstruction. Resources are refunded progressively
@@ -2228,6 +2284,8 @@ func destroy_building_with_refund(grid_pos: Vector2i) -> void:
 		if data:
 			for item_id in data.build_cost:
 				var rk := _resolve_resource_key(str(item_id))
+				if not can_refund_deconstruct_resource(rk):
+					continue
 				total_to_refund[rk] = int(data.build_cost[item_id])
 
 	# Deconstruct duration = how far the build got (partially built) or
@@ -2551,8 +2609,9 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 	if not _terrain_accepts_at(grid_pos, data):
 		return false
 
-	# Extractor placement checks
-	if data.category == BlockData.BlockCategory.EXTRACTORS:
+	# Extractor placement checks. Pump-style fluid extractors are already
+	# validated by _terrain_accepts_at and their pump/condenser rules below.
+	if data.category == BlockData.BlockCategory.EXTRACTORS and not data.tags.has("pump"):
 		var building_sys = _building_sys_ref()
 		if building_sys:
 			var pay_rot := int(payload.get("rotation", 0))
@@ -2578,11 +2637,9 @@ func place_payload_building(payload: Dictionary, grid_pos: Vector2i) -> bool:
 		if terrain.floor_tiles.get(center, &"") != &"vent":
 			return false
 
-	# Condenser must be on a vent or geyser tile (same gate as the
-	# regular placement flow). Without this a crane could drop the
-	# vent condenser anywhere and the placement would silently
-	# succeed.
-	if data.tags.has("condenser") and terrain:
+	# Condenser must be on a vent or geyser tile unless it declares its own
+	# accepted ground vent tiles, like the Water Extractor does.
+	if data.tags.has("condenser") and terrain and data.vent_tile == &"":
 		var cd_center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
 		var cd_tile = terrain.floor_tiles.get(cd_center, &"")
 		if cd_tile != &"vent" and cd_tile != &"geyser":
@@ -2811,7 +2868,11 @@ func destroy_building(grid_pos: Vector2i, by_enemy: bool = false) -> void:
 	if faction == Faction.FEROX and data and data.tags.has("core"):
 		_check_enemy_cores_remaining()
 	if faction == Faction.LUMINA and data and data.tags.has("core"):
-		_check_player_cores_remaining()
+		# Center of the just-destroyed core's footprint, so a sector-loss
+		# can pan the camera onto the spot where it stood.
+		var lost_core_center: Vector2 = grid_to_world(anchor) \
+			+ Vector2(data.grid_size) * (GRID_SIZE * 0.5)
+		_check_player_cores_remaining(lost_core_center)
 		# Losing a core shrinks the storage cap, so any resource over
 		# the new cap needs trimming right now — otherwise the pool
 		# would sit permanently over capacity.
@@ -2924,26 +2985,71 @@ static func draw_beam(canvas: CanvasItem, from_pos: Vector2, to_pos: Vector2, co
 	var alpha: float = 0.6 + 0.3 * pulse
 	var outer_color := Color(color.r, color.g, color.b, alpha)
 	var inner_color := Color(1.0, 1.0, 1.0, alpha)
-	var inner_width: float = width * 0.5
+	var line_width: float = width * 2.5
+	var inner_width: float = width * 0.68
 	var inner_radius: float = circle_radius * 0.5
 
-	# Outer colored lines (offset perpendicular to beam direction)
-	var dir: Vector2 = (to_pos - from_pos).normalized()
+	# Mindustry-style beam composition: endpoint caps plus one shortened center
+	# line. Mindustry draws edge textures at the endpoints, then starts the line
+	# inward from those edges; it does not try to merge offset rails into caps.
+	var beam_vec: Vector2 = to_pos - from_pos
+	var dir: Vector2 = beam_vec.normalized()
 	var perp: Vector2 = Vector2(-dir.y, dir.x)
-	var offset: float = width * 0.6
+	var outer_half: float = minf(line_width * 0.5, circle_radius - 0.001)
+	var outer_join: float = sqrt(maxf(circle_radius * circle_radius - outer_half * outer_half, 0.0))
+	# When the beam is shorter than the two endpoint caps combined, the rail joins
+	# (from_pos + dir*outer_join and to_pos - dir*outer_join) cross over and the
+	# capsule polygon self-intersects — triangulation fails for that frame. At
+	# that length the caps already cover the body, so just stack the endpoint
+	# discs instead of building the polygon.
+	if beam_vec.length() <= outer_join * 2.0 + 0.5:
+		canvas.draw_circle(from_pos, circle_radius, outer_color)
+		canvas.draw_circle(to_pos, circle_radius, outer_color)
+		canvas.draw_circle(from_pos, inner_radius, inner_color)
+		canvas.draw_circle(to_pos, inner_radius, inner_color)
+		return
+	var base_ang: float = dir.angle()
+	var top_ang: float = atan2(outer_half, -outer_join)
+	var bot_ang: float = atan2(-outer_half, -outer_join)
+	var start_top_ang: float = atan2(outer_half, outer_join)
+	var start_bot_ang: float = atan2(-outer_half, outer_join)
+	var outer_pts := PackedVector2Array()
+	var arc_steps: int = 18
+	outer_pts.append(from_pos + dir * outer_join + perp * outer_half)
+	outer_pts.append(to_pos - dir * outer_join + perp * outer_half)
+	# Trace the end cap the long way (through 0°, away from from_pos) so it bulges
+	# OUTWARD. A plain lerp from top_ang to bot_ang passes through 0°; lerp_angle
+	# would take the shortest arc through 180°, carving the cap into the beam body
+	# — that hides the endpoint circle and makes the polygon concave (which
+	# triangulates unstably, flickers, and prints "triangulation failed").
+	for i in range(arc_steps + 1):
+		var t: float = float(i) / float(arc_steps)
+		var ang: float = top_ang + t * (bot_ang - top_ang)
+		outer_pts.append(to_pos + Vector2.from_angle(base_ang + ang) * circle_radius)
+	outer_pts.append(from_pos + dir * outer_join - perp * outer_half)
+	# Trace the start cap the long way (through 180°, away from to_pos) so it
+	# bulges OUTWARD. lerp_angle would take the shortest arc through 0°, carving
+	# the cap into the beam body — that hides the outer endpoint circle and makes
+	# the polygon concave, which triangulates unstably and flickers when moving.
+	var start_sweep: float = TAU - (start_top_ang - start_bot_ang)
+	for i in range(arc_steps + 1):
+		var t: float = float(i) / float(arc_steps)
+		var ang: float = start_bot_ang - t * start_sweep
+		outer_pts.append(from_pos + Vector2.from_angle(base_ang + ang) * circle_radius)
+	canvas.draw_colored_polygon(outer_pts, outer_color)
 
-	canvas.draw_line(from_pos + perp * offset, to_pos + perp * offset, outer_color, width, true)
-	canvas.draw_line(from_pos - perp * offset, to_pos - perp * offset, outer_color, width, true)
-
-	# Center white line
-	canvas.draw_line(from_pos, to_pos, inner_color, inner_width, true)
-
-	# Endpoint circles — outer colored, inner white
-	# From
-	canvas.draw_circle(from_pos, circle_radius, outer_color)
+	# Thin inner line clipped to the endpoint circles, then full-radius white
+	# endpoint circles. Keeping these as separate non-overlapping shapes avoids
+	# the "umbrella" wedge caused by forcing a thin body and large cap into one
+	# polygon, while still preventing the line from showing underneath the cap.
+	var core_half: float = maxf(inner_width * 0.5, 0.5)
+	var inner_join: float = sqrt(maxf(inner_radius * inner_radius - core_half * core_half, 0.0))
+	inner_join = maxf(inner_join - 0.25, 0.0)
+	var inner_start: Vector2 = from_pos + dir * inner_join
+	var inner_end: Vector2 = to_pos - dir * inner_join
+	if inner_start.distance_squared_to(inner_end) > 0.0001:
+		canvas.draw_line(inner_start, inner_end, inner_color, inner_width, true)
 	canvas.draw_circle(from_pos, inner_radius, inner_color)
-	# To
-	canvas.draw_circle(to_pos, circle_radius, outer_color)
 	canvas.draw_circle(to_pos, inner_radius, inner_color)
 
 
@@ -2952,7 +3058,7 @@ static func draw_beam(canvas: CanvasItem, from_pos: Vector2, to_pos: Vector2, co
 # =========================
 
 ## Check if any FEROX cores remain. If not, convert all FEROX buildings to DERELICT.
-func _check_player_cores_remaining() -> void:
+func _check_player_cores_remaining(lost_core_center: Vector2 = Vector2.ZERO) -> void:
 	for pos in placed_buildings:
 		if get_building_faction(pos) == Faction.LUMINA:
 			var bid = placed_buildings[pos]
@@ -2962,10 +3068,35 @@ func _check_player_cores_remaining() -> void:
 	# No LUMINA cores remain — sector lost
 	if not sector_lost:
 		sector_lost = true
-		world_paused = true
-		var hud_node = _hud_ref()
-		if hud_node and hud_node.has_method("show_sector_loss"):
-			hud_node.show_sector_loss()
+		# Don't pause the world yet: `sector_lost` already blocks player
+		# input via is_ui_blocking(), and we WANT the world to keep ticking
+		# so the Mindustry-style core explosion animates during the focus
+		# hold. The world pauses only when the loss screen drops in.
+		_play_sector_loss_sequence(lost_core_center)
+
+
+## Sector-loss intro: smoothly snap-focus the camera onto the spot where the
+## final core fell and let the world keep ticking (so the core explosion
+## animates) for a 3 s beat, THEN pause and reveal the loss screen — instead
+## of cutting to it the instant the core pops. `focus_override` outranks every
+## other follow target, so the camera's normal follow lerp eases onto the core
+## (~0.5 s) and then holds there. Player input is already suppressed by
+## `sector_lost` (see is_ui_blocking), so nothing is pausing the simulation.
+func _play_sector_loss_sequence(lost_core_center: Vector2) -> void:
+	var cam = get_node_or_null("Camera2D")
+	if cam and "focus_override" in cam:
+		cam.focus_override = lost_core_center
+	# Let the world run (core explosion plays out) for the 3 s hold.
+	await get_tree().create_timer(3.0).timeout
+	# The sector could have been torn down / scene-swapped during the wait
+	# (e.g. the player abandoned from a menu) — bail if so.
+	if not sector_lost or not is_inside_tree():
+		return
+	# Now freeze the world and drop in the loss screen.
+	world_paused = true
+	var hud_node = _hud_ref()
+	if hud_node and hud_node.has_method("show_sector_loss"):
+		hud_node.show_sector_loss()
 
 
 func _check_enemy_cores_remaining() -> void:
@@ -2983,10 +3114,16 @@ func _check_enemy_cores_remaining() -> void:
 ## Convert all remaining FEROX buildings to DERELICT faction.
 func _convert_ferox_to_derelict() -> void:
 	var converted := 0
+	var changed_anchors: Dictionary = {}
 	for pos in building_factions.keys():
 		if building_factions[pos] == Faction.FEROX:
 			building_factions[pos] = Faction.DERELICT
+			changed_anchors[building_origins.get(pos, pos)] = true
 			converted += 1
+	# Recolour the minimap for every flipped footprint (anchors only, so a
+	# multi-tile block emits once).
+	for anchor in changed_anchors:
+		building_faction_changed.emit(anchor)
 	ferox_rebuild_queue.clear()  # Stop ferox rebuilds
 	print("Main: Converted %d FEROX blocks to DERELICT." % converted)
 	# Any FEROX units still on the map have nothing to defend or rebuild
@@ -3040,6 +3177,7 @@ func convert_derelict_in_rect(from: Vector2i, to: Vector2i) -> void:
 							building_factions[cell] = Faction.LUMINA
 			else:
 				building_factions[pos] = Faction.LUMINA
+			building_faction_changed.emit(anchor)
 			# Trigger the conversion flash on the captured block's anchor
 			# exactly once — same yellow flash the launch animation paints on
 			# pre-built LUMINA blocks, minus the white kicker.
@@ -3050,6 +3188,12 @@ func convert_derelict_in_rect(from: Vector2i, to: Vector2i) -> void:
 				var po = get_node_or_null("ParticleOverlay")
 				if po and po.has_method("spawn_build_pulse") and bdata:
 					po.spawn_build_pulse(anchor, bdata.grid_size)
+	if not seen_anchors.is_empty():
+		var ps = _power_sys_ref()
+		if ps and "_networks_dirty" in ps:
+			ps._networks_dirty = true
+		if building_sys and building_sys.has_method("mark_power_visuals_dirty"):
+			building_sys.mark_power_visuals_dirty()
 
 
 ## Queue destroyed player buildings in a rect for rebuild.
@@ -3370,3 +3514,4 @@ func _convert_anchor_to_derelict(anchor: Vector2i) -> void:
 			var p: Vector2i = anchor + Vector2i(x, y)
 			if building_factions.has(p):
 				building_factions[p] = Faction.DERELICT
+	building_faction_changed.emit(anchor)

@@ -191,7 +191,7 @@ func show_save_dialog(captured_override = null) -> void:
 	# Big tiled-background preview at top, name field, then collapsible
 	# block list + requirement list, then Cancel / Save.
 	popup = PopupPanel.new()
-	popup.size = Vector2(420, 560)
+	popup.set_deferred("size", Vector2(420, 560))
 	# Match the dark Mindustry-ish chrome instead of Godot's default
 	# light-gray PopupPanel.
 	var popup_style := StyleBoxFlat.new()

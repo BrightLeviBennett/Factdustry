@@ -102,9 +102,11 @@ var require_resources := false
 var placement_rotation := 0
 var core_position := Vector2i(48, 48)
 
-# Signals used by BuildingSystem and TerrainSystem
-signal resources_changed(resources: Dictionary)
-signal building_selected(block_id: StringName)
+# Signals used by BuildingSystem and TerrainSystem. Declared to satisfy the
+# shared Main API contract those systems expect; the editor itself never
+# emits them, hence the unused-signal suppressions.
+@warning_ignore("unused_signal") signal resources_changed(resources: Dictionary)
+@warning_ignore("unused_signal") signal building_selected(block_id: StringName)
 signal building_placed(block_id: StringName, grid_pos: Vector2i)
 signal building_destroyed(grid_pos: Vector2i)
 
@@ -433,13 +435,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		# the key for spawn-core selection here.
 		if event.is_action_pressed("schematic_capture"):
 			var grid_pos := world_to_grid(get_global_mouse_position())
-			if placed_buildings.has(grid_pos):
-				var block_id = placed_buildings[grid_pos]
-				var data = Registry.get_block(block_id)
-				if data and data.tags.has("core"):
-					var anchor = building_origins.get(grid_pos, grid_pos)
-					core_position = anchor
-					_overlay.queue_redraw()
+			var anchor: Vector2i = building_origins.get(grid_pos, grid_pos)
+			if _is_lumina_core_anchor(anchor):
+				core_position = anchor
+				_overlay.queue_redraw()
 			return
 		# Esc: close crane filter menu / exit crane link mode (mirrors the
 		# in-game ui_cancel chain in BuildingSystem._input). This runs
@@ -539,7 +538,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				# selected from the palette, left-clicking on a sorter /
 				# constructor / refabricator / archive opens its menu so
 				# authors can bake selections into the sector.
-				var bs = get_node_or_null("BuildingSystem")
 				var wui = get_node_or_null("WorldUiSystem")
 				if wui and wui.world_menu_open:
 					var mouse_world = get_global_mouse_position()
@@ -994,6 +992,8 @@ func undo() -> void:
 				terrain_changed_cells[entry["cell"]] = true
 	_undoing = false
 	_invalidate_anchor_cache()
+	if not _has_spawn_core():
+		_pick_next_spawn_core()
 	if terrain_changed_cells.is_empty():
 		_after_terrain_restore()
 	else:
@@ -1017,6 +1017,8 @@ func redo() -> void:
 				terrain_changed_cells[entry["cell"]] = true
 	_undoing = false
 	_invalidate_anchor_cache()
+	if not _has_spawn_core():
+		_pick_next_spawn_core()
 	if terrain_changed_cells.is_empty():
 		_after_terrain_restore()
 	else:
@@ -1655,6 +1657,8 @@ func _paste_transform_data(dest_min: Vector2i) -> Dictionary:
 
 
 func _apply_transform_move() -> void:
+	var old_min := _transform_rect_min()
+	var old_spawn_core := core_position
 	var dest_min := _transform_rect_min() + _transform_current_offset
 
 	# Erase original
@@ -1668,6 +1672,7 @@ func _apply_transform_move() -> void:
 	var size := _transform_rect_max() - _transform_rect_min()
 	_transform_start = dest_min
 	_transform_end = dest_min + size
+	_repair_spawn_core_after_transform(old_spawn_core, old_min, dest_min)
 
 	_invalidate_anchor_cache()
 	if terrain_changed_cells.is_empty():
@@ -1858,6 +1863,8 @@ func transform_convert_faction(faction: int) -> void:
 	# Update the captured transform data too so it stays in sync
 	for offset in _transform_bld_factions:
 		_transform_bld_factions[offset] = faction
+	if not _has_spawn_core():
+		_pick_next_spawn_core()
 
 	var bs = get_node_or_null("BuildingSystem")
 	if bs:
@@ -1979,7 +1986,7 @@ func _place_block_at(grid_pos: Vector2i) -> void:
 	building_placed.emit(selected_block, grid_pos)
 
 	# Auto-set spawn core if this is the first core placed
-	if data.tags.has("core") and not _has_spawn_core():
+	if data.tags.has("core") and selected_faction == Faction.LUMINA and not _has_spawn_core():
 		core_position = grid_pos
 	_invalidate_anchor_cache()
 	_overlay.queue_redraw()
@@ -2048,23 +2055,43 @@ func clear_buildings() -> void:
 		bs.queue_redraw()
 
 
-## Returns true if the current core_position points to a valid placed core.
-func _has_spawn_core() -> bool:
-	if not placed_buildings.has(core_position):
+func _is_lumina_core_anchor(anchor: Vector2i) -> bool:
+	if not placed_buildings.has(anchor):
 		return false
-	var data = Registry.get_block(placed_buildings[core_position])
+	if building_origins.get(anchor, anchor) != anchor:
+		return false
+	if get_building_faction(anchor) != Faction.LUMINA:
+		return false
+	var data = Registry.get_block(placed_buildings[anchor])
 	return data != null and data.tags.has("core")
 
 
-## Finds any remaining core on the map and sets it as spawn, or resets.
+## Returns true if the current core_position points to a valid LUMINA core.
+func _has_spawn_core() -> bool:
+	return _is_lumina_core_anchor(core_position)
+
+
+## Finds any remaining LUMINA core on the map and sets it as spawn, or resets.
 func _pick_next_spawn_core() -> void:
 	for pos in placed_buildings:
-		var data = Registry.get_block(placed_buildings[pos])
-		if data and data.tags.has("core"):
-			var anchor = building_origins.get(pos, pos)
+		var anchor: Vector2i = building_origins.get(pos, pos)
+		if anchor != pos:
+			continue
+		if _is_lumina_core_anchor(anchor):
 			core_position = anchor
 			return
 	core_position = Vector2i(-1, -1)
+
+
+func _repair_spawn_core_after_transform(old_spawn_core: Vector2i, old_min: Vector2i, dest_min: Vector2i) -> void:
+	if _is_lumina_core_anchor(core_position):
+		return
+	var moved_offset: Vector2i = old_spawn_core - old_min
+	var moved_anchor: Vector2i = dest_min + moved_offset
+	if _is_lumina_core_anchor(moved_anchor):
+		core_position = moved_anchor
+		return
+	_pick_next_spawn_core()
 
 
 # --- LINKING ---
@@ -2246,13 +2273,11 @@ func _draw_grid() -> void:
 
 
 func _draw_core_marker() -> void:
-	# Only draw spawn marker if a core is actually placed at core_position
-	if not placed_buildings.has(core_position):
+	# Only draw spawn marker if a LUMINA core is actually placed at core_position.
+	if not _is_lumina_core_anchor(core_position):
 		return
 	var block_id = placed_buildings[core_position]
 	var data = Registry.get_block(block_id)
-	if data == null or not data.tags.has("core"):
-		return
 
 	var world_pos := grid_to_world(core_position)
 	var w := float(GRID_SIZE * data.grid_size.x)

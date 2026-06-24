@@ -121,6 +121,33 @@ var can_place := false
 ## still uses `can_place`, which keeps the range check.
 var can_place_excluding_range := false
 
+const _PLAN_GHOST_ALPHA: float = 0.72
+const _PLAN_INVALID_ALPHA: float = 0.72
+const _PLAN_RECT_ALPHA: float = 0.56
+const _PLAN_INVALID_RECT_ALPHA: float = 0.46
+var _construct_edge_mask_cache: Dictionary = {}
+var _construct_alpha_image_cache: Dictionary = {}
+
+
+func _plan_ghost_pulse() -> float:
+	return 0.24 + absf(sin(float(Time.get_ticks_msec()) * 0.001 * TAU / 6.0)) * 0.28
+
+
+func _plan_ghost_tint(valid: bool) -> Color:
+	if valid:
+		var wash: float = _plan_ghost_pulse()
+		return Color(1.0, 1.0, 1.0, _PLAN_GHOST_ALPHA + wash * 0.08)
+	var pulse: float = _plan_ghost_pulse()
+	return Color(1.0, 0.34 + pulse * 0.10, 0.34 + pulse * 0.10, _PLAN_INVALID_ALPHA)
+
+
+func _plan_rect_ghost_color(block_id: StringName, valid: bool) -> Color:
+	if valid:
+		var color: Color = _get_block_color(block_id).lerp(Color.WHITE, _plan_ghost_pulse() * 0.18)
+		color.a = _PLAN_RECT_ALPHA
+		return color
+	return Color(1.0, 0.12, 0.12, _PLAN_INVALID_RECT_ALPHA)
+
 # Direction arrow constants (same as logistics_system)
 const DIR_VECTORS := [
 	Vector2i(1, 0),   # 0 = right
@@ -147,6 +174,10 @@ var _belt_scroll_phase: float = 0.0
 # stalled build tick.
 var _build_beam_phase: float = 0.0
 const _BUILD_BEAM_PERIOD: float = 1.0
+
+# Plasma-bore spark animation clock, in Mindustry-style frames (~60/sec). Only
+# advanced while the world is unpaused so the ore sparks freeze when paused.
+var _drill_spark_clock: float = 0.0
 
 # Derelict-→-LUMINA conversion flash. anchor → Time.get_ticks_msec() at
 # conversion, in seconds. Reused by `get_conversion_flash_tint` in the
@@ -401,6 +432,10 @@ var _crane_filter_menu_items: Array = []  # Array of {id: StringName, icon: Text
 var _crane_filter_menu_columns: int = 6
 var _crane_filter_menu_cell: float = 44.0
 var _crane_filter_menu_hovered: int = -1
+var _crane_filter_menu_owner: String = "crane"
+
+# Currently selected lane shifter in programming mode.
+var _lane_shifter_link_anchor: Vector2i = Vector2i(-1, -1)
 
 # World menu, storage panel, and landing-pad pick state moved to
 # WorldUiSystem — access via `_world_ui.<field>`.
@@ -592,6 +627,12 @@ func _ready() -> void:
 	# stacking two semi-transparent inner copies (which alpha-doubles
 	# at every spoke crossing).
 	_bake_spinner_preview_textures()
+
+
+func mark_power_visuals_dirty() -> void:
+	queue_redraw()
+	if _cable_overlay != null and is_instance_valid(_cable_overlay):
+		_cable_overlay.queue_redraw()
 
 
 func _on_walls_changed() -> void:
@@ -889,7 +930,7 @@ const _PIPE_TEX_PATHS := {
 	"ca":       "res://textures/blocks/fluid transportation/pipe/Pipe-CA.png",
 	"cb":       "res://textures/blocks/fluid transportation/pipe/Pipe-CB.png",
 }
-const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPump.png"
+const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPumpTop.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _BRIDGE_VISUALIZER_TEX_PATH := "res://textures/blocks/item transportation/BridgeVisualizer.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
@@ -1182,16 +1223,29 @@ func _draw_drill_lasers(grid_pos: Vector2i, rotation: int, grid_size: Vector2i, 
 	# so the laser needs to do the same — otherwise ore at the very
 	# end of range looks like it falls outside the beam.
 	var max_reach: int = mine_range + 1
+	# Perpendicular to the facing direction + the facing angle, used by the
+	# Mindustry-style spark streaks below.
+	var perp := Vector2(-fwd.y, fwd.x)
+	var facing_angle := fwd.angle()
+	# Mindustry's spark timer runs on its frame counter (~60 fps); use the
+	# pause-aware spark clock so the streaks freeze when the world is paused.
+	var spark_time := _drill_spark_clock
+	var facet_index := 0
 	for outer in outer_front_cells:
 		var inner_front: Vector2i = outer - fwd_i
 		# Find the first ore tile within reach; else use max-range.
 		var hit_dist: int = max_reach
+		var hit_color := laser_color
+		var found_ore := false
 		for step in range(1, max_reach + 1):
 			var scan: Vector2i = outer + fwd_i * (step - 1)
 			if terrain != null and terrain.has_method("get_ore_at"):
 				var ore = terrain.get_ore_at(scan)
 				if ore != null and ore.minable_resource != &"":
 					hit_dist = step
+					if ore.color.a > 0.0:
+						hit_color = ore.color
+					found_ore = true
 					break
 		var hit_cell: Vector2i = outer + fwd_i * (hit_dist - 1)
 		# Start: front face of the bore's own front-edge cell (the emitter
@@ -1203,6 +1257,51 @@ func _draw_drill_lasers(grid_pos: Vector2i, rotation: int, grid_size: Vector2i, 
 		# the `main` node, so it also works when the building renderer runs
 		# under the Map Editor (whose root node has no draw_beam method).
 		Main.draw_beam(self, start, end, laser_color, pulse)
+		# Spark streaks fly off the mined ore (port of Mindustry BeamDrill).
+		if found_ore:
+			_draw_drill_sparks(end, facing_angle, perp, gs, hit_color, grid_pos, facet_index, spark_time)
+		facet_index += 1
+
+
+# --- Mindustry BeamDrill spark constants (tilesize 8 px there; scaled by gs/8) ---
+const _DRILL_SPARKS := 22
+const _DRILL_SPARK_RANGE := 10.0       # how far a spark travels from the impact
+const _DRILL_SPARK_LIFE := 27.0        # frames (@60fps) for one full cycle
+const _DRILL_SPARK_RECURRENCE := 4.0   # cycle period; spark is only visible for fin<=1
+const _DRILL_SPARK_SPREAD := 45.0      # degrees of angular scatter around facing
+const _DRILL_SPARK_SIZE := 3.5         # peak streak length
+const _DRILL_SPARK_COLOR := Color(0.992, 0.62, 0.506)  # Mindustry sparkColor "fd9e81"
+
+
+## Ports the spark streaks Mindustry's Plasma Bore (BeamDrill) throws off the
+## ore it's mining. Each beam endpoint emits `_DRILL_SPARKS` short line streaks
+## that radiate outward in the bore's facing direction (±spread), each running
+## its own looping timer (`fin`). A streak's length follows a triangle envelope
+## (grow then shrink) and its color blends from a hot orange toward the ore's
+## own color as it travels. Per-spark randomness is seeded by grid position +
+## facet index so each emitter looks distinct but is stable frame-to-frame.
+func _draw_drill_sparks(impact_pos: Vector2, facing_angle: float, perp: Vector2, gs: float, ore_color: Color, grid_pos: Vector2i, facet_index: int, t: float) -> void:
+	var c: CanvasItem = self
+	var scale: float = gs / 8.0
+	var stroke_w: float = maxf(5.0, scale * 0.5)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = (grid_pos.x * 92837111) ^ (grid_pos.y * 689287499) ^ (facet_index * 283923481)
+	for j in range(_DRILL_SPARKS):
+		# Mindustry draws these rands in sequence per spark: phase, then perp
+		# offset, then angular spread. Match the order so the pattern is faithful.
+		var phase: float = rng.randf() * (_DRILL_SPARK_RECURRENCE + 1.0)
+		var off: float = rng.randf_range(-2.0, 2.0) * scale
+		var spread: float = rng.randf_range(-_DRILL_SPARK_SPREAD, _DRILL_SPARK_SPREAD)
+		var fin: float = fmod(t / _DRILL_SPARK_LIFE + phase, _DRILL_SPARK_RECURRENCE)
+		if fin > 1.0:
+			continue
+		var ang: float = facing_angle + deg_to_rad(spread)
+		var dist: float = _DRILL_SPARK_RANGE * fin * scale
+		var origin: Vector2 = impact_pos + Vector2(dist, 0).rotated(ang) + perp * off
+		# Triangle envelope: length peaks at the middle of the visible window.
+		var streak_len: float = (1.0 - absf(fin - 0.5) * 2.0) * _DRILL_SPARK_SIZE * scale
+		var tip: Vector2 = origin + Vector2(streak_len, 0).rotated(ang)
+		c.draw_line(origin, tip, _DRILL_SPARK_COLOR.lerp(ore_color, fin), stroke_w, true)
 
 
 ## Draws two gear-style crusher heads on a block tagged "crusher_heads".
@@ -1563,6 +1662,24 @@ func _draw_hovered_turret_range() -> void:
 	# at a glance which neighbours benefit.
 	if is_overdrive or is_mender:
 		_draw_affected_block_outlines(anchor, data, center, range_px, ring_color, is_overdrive)
+
+
+func _draw_hovered_lane_shifter_range() -> void:
+	if main.selected_building != &"":
+		return
+	if main.has_method("is_ui_blocking") and main.is_ui_blocking():
+		return
+	var mouse_world: Vector2 = get_global_mouse_position()
+	var grid_pos: Vector2i = main.world_to_grid(mouse_world)
+	if not main.placed_buildings.has(grid_pos):
+		return
+	if main.get_building_faction(grid_pos) != main.Faction.LUMINA:
+		return
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or not data.tags.has("lane_shifter"):
+		return
+	_draw_lane_shifter_range_preview(anchor, data.grid_size, main.building_rotation.get(anchor, 0), data)
 
 
 ## Paints a thin outline around every friendly placed building that
@@ -2145,9 +2262,14 @@ func _input(event: InputEvent) -> void:
 			_schematic.enter_paste_mode_from_rect(_schematic.start, _schematic.end)
 			queue_redraw()
 	if event.is_action_pressed("ui_cancel"):
-		# Filter menu first, then crane link mode, then power-link source.
+		# Filter menu first, then crane/lane link mode, then power-link source.
 		if _crane_filter_menu_open:
 			_close_crane_filter_menu()
+			get_viewport().set_input_as_handled()
+			return
+		if _lane_shifter_link_anchor != Vector2i(-1, -1):
+			_lane_shifter_link_anchor = Vector2i(-1, -1)
+			queue_redraw()
 			get_viewport().set_input_as_handled()
 			return
 		if _crane_link_anchor != Vector2i(-1, -1):
@@ -2297,6 +2419,11 @@ func _process(_delta: float) -> void:
 		# toggle so the build laser still animates when the player has
 		# belt scrolling disabled.
 		_build_beam_phase = fposmod(_build_beam_phase + _delta / _BUILD_BEAM_PERIOD, 1.0)
+		# Drive the plasma-bore spark clock at Mindustry's frame rate (~60/sec)
+		# and keep the bore visuals redrawing so the streaks animate. Frozen
+		# while paused since this whole branch is gated on world_paused.
+		_drill_spark_clock += _delta * 60.0
+		queue_redraw()
 		_tick_menders(_delta)
 
 	# --- Unified work queue: build + deconstruct, one at a time ---
@@ -2381,6 +2508,17 @@ func _process(_delta: float) -> void:
 			_crane_link_anchor = Vector2i(-1, -1)
 			_crane_link_next_kind = "input"
 			if _crane_filter_menu_open:
+				_close_crane_filter_menu()
+		queue_redraw()
+
+	if _lane_shifter_link_anchor != Vector2i(-1, -1):
+		var lane_still_valid: bool = main.placed_buildings.has(_lane_shifter_link_anchor)
+		if lane_still_valid and "building_deconstruct_progress" in main \
+				and main.building_deconstruct_progress.has(_lane_shifter_link_anchor):
+			lane_still_valid = false
+		if not lane_still_valid:
+			_lane_shifter_link_anchor = Vector2i(-1, -1)
+			if _crane_filter_menu_open and _crane_filter_menu_owner == "lane_shifter":
 				_close_crane_filter_menu()
 		queue_redraw()
 
@@ -2603,6 +2741,9 @@ func _tick_pending_swap(anchor: Vector2i, delta: float) -> void:
 	var refunded: Dictionary = entry.get("refunded", {})
 	if not refund_pool.is_empty():
 		for rk in refund_pool:
+			if main.has_method("can_refund_deconstruct_resource") \
+					and not main.can_refund_deconstruct_resource(StringName(rk)):
+				continue
 			var pool_amt: int = int(refund_pool[rk])
 			var target_refund: int = floori(pct * pool_amt)
 			var already_refunded: int = int(refunded.get(rk, 0))
@@ -2748,6 +2889,9 @@ func _tick_progressive_deconstruct(anchor: Vector2i, delta: float) -> void:
 	var refunded: Dictionary = main.building_resources_refunded.get(anchor, {})
 	var any_refunded := false
 	for rk in total_refund:
+		if main.has_method("can_refund_deconstruct_resource") \
+				and not main.can_refund_deconstruct_resource(StringName(rk)):
+			continue
 		var total: int = int(total_refund[rk])
 		var target: int = floori(pct * total)
 		var already: int = int(refunded.get(rk, 0))
@@ -2764,6 +2908,9 @@ func _tick_progressive_deconstruct(anchor: Vector2i, delta: float) -> void:
 	if entry["progress"] >= build_time:
 		# Refund any remaining (rounding)
 		for rk in total_refund:
+			if main.has_method("can_refund_deconstruct_resource") \
+					and not main.can_refund_deconstruct_resource(StringName(rk)):
+				continue
 			var total: int = int(total_refund[rk])
 			var already: int = int(refunded.get(rk, 0))
 			if already < total:
@@ -2807,7 +2954,7 @@ func _can_place_terrain(grid_pos: Vector2i, block_id: StringName) -> bool:
 		var on_vent_tile: bool = false
 		for vx in range(data.grid_size.x):
 			for vy in range(data.grid_size.y):
-				if StringName(terrain.floor_tiles.get(grid_pos + Vector2i(vx, vy), &"")) == data.vent_tile:
+				if data.vent_accepts(StringName(terrain.floor_tiles.get(grid_pos + Vector2i(vx, vy), &""))):
 					on_vent_tile = true
 					break
 			if on_vent_tile:
@@ -3016,7 +3163,8 @@ func _ferox_builders_with_facing_for(anchor: Vector2i) -> Array:
 		if Vector2i(tgt.get("grid_pos", Vector2i(-9999, -9999))) != anchor:
 			continue
 		var fa: float = float(child.get("facing_angle")) if "facing_angle" in child else 0.0
-		out.append({"pos": child.position, "facing": fa})
+		var front_pos: Vector2 = child.get_build_diamond_world_pos() if child.has_method("get_build_diamond_world_pos") else child.position
+		out.append({"pos": child.position, "facing": fa, "front_pos": front_pos})
 	return out
 
 
@@ -3032,7 +3180,8 @@ func _builders_with_facing_for(anchor: Vector2i) -> Array:
 		var fa: float = 0.0
 		if "facing_angle" in d:
 			fa = float(d.facing_angle)
-		out.append({"pos": d.position, "facing": fa})
+		var front_pos: Vector2 = d.get_build_diamond_world_pos() if d.has_method("get_build_diamond_world_pos") else d.position
+		out.append({"pos": d.position, "facing": fa, "front_pos": front_pos})
 	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
 	if unit_mgr and "player_units" in unit_mgr:
 		for u in unit_mgr.player_units:
@@ -3100,9 +3249,9 @@ func _draw_active_build_beams(anchor: Vector2i, line_top: Vector2, line_bot: Vec
 		var facing: float = float(b["facing"])
 		var fwd: Vector2 = Vector2.from_angle(facing + PI / 2.0)
 		var origin: Vector2 = unit_pos + fwd * (main.GRID_SIZE * 0.25)
-		# Filled triangle: origin → line_top → line_bot.
+		# Filled triangle: origin -> line_top -> line_bot.
 		var tri := PackedVector2Array([origin, line_top, line_bot])
-		draw_colored_polygon(tri, fill_color)
+		_draw_colored_polygon_if_valid(tri, fill_color)
 		# Two outer lines from the origin to each end of the reveal
 		# line so the triangle reads as a beam rather than a vague
 		# wedge of fog.
@@ -3134,14 +3283,31 @@ func _draw_active_build_beams(anchor: Vector2i, line_top: Vector2, line_bot: Vec
 			var bot_a: Vector2 = origin.lerp(line_bot, bot_t0)
 			var bot_b: Vector2 = origin.lerp(line_bot, bot_t1)
 			var stripe := PackedVector2Array([top_a, top_b, bot_b, bot_a])
-			draw_colored_polygon(stripe, stripe_color)
-	# Diamond is rendered separately (via crane_overlay at z 4096) so
+			_draw_colored_polygon_if_valid(stripe, stripe_color)
+		# Diamond is rendered separately (via crane_overlay at z 4096) so
 	# it sits ON TOP of the drone / unit sprite (z 4095) rather than
 	# being clipped by the chassis. See `_draw_active_work_diamonds`.
 
 
-## Draws the pulsing emitter diamond at one builder's tip, oriented
-## along `axis` (unit→block) with `hue` colouring. Routed onto
+func _draw_colored_polygon_if_valid(points: PackedVector2Array, color: Color) -> void:
+	if points.size() < 3:
+		return
+	if _polygon_area_abs(points) < 0.75:
+		return
+	_ccanvas().draw_colored_polygon(points, color)
+
+
+func _polygon_area_abs(points: PackedVector2Array) -> float:
+	var area: float = 0.0
+	for i in range(points.size()):
+		var a: Vector2 = points[i]
+		var b: Vector2 = points[(i + 1) % points.size()]
+		area += a.x * b.y - b.x * a.y
+	return absf(area) * 0.5
+
+
+## Draws the pulsing emitter diamond at one builder's front edge, oriented
+## along `axis` with `hue` colouring. Routed onto
 ## whichever CanvasItem is currently driving the draw — the
 ## crane_overlay's `_draw` parks itself in `_crane_draw_canvas`
 ## before invoking us so the diamond lands above the drone sprite.
@@ -3154,13 +3320,12 @@ func _draw_build_beam_diamond_on(canvas: CanvasItem, origin: Vector2, axis: Vect
 	var pulse: float = sin(_build_beam_phase * TAU * 2.0)
 	var base_size: float = main.GRID_SIZE * 0.09
 	var size_d: float = base_size * (1.0 + pulse * 0.20)
-	var fwd_size: float = size_d * 1.4
 	var alpha: float = clampf(0.7 + pulse * 0.25, 0.0, 1.0)
 	var diamond := PackedVector2Array([
-		origin + axis * fwd_size,        # tip → block
-		origin + perp * size_d,          # right
-		origin - axis * fwd_size * 0.7,  # tail
-		origin - perp * size_d,          # left
+		origin + axis * size_d,
+		origin + perp * size_d,
+		origin - axis * size_d,
+		origin - perp * size_d,
 	])
 	canvas.draw_colored_polygon(diamond, Color(hue.r, hue.g, hue.b, alpha))
 	var outline_hue := Color(
@@ -3198,11 +3363,6 @@ func _draw_active_work_diamonds() -> void:
 	var build_data = Registry.get_block(main.placed_buildings.get(active_anchor, &""))
 	if build_data == null:
 		return
-	var block_size: Vector2i = build_data.grid_size
-	var block_world: Vector2 = main.grid_to_world(active_anchor)
-	var top_pos: Vector2 = block_world + _get_top_offset(block_world)
-	var block_w: float = gs * block_size.x
-	var block_h: float = gs * block_size.y
 	# Are we building or deconstructing? Build state takes priority.
 	var is_build: bool = "building_build_progress" in main and main.building_build_progress.has(active_anchor)
 	var is_decon: bool = (not is_build) and "building_deconstruct_progress" in main \
@@ -3210,40 +3370,27 @@ func _draw_active_work_diamonds() -> void:
 	if not (is_build or is_decon):
 		return
 	var hue: Color
-	var line_x: float
 	if is_build:
 		var bp: float = main.get_build_progress_pct(active_anchor)
 		if bp <= 0.0 or bp >= 1.0:
 			return
-		line_x = top_pos.x + block_w * bp
 		hue = Color(1.0, 0.9, 0.2)
 	else:
-		var entry: Dictionary = main.building_deconstruct_progress[active_anchor]
-		var bt: float = float(entry.get("build_time", 1.0))
-		var dp: float = clampf(float(entry.get("progress", 0.0)) / maxf(bt, 0.0001), 0.0, 1.0)
-		var max_pct: float = float(entry.get("max_build_pct", 1.0))
-		line_x = top_pos.x + block_w * (max_pct * (1.0 - dp))
 		hue = Color(0.95, 0.25, 0.25)
-	var line_mid := Vector2(line_x, top_pos.y + block_h * 0.5)
 	for b in _builders_with_facing_for(active_anchor):
 		var unit_pos: Vector2 = b["pos"]
 		var facing: float = float(b["facing"])
 		var fwd: Vector2 = Vector2.from_angle(facing + PI / 2.0)
-		# Sit the diamond at the front edge of the unit sprite. The
-		# diamond renders on the crane_overlay at z 4096 so it stays
-		# visible over the drone art (z 4095) even when it sits
-		# directly on top of the chassis nose.
-		var origin: Vector2 = unit_pos + fwd * (gs * 0.50)
-		var axis: Vector2 = (line_mid - origin)
-		if axis.length_squared() < 0.0001:
-			continue
-		axis = axis.normalized()
+		# Center the diamond on the builder's front edge so it sits
+		# halfway on the sprite and halfway past the nose.
+		var origin: Vector2 = b.get("front_pos", unit_pos + fwd * (gs * 0.50))
+		var axis: Vector2 = fwd.normalized()
 		_draw_build_beam_diamond_on(canvas, origin, axis, hue)
 
 
 ## Paints the build/decon overlays that the user expects to sit on TOP
-## of every in-world layer — the dim wash over the unbuilt / deconstructed
-## portion and the turret head preview for in-progress turrets. Invoked
+## of every in-world layer — the build blueprint over the unbuilt portion,
+## deconstruct darkening, and the turret head preview for in-progress turrets. Invoked
 ## from `crane_overlay._draw()` which parks itself in `_crane_draw_canvas`
 ## first, so every `c.draw_*()` call here lands at z 4096 (above units at
 ## 4095 and the projectile overlay at 4095).
@@ -3282,19 +3429,14 @@ func _draw_active_build_overlays_high_z() -> void:
 				# "not yet built".
 				_draw_block_ghost_preview(grid_pos, block_id, data, b_top_pos, b_width, b_height, b_rot, false)
 				if data.is_turret():
-					_draw_turret_preview_heads(data, b_top_pos, b_width, b_height, b_rot, Color(1, 1, 1, 0.45))
+					_draw_turret_preview_heads(data, b_top_pos, b_width, b_height, b_rot, _plan_ghost_tint(true))
 			else:
-				# Active build — dim wash on the unbuilt right portion,
-				# plus the bright head preview at 0.7 alpha.
+				# Active build — Mindustry-style yellow blueprint on the
+				# unbuilt right portion, plus the bright head preview.
 				var reveal_x: float = b_width * pct
 				var unbuilt_w: float = b_width - reveal_x
 				if unbuilt_w > 0.0:
-					c.draw_rect(
-						Rect2(b_top_pos.x + reveal_x, b_top_pos.y, unbuilt_w, b_height),
-						Color(0, 0, 0, 0.45), true,
-					)
-				if data.is_turret():
-					_draw_turret_preview_heads(data, b_top_pos, b_width, b_height, b_rot, Color(1, 1, 1, 0.7))
+					_draw_construct_blueprint_details(block_id, data, b_top_pos, b_width, b_height, reveal_x, b_rot)
 	# --- Deconstruct overlays ---
 	if "building_deconstruct_progress" in main and not main.building_deconstruct_progress.is_empty():
 		for grid_pos in main.building_deconstruct_progress:
@@ -3315,19 +3457,14 @@ func _draw_active_build_overlays_high_z() -> void:
 			var d_pct: float = clampf(float(d_entry.get("progress", 0.0)) / maxf(d_bt, 0.0001), 0.0, 1.0)
 			var max_pct: float = float(d_entry.get("max_build_pct", 1.0))
 			var line_pct: float = max_pct * (1.0 - d_pct)
-			var line_x: float = d_top_pos.x + d_width * line_pct
+			var d_rot: int = int(d_entry.get("rotation", main.building_rotation.get(grid_pos, 0)))
+			var d_angle: float = _construct_reveal_angle(d_block_id, d_rot)
 			if line_pct < max_pct:
-				var dark_left: float = line_x
-				var dark_right: float = d_top_pos.x + d_width * max_pct
-				c.draw_rect(
-					Rect2(dark_left, d_top_pos.y, dark_right - dark_left, d_height),
-					Color(0, 0, 0, 0.45), true,
-				)
-			if max_pct < 1.0:
-				var never_left: float = d_top_pos.x + d_width * max_pct
-				c.draw_rect(
-					Rect2(never_left, d_top_pos.y, d_width * (1.0 - max_pct), d_height),
-					Color(0, 0, 0, 0.45), true,
+				_draw_construct_hatching_range(
+					d_top_pos, d_width, d_height,
+					d_width * line_pct, d_width,
+					Color(0.95, 0.25, 0.25), d_angle,
+					_construct_blueprint_mask_textures(d_data),
 				)
 
 
@@ -3442,19 +3579,21 @@ func _can_place_ignoring_range(grid_pos: Vector2i, block_id: StringName, rotatio
 				var floor_data = terrain.get_floor_at(check_pos)
 				if floor_data == null or not floor_data.tags.has("core_zone"):
 					return false
-	# Extractor must face ore / wall
-	if data.category == BlockData.BlockCategory.EXTRACTORS:
+	# Extractor must face ore / wall (item drills only — fluid extractors carry a
+	# pump tag and are validated by their vent tile in _can_place_terrain).
+	if data.category == BlockData.BlockCategory.EXTRACTORS and not data.tags.has("pump"):
 		if data.tags.has("wall_miner"):
 			if not _is_facing_wall(grid_pos, rotation, block_id):
 				return false
 		else:
 			if not _is_facing_ore(grid_pos, rotation, block_id):
 				return false
-	# Pump must be on liquid — except for condensers, which extract from
-	# steam and need a vent or geyser tile centered under their footprint.
+	# Pump must be on liquid — except for condensers, which extract from steam
+	# (vent/geyser). Data-driven vent extractors (vent_tile set, e.g. Water
+	# Extractor on sand/blackstone) are already validated in _can_place_terrain.
 	elif data.tags.has("pump"):
 		if data.tags.has("condenser"):
-			if terrain:
+			if terrain and data.vent_tile == &"":
 				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
 				var tid = terrain.floor_tiles.get(center, &"")
 				if tid != &"vent" and tid != &"geyser":
@@ -3513,18 +3652,21 @@ func _can_place_at(grid_pos: Vector2i, block_id: StringName) -> bool:
 					return false
 
 	# Extractor must face ore — or, for wall_miner extractors, a blackstone wall.
-	if data.category == BlockData.BlockCategory.EXTRACTORS:
+	# Item drills only; fluid extractors (pump tag) are validated by their vent
+	# tile in _can_place_terrain.
+	if data.category == BlockData.BlockCategory.EXTRACTORS and not data.tags.has("pump"):
 		if data.tags.has("wall_miner"):
 			if not _is_facing_wall(grid_pos, main.placement_rotation, block_id):
 				return false
 		else:
 			if not _is_facing_ore(grid_pos, main.placement_rotation):
 				return false
-	# Pump must be on liquid — except for condensers, which extract from
-	# steam and need a vent or geyser tile centered under their footprint.
+	# Pump must be on liquid — except for condensers, which extract from steam
+	# (vent/geyser). Data-driven vent extractors (vent_tile set, e.g. Water
+	# Extractor on sand/blackstone) are already validated in _can_place_terrain.
 	elif data.tags.has("pump"):
 		if data.tags.has("condenser"):
-			if terrain:
+			if terrain and data.vent_tile == &"":
 				var center = grid_pos + Vector2i(data.grid_size.x / 2, data.grid_size.y / 2)
 				var tid = terrain.floor_tiles.get(center, &"")
 				if tid != &"vent" and tid != &"geyser":
@@ -3882,6 +4024,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
+				if _handle_lane_shifter_programming_click(event):
+					get_viewport().set_input_as_handled()
+					return
 				if _handle_crane_link_click(event):
 					get_viewport().set_input_as_handled()
 					return
@@ -3995,6 +4140,10 @@ func _unhandled_input(event: InputEvent) -> void:
 								if _world_ui: _world_ui.open("payload_source", click_anchor)
 								get_viewport().set_input_as_handled()
 								return
+							elif click_data.tags.has("lane_shifter"):
+								if _world_ui: _world_ui.open("lane_shifter", click_anchor)
+								get_viewport().set_input_as_handled()
+								return
 							elif click_data.tags.has("sorter") or click_data.tags.has("inverted_sorter") or click_data.tags.has("unloader"):
 								if _world_ui: _world_ui.open("sorter", click_anchor)
 								get_viewport().set_input_as_handled()
@@ -4008,7 +4157,7 @@ func _unhandled_input(event: InputEvent) -> void:
 								get_viewport().set_input_as_handled()
 								return
 							elif click_data.tags.has("recipe_select") and click_data.factory_recipes != null and click_data.factory_recipes.size() > 0:
-								# Rod Shapper-style factory — clicking opens a recipe
+								# Rod Shaper-style factory — clicking opens a recipe
 								# picker. Selection persists per-anchor in
 								# logistics.factory_recipe_state.
 								if _world_ui: _world_ui.open("recipe_select", click_anchor)
@@ -4175,6 +4324,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Right-click while in crane link mode deletes the diamond under
 			# the cursor (and is consumed so it doesn't fall through to
 			# demolish).
+			if event.pressed and _lane_shifter_link_anchor != Vector2i(-1, -1):
+				if _handle_lane_shifter_programming_right_click():
+					get_viewport().set_input_as_handled()
+					return
 			if event.pressed and _crane_link_anchor != Vector2i(-1, -1):
 				if _handle_crane_link_right_click():
 					get_viewport().set_input_as_handled()
@@ -4484,6 +4637,8 @@ func _handle_crane_link_click(event: InputEventMouseButton) -> bool:
 
 	# 1) Filter menu open: hit-test it, otherwise close on outside click.
 	if _crane_filter_menu_open:
+		if _crane_filter_menu_owner != "crane":
+			return false
 		var hit := _crane_filter_menu_hit_test(mouse_world)
 		if hit >= 0:
 			_apply_crane_filter_selection(hit)
@@ -4585,11 +4740,160 @@ func _handle_crane_link_click(event: InputEventMouseButton) -> bool:
 				if has_build or has_decon or in_queue:
 					return false
 				_crane_link_anchor = anchor2
+				_lane_shifter_link_anchor = Vector2i(-1, -1)
 				_crane_link_next_kind = "input"
 				if not crane_links.has(anchor2):
 					crane_links[anchor2] = {"inputs": [], "outputs": []}
 				queue_redraw()
 				return true
+
+	return false
+
+
+func _logistics_ref() -> Node:
+	return get_node_or_null("/root/Main/LogisticsSystem")
+
+
+func _lane_shifter_links(anchor: Vector2i) -> Dictionary:
+	var logistics = _logistics_ref()
+	if logistics == null or not logistics.has_method("get_lane_shifter_links"):
+		return {"inputs": [], "outputs": []}
+	return logistics.get_lane_shifter_links(anchor)
+
+
+func _lane_shifter_set_links(anchor: Vector2i, inputs: Array, outputs: Array) -> void:
+	var logistics = _logistics_ref()
+	if logistics and logistics.has_method("set_lane_shifter_links"):
+		logistics.set_lane_shifter_links(anchor, inputs, outputs)
+
+
+func _is_lane_shifter_programmable_transport(cell: Vector2i) -> bool:
+	var logistics = _logistics_ref()
+	if logistics and logistics.has_method("_is_lane_compatible_transport"):
+		return logistics._is_lane_compatible_transport(cell)
+	if not main.placed_buildings.has(cell):
+		return false
+	var id: StringName = main.placed_buildings[cell]
+	return id == &"conveyor_belt" or id == &"duct"
+
+
+func _lane_shifter_program_cells(anchor: Vector2i) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	if not main.placed_buildings.has(anchor):
+		return cells
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	if data == null or not data.tags.has("lane_shifter"):
+		return cells
+	var rot: int = main.building_rotation.get(anchor, 0) % 4
+	var fwd: Vector2i = DIR_VECTORS[rot]
+	var front_cells := _get_front_edge(anchor, data.grid_size, rot)
+	for front in front_cells:
+		for depth in range(4):
+			var cell: Vector2i = front + fwd * depth
+			if not cells.has(cell):
+				cells.append(cell)
+	return cells
+
+
+func _lane_shifter_link_hit_at(world_pos: Vector2) -> Dictionary:
+	if _lane_shifter_link_anchor == Vector2i(-1, -1):
+		return {}
+	var links: Dictionary = _lane_shifter_links(_lane_shifter_link_anchor)
+	var click_pos: Vector2i = main.world_to_grid(world_pos)
+	var inputs: Array = links.get("inputs", [])
+	for i in range(inputs.size()):
+		if not (inputs[i] is Dictionary):
+			continue
+		if Vector2i(inputs[i].get("pos", Vector2i.ZERO)) == click_pos:
+			return {"kind": "input", "index": i}
+	var outputs: Array = links.get("outputs", [])
+	for i in range(outputs.size()):
+		if not (outputs[i] is Dictionary):
+			continue
+		if Vector2i(outputs[i].get("pos", Vector2i.ZERO)) == click_pos:
+			return {"kind": "output", "index": i}
+	return {}
+
+
+func _handle_lane_shifter_programming_click(event: InputEventMouseButton) -> bool:
+	var mouse_world := get_global_mouse_position()
+
+	if _crane_filter_menu_open and _crane_filter_menu_owner == "lane_shifter":
+		var menu_hit := _crane_filter_menu_hit_test(mouse_world)
+		if menu_hit >= 0:
+			_apply_crane_filter_selection(menu_hit)
+		else:
+			_close_crane_filter_menu()
+		return true
+
+	if event.ctrl_pressed or main.selected_building != &"":
+		return false
+
+	var click_pos: Vector2i = main.world_to_grid(mouse_world)
+	var click_anchor: Vector2i = main.building_origins.get(click_pos, click_pos)
+	var click_data: BlockData = null
+	if main.placed_buildings.has(click_anchor):
+		click_data = Registry.get_block(main.placed_buildings[click_anchor])
+
+	if _lane_shifter_link_anchor != Vector2i(-1, -1):
+		if not main.placed_buildings.has(_lane_shifter_link_anchor):
+			_lane_shifter_link_anchor = Vector2i(-1, -1)
+			return false
+		var selected_data: BlockData = Registry.get_block(main.placed_buildings.get(_lane_shifter_link_anchor, &""))
+		if selected_data == null or not selected_data.tags.has("lane_shifter"):
+			_lane_shifter_link_anchor = Vector2i(-1, -1)
+			return false
+
+		if click_anchor == _lane_shifter_link_anchor and click_data and click_data.tags.has("lane_shifter"):
+			_lane_shifter_link_anchor = Vector2i(-1, -1)
+			_close_crane_filter_menu()
+			queue_redraw()
+			return true
+
+		var hit_existing: Dictionary = _lane_shifter_link_hit_at(mouse_world)
+		if event.shift_pressed:
+			if hit_existing.get("kind", "") == "input":
+				_open_lane_shifter_filter_menu(int(hit_existing.get("index", 0)))
+			return true
+
+		if not hit_existing.is_empty():
+			var links: Dictionary = _lane_shifter_links(_lane_shifter_link_anchor)
+			var k: String = hit_existing.get("kind", "input")
+			var idx: int = int(hit_existing.get("index", 0))
+			var from_arr: Array = links.get(k + "s", [])
+			if idx >= 0 and idx < from_arr.size():
+				var spec: Dictionary = from_arr[idx]
+				from_arr.remove_at(idx)
+				var other_key: String = "outputs" if k == "input" else "inputs"
+				if not spec.has("filter"):
+					spec["filter"] = []
+				(links[other_key] as Array).append(spec)
+				_lane_shifter_set_links(_lane_shifter_link_anchor, links.get("inputs", []), links.get("outputs", []))
+				_close_crane_filter_menu()
+				queue_redraw()
+			return true
+
+		if _lane_shifter_program_cells(_lane_shifter_link_anchor).has(click_pos) \
+				and _is_lane_shifter_programmable_transport(click_pos):
+			var links2: Dictionary = _lane_shifter_links(_lane_shifter_link_anchor)
+			var inputs: Array = links2.get("inputs", [])
+			var outputs: Array = links2.get("outputs", [])
+			inputs.append({"pos": click_pos, "filter": []})
+			_lane_shifter_set_links(_lane_shifter_link_anchor, inputs, outputs)
+			queue_redraw()
+			return true
+
+		return true
+
+	if main.placed_buildings.has(click_anchor) and click_data and click_data.tags.has("lane_shifter"):
+		var faction: int = main.get_building_faction(click_anchor) if main.has_method("get_building_faction") else FACTION_LUMINA
+		if faction != FACTION_LUMINA:
+			return false
+		_lane_shifter_link_anchor = click_anchor
+		_crane_link_anchor = Vector2i(-1, -1)
+		_lane_shifter_links(click_anchor)
+		queue_redraw()
+		return true
 
 	return false
 
@@ -4615,9 +4919,30 @@ func _handle_crane_link_right_click() -> bool:
 	return true
 
 
+func _handle_lane_shifter_programming_right_click() -> bool:
+	if _lane_shifter_link_anchor == Vector2i(-1, -1):
+		return false
+	var hit: Dictionary = _lane_shifter_link_hit_at(get_global_mouse_position())
+	if hit.is_empty():
+		return false
+	var links: Dictionary = _lane_shifter_links(_lane_shifter_link_anchor)
+	var k: String = hit.get("kind", "input")
+	var idx: int = int(hit.get("index", 0))
+	var arr: Array = links.get(k + "s", [])
+	if idx >= 0 and idx < arr.size():
+		arr.remove_at(idx)
+	_lane_shifter_set_links(_lane_shifter_link_anchor, links.get("inputs", []), links.get("outputs", []))
+	if _crane_filter_menu_open and _crane_filter_menu_owner == "lane_shifter" \
+			and _crane_filter_menu_kind == k and _crane_filter_menu_index == idx:
+		_close_crane_filter_menu()
+	queue_redraw()
+	return true
+
+
 ## Opens the in-world filter menu for an existing crane link entry.
 func _open_crane_filter_menu(kind: String, index: int) -> void:
 	_crane_filter_menu_open = true
+	_crane_filter_menu_owner = "crane"
 	_crane_filter_menu_anchor = _crane_link_anchor
 	_crane_filter_menu_kind = kind
 	_crane_filter_menu_index = index
@@ -4658,8 +4983,35 @@ func _open_crane_filter_menu(kind: String, index: int) -> void:
 	queue_redraw()
 
 
+func _open_lane_shifter_filter_menu(index: int) -> void:
+	var links: Dictionary = _lane_shifter_links(_lane_shifter_link_anchor)
+	var inputs: Array = links.get("inputs", [])
+	if index < 0 or index >= inputs.size():
+		_close_crane_filter_menu()
+		return
+	_crane_filter_menu_open = true
+	_crane_filter_menu_owner = "lane_shifter"
+	_crane_filter_menu_anchor = _lane_shifter_link_anchor
+	_crane_filter_menu_kind = "input"
+	_crane_filter_menu_index = index
+	_crane_filter_menu_hovered = -1
+	_crane_filter_menu_items.clear()
+	var spec: Dictionary = inputs[index]
+	_crane_filter_menu_world_pos = main.grid_to_world(Vector2i(spec.get("pos", Vector2i.ZERO))) \
+		+ Vector2(main.GRID_SIZE * 0.5, main.GRID_SIZE * 0.5)
+
+	for item in Registry.items_list:
+		if item == null:
+			continue
+		if TechTree.nodes.has(item.id) and not TechTree.is_researched(item.id):
+			continue
+		_crane_filter_menu_items.append({"id": item.id, "icon": item.icon, "name": item.display_name})
+	queue_redraw()
+
+
 func _close_crane_filter_menu() -> void:
 	_crane_filter_menu_open = false
+	_crane_filter_menu_owner = "crane"
 	_crane_filter_menu_anchor = Vector2i(-1, -1)
 	_crane_filter_menu_index = -1
 	_crane_filter_menu_items.clear()
@@ -4691,6 +5043,19 @@ func _apply_crane_filter_selection(idx: int) -> void:
 	if idx < 0 or idx >= _crane_filter_menu_items.size():
 		return
 	if _crane_filter_menu_anchor == Vector2i(-1, -1):
+		return
+	if _crane_filter_menu_owner == "lane_shifter":
+		var links: Dictionary = _lane_shifter_links(_crane_filter_menu_anchor)
+		var inputs: Array = links.get("inputs", [])
+		if _crane_filter_menu_index < 0 or _crane_filter_menu_index >= inputs.size():
+			return
+		var spec_ls: Dictionary = inputs[_crane_filter_menu_index]
+		var selected_id: StringName = _crane_filter_menu_items[idx].get("id", &"")
+		spec_ls["filter"] = [selected_id]
+		inputs[_crane_filter_menu_index] = spec_ls
+		_lane_shifter_set_links(_crane_filter_menu_anchor, inputs, links.get("outputs", []))
+		_close_crane_filter_menu()
+		queue_redraw()
 		return
 	var entry: Dictionary = crane_links.get(_crane_filter_menu_anchor, {})
 	var arr: Array = entry.get(_crane_filter_menu_kind + "s", [])
@@ -4748,6 +5113,7 @@ func _draw() -> void:
 	# set so every draw call lands on its higher-z surface.
 	_draw_crane_link_overlays()
 	_draw_hovered_turret_range()
+	_draw_hovered_lane_shifter_range()
 	_draw_hovered_extractor_output()
 	_draw_archive_scan_overlay()
 	_draw_paused_queue()
@@ -4841,6 +5207,376 @@ func _draw_block_texture(texture: Texture2D, top_pos: Vector2, w: float, h: floa
 	c.draw_set_transform(center, angle)
 	c.draw_texture_rect(texture, Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h)), false, tint)
 	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+
+## Computes the texture-space src rect and local-space dst rect for the part of a
+## sprite covered by a WORLD-space left→right reveal at fraction `pct` (0..1),
+## given the sprite's draw `angle`. Block rotations are 90° multiples, so world
+## +x maps to one cardinal edge of the texture — this keeps the construction /
+## deconstruction wipe sweeping left→right on screen no matter how the block is
+## rotated, while the sprite itself stays rotated to its placed facing.
+## `leading` = the world-left (already-built) side; false = the world-right
+## (remaining / un-built) side. Returns [src_rect, dst_rect].
+func _world_reveal_rects(angle: float, pct: float, leading: bool, w: float, h: float, tex: Vector2) -> Array:
+	pct = clampf(pct, 0.0, 1.0)
+	# World +x expressed in the sprite's local (un-rotated) coordinates.
+	var ax := Vector2(1, 0).rotated(-angle)
+	var cx := 0.0
+	var cy := 0.0
+	if absf(ax.x) >= absf(ax.y):
+		cx = signf(ax.x)
+	else:
+		cy = signf(ax.y)
+	# World segment [seg0, seg1] along +x that this portion covers.
+	var seg0: float = 0.0 if leading else pct
+	var seg1: float = pct if leading else 1.0
+	# Map that world segment onto texture U/V via the cardinal direction. Local
+	# x/y line up with texture U/V, so dst reuses the same fractions.
+	var u0 := 0.0
+	var u1 := 1.0
+	var v0 := 0.0
+	var v1 := 1.0
+	if cx > 0.0:        # world +x == local +x  → texture +U
+		u0 = seg0; u1 = seg1
+	elif cx < 0.0:      # world +x == local -x  → texture -U (flip)
+		u0 = 1.0 - seg1; u1 = 1.0 - seg0
+	elif cy > 0.0:      # world +x == local +y  → texture +V
+		v0 = seg0; v1 = seg1
+	else:               # world +x == local -y  → texture -V (flip)
+		v0 = 1.0 - seg1; v1 = 1.0 - seg0
+	var src := Rect2(u0 * tex.x, v0 * tex.y, (u1 - u0) * tex.x, (v1 - v0) * tex.y)
+	var dst := Rect2(-w * 0.5 + u0 * w, -h * 0.5 + v0 * h, (u1 - u0) * w, (v1 - v0) * h)
+	return [src, dst]
+
+
+func _construct_edge_mask_for(texture: Texture2D) -> Texture2D:
+	if texture == null:
+		return null
+	if _construct_edge_mask_cache.has(texture):
+		return _construct_edge_mask_cache[texture]
+	var result: Texture2D = null
+	var src: Image = texture.get_image()
+	if src != null:
+		var ww: int = src.get_width()
+		var hh: int = src.get_height()
+		var mask: Image = Image.create(ww, hh, false, Image.FORMAT_RGBA8)
+		var ink := Color(1, 1, 1, 1)
+		var clear := Color(0, 0, 0, 0)
+		for y in range(hh):
+			for x in range(ww):
+				var px: Color = src.get_pixel(x, y)
+				if px.a <= 0.08:
+					mask.set_pixel(x, y, clear)
+					continue
+				var edge := false
+				for off in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+					var nx: int = x + off.x
+					var ny: int = y + off.y
+					if nx < 0 or ny < 0 or nx >= ww or ny >= hh:
+						edge = true
+						break
+					var np: Color = src.get_pixel(nx, ny)
+					var luma: float = px.r * 0.299 + px.g * 0.587 + px.b * 0.114
+					var nluma: float = np.r * 0.299 + np.g * 0.587 + np.b * 0.114
+					if np.a <= 0.08 or absf(luma - nluma) > 0.13 or absf(px.a - np.a) > 0.2:
+						edge = true
+						break
+				mask.set_pixel(x, y, ink if edge else clear)
+		result = ImageTexture.create_from_image(mask)
+	_construct_edge_mask_cache[texture] = result
+	return result
+
+
+func _draw_construct_detail_slice(texture: Texture2D, top_pos: Vector2, w: float, h: float,
+		reveal_x: float, tint: Color, _rot: int = 0, _directional: bool = true) -> void:
+	if texture == null or reveal_x >= w:
+		return
+	var mask: Texture2D = _construct_edge_mask_for(texture)
+	if mask == null:
+		return
+	var c: CanvasItem = _ccanvas()
+	var tex_size: Vector2 = mask.get_size()
+	if tex_size.x <= 0.0 or tex_size.y <= 0.0:
+		return
+	# Keep the sprite rotated to its placed facing...
+	var angle: float = 0.0
+	if _directional:
+		angle = _rot * PI / 2.0 + PI / 2.0
+	# ...but draw the un-built remainder as the world-RIGHT side of a left→right
+	# reveal, so the wipe boundary always sweeps left→right on screen.
+	var rects := _world_reveal_rects(angle, reveal_x / maxf(w, 0.001), false, w, h, tex_size)
+	c.draw_set_transform(top_pos + Vector2(w * 0.5, h * 0.5), angle)
+	c.draw_texture_rect_region(mask, rects[1], rects[0], tint)
+	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+
+func _draw_constructed_texture_slice(texture: Texture2D, top_pos: Vector2, w: float, h: float,
+		reveal_x: float, tint: Color = Color.WHITE, _rot: int = 0, _directional: bool = true, _angle_override: Variant = null) -> void:
+	if texture == null or reveal_x <= 0.0:
+		return
+	var c: CanvasItem = _ccanvas()
+	var tex_size: Vector2 = texture.get_size()
+	if tex_size.x <= 0.0 or tex_size.y <= 0.0:
+		return
+	# Keep the sprite rotated to its placed facing (override wins when set)...
+	var angle: float = 0.0
+	if _angle_override != null:
+		angle = float(_angle_override)
+	elif _directional:
+		angle = _rot * PI / 2.0 + PI / 2.0
+	# ...but draw the built portion as the world-LEFT side of a left→right
+	# reveal, so the wipe boundary always sweeps left→right on screen.
+	var rects := _world_reveal_rects(angle, reveal_x / maxf(w, 0.001), true, w, h, tex_size)
+	c.draw_set_transform(top_pos + Vector2(w * 0.5, h * 0.5), angle)
+	c.draw_texture_rect_region(texture, rects[1], rects[0], tint)
+	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+
+func _construct_reveal_angle(_block_id: StringName, _rot: int) -> float:
+	return 0.0
+
+
+func _construct_reveal_line(top_pos: Vector2, w: float, h: float, reveal_x: float, angle: float) -> PackedVector2Array:
+	var center := top_pos + Vector2(w * 0.5, h * 0.5)
+	var local_x: float = -w * 0.5 + clampf(reveal_x, 0.0, w)
+	return PackedVector2Array([
+		center + Vector2(local_x, -h * 0.5).rotated(angle),
+		center + Vector2(local_x, h * 0.5).rotated(angle),
+	])
+
+
+func _draw_construct_reveal_rect(top_pos: Vector2, w: float, h: float,
+		from_x: float, to_x: float, angle: float, color: Color) -> void:
+	from_x = clampf(from_x, 0.0, w)
+	to_x = clampf(to_x, 0.0, w)
+	if to_x <= from_x:
+		return
+	var center := top_pos + Vector2(w * 0.5, h * 0.5)
+	var left: float = -w * 0.5 + from_x
+	var right: float = -w * 0.5 + to_x
+	var top: float = -h * 0.5
+	var bottom: float = h * 0.5
+	var points := PackedVector2Array([
+		center + Vector2(left, top).rotated(angle),
+		center + Vector2(right, top).rotated(angle),
+		center + Vector2(right, bottom).rotated(angle),
+		center + Vector2(left, bottom).rotated(angle),
+	])
+	_draw_colored_polygon_if_valid(points, color)
+
+
+func _draw_constructed_block_portion(grid_pos: Vector2i, block_id: StringName, data: BlockData,
+		top_pos: Vector2, w: float, h: float, build_pct: float, rot: int = 0) -> void:
+	var reveal_x: float = w * clampf(build_pct, 0.0, 1.0)
+	if reveal_x <= 0.0:
+		return
+	if (block_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
+			or (block_id == &"duct" and not _duct_textures.is_empty()) \
+			or (block_id == &"fluid_pipe" and not _pipe_textures.is_empty()):
+		var info: Dictionary = _get_belt_draw_info(grid_pos)
+		var tex: Texture2D = info.get("texture")
+		_draw_constructed_texture_slice(tex, top_pos, w, h, reveal_x, Color.WHITE, 0, false, info.get("angle", 0.0))
+		return
+	var is_dir: bool = _is_directional(block_id)
+	if data == null:
+		draw_rect(Rect2(top_pos, Vector2(reveal_x, h)), _get_block_color(block_id), true)
+		return
+	if data.base_sprite:
+		_draw_constructed_texture_slice(data.base_sprite, top_pos, w, h, reveal_x, Color.WHITE, rot, is_dir)
+	if data.top_sprite:
+		_draw_constructed_texture_slice(data.top_sprite, top_pos, w, h, reveal_x, Color.WHITE, rot, is_dir)
+	elif not data.base_sprite:
+		_draw_constructed_texture_slice(data.icon, top_pos, w, h, reveal_x, Color.WHITE, rot, is_dir)
+	if data.lumina_overlay:
+		var ow: float = w * 0.7
+		var oh: float = h * 0.7
+		var op: Vector2 = top_pos + Vector2((w - ow) * 0.5, (h - oh) * 0.5)
+		var local_reveal: float = clampf(reveal_x - (op.x - top_pos.x), 0.0, ow)
+		_draw_constructed_texture_slice(data.lumina_overlay, op, ow, oh, local_reveal, Color.WHITE, rot, is_dir)
+
+
+func _clip_segment_to_rect(p0: Vector2, p1: Vector2, rect: Rect2) -> PackedVector2Array:
+	var d: Vector2 = p1 - p0
+	var t0: float = 0.0
+	var t1: float = 1.0
+	var checks := [
+		Vector2(-d.x, p0.x - rect.position.x),
+		Vector2(d.x, rect.position.x + rect.size.x - p0.x),
+		Vector2(-d.y, p0.y - rect.position.y),
+		Vector2(d.y, rect.position.y + rect.size.y - p0.y),
+	]
+	for check in checks:
+		var p: float = check.x
+		var q: float = check.y
+		if absf(p) <= 0.0001:
+			if q < 0.0:
+				return PackedVector2Array()
+			continue
+		var r: float = q / p
+		if p < 0.0:
+			if r > t1:
+				return PackedVector2Array()
+			t0 = maxf(t0, r)
+		else:
+			if r < t0:
+				return PackedVector2Array()
+			t1 = minf(t1, r)
+	return PackedVector2Array([p0 + d * t0, p0 + d * t1])
+
+
+func _construct_alpha_image_for(texture: Texture2D) -> Image:
+	if texture == null:
+		return null
+	if _construct_alpha_image_cache.has(texture):
+		return _construct_alpha_image_cache[texture]
+	var img: Image = texture.get_image()
+	_construct_alpha_image_cache[texture] = img
+	return img
+
+
+func _construct_blueprint_mask_textures(data: BlockData) -> Array:
+	var textures: Array = []
+	if data == null:
+		return textures
+	if data.base_sprite:
+		textures.append(data.base_sprite)
+	if data.top_sprite:
+		textures.append(data.top_sprite)
+	if textures.is_empty() and data.icon:
+		textures.append(data.icon)
+	if data.lumina_overlay:
+		textures.append(data.lumina_overlay)
+	return textures
+
+
+func _construct_mask_has_alpha(local_pos: Vector2, w: float, h: float, mask_textures: Array) -> bool:
+	if mask_textures.is_empty():
+		return true
+	if w <= 0.0 or h <= 0.0:
+		return true
+	var u: float = (local_pos.x + w * 0.5) / w
+	var v: float = (local_pos.y + h * 0.5) / h
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return false
+	for texture in mask_textures:
+		if not (texture is Texture2D):
+			continue
+		var img: Image = _construct_alpha_image_for(texture)
+		if img == null or img.get_width() <= 0 or img.get_height() <= 0:
+			continue
+		var px: int = clampi(int(floor(u * float(img.get_width()))), 0, img.get_width() - 1)
+		var py: int = clampi(int(floor(v * float(img.get_height()))), 0, img.get_height() - 1)
+		if img.get_pixel(px, py).a > 0.08:
+			return true
+	return false
+
+
+func _draw_construct_noise_line(c: CanvasItem, p0: Vector2, p1: Vector2,
+		w: float, h: float, color: Color, width: float, mask_textures: Array) -> void:
+	if mask_textures.is_empty():
+		c.draw_line(p0, p1, color, width)
+		return
+	var length: float = p0.distance_to(p1)
+	if length <= 0.001:
+		return
+	var steps: int = maxi(1, ceili(length / 2.0))
+	var run_start: float = -1.0
+	for i in range(steps):
+		var t0: float = float(i) / float(steps)
+		var t1: float = float(i + 1) / float(steps)
+		var mid: Vector2 = p0.lerp(p1, (t0 + t1) * 0.5)
+		var visible: bool = _construct_mask_has_alpha(mid, w, h, mask_textures)
+		if visible:
+			if run_start < 0.0:
+				run_start = t0
+		elif run_start >= 0.0:
+			c.draw_line(p0.lerp(p1, run_start), p0.lerp(p1, t0), color, width)
+			run_start = -1.0
+	if run_start >= 0.0:
+		c.draw_line(p0.lerp(p1, run_start), p1, color, width)
+
+
+func _draw_construct_noise_outline(c: CanvasItem, rect: Rect2,
+		w: float, h: float, color: Color, width: float, mask_textures: Array) -> void:
+	var tl: Vector2 = rect.position
+	var tr: Vector2 = rect.position + Vector2(rect.size.x, 0.0)
+	var br: Vector2 = rect.position + rect.size
+	var bl: Vector2 = rect.position + Vector2(0.0, rect.size.y)
+	_draw_construct_noise_line(c, tl, tr, w, h, color, width, mask_textures)
+	_draw_construct_noise_line(c, tr, br, w, h, color, width, mask_textures)
+	_draw_construct_noise_line(c, br, bl, w, h, color, width, mask_textures)
+	_draw_construct_noise_line(c, bl, tl, w, h, color, width, mask_textures)
+
+
+func _draw_construct_hatching(top_pos: Vector2, w: float, h: float, reveal_x: float,
+		hue: Color, angle: float = 0.0, draw_after_reveal: bool = true,
+		mask_textures: Array = []) -> void:
+	if (draw_after_reveal and reveal_x >= w) or (not draw_after_reveal and reveal_x <= 0.0):
+		return
+	_draw_construct_hatching_range(
+		top_pos, w, h,
+		reveal_x if draw_after_reveal else 0.0,
+		w if draw_after_reveal else reveal_x,
+		hue, angle, mask_textures,
+	)
+
+
+func _draw_construct_hatching_range(top_pos: Vector2, w: float, h: float,
+		from_x: float, to_x: float, hue: Color, angle: float = 0.0,
+		mask_textures: Array = []) -> void:
+	from_x = clampf(from_x, 0.0, w)
+	to_x = clampf(to_x, 0.0, w)
+	if to_x <= from_x:
+		return
+	var c: CanvasItem = _ccanvas()
+	var full_rect := Rect2(Vector2(-w * 0.5, -h * 0.5), Vector2(w, h))
+	var rect := Rect2(Vector2(-w * 0.5 + from_x, -h * 0.5), Vector2(to_x - from_x, h))
+	c.draw_set_transform(top_pos + Vector2(w * 0.5, h * 0.5), angle)
+	_draw_construct_noise_outline(c, rect, w, h, Color(hue.r, hue.g, hue.b, 0.30), 1.0, mask_textures)
+	var spacing: float = maxf(7.0, main.GRID_SIZE * 0.13)
+	var span: float = full_rect.size.x + full_rect.size.y + spacing * 4.0
+	var line_start: float = floor((full_rect.position.x - full_rect.size.y - span) / spacing) * spacing - spacing * 2.0
+	var line_end: float = full_rect.position.x + full_rect.size.x + span
+	var x := line_start
+	while x <= line_end:
+		var p0 := Vector2(x, rect.position.y - span)
+		var p1 := p0 + Vector2(span * 2.0, span * 2.0)
+		var clipped: PackedVector2Array = _clip_segment_to_rect(p0, p1, rect)
+		if clipped.size() == 2 and clipped[0].distance_squared_to(clipped[1]) > 1.0:
+			var base_alpha: float = 0.52
+			_draw_construct_noise_line(
+				c, clipped[0], clipped[1], w, h,
+				Color(hue.r, hue.g, hue.b, base_alpha), 1.05, mask_textures,
+			)
+		x += spacing
+	c.draw_set_transform(Vector2.ZERO, 0.0)
+
+
+func _draw_construct_blueprint_details(block_id: StringName, data: BlockData, top_pos: Vector2,
+		w: float, h: float, reveal_x: float, rot: int) -> void:
+	if data == null or reveal_x >= w:
+		return
+	var tint := Color(1.0, 0.92, 0.2, 0.62)
+	var is_dir: bool = _is_directional(block_id)
+	_draw_construct_hatching(
+		top_pos, w, h, reveal_x, Color(1.0, 0.9, 0.2, 1.0),
+		_construct_reveal_angle(block_id, rot), true,
+		_construct_blueprint_mask_textures(data),
+	)
+	if data.base_sprite:
+		_draw_construct_detail_slice(data.base_sprite, top_pos, w, h, reveal_x, tint, rot, is_dir)
+	if data.top_sprite:
+		_draw_construct_detail_slice(data.top_sprite, top_pos, w, h, reveal_x, tint, rot, is_dir)
+	elif not data.base_sprite:
+		var tex: Texture2D = data.icon
+		if tex:
+			_draw_construct_detail_slice(tex, top_pos, w, h, reveal_x, tint, rot, is_dir)
+	if data.lumina_overlay:
+		var ow: float = w * 0.7
+		var oh: float = h * 0.7
+		var op: Vector2 = top_pos + Vector2((w - ow) * 0.5, (h - oh) * 0.5)
+		var local_reveal: float = clampf(reveal_x - (op.x - top_pos.x), 0.0, ow)
+		_draw_construct_detail_slice(data.lumina_overlay, op, ow, oh, local_reveal, tint, rot, is_dir)
 
 
 ## Mindustry DrawLiquidTile look: re-draws the block's `base_sprite` tinted by
@@ -6765,6 +7501,11 @@ func _draw_placed_buildings() -> void:
 			if ss and ss.is_tile_hidden(grid_pos):
 				continue
 			var block_id: StringName = main.placed_buildings[grid_pos]
+			if has_build_progress and main.building_build_progress.has(grid_pos) \
+					and main.get_build_progress_pct(grid_pos) < 1.0:
+				continue
+			if has_decon and main.building_deconstruct_progress.has(grid_pos):
+				continue
 			var block_size: Vector2i = _size_for.call(block_id)
 			var side_colors := _get_side_colors(block_id)
 			offset = _offset_for.call(block_id)
@@ -6866,6 +7607,17 @@ func _draw_placed_buildings() -> void:
 		var top_pos: Vector2 = world_pos + offset
 		var data: BlockData = _get_block.call(block_id)
 
+		if has_decon and main.building_deconstruct_progress.has(grid_pos):
+			var d_entry_top: Dictionary = main.building_deconstruct_progress[grid_pos]
+			var d_build_time_top: float = float(d_entry_top.get("build_time", 1.0))
+			var d_pct_top: float = clampf(float(d_entry_top.get("progress", 0.0)) / maxf(d_build_time_top, 0.0001), 0.0, 1.0)
+			var d_max_pct_top: float = float(d_entry_top.get("max_build_pct", 1.0))
+			var remaining_pct: float = clampf(d_max_pct_top * (1.0 - d_pct_top), 0.0, 1.0)
+			if remaining_pct > 0.0:
+				var d_rot_top: int = int(d_entry_top.get("rotation", main.building_rotation.get(grid_pos, 0)))
+				_draw_constructed_block_portion(grid_pos, block_id, data, top_pos, width, height, remaining_pct, d_rot_top)
+			continue
+
 		# A queued-but-not-yet-actively-building block renders as a faded
 		# ghost so the player can tell which one the drone is currently
 		# working on. The active anchor and any partially-built block keep
@@ -6880,6 +7632,10 @@ func _draw_placed_buildings() -> void:
 				# so the queued footprint renders above units (z 4095)
 				# and live blocks instead of being clipped under them.
 				# Skip the block-layer paint entirely.
+				continue
+			if pct_q < 1.0:
+				var rot_q: int = int(main.building_rotation.get(grid_pos, 0))
+				_draw_constructed_block_portion(grid_pos, block_id, data, top_pos, width, height, pct_q, rot_q)
 				continue
 
 		# Conveyor belts, ducts, and fluid pipes all use auto-tiled
@@ -6954,8 +7710,9 @@ func _draw_placed_buildings() -> void:
 		# fluid-pump texture, masking the turbine's own sprite.
 		elif block_id == &"vent_turbine":
 			_draw_vent_turbine(grid_pos, top_pos, width, height)
-		# Fluid pumps: draw with pump texture (before pipes; pumps also transport_fluid)
-		elif data and data.tags.has("pump") and _pump_texture:
+		# Fluid Pump: draw with its dedicated pump texture. Other pump-tagged
+		# ground extractors fall through to their own sprite/flat-color render.
+		elif block_id == &"fluid_pump" and _pump_texture:
 			var rot: int = main.building_rotation.get(grid_pos, 0)
 			var angle: float = rot * PI / 2.0 + PI / 2.0
 			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
@@ -7185,6 +7942,11 @@ func _draw_placed_buildings() -> void:
 		var data: BlockData = _get_block.call(block_id)
 		if data == null:
 			continue
+		if has_build_progress and main.building_build_progress.has(grid_pos) \
+				and main.get_build_progress_pct(grid_pos) < 1.0:
+			continue
+		if has_decon and main.building_deconstruct_progress.has(grid_pos):
+			continue
 		var is_dir: bool = _is_directional(block_id)
 		var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
 		if data.tags.has("drill_heads"):
@@ -7197,9 +7959,12 @@ func _draw_placed_buildings() -> void:
 			var lasers_active: bool = true
 			if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
 				lasers_active = false
-			if lasers_active:
-				if power_sys and power_sys.has_method("is_powered_or_battery"):
-					lasers_active = power_sys.is_powered_or_battery(grid_pos)
+			if lasers_active and power_sys and power_sys.has_method("is_powered_or_battery"):
+				lasers_active = power_sys.is_powered_or_battery(grid_pos)
+			# Live "is the bore actually mining?" verdict (ore in range, output
+			# not full) from LogisticsSystem's drill tick.
+			if lasers_active and _logistics != null and _logistics.has_method("is_drill_active"):
+				lasers_active = _logistics.is_drill_active(grid_pos)
 			if lasers_active:
 				_draw_drill_lasers(grid_pos, rot, data.grid_size, data.mine_range)
 		if data.tags.has("crusher_heads") or data.tags.has("grinder_heads"):
@@ -7252,9 +8017,13 @@ func _draw_placed_buildings() -> void:
 				# visually anchored to the block at the building layer.
 				var reveal_x: float = b_width * build_pct
 				if is_active_build:
-					var line_x: float = b_top_pos.x + reveal_x
-					var line_top := Vector2(line_x, b_top_pos.y)
-					var line_bot := Vector2(line_x, b_top_pos.y + b_height)
+					var b_rot: int = int(main.building_rotation.get(grid_pos, 0))
+					var line_pts := _construct_reveal_line(
+						b_top_pos, b_width, b_height, reveal_x,
+						_construct_reveal_angle(b_block_id, b_rot),
+					)
+					var line_top: Vector2 = line_pts[0]
+					var line_bot: Vector2 = line_pts[1]
 					# Build laser: every builder in range projects a
 					# translucent yellow triangle from its sprite front
 					# to the two endpoints of the reveal line, with a
@@ -7266,11 +8035,9 @@ func _draw_placed_buildings() -> void:
 			# Pending-not-active blocks are now rendered by the faded
 			# ghost preview path in PASS 2 — nothing to overlay here.
 
-	# --- PASS 2.27: Deferred same-group swap preview ---
-	# pending_swaps are junctions / bridges / etc. queued over an existing
-	# belt or pipe. The old block is still live (and being drawn at full
-	# opacity by pass 2), so we just overlay a translucent ghost of the
-	# incoming block so the player can see what's coming.
+	# --- PASS 2.27: Deferred same-group swap construction ---
+	# pending_swaps leave the old block live underneath, but the incoming
+	# block should read as being constructed rather than as a static ghost.
 	if "pending_swaps" in main and not main.pending_swaps.is_empty():
 		for grid_pos in main.pending_swaps:
 			if ss and ss.is_tile_hidden(grid_pos):
@@ -7286,39 +8053,21 @@ func _draw_placed_buildings() -> void:
 			var w_s: float = gs * new_data.grid_size.x
 			var h_s: float = gs * new_data.grid_size.y
 			var top_pos_s: Vector2 = world_pos_s + off_s
-			var tint_s := Color(1, 1, 1, 0.55)
-			if (new_id == &"conveyor_belt" and not _belt_textures.is_empty()) \
-					or (new_id == &"duct" and not _duct_textures.is_empty()) \
-					or (new_id == &"fluid_pipe" and not _pipe_textures.is_empty()):
-				# Use the with-preview variant so the texture set is picked
-				# from `new_id` (the swapped-in block) rather than whatever
-				# is currently placed at this cell.
-				var info_s: Dictionary = _get_belt_draw_info_with_preview(grid_pos, {}, {}, new_id)
-				var texture_s: Texture2D = info_s["texture"]
-				var angle_s: float = info_s["angle"]
-				if texture_s:
-					var centre_s: Vector2 = top_pos_s + Vector2(w_s / 2.0, h_s / 2.0)
-					draw_set_transform(centre_s, angle_s)
-					var dst_s := Rect2(Vector2(-w_s / 2.0, -h_s / 2.0), Vector2(w_s, h_s))
-					var tex_size_s: Vector2 = texture_s.get_size()
-					draw_texture_rect_region(texture_s, dst_s, Rect2(Vector2.ZERO, tex_size_s), tint_s)
-					draw_set_transform(Vector2.ZERO, 0.0)
-			else:
-				# Prefer world-facing top/base sprites. data.icon is UI-only.
-				var swap_tex: Texture2D = null
-				if new_data.top_sprite:
-					swap_tex = new_data.top_sprite
-				elif new_data.base_sprite:
-					swap_tex = new_data.base_sprite
-				if swap_tex:
-					var is_dir_s: bool = _is_directional(new_id)
-					var draw_rot: int = new_rot if is_dir_s else 0
-					_draw_block_texture(swap_tex, top_pos_s, w_s, h_s, draw_rot, tint_s, is_dir_s)
-				else:
-					var col_s: Color = _get_block_color(new_id)
-					col_s.a = 0.45
-					draw_rect(Rect2(top_pos_s, Vector2(w_s, h_s)), col_s, true)
-			draw_rect(Rect2(top_pos_s, Vector2(w_s, h_s)), Color(1, 1, 1, 0.35), false, 1.0)
+			var build_time_s: float = float(entry.get("build_time", new_data.build_time))
+			var pct_s: float = clampf(float(entry.get("progress", 0.0)) / maxf(build_time_s, 0.0001), 0.0, 1.0)
+			_draw_constructed_block_portion(grid_pos, new_id, new_data, top_pos_s, w_s, h_s, pct_s, new_rot)
+			if pct_s < 1.0:
+				var reveal_x_s: float = w_s * pct_s
+				_draw_construct_blueprint_details(new_id, new_data, top_pos_s, w_s, h_s, reveal_x_s, new_rot)
+			if has_active_work and active_work_anchor == grid_pos:
+				var line_pts_s := _construct_reveal_line(
+					top_pos_s, w_s, h_s, w_s * pct_s,
+					_construct_reveal_angle(new_id, new_rot),
+				)
+				var line_top_s: Vector2 = line_pts_s[0]
+				var line_bot_s: Vector2 = line_pts_s[1]
+				_draw_active_build_beams(grid_pos, line_top_s, line_bot_s)
+				draw_line(line_top_s, line_bot_s, Color(1.0, 0.9, 0.2, 0.9), 2.0)
 
 	# --- PASS 2.3: Deconstruct animation overlay (right-to-left, red line) ---
 	if has_decon:
@@ -7330,6 +8079,7 @@ func _draw_placed_buildings() -> void:
 				continue
 			var d_entry: Dictionary = main.building_deconstruct_progress[grid_pos]
 			var d_block_id: StringName = d_entry["block_id"]
+			var d_data: BlockData = Registry.get_block(d_block_id)
 			var d_block_size: Vector2i = _size_for.call(d_block_id)
 			var d_world_pos: Vector2 = main.grid_to_world(grid_pos)
 			var d_offset: Vector2 = _offset_for.call(d_block_id)
@@ -7341,7 +8091,9 @@ func _draw_placed_buildings() -> void:
 			var d_pct: float = clampf(d_entry["progress"] / d_entry["build_time"], 0.0, 1.0)
 			var max_pct: float = float(d_entry.get("max_build_pct", 1.0))
 			var line_pct: float = max_pct * (1.0 - d_pct)
-			var line_x: float = d_top_pos.x + d_width * line_pct
+			var d_rot: int = int(d_entry.get("rotation", main.building_rotation.get(grid_pos, 0)))
+			var d_angle: float = _construct_reveal_angle(d_block_id, d_rot)
+			var d_line_pts := _construct_reveal_line(d_top_pos, d_width, d_height, d_width * line_pct, d_angle)
 			# Dim washes over the deconstructed / never-built portion are
 			# drawn from `_draw_active_build_overlays_high_z()` so they
 			# sit above units instead of being painted over by them.
@@ -7349,8 +8101,8 @@ func _draw_placed_buildings() -> void:
 			# entries freeze the reveal at its current position so the
 			# player can see exactly how far decon has gotten.
 			if is_active_decon:
-				var d_line_top := Vector2(line_x, d_top_pos.y)
-				var d_line_bot := Vector2(line_x, d_top_pos.y + d_height)
+				var d_line_top: Vector2 = d_line_pts[0]
+				var d_line_bot: Vector2 = d_line_pts[1]
 				# Red work-laser variant: same triangle + scrolling
 				# stripe + pulsing diamond as the build beam, but the
 				# stripe rides block→unit instead of unit→block so the
@@ -7361,11 +8113,14 @@ func _draw_placed_buildings() -> void:
 				)
 				draw_line(d_line_top, d_line_bot, Color(0.9, 0.2, 0.2, 0.9), 2.0)
 			else:
-				# Tint the still-intact (already-built) area a faint red so
-				# paused decons are distinguishable from normal buildings.
-				var intact_w: float = line_x - d_top_pos.x
-				if intact_w > 0.0:
-					draw_rect(Rect2(d_top_pos.x, d_top_pos.y, intact_w, d_height), Color(0.9, 0.2, 0.2, 0.18), true)
+				# Paused decons keep the red blueprint noise on the portion
+				# already removed, but do not tint the intact side.
+				_draw_construct_hatching_range(
+					d_top_pos, d_width, d_height,
+					d_width * line_pct, d_width,
+					Color(0.95, 0.25, 0.25), d_angle,
+					_construct_blueprint_mask_textures(d_data),
+				)
 
 	# --- PASS 2.5: Faction overlay on enemy buildings ---
 	# Draws a single sprite (FactionOverlayFerox.png / FactionOverlayDerelict.png)
@@ -7381,6 +8136,8 @@ func _draw_placed_buildings() -> void:
 				continue
 			var grid_pos: Vector2i = all_positions[idx]
 			if ss and ss.is_tile_hidden(grid_pos):
+				continue
+			if has_decon and main.building_deconstruct_progress.has(grid_pos):
 				continue
 			var bfaction: int = main.get_building_faction(grid_pos)
 			if bfaction == FACTION_LUMINA:
@@ -7416,6 +8173,8 @@ func _draw_placed_buildings() -> void:
 			continue
 		var grid_pos: Vector2i = all_positions[idx]
 		if ss and ss.is_tile_hidden(grid_pos):
+			continue
+		if has_decon and main.building_deconstruct_progress.has(grid_pos):
 			continue
 		var health_pct: float = main.get_building_health_pct(grid_pos)
 		# Launch-anim reveal tint: paints over the freshly-drawn sprite
@@ -7594,6 +8353,13 @@ func _draw_direction_arrow(center: Vector2, rotation: int, color: Color) -> void
 ## with the block; the cell it sits on shifts whenever the player
 ## presses Q to re-rotate the preview.
 const _FRONT_DIR_ARROW_COLOR := Color(1.0, 0.55, 0.0, 0.95)
+
+func _uses_drill_range_preview(block_id: StringName) -> bool:
+	return block_id == &"mechanical_drill" \
+		or block_id == &"plasma_bore" \
+		or block_id == &"advanced_plasma_bore"
+
+
 func _draw_front_direction_arrow(grid_pos: Vector2i, grid_size: Vector2i, rotation: int) -> void:
 	var gs: float = float(main.GRID_SIZE)
 	var dir_v: Vector2i = DIR_VECTORS[rotation]
@@ -7734,15 +8500,13 @@ func _draw_paused_queue() -> void:
 				draw_set_transform(center, angle)
 				var dst_q := Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h))
 				var tex_size_q: Vector2 = texture.get_size()
-				draw_texture_rect_region(texture, dst_q, Rect2(Vector2.ZERO, tex_size_q), Color(1, 1, 1, 0.45))
+				draw_texture_rect_region(texture, dst_q, Rect2(Vector2.ZERO, tex_size_q), _plan_ghost_tint(true))
 				draw_set_transform(Vector2.ZERO, 0.0)
 			else:
-				var color: Color = _get_block_color(block_id)
-				color.a = 0.35
-				draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
+				draw_rect(Rect2(top_pos, Vector2(w, h)), _plan_rect_ghost_color(block_id, true), true)
 		else:
 			var q_rot: int = rotation if _is_directional(block_id) else 0
-			var tint := Color(1, 1, 1, 0.45)
+			var tint := _plan_ghost_tint(true)
 			# Prefer world-facing top/base sprites. data.icon is UI-only.
 			var q_tex: Texture2D = null
 			var q_drew_layered := false
@@ -7780,9 +8544,7 @@ func _draw_paused_queue() -> void:
 			if q_tex:
 				_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint)
 			elif not q_drew_layered:
-				var color: Color = _get_block_color(block_id)
-				color.a = 0.35
-				draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
+				draw_rect(Rect2(top_pos, Vector2(w, h)), _plan_rect_ghost_color(block_id, true), true)
 				# Draw direction arrow for directional blocks without textures
 				if _is_directional(block_id):
 					var center = world_pos + Vector2(w / 2.0, h / 2.0) + offset
@@ -7791,23 +8553,18 @@ func _draw_paused_queue() -> void:
 		# Drill heads overlay for queued drill ghosts.
 		if data.tags.has("drill_heads"):
 			var dh_levels: Dictionary = _get_drill_head_levels(grid_pos, rotation, data.grid_size)
-			_draw_drill_heads(grid_pos, rotation, data.grid_size, dh_levels, block_id, Color(1, 1, 1, 0.45))
+			_draw_drill_heads(grid_pos, rotation, data.grid_size, dh_levels, block_id, _plan_ghost_tint(true))
 		if data.tags.has("crusher_heads") or data.tags.has("grinder_heads"):
-			_draw_crusher_heads(grid_pos, rotation, data.grid_size, block_id, Color(1, 1, 1, 0.45), false)
+			_draw_crusher_heads(grid_pos, rotation, data.grid_size, block_id, _plan_ghost_tint(true), false)
 		# Turret heads / chassis overlay so paused-queue and out-of-
 		# build-range turret ghosts visibly show their barrels.
 		if data.is_turret():
-			_draw_turret_preview_heads(data, top_pos, w, h, rotation, Color(1, 1, 1, 0.45))
-
-		# Yellow outline for all queued blocks
-		draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
+			_draw_turret_preview_heads(data, top_pos, w, h, rotation, _plan_ghost_tint(true))
 
 
-## Renders a queued (in-range, build_progress == 0, not actively being
-## built) block as a faded ghost — same look-and-feel as the out-of-range
-## paused-queue preview, so the player can tell at a glance which block
-## the drone is actually working on right now versus the rest of the
-## queue. Anchored at `top_pos` with the block's full footprint.
+## Renders a queued/in-progress block as the same basic plan ghost used by
+## the placement hover preview. Queue state is intentionally not styled as a
+## separate preview category.
 func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: BlockData, top_pos: Vector2,
 		w: float, h: float, rot: int, draw_heads: bool = true) -> void:
 	if data == null:
@@ -7817,7 +8574,7 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 	# and live turret heads — instead of being clipped under them at
 	# the BuildingSystem's default z (50).
 	var c: CanvasItem = _ccanvas()
-	var tint := Color(1, 1, 1, 0.45)
+	var tint := _plan_ghost_tint(true)
 	# Conveyor belts and ducts use the auto-tile texture system so the
 	# ghost orients with its neighbours instead of always pointing the
 	# same way.
@@ -7867,9 +8624,7 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 	if q_tex:
 		_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint)
 	elif not q_drew_layered:
-		var color: Color = _get_block_color(block_id)
-		color.a = 0.35
-		c.draw_rect(Rect2(top_pos, Vector2(w, h)), color, true)
+		c.draw_rect(Rect2(top_pos, Vector2(w, h)), _plan_rect_ghost_color(block_id, true), true)
 		if _is_directional(block_id):
 			var center := top_pos + Vector2(w / 2.0, h / 2.0)
 			_draw_direction_arrow(center, q_rot, Color(1, 1, 1, 0.5))
@@ -7879,8 +8634,6 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 	# brighter head overlay so we don't want to double-stamp.
 	if draw_heads:
 		_draw_turret_preview_heads(data, top_pos, w, h, q_rot, tint)
-	# Yellow outline marks "queued, waiting for the drone".
-	c.draw_rect(Rect2(top_pos, Vector2(w, h)), Color(1.0, 0.9, 0.2, 0.5), false, 1.5)
 
 
 func _draw_preview() -> void:
@@ -7947,7 +8700,7 @@ func _draw_preview() -> void:
 				var texture: Texture2D = info["texture"]
 				var angle: float = info["angle"]
 				if texture:
-					var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+					var tint: Color = _plan_ghost_tint(cell_ok)
 					var center: Vector2 = cell_pos + Vector2(w / 2.0, h / 2.0)
 					draw_set_transform(center, angle)
 					var dst_dl := Rect2(Vector2(-w / 2.0, -h / 2.0), Vector2(w, h))
@@ -7955,12 +8708,10 @@ func _draw_preview() -> void:
 					draw_texture_rect_region(texture, dst_dl, Rect2(Vector2.ZERO, tex_size_dl), tint)
 					draw_set_transform(Vector2.ZERO, 0.0)
 				else:
-					var cell_color: Color = _get_block_color(cell_block_id) if cell_ok else Color(1, 0, 0, 0.4)
-					cell_color.a = 0.5
-					draw_rect(Rect2(cell_pos, Vector2(w, h)), cell_color, true)
+					draw_rect(Rect2(cell_pos, Vector2(w, h)), _plan_rect_ghost_color(cell_block_id, cell_ok), true)
 			else:
 				var cell_rot: int = preview_rots.get(cell, main.placement_rotation) if _is_directional(cell_block_id) else 0
-				var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				var tint: Color = _plan_ghost_tint(cell_ok)
 				# Layered-render blocks get their own preview branch so the
 				# drag ghost matches what the live render will paint.
 				var cell_layered := false
@@ -7997,12 +8748,7 @@ func _draw_preview() -> void:
 					var draw_rot: int = (cell_rot + 1) % 4 if cell_data.tags.has("shaft") else cell_rot
 					_draw_block_texture(cell_tex, cell_pos, w, h, draw_rot, tint)
 				else:
-					var color: Color
-					if cell_ok:
-						color = _get_block_color(cell_block_id)
-						color.a = 0.5
-					else:
-						color = Color(1, 0, 0, 0.4)
+					var color: Color = _plan_rect_ghost_color(cell_block_id, cell_ok)
 					draw_rect(Rect2(cell_pos, Vector2(w, h)), color, true)
 					draw_rect(Rect2(cell_pos, Vector2(w, h)), color.lightened(0.2), false, 2.0)
 
@@ -8018,7 +8764,7 @@ func _draw_preview() -> void:
 			# (textured and belts included). Lands on the cell one tile
 			# past the front face so the player sees exactly where the
 			# block will eject to.
-			if _is_directional(cell_block_id):
+			if _is_directional(cell_block_id) and not _uses_drill_range_preview(cell_block_id):
 				var dl_grid_size: Vector2i = cell_data.grid_size if cell_data else Vector2i(cell_grid_w, cell_grid_h)
 				var dl_rot: int = preview_rots.get(cell, main.placement_rotation)
 				_draw_front_direction_arrow(cell, dl_grid_size, dl_rot)
@@ -8028,12 +8774,12 @@ func _draw_preview() -> void:
 			# bake path already painted the heads.
 			if cell_block_id == main.selected_building and cell_data and cell_data.is_turret() and not cell_used_bake:
 				var t_rot_dl: int = preview_rots.get(cell, main.placement_rotation)
-				var t_tint_dl: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				var t_tint_dl: Color = _plan_ghost_tint(cell_ok)
 				_draw_turret_preview_heads(cell_data, cell_pos, w, h, t_rot_dl, t_tint_dl)
 			# Crane preview overlay — only the selected crane shows the
 			# arm silhouette, not junction/bridge substitutions.
 			if cell_block_id == main.selected_building and cell_data and cell_data.tags.has("crane"):
-				var c_tint_dl: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				var c_tint_dl: Color = _plan_ghost_tint(cell_ok)
 				_draw_crane_preview(cell_pos, w, h, c_tint_dl)
 			# Drill/crusher heads preview: only the selected block shows
 			# these, not junction/bridge substitutions.
@@ -8043,11 +8789,11 @@ func _draw_preview() -> void:
 				# body face by default so the ghost reads as a complete
 				# drill even when placement is invalid (no ore in front).
 				var dh_levels: Dictionary = _get_drill_head_levels(cell, dh_rot, data.grid_size)
-				var dh_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				var dh_tint: Color = _plan_ghost_tint(cell_ok)
 				_draw_drill_heads(cell, dh_rot, data.grid_size, dh_levels, main.selected_building, dh_tint)
 			if cell_block_id == main.selected_building and data and (data.tags.has("crusher_heads") or data.tags.has("grinder_heads")):
 				var ch_rot: int = preview_rots.get(cell, main.placement_rotation)
-				var ch_tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+				var ch_tint: Color = _plan_ghost_tint(cell_ok)
 				_draw_crusher_heads(cell, ch_rot, data.grid_size, main.selected_building, ch_tint, false)
 		return
 
@@ -8080,7 +8826,7 @@ func _draw_preview() -> void:
 		var texture: Texture2D = info["texture"]
 		var angle: float = info["angle"]
 		if texture:
-			var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+			var tint: Color = _plan_ghost_tint(cell_ok)
 			var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 			draw_set_transform(center, angle)
 			var dst_h := Rect2(Vector2(-width / 2.0, -height / 2.0), Vector2(width, height))
@@ -8088,14 +8834,10 @@ func _draw_preview() -> void:
 			draw_texture_rect_region(texture, dst_h, Rect2(Vector2.ZERO, tex_size_h), tint)
 			draw_set_transform(Vector2.ZERO, 0.0)
 		else:
-			if cell_ok:
-				color.a = 0.5
-			else:
-				color = Color(1, 0, 0, 0.4)
-			draw_rect(Rect2(top_pos, Vector2(width, height)), color, true)
+			draw_rect(Rect2(top_pos, Vector2(width, height)), _plan_rect_ghost_color(main.selected_building, cell_ok), true)
 	else:
 		var hover_rot: int = main.placement_rotation if is_dir else 0
-		var tint: Color = Color(1, 1, 1, 0.6) if cell_ok else Color(1, 0.3, 0.3, 0.5)
+		var tint: Color = _plan_ghost_tint(cell_ok)
 		# Prefer the world-facing top_sprite; data.icon is UI-only and
 		# intentionally skipped here.
 		var hover_tex: Texture2D = null
@@ -8158,10 +8900,7 @@ func _draw_preview() -> void:
 			var draw_rot: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
 			_draw_block_texture(hover_tex, top_pos, width, height, draw_rot, tint)
 		elif not hover_layered:
-			if cell_ok:
-				color.a = 0.5
-			else:
-				color = Color(1, 0, 0, 0.4)
+			color = _plan_rect_ghost_color(main.selected_building, cell_ok)
 			draw_rect(Rect2(top_pos, Vector2(width, height)), color, true)
 			draw_rect(Rect2(top_pos, Vector2(width, height)), color.lightened(0.2), false, 2.0)
 
@@ -8175,7 +8914,7 @@ func _draw_preview() -> void:
 	# Front-cell orange arrow — drawn for ALL directional previews
 	# (textured and belts included) so the player can see exactly
 	# where the block will eject to.
-	if is_dir and data:
+	if is_dir and data and not _uses_drill_range_preview(main.selected_building):
 		_draw_front_direction_arrow(preview_grid_pos, data.grid_size, main.placement_rotation)
 
 	# Turret heads / chassis preview overlay (mirrors the drag-line path
@@ -8183,14 +8922,14 @@ func _draw_preview() -> void:
 	# Skipped when the bake path already painted the heads as part of
 	# the composite — otherwise the heads would render twice.
 	if data and data.is_turret() and not hover_used_bake:
-		var t_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
+		var t_tint: Color = _plan_ghost_tint(can_place_excluding_range)
 		_draw_turret_preview_heads(data, top_pos, width, height, main.placement_rotation, t_tint)
 
 	# Scraper / impact-drill heads in the preview. Both draw on top of
 	# the base sprite the same way the live render does — without this,
 	# the placement ghost was a headless body plate.
 	if data and data.tags.has("scraper_head"):
-		var sh_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
+		var sh_tint: Color = _plan_ghost_tint(can_place_excluding_range)
 		if _scraper_head_texture:
 			var sh_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
 			draw_set_transform(sh_center, 0.0)
@@ -8199,7 +8938,7 @@ func _draw_preview() -> void:
 				false, sh_tint)
 			draw_set_transform(Vector2.ZERO, 0.0)
 	if data and data.tags.has("impact_head"):
-		var ih_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
+		var ih_tint: Color = _plan_ghost_tint(can_place_excluding_range)
 		if _impact_head_texture:
 			# At-rest pose = full IMPACT_HEAD_MAX_SCALE (slam_progress = 1).
 			var ih_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
@@ -8214,7 +8953,7 @@ func _draw_preview() -> void:
 	# Crane preview: arm + grabber + base pivot at the default pose so
 	# the player sees the silhouette before placing.
 	if data and data.tags.has("crane"):
-		var c_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
+		var c_tint: Color = _plan_ghost_tint(can_place_excluding_range)
 		_draw_crane_preview(top_pos, width, height, c_tint)
 
 	# Turret attack-range circle in the placement preview — dashed, same
@@ -8229,10 +8968,10 @@ func _draw_preview() -> void:
 	# drill regardless of placement validity.
 	if data and data.tags.has("drill_heads"):
 		var dh_levels: Dictionary = _get_drill_head_levels(preview_grid_pos, main.placement_rotation, data.grid_size)
-		var dh_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
+		var dh_tint: Color = _plan_ghost_tint(can_place_excluding_range)
 		_draw_drill_heads(preview_grid_pos, main.placement_rotation, data.grid_size, dh_levels, main.selected_building, dh_tint)
 	if data and (data.tags.has("crusher_heads") or data.tags.has("grinder_heads")):
-		var ch_tint: Color = Color(1, 1, 1, 0.6) if can_place_excluding_range else Color(1, 0.3, 0.3, 0.5)
+		var ch_tint: Color = _plan_ghost_tint(can_place_excluding_range)
 		_draw_crusher_heads(preview_grid_pos, main.placement_rotation, data.grid_size, main.selected_building, ch_tint, false)
 
 	# Extractor efficiency readout — preview-only. A white tick the width
@@ -8288,6 +9027,10 @@ func _draw_preview() -> void:
 	if data and data.tags.has("cable_node"):
 		var cable_range: int = 10 if String(data.id).begins_with("cable_tower") else 5
 		_draw_cable_range_preview(preview_grid_pos, data.grid_size, cable_range)
+
+	if data and data.tags.has("lane_shifter"):
+		_draw_lane_shifter_range_preview(preview_grid_pos, data.grid_size,
+			main.placement_rotation, data)
 
 	# Drill / extractor mining range preview: reuse the dashed line style
 	# the cable preview uses, but only along the front edge in the
@@ -8403,6 +9146,33 @@ func _draw_drill_range_preview(origin: Vector2i, grid_size: Vector2i, rotation: 
 		# Start at the centre of the front-edge tile.
 		var center: Vector2 = Vector2(front) * gs + Vector2(gs * 0.5, gs * 0.5) + parallax_off
 		for t in range(line_tiles):
+			var seg_start: Vector2 = center + dir_vf * (gs * (float(t) - 0.5))
+			var seg_end: Vector2 = seg_start + dir_vf * (gs * dash_frac)
+			draw_line(seg_start, seg_end, dash_color, 2.0)
+
+
+func _draw_lane_shifter_range_preview(origin: Vector2i, grid_size: Vector2i, rotation: int, data: BlockData) -> void:
+	if data == null or not data.tags.has("lane_shifter"):
+		return
+	var reach: int = 6 if data.id == &"large_lane_shifter" else 4
+	if reach <= 0:
+		return
+	var gs := float(main.GRID_SIZE)
+	var parallax_off := _get_top_offset(Vector2.ZERO)
+	var fwd: Vector2i
+	match rotation:
+		0: fwd = Vector2i(1, 0)
+		1: fwd = Vector2i(0, 1)
+		2: fwd = Vector2i(-1, 0)
+		3: fwd = Vector2i(0, -1)
+		_: fwd = Vector2i(1, 0)
+	var dir_vf: Vector2 = Vector2(fwd)
+	var front_cells := _get_front_edge(origin, grid_size, rotation)
+	var dash_color := Color(1.0, 0.9, 0.2, 0.85)
+	var dash_frac := 0.55
+	for front_cell in front_cells:
+		var center: Vector2 = Vector2(front_cell) * gs + Vector2(gs * 0.5, gs * 0.5) + parallax_off
+		for t in range(reach):
 			var seg_start: Vector2 = center + dir_vf * (gs * (float(t) - 0.5))
 			var seg_end: Vector2 = seg_start + dir_vf * (gs * dash_frac)
 			draw_line(seg_start, seg_end, dash_color, 2.0)
@@ -8686,6 +9456,13 @@ func _on_building_destroyed(_grid_pos: Vector2i) -> void:
 	if _crane_link_anchor == _grid_pos:
 		_crane_link_anchor = Vector2i(-1, -1)
 		_crane_link_next_kind = "input"
+	if _lane_shifter_link_anchor == _grid_pos:
+		_lane_shifter_link_anchor = Vector2i(-1, -1)
+		if _crane_filter_menu_open and _crane_filter_menu_owner == "lane_shifter":
+			_close_crane_filter_menu()
+	var logistics = _logistics_ref()
+	if logistics and logistics.has_method("remove_lane_shifter_link_refs"):
+		logistics.remove_lane_shifter_link_refs(_grid_pos)
 	archive_holdings.erase(_grid_pos)
 	var ad_sys_d = get_node_or_null("/root/Main/ArchiveDecoderSystem")
 	if ad_sys_d and ad_sys_d.has_method("unregister"):
@@ -9981,8 +10758,53 @@ func _draw_crane_link_overlays() -> void:
 			draw_rect(Rect2(w, size), Color(0.4, 1.0, 0.4, 0.9), false, 2.0)
 
 	# Filter menu.
-	if _crane_filter_menu_open:
+	if _crane_filter_menu_open and _crane_filter_menu_owner == "crane":
 		_draw_crane_filter_menu()
+
+	_draw_lane_shifter_link_overlays()
+
+
+func _draw_lane_shifter_link_overlays() -> void:
+	if _lane_shifter_link_anchor == Vector2i(-1, -1) or not main.placed_buildings.has(_lane_shifter_link_anchor):
+		if _crane_filter_menu_open and _crane_filter_menu_owner == "lane_shifter":
+			_draw_crane_filter_menu()
+		return
+	var data: BlockData = Registry.get_block(main.placed_buildings.get(_lane_shifter_link_anchor, &""))
+	if data == null or not data.tags.has("lane_shifter"):
+		return
+	var links: Dictionary = _lane_shifter_links(_lane_shifter_link_anchor)
+	for spec in links.get("inputs", []):
+		if spec is Dictionary:
+			_draw_lane_shifter_link_cell(spec, Color(0.25, 0.55, 1.0, 0.85), true)
+	for spec in links.get("outputs", []):
+		if spec is Dictionary:
+			_draw_lane_shifter_link_cell(spec, Color(1.0, 0.85, 0.15, 0.85), false)
+	var gs: float = main.GRID_SIZE
+	var w: Vector2 = main.grid_to_world(_lane_shifter_link_anchor)
+	var size := Vector2(data.grid_size.x * gs, data.grid_size.y * gs)
+	draw_rect(Rect2(w, size), Color(0.4, 0.9, 0.4, 0.2), true)
+	draw_rect(Rect2(w, size), Color(0.4, 1.0, 0.4, 0.85), false, 2.0)
+	if _crane_filter_menu_open and _crane_filter_menu_owner == "lane_shifter":
+		_draw_crane_filter_menu()
+
+
+func _draw_lane_shifter_link_cell(spec: Dictionary, color: Color, active: bool) -> void:
+	var gs: float = main.GRID_SIZE
+	var pos: Vector2i = Vector2i(spec.get("pos", Vector2i.ZERO))
+	var rect := Rect2(main.grid_to_world(pos), Vector2(gs, gs))
+	var fill: Color = color
+	fill.a *= 0.28
+	draw_rect(rect, fill, true)
+	draw_rect(rect.grow(-2.0), color, false, 2.0)
+	if active:
+		var filter: Array = spec.get("filter", [])
+		if not filter.is_empty():
+			var fid: StringName = filter[0]
+			var item = Registry.get_item(fid)
+			if item and item.icon:
+				var icon_size: float = gs * 0.55
+				var icon_pos: Vector2 = rect.position + Vector2((gs - icon_size) * 0.5, gs + 4.0)
+				draw_texture_rect(item.icon, Rect2(icon_pos, Vector2(icon_size, icon_size)), false, Color(1, 1, 1, 0.95))
 
 
 ## Renders one 3-tile diamond at the spec's world position, plus a small
@@ -10047,7 +10869,11 @@ func _draw_crane_filter_menu() -> void:
 	# Selected ids — currently in the spec's filter list (highlighted).
 	var selected: Array = []
 	if _crane_filter_menu_anchor != Vector2i(-1, -1):
-		var entry: Dictionary = crane_links.get(_crane_filter_menu_anchor, {})
+		var entry: Dictionary = {}
+		if _crane_filter_menu_owner == "lane_shifter":
+			entry = _lane_shifter_links(_crane_filter_menu_anchor)
+		else:
+			entry = crane_links.get(_crane_filter_menu_anchor, {})
 		var arr: Array = entry.get(_crane_filter_menu_kind + "s", [])
 		if _crane_filter_menu_index >= 0 and _crane_filter_menu_index < arr.size():
 			selected = arr[_crane_filter_menu_index].get("filter", [])

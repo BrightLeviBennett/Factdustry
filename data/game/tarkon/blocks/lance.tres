@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
 [ext_resource type="Script" uid="uid://mlvivi0chx0p" path="res://data/game/tarkon/blocks/ammo_type.gd" id="1_ammo"]
-[ext_resource type="Texture2D" uid="uid://12n0k6gpubv5" path="res://textures/blocks/turrets/DoubleBarrel/DoubeBarrelBase.png" id="2_base"]
+[ext_resource type="Texture2D" uid="uid://c1sdwb3ut6s5k" path="res://textures/blocks/turrets/DoubleBarrel/DoubeBarrelBase.png" id="2_base"]
 [ext_resource type="Texture2D" uid="uid://ckrks8kxlotgo" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelHead.png" id="3_head"]
 [ext_resource type="Texture2D" uid="uid://cefc2lupt614p" path="res://textures/blocks/turrets/SingleBarrel/SingleBarrelComplete.png" id="4_icon"]
 

@@ -7,7 +7,7 @@
 script = ExtResource("1")
 id = &"fluid_pipe"
 display_name = "Fluid Pipe"
-description = "Basic pipe for transporting liquids and gases."
+description = "A simple pipe used to transport fluids and gases."
 icon = ExtResource("1_phwqv")
 category = 9
 tags = PackedStringArray("fluid", "transport")

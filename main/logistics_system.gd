@@ -79,6 +79,14 @@ const DIR_VECTORS := [
 #   "progress": float — 0.0 (just entered) to 1.0 (ready to transfer)
 var conveyor_items := {}
 
+# Cached metadata for item-transport cells. Conveyor topology only changes on
+# block placement/destruction/rotation, so the hot item loop should not ask the
+# registry and tag helpers several times per moving item per frame.
+var _conv_meta: Dictionary = {}          # Vector2i -> Dictionary
+var _conv_meta_dirty: bool = true
+var _ready_conveyor_cells: Array[Vector2i] = []
+var _item_visual_cache: Dictionary = {}  # StringName -> ItemData/FluidData/null
+
 # --- PIPE STATE ---
 # Key = Vector2i (grid position of a pipe cell)
 # Value = Dictionary:
@@ -162,6 +170,17 @@ var _drill_scan_cache := {}
 # the per-extractor "Efficiency: NN%" overlay.
 var extractor_efficiency := {}
 
+# --- DRILL ACTIVE STATE ---
+# Key = Vector2i (drill origin). Value = bool: is the drill actually mining
+# right now (built, enabled, powered, ore in range, output not full)? The
+# plasma-bore laser/spark renderer reads this so the beams only show when the
+# bore is genuinely working.
+var drill_active := {}
+
+# Throttle for incinerator smoke puffs: anchor -> earliest next puff (ms). Caps
+# the visual at a gentle wisp even when items burn faster than that.
+var _incinerate_smoke_next := {}
+
 # --- PUMP STATE ---
 # Key = Vector2i (grid position of a fluid pump)
 # Value = float (seconds remaining until next item is produced)
@@ -183,6 +202,10 @@ var factory_buffers := {}
 #   Key = Vector2i (input bridge anchor)
 #   Value = int (next destination index to try)
 var bridge_output_rr := {}
+
+# Pause-aware clock for lane shifter particles. This only advances while the
+# world is ticking, so the transfer field freezes cleanly during pause.
+var _lane_shifter_visual_clock: float = 0.0
 
 # Per-output item filter for duct bridges. Maps an output bridge
 # anchor to the single item id it'll accept (from ANY incoming
@@ -217,6 +240,16 @@ var sorter_filters := {}
 # --- SORTER SIDE OUTPUT INDEX ---
 # Key = Vector2i, Value = int (0 or 1, alternates between left/right side output)
 var sorter_side_index := {}
+
+# --- LANE SHIFTER STATE ---
+# Key = Vector2i (lane shifter anchor)
+# Value = Dictionary:
+#   "banks": Array of bank dictionaries:
+#     "routes": Array of {item_id, mode, enabled, source, dest, stalled}
+#     "suspended": Array of {item_id, route, source, dest, progress, state}
+#     "cooldown": float
+#     "route_rr": int
+var lane_shifter_state := {}
 
 # --- PAYLOAD STATE ---
 # Key = Vector2i (grid position of a payload conveyor cell)
@@ -417,6 +450,7 @@ func _process(delta: float) -> void:
 	if ("world_paused" in main and main.world_paused):
 		queue_redraw()
 		return
+	_lane_shifter_visual_clock += delta
 	# Slow producers (drills / pumps / factories) are pure delta-timer state
 	# machines: a cycle completes after `production_time` of accumulated
 	# delta, then resets. Running them at ~12 Hz instead of 60 Hz with the
@@ -440,6 +474,7 @@ func _process(delta: float) -> void:
 	# Item / fluid / payload motion stays at full frame rate for smoothness.
 	_update_fabricator_ejection_visuals(delta)
 	_update_conveyors(delta)
+	_update_lane_shifters(delta)
 	_update_payloads(delta)
 	_update_constructors(delta)
 	_update_deconstructors(delta)
@@ -451,6 +486,7 @@ func _process(delta: float) -> void:
 	_update_refit_bays(delta)
 	_update_resource_sources(delta)
 	_update_payload_sources(delta)
+	_update_fluid_unloaders(delta)
 	_update_pipes(delta)
 	_update_storage_unloading(delta)
 	_update_belt_unloaders(delta)
@@ -549,6 +585,7 @@ func _rebuild_buckets() -> void:
 	var pipe: Array = []
 	var junction: Array = []
 	var unloader: Array = []
+	var fluid_unloader: Array = []
 	var constructor: Array = []
 	var deconstructor: Array = []
 	var refabricator: Array = []
@@ -565,12 +602,17 @@ func _rebuild_buckets() -> void:
 		if data == null:
 			continue
 		var tags = data.tags
-		if data.category == BlockData.BlockCategory.EXTRACTORS:
+		# Item-mining drills only. Fluid extractors (pumps/condensers) can also
+		# live in the EXTRACTORS UI category but are driven by the pump tick, so
+		# keep them out of the item-drill bucket to avoid double processing.
+		if data.category == BlockData.BlockCategory.EXTRACTORS and not tags.has("pump"):
 			extractor.append(grid_pos)
 		if tags.has("pump"):
 			pump.append(grid_pos)
 		if tags.has("unloader"):
 			unloader.append(grid_pos)
+		if tags.has("fluid_unloader"):
+			fluid_unloader.append(grid_pos)
 		if tags.has("constructor"):
 			constructor.append(grid_pos)
 		if tags.has("deconstructor"):
@@ -611,6 +653,7 @@ func _rebuild_buckets() -> void:
 		"pipe": pipe,
 		"junction": junction,
 		"unloader": unloader,
+		"fluid_unloader": fluid_unloader,
 		"constructor": constructor,
 		"deconstructor": deconstructor,
 		"refabricator": refabricator,
@@ -651,6 +694,29 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 	var terrain = _terrain_ref()
 	if terrain == null:
 		return 1.0
+	if data.vent_fluid != &"":
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				var vent_cell: Vector2i = origin + Vector2i(x, y)
+				if data.vent_accepts(StringName(terrain.floor_tiles.get(vent_cell, &""))):
+					return 1.0
+		return 0.0
+	if data.tags.has("condenser"):
+		var on_geyser := false
+		var on_vent := false
+		for x in range(data.grid_size.x):
+			for y in range(data.grid_size.y):
+				var vent_cell: Vector2i = origin + Vector2i(x, y)
+				var floor_id: StringName = StringName(terrain.floor_tiles.get(vent_cell, &""))
+				if floor_id == &"geyser":
+					on_geyser = true
+				elif floor_id == &"vent":
+					on_vent = true
+		if on_geyser:
+			return 1.0
+		if on_vent:
+			return 0.5
+		return 0.0
 	var is_pump: bool = data.tags.has("pump")
 	if is_pump:
 		var max_depth: int = 0
@@ -700,6 +766,9 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 	var eff_sum: float = 0.0
 	for cell in front_cells:
 		var hit_mult: float = 0.0
+		if _drill_scan_blocked_at(cell):
+			eff_sum += hit_mult
+			continue
 		if is_wall_miner:
 			var hit_wall: StringName = &""
 			var wid_e: StringName = StringName(terrain.wall_tiles.get(cell, &""))
@@ -708,6 +777,8 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 			else:
 				for step in range(1, max_extend + 1):
 					var scan: Vector2i = cell + dir * step
+					if _drill_scan_blocked_at(scan):
+						break
 					var wid_s: StringName = StringName(terrain.wall_tiles.get(scan, &""))
 					if terrain.get_ore_at(scan) == null and accepted_walls_eff.has(wid_s):
 						hit_wall = wid_s
@@ -719,7 +790,10 @@ func compute_extractor_preview_efficiency(origin: Vector2i, data: BlockData, rot
 				hit_mult = 1.0
 			else:
 				for step in range(1, max_extend + 1):
-					if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
+					var scan_ore: Vector2i = cell + dir * step
+					if _drill_scan_blocked_at(scan_ore):
+						break
+					if _ore_is_minable_by(terrain.get_ore_at(scan_ore), is_floor_miner, data):
 						hit_mult = 1.0
 						break
 		eff_sum += hit_mult
@@ -824,16 +898,24 @@ func compute_extractor_preview_output(origin: Vector2i, data: BlockData, rot: in
 	var terrain = _terrain_ref()
 	# Pumps & condensers run their own per-tile lookup. Pump rate scales
 	# with depth_mult (= efficiency) on PUMP_BASE_RATE_PER_SEC; condenser
-	# rate is the geyser-or-vent base (8 / 4) scaled by efficiency, where
+	# rate is the geyser-or-vent base scaled by efficiency, where
 	# `efficiency` for condensers is geyser→1.0, vent→0.5.
 	if data.tags.has("pump"):
 		var fluid_id: StringName = &""
+		if data.vent_fluid != &"":
+			if efficiency <= 0.0:
+				return blank
+			return {
+				"item_id": data.vent_fluid,
+				"per_sec": (data.vent_rate if data.vent_rate > 0.0 else 4.0) * efficiency,
+			}
 		if data.tags.has("condenser"):
 			fluid_id = &"mat_water"
-			# 8 = geyser baseline; vent reads as 0.5 efficiency → 4/s.
+			# `vent_rate` is the normal vent rate; geyser preview doubles it.
 			# Vent turbine produces half of a dedicated condenser at
 			# the same source.
-			var rate_preview: float = 8.0 * efficiency
+			var condenser_vent_rate: float = data.vent_rate if data.vent_rate > 0.0 else 8.0
+			var rate_preview: float = condenser_vent_rate * 2.0 * efficiency
 			if data.id == &"vent_turbine":
 				rate_preview *= 0.5
 			return {"item_id": fluid_id, "per_sec": rate_preview}
@@ -926,6 +1008,37 @@ func _ore_is_minable_by(ore_data: TerrainTileData, is_floor_miner: bool, data: B
 	return true
 
 
+func _drill_scan_blocked_at(grid_pos: Vector2i) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	var block_id: StringName = main.placed_buildings.get(anchor, main.placed_buildings.get(grid_pos, &""))
+	var data = Registry.get_block(block_id)
+	if data == null:
+		return false
+	return not _is_drill_lane_passthrough_block(grid_pos, data)
+
+
+func _is_drill_lane_passthrough_block(grid_pos: Vector2i, data: BlockData) -> bool:
+	if data == null:
+		return false
+	if data.tags.has("payload") or data.tags.has("freight"):
+		return false
+	if _is_conveyor_cell(grid_pos) or _is_pipe_cell(grid_pos):
+		return true
+	if _is_junction_cell(grid_pos) or _is_router_cell(grid_pos) or _is_bridge_cell(grid_pos):
+		return true
+	if _is_sorter_cell(grid_pos) or _is_inverted_sorter_cell(grid_pos):
+		return true
+	if _is_overflow_cell(grid_pos) or _is_underflow_cell(grid_pos):
+		return true
+	var id: StringName = data.id
+	return id == &"duct_sorter" \
+			or id == &"inverted_duct_sorter" \
+			or id == &"overflow_duct" \
+			or id == &"underflow_duct"
+
+
 func _clear_drill_scan_cache() -> void:
 	_drill_scan_cache.clear()
 
@@ -974,6 +1087,15 @@ func _get_drill_scan_result(origin: Vector2i, data: BlockData, rot: int) -> Dict
 				mine_cells.append(origin + Vector2i(fx, fy))
 	else:
 		mine_cells = _get_extended_front_edge(origin, data.grid_size, rot, data.mine_range)
+	var front_cells_for_scan := _get_front_edge(origin, data.grid_size, rot)
+	var dir_for_scan: Vector2i
+	match rot:
+		0: dir_for_scan = Vector2i(1, 0)
+		1: dir_for_scan = Vector2i(0, 1)
+		2: dir_for_scan = Vector2i(-1, 0)
+		3: dir_for_scan = Vector2i(0, -1)
+		_: dir_for_scan = Vector2i(1, 0)
+	var max_scan_extend: int = maxi(data.mine_range, 1)
 
 	var ore: TerrainTileData = null
 	var floor_resource: StringName = &""
@@ -982,31 +1104,52 @@ func _get_drill_scan_result(origin: Vector2i, data: BlockData, rot: int) -> Dict
 	var accepted_walls: Array = data.accepted_walls if data.accepted_walls.size() > 0 \
 			else [&"blackstone_wall"]
 	if is_wall_miner:
-		for cell in mine_cells:
-			if terrain.get_ore_at(cell) != null:
+		for cell in front_cells_for_scan:
+			if _drill_scan_blocked_at(cell):
 				continue
 			var wid: StringName = StringName(terrain.wall_tiles.get(cell, &""))
-			if wid != &"" and accepted_walls.has(wid):
+			if terrain.get_ore_at(cell) == null and wid != &"" and accepted_walls.has(wid):
 				source_wall = wid
 				wall_found = true
+				break
+			for step in range(1, max_scan_extend + 1):
+				var scan_wall: Vector2i = cell + dir_for_scan * step
+				if _drill_scan_blocked_at(scan_wall):
+					break
+				var wid_s: StringName = StringName(terrain.wall_tiles.get(scan_wall, &""))
+				if terrain.get_ore_at(scan_wall) == null and wid_s != &"" and accepted_walls.has(wid_s):
+					source_wall = wid_s
+					wall_found = true
+					break
+			if wall_found:
 				break
 		if not wall_found:
 			_drill_scan_cache[origin] = result
 			return result
 	else:
-		for cell in mine_cells:
-			if is_floor_miner:
+		if is_floor_miner:
+			for cell in mine_cells:
 				floor_resource = _floor_miner_resource_at(cell, data)
 				if floor_resource != &"":
 					break
-			else:
+		else:
+			for cell in front_cells_for_scan:
+				if _drill_scan_blocked_at(cell):
+					continue
 				var candidate: TerrainTileData = terrain.get_ore_at(cell)
-				if not _ore_is_minable_by(candidate, false, data):
-					continue
-				if candidate.minable_resource == &"":
-					continue
-				ore = candidate
-				break
+				if _ore_is_minable_by(candidate, false, data) and candidate.minable_resource != &"":
+					ore = candidate
+					break
+				for step in range(1, max_scan_extend + 1):
+					var scan_ore: Vector2i = cell + dir_for_scan * step
+					if _drill_scan_blocked_at(scan_ore):
+						break
+					var candidate_s: TerrainTileData = terrain.get_ore_at(scan_ore)
+					if _ore_is_minable_by(candidate_s, false, data) and candidate_s.minable_resource != &"":
+						ore = candidate_s
+						break
+				if ore != null:
+					break
 		if is_floor_miner and floor_resource == &"":
 			_drill_scan_cache[origin] = result
 			return result
@@ -1033,6 +1176,9 @@ func _get_drill_scan_result(origin: Vector2i, data: BlockData, rot: int) -> Dict
 		var eff_sum: float = 0.0
 		for cell in front_cells:
 			var hit_mult: float = 0.0
+			if _drill_scan_blocked_at(cell):
+				eff_sum += hit_mult
+				continue
 			if is_wall_miner:
 				var hit_wall: StringName = &""
 				var wid_e: StringName = StringName(terrain.wall_tiles.get(cell, &""))
@@ -1041,6 +1187,8 @@ func _get_drill_scan_result(origin: Vector2i, data: BlockData, rot: int) -> Dict
 				else:
 					for step in range(1, max_extend + 1):
 						var scan: Vector2i = cell + dir * step
+						if _drill_scan_blocked_at(scan):
+							break
 						var wid_s: StringName = StringName(terrain.wall_tiles.get(scan, &""))
 						if terrain.get_ore_at(scan) == null and accepted_walls_eff.has(wid_s):
 							hit_wall = wid_s
@@ -1052,7 +1200,10 @@ func _get_drill_scan_result(origin: Vector2i, data: BlockData, rot: int) -> Dict
 					hit_mult = 1.0
 				else:
 					for step in range(1, max_extend + 1):
-						if _ore_is_minable_by(terrain.get_ore_at(cell + dir * step), is_floor_miner, data):
+						var scan_ore: Vector2i = cell + dir * step
+						if _drill_scan_blocked_at(scan_ore):
+							break
+						if _ore_is_minable_by(terrain.get_ore_at(scan_ore), is_floor_miner, data):
 							hit_mult = 1.0
 							break
 			eff_sum += hit_mult
@@ -1092,8 +1243,10 @@ func _update_drills(delta: float) -> void:
 		# Skip disabled or under-construction buildings
 		var sector_script = _sector_script_ref()
 		if sector_script and sector_script.is_building_disabled(origin):
+			drill_active[origin] = false
 			continue
 		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			drill_active[origin] = false
 			continue
 
 		if not drill_timers.has(origin):
@@ -1105,10 +1258,16 @@ func _update_drills(delta: float) -> void:
 			continue
 
 		var rot: int = main.building_rotation.get(origin, 0)
+		# Always try to offload any backlog already in storage to adjacent
+		# outputs/consumers — even when the drill is otherwise stalled (full
+		# storage, depleted ore, no power). Without this a drill that filled up
+		# before a consumer was placed next to it would never feed that consumer.
+		_drain_drill_storage_to_outputs(origin, data, rot)
 		var scan: Dictionary = _get_drill_scan_result(origin, data, rot)
 		var efficiency: float = float(scan.get("efficiency", 0.0))
 		extractor_efficiency[origin] = efficiency
 		if not bool(scan.get("valid", false)):
+			drill_active[origin] = false  # No mineable ore in range.
 			continue
 
 		# Electrical power: scale production speed by the network's
@@ -1120,7 +1279,12 @@ func _update_drills(delta: float) -> void:
 			if power_sys:
 				power_eff = power_sys.get_electrical_efficiency(origin)
 			if power_eff <= 0.0:
+				drill_active[origin] = false  # No power.
 				continue  # No generation at all — idle this tick.
+
+		# Past every gate: the drill has ore, power, and is enabled, so it's
+		# actively mining (the output-full check below can still flip this off).
+		drill_active[origin] = true
 
 		var od_mult: float = 1.0
 		if main.has_method("get_overdrive_multiplier"):
@@ -1142,6 +1306,7 @@ func _update_drills(delta: float) -> void:
 				break
 		if any_full:
 			drill_timers[origin] = 0.0
+			drill_active[origin] = false  # Output storage full — stalled.
 			continue
 
 		var cycle_time = data.production_time if data.production_time > 0 else default_drill_time
@@ -1173,6 +1338,14 @@ func _update_drills(delta: float) -> void:
 					if _add_to_storage(origin, item_id, data):
 						if drill_is_lumina and main.has_signal("item_mined"):
 							main.item_mined.emit(item_id)
+
+## True when the drill at `origin` is genuinely mining (built, enabled, powered,
+## ore in range, output not full). The plasma-bore renderer uses this to hide
+## its lasers/sparks when the bore isn't actually working. Defaults to false for
+## unknown anchors so beams stay off until the slow drill tick confirms activity.
+func is_drill_active(origin: Vector2i) -> bool:
+	return bool(drill_active.get(origin, false))
+
 
 ## Finds the top-left origin cell of a multi-tile building.
 ## For 1x1 buildings, just returns grid_pos.
@@ -1349,8 +1522,8 @@ func _update_pumps(delta: float) -> void:
 			continue
 
 		# Condenser branch: rate is determined by the steam source under
-		# the footprint (vent → 4 water/s, geyser → 8 water/s) instead
-		# of the standard pump's water-depth math.
+		# the footprint instead of the standard pump's water-depth math.
+		# `vent_rate` is the normal vent rate; geysers double it.
 		var is_condenser: bool = data.tags.has("condenser")
 		var fluid_id: StringName = &""
 		var rate_per_sec: float = 0.0
@@ -1362,7 +1535,7 @@ func _update_pumps(delta: float) -> void:
 			for x in range(data.grid_size.x):
 				for y in range(data.grid_size.y):
 					var cp_v: Vector2i = anchor + Vector2i(x, y)
-					if StringName(terrain.floor_tiles.get(cp_v, &"")) == data.vent_tile:
+					if data.vent_accepts(StringName(terrain.floor_tiles.get(cp_v, &""))):
 						on_vent_tile = true
 			if not on_vent_tile:
 				extractor_efficiency[anchor] = 0.0
@@ -1388,7 +1561,8 @@ func _update_pumps(delta: float) -> void:
 			# Geyser wins on tie — a footprint that touches both is rare
 			# but the higher-yield source is the one the player placed
 			# the condenser FOR.
-			rate_per_sec = 8.0 if on_geyser else 4.0
+			var condenser_vent_rate: float = data.vent_rate if data.vent_rate > 0.0 else 8.0
+			rate_per_sec = condenser_vent_rate * (2.0 if on_geyser else 1.0)
 			# Vent turbine condenses water as a byproduct of its main
 			# job (power gen). Half the throughput of a dedicated
 			# condenser at the same source.
@@ -1397,7 +1571,7 @@ func _update_pumps(delta: float) -> void:
 			# Efficiency overlay shows 100% on a geyser (max), 50% on a
 			# vent (half) so the live indicator matches the pump's
 			# normalized scale.
-			extractor_efficiency[anchor] = rate_per_sec / 8.0
+			extractor_efficiency[anchor] = rate_per_sec / (condenser_vent_rate * 2.0)
 		else:
 			# Check for liquid underneath any tile of the pump and pick the
 			# DEEPEST tile beneath the footprint — pumps with one tile in
@@ -1445,40 +1619,100 @@ func _update_pumps(delta: float) -> void:
 		# pipe → place new pipe → new pipe never receives water.
 		_drain_pump_storage_to_pipes(anchor, data, delta)
 
-		# Don't waste production into a full storage.
-		if _is_storage_full(anchor, data):
-			continue
-
 		var pump_od: float = 1.0
 		if main.has_method("get_overdrive_multiplier"):
 			pump_od = main.get_overdrive_multiplier(anchor)
 		var amount: float = rate_per_sec * net_eff * pump_od * delta
 		if amount <= 0.0:
 			continue
-		var pushed_any := false
-		for x in range(data.grid_size.x):
-			for y in range(data.grid_size.y):
-				var tile: Vector2i = anchor + Vector2i(x, y)
-				for dir in range(4):
-					var neighbor: Vector2i = tile + DIR_VECTORS[dir]
-					if main.building_origins.get(neighbor, neighbor) == anchor:
-						continue
-					if _is_cross_faction(tile, neighbor):
-						continue
-					if not _is_pipe_cell(neighbor):
-						continue
-					if _add_fluid_to_pipe(neighbor, fluid_id, amount, dir):
-						pushed_any = true
-					if pushed_any:
-						break
-				if pushed_any:
-					break
-			if pushed_any:
-				break
-		# If no pipe was available, accumulate into the pump's own
-		# fluid storage so the production doesn't just evaporate.
+
+		var pushed_any := _try_push_pump_fluid_to_pipes(anchor, data, fluid_id, amount)
+		if pushed_any:
+			continue
+
+		# Don't keep producing into a full internal tank when no pipe can take
+		# the fresh output. If a pipe can take it, the direct push above wins
+		# even while the backup tank is full.
+		if _is_storage_full(anchor, data):
+			continue
+
+		# If no pipe was available, accumulate into the pump's own fluid storage
+		# so the production doesn't just evaporate.
 		if not pushed_any:
 			_add_to_storage(anchor, fluid_id, data)
+
+
+func _try_push_pump_fluid_to_pipes(anchor: Vector2i, data: BlockData, fluid_id: StringName, amount: float) -> bool:
+	for x in range(data.grid_size.x):
+		for y in range(data.grid_size.y):
+			var tile: Vector2i = anchor + Vector2i(x, y)
+			for dir in range(4):
+				var neighbor: Vector2i = tile + DIR_VECTORS[dir]
+				if main.building_origins.get(neighbor, neighbor) == anchor:
+					continue
+				if _is_cross_faction(tile, neighbor):
+					continue
+				if not _is_pipe_cell(neighbor):
+					continue
+				if _add_fluid_to_pipe(neighbor, fluid_id, amount, dir):
+					return true
+	return false
+
+
+func _pipe_can_accept_fluid(grid_pos: Vector2i, fluid_id: StringName, from_dir: int = -1) -> bool:
+	return _pipe_fluid_space(grid_pos, fluid_id, from_dir) > 0.0
+
+
+func _pipe_fluid_space(grid_pos: Vector2i, fluid_id: StringName, from_dir: int = -1) -> float:
+	var fluid = Registry.get_fluid(fluid_id)
+	if fluid == null:
+		return 0.0
+	if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
+		return 0.0
+	if _is_junction_cell(grid_pos):
+		if from_dir < 0:
+			return 0.0
+		var axis: String = "h" if from_dir == 0 or from_dir == 2 else "v"
+		var state: Dictionary = pipe_junction_state.get(grid_pos, {})
+		var existing_fluid: StringName = state.get(axis + "_fluid", &"")
+		var existing_amount: float = float(state.get(axis + "_amount", 0.0))
+		if existing_fluid != &"" and existing_fluid != fluid_id:
+			return 0.0
+		return maxf(0.0, fluid.units_per_segment - existing_amount)
+	if pipe_contents.has(grid_pos):
+		var pipe: Dictionary = pipe_contents[grid_pos]
+		if pipe["fluid_id"] != fluid_id:
+			return 0.0
+		return maxf(0.0, fluid.units_per_segment - float(pipe["amount"]))
+	return fluid.units_per_segment if _is_pipe_cell(grid_pos) else 0.0
+
+
+func _pump_has_output_route(anchor: Vector2i, data: BlockData, fluid_id: StringName = &"") -> bool:
+	if fluid_id == &"":
+		if data.vent_fluid != &"":
+			fluid_id = data.vent_fluid
+		elif data.tags.has("condenser"):
+			fluid_id = &"mat_water"
+		else:
+			var storage: Dictionary = block_storage.get(anchor, {})
+			var fluids: Dictionary = storage.get("fluids", {})
+			for stored_id in fluids:
+				fluid_id = StringName(stored_id)
+				break
+	if fluid_id == &"":
+		return false
+	for x in range(data.grid_size.x):
+		for y in range(data.grid_size.y):
+			var tile: Vector2i = anchor + Vector2i(x, y)
+			for dir in range(4):
+				var neighbor: Vector2i = tile + DIR_VECTORS[dir]
+				if main.building_origins.get(neighbor, neighbor) == anchor:
+					continue
+				if _is_cross_faction(tile, neighbor):
+					continue
+				if _is_pipe_cell(neighbor) and _pipe_can_accept_fluid(neighbor, fluid_id, dir):
+					return true
+	return false
 
 
 ## Empties whatever fluid is already in a pump's block_storage into
@@ -1542,6 +1776,9 @@ func _drain_pump_storage_to_pipes(anchor: Vector2i, data: BlockData, delta: floa
 ## entry_dir: direction the item entered from (0-3), or -1 for default (behind belt).
 ## Returns true if the item was successfully placed.
 func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1) -> bool:
+	if _conv_meta_dirty:
+		_rebuild_conveyor_metadata()
+
 	# Can't push items onto buildings under construction
 	if main.has_method("is_building_inactive") and main.is_building_inactive(grid_pos):
 		return false
@@ -1553,13 +1790,14 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 		var inc_anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 		if power_sys_inc and power_sys_inc.get_electrical_efficiency(inc_anchor) <= 0.0:
 			return false
+		_incinerate_smoke(inc_anchor)
 		return true
 	# Direct deposit into the core — reject if storage full (backs up conveyor)
 	if _is_core_cell(grid_pos):
 		return _absorb_item(item_id, grid_pos)
 
 	# Check if this is a fluid
-	var is_fluid: bool = Registry.get_fluid(item_id) != null
+	var is_fluid: bool = Registry.fluids.has(item_id)
 
 	if is_fluid:
 		# Route fluid to pipe
@@ -1567,12 +1805,23 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 			return _add_fluid_to_pipe(grid_pos, item_id, PIPE_PUSH_AMOUNT)
 	else:
 		# Route item to conveyor
-		if _is_conveyor_cell(grid_pos) and not conveyor_items.has(grid_pos):
-			conveyor_items[grid_pos] = {
-				"item_id": item_id,
-				"progress": 0.0,
-				"entry_dir": entry_dir,
-			}
+		var meta: Dictionary = _conv_meta.get(grid_pos, {})
+		if not meta.is_empty():
+			if conveyor_items.has(grid_pos):
+				return false
+			if bool(meta.get("bridge", false)) and entry_dir >= 0 and _is_bridge_output(grid_pos):
+				return false
+			# Routers only accept items entering from their BACK side (the
+			# direction opposite the rotation arrow); every other face is
+			# reserved for output. Without this, a factory sitting on a
+			# router's output face (e.g. a refinery flanking a router) would
+			# push its product straight back onto the router. Mirrors the
+			# gate in _try_transfer_item. entry_dir < 0 = unknown source,
+			# still allowed.
+			if bool(meta.get("router", false)) and entry_dir >= 0:
+				if entry_dir != int(meta.get("router_entry", (int(meta.get("rot", 0)) + 2) % 4)):
+					return false
+			_set_conveyor_item(grid_pos, item_id, 0.0, entry_dir)
 			return true
 
 	# Accept into factory input side (works for both items and fluids)
@@ -1621,19 +1870,124 @@ func _try_accept_storage_block(grid_pos: Vector2i, item_id: StringName) -> bool:
 # CONVEYOR LOGIC
 # =========================
 
+func _mark_conveyor_cache_dirty() -> void:
+	_conv_meta_dirty = true
+
+
+func _erase_conveyor_item(cell: Vector2i) -> void:
+	conveyor_items.erase(cell)
+
+
+func _set_conveyor_item(cell: Vector2i, item_id: StringName, progress: float, entry_dir: int, exit_dir: int = -1) -> void:
+	var entry: Dictionary = {
+		"item_id": item_id,
+		"progress": progress,
+		"entry_dir": entry_dir,
+	}
+	if exit_dir >= 0:
+		entry["exit_dir"] = exit_dir
+	conveyor_items[cell] = entry
+
+
+func _rebuild_conveyor_metadata() -> void:
+	_conv_meta.clear()
+	for cell in main.placed_buildings:
+		var block_id: StringName = main.placed_buildings[cell]
+		var data = Registry.get_block(block_id)
+		if data == null:
+			continue
+		if data.tags.has("payload") or data.tags.has("freight"):
+			continue
+		if not data.is_transport() or data.transports_fluid:
+			continue
+		var rot: int = int(main.building_rotation.get(cell, 0)) % 4
+		var tags: PackedStringArray = data.tags
+		var meta: Dictionary = {
+			"speed": data.transport_speed if data.transport_speed > 0 else conveyor_speed,
+			"rot": rot,
+			"next": cell + DIR_VECTORS[rot],
+			"entry": (rot + 2) % 4,
+			"bridge": tags.has("bridge"),
+			"junction": tags.has("junction"),
+			"router": tags.has("router"),
+			"sorter": tags.has("sorter"),
+			"inverted_sorter": tags.has("inverted_sorter"),
+			"overflow": tags.has("overflow"),
+			"underflow": tags.has("underflow"),
+		}
+		meta["instant"] = bool(meta["sorter"]) or bool(meta["inverted_sorter"]) or bool(meta["bridge"])
+		meta["router_entry"] = (rot + 2) % 4
+		meta["simple"] = not bool(meta["router"]) and not bool(meta["junction"]) \
+			and not bool(meta["sorter"]) and not bool(meta["inverted_sorter"]) \
+			and not bool(meta["overflow"]) and not bool(meta["underflow"]) \
+			and not bool(meta["bridge"])
+		_conv_meta[cell] = meta
+	_conv_meta_dirty = false
+
+
+func _conveyor_meta(cell: Vector2i) -> Dictionary:
+	if _conv_meta_dirty:
+		_rebuild_conveyor_metadata()
+	return _conv_meta.get(cell, {})
+
+
+func _item_visual_data(item_id: StringName):
+	if not _item_visual_cache.has(item_id):
+		_item_visual_cache[item_id] = Registry.get_item_or_fluid(item_id)
+	return _item_visual_cache[item_id]
+
+
+func _try_transfer_to_conveyor_fast(to: Vector2i, item_id: StringName, entry_dir: int) -> bool:
+	var meta: Dictionary = _conv_meta.get(to, {})
+	if meta.is_empty():
+		return false
+	if conveyor_items.has(to):
+		return false
+
+	if bool(meta.get("bridge", false)) and entry_dir >= 0 and _is_bridge_output(to):
+		return false
+
+	# Junctions have two independent lanes and need their straight-through
+	# acceptance check before occupying either lane.
+	if bool(meta.get("junction", false)) and entry_dir >= 0:
+		if not _junction_would_accept_item(to, item_id, entry_dir):
+			return false
+		if _is_junction_primary_axis(to, entry_dir):
+			_set_conveyor_item(to, item_id, 1.0, entry_dir)
+		else:
+			junction_items[to] = {
+				"item_id": item_id,
+				"progress": 1.0,
+				"entry_dir": entry_dir,
+			}
+		return true
+
+	if bool(meta.get("router", false)) and entry_dir >= 0:
+		if entry_dir != int(meta.get("router_entry", (int(meta.get("rot", 0)) + 2) % 4)):
+			return false
+
+	_set_conveyor_item(to, item_id, 1.0 if bool(meta.get("instant", false)) else 0.0, entry_dir)
+	return true
+
 func _update_conveyors(delta: float) -> void:
+	if _conv_meta_dirty:
+		_rebuild_conveyor_metadata()
+	if conveyor_items.is_empty() and junction_items.is_empty():
+		return
+	var can_check_belt_block: bool = main.has_method("is_belt_conveyance_blocked")
+
 	# --- PHASE 1: TRANSFER ---
 	# Try to move items that have reached the end of their cell.
 	# We may need multiple passes because transferring one item
 	# can free up space for the item behind it. 2 passes is enough
 	# for smooth flow in practice.
 	for _pass in range(2):
-		var cells_with_full_items = []
-		for grid_pos in conveyor_items:
-			if conveyor_items[grid_pos]["progress"] >= 1.0:
-				cells_with_full_items.append(grid_pos)
+		_ready_conveyor_cells.clear()
+		for active_cell in conveyor_items:
+			if float(conveyor_items[active_cell].get("progress", 0.0)) >= 1.0:
+				_ready_conveyor_cells.append(active_cell)
 
-		for grid_pos in cells_with_full_items:
+		for grid_pos in _ready_conveyor_cells:
 			if not conveyor_items.has(grid_pos):
 				continue  # Already transferred by a previous iteration
 
@@ -1642,81 +1996,81 @@ func _update_conveyors(delta: float) -> void:
 			# only QUEUED for deconstruction (drone hasn't started yet)
 			# keeps conveying — the items still get a chance to clear
 			# before the belt actually disappears.
-			if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
+			if can_check_belt_block and main.is_belt_conveyance_blocked(grid_pos):
 				continue
 
 			var item = conveyor_items[grid_pos]
+			var meta: Dictionary = _conv_meta.get(grid_pos, {})
 
 			# --- BRIDGE: teleport to linked output bridge ---
-			if _is_bridge_cell(grid_pos):
+			if bool(meta.get("bridge", false)):
 				if _is_bridge_input(grid_pos):
 					if _try_bridge_transfer(grid_pos, item):
-						conveyor_items.erase(grid_pos)
+						_erase_conveyor_item(grid_pos)
 					continue
 				# Output bridge: fall through to normal conveyor transfer below
 
 			# --- JUNCTION: pass straight through (handled per-axis) ---
-			if _is_junction_cell(grid_pos):
+			if bool(meta.get("junction", false)):
 				if _try_junction_transfer(grid_pos, item):
-					conveyor_items.erase(grid_pos)
+					_erase_conveyor_item(grid_pos)
 				continue
 
 			# --- SORTER: match→front, else→sides ---
-			if _is_sorter_cell(grid_pos):
+			if bool(meta.get("sorter", false)):
 				if _try_sorter_transfer(grid_pos, item, false):
-					conveyor_items.erase(grid_pos)
+					_erase_conveyor_item(grid_pos)
 				continue
 
 			# --- INVERTED SORTER: match→sides, else→front ---
-			if _is_inverted_sorter_cell(grid_pos):
+			if bool(meta.get("inverted_sorter", false)):
 				if _try_sorter_transfer(grid_pos, item, true):
-					conveyor_items.erase(grid_pos)
+					_erase_conveyor_item(grid_pos)
 				continue
 
 			# --- OVERFLOW: front first, then sides ---
-			if _is_overflow_cell(grid_pos):
+			if bool(meta.get("overflow", false)):
 				if _try_overflow_transfer(grid_pos, item):
-					conveyor_items.erase(grid_pos)
+					_erase_conveyor_item(grid_pos)
 				continue
 
 			# --- UNDERFLOW: sides first, then front ---
-			if _is_underflow_cell(grid_pos):
+			if bool(meta.get("underflow", false)):
 				if _try_underflow_transfer(grid_pos, item):
-					conveyor_items.erase(grid_pos)
+					_erase_conveyor_item(grid_pos)
 				continue
 
 			# --- ROUTER: distribute to 3 output directions (round-robin) ---
-			if _is_router_cell(grid_pos):
+			if bool(meta.get("router", false)):
 				# Use pre-decided exit direction if available
 				var exit_dir: int = item.get("exit_dir", -1)
 				if exit_dir >= 0:
 					var next_pos: Vector2i = grid_pos + DIR_VECTORS[exit_dir]
 					var entry_dir: int = (exit_dir + 2) % 4
 					if not _is_cross_faction(grid_pos, next_pos) and _try_transfer_item(next_pos, item["item_id"], entry_dir):
-						conveyor_items.erase(grid_pos)
+						_erase_conveyor_item(grid_pos)
 					else:
 						# Pre-decided path blocked. Try the other outputs; if any
 						# succeeds, transfer. If ALL blocked, leave exit_dir intact
 						# so the item visually stalls at the chosen exit instead
 						# of flicking through all 3 edges every frame.
 						if _try_router_transfer(grid_pos, item):
-							conveyor_items.erase(grid_pos)
+							_erase_conveyor_item(grid_pos)
 				else:
 					if _try_router_transfer(grid_pos, item):
-						conveyor_items.erase(grid_pos)
+						_erase_conveyor_item(grid_pos)
 				continue
 
 			# --- Normal conveyor: push forward ---
-			var drilRotation = main.building_rotation.get(grid_pos, 0)
-			var next_pos = grid_pos + DIR_VECTORS[drilRotation]
-			var entry_dir = (drilRotation + 2) % 4  # Item enters from opposite of sender's facing
+			var next_pos: Vector2i = meta.get("next", grid_pos + DIR_VECTORS[int(main.building_rotation.get(grid_pos, 0)) % 4])
+			var entry_dir: int = int(meta.get("entry", (int(main.building_rotation.get(grid_pos, 0)) + 2) % 4))
 
 			# Block cross-faction transfers
 			if _is_cross_faction(grid_pos, next_pos):
 				continue
 
 			if _try_transfer_item(next_pos, item["item_id"], entry_dir):
-				conveyor_items.erase(grid_pos)
+				_erase_conveyor_item(grid_pos)
 				continue
 			# No side-dump fallback: a belt only delivers to the cell it's
 			# facing. Without this, a belt running E-W next to a factory to
@@ -1744,16 +2098,12 @@ func _update_conveyors(delta: float) -> void:
 	# progress — they literally don't slide this frame. Belts that are
 	# only queued (not actively decommissioning) keep advancing items.
 	for grid_pos in conveyor_items:
-		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
+		if can_check_belt_block and main.is_belt_conveyance_blocked(grid_pos):
 			continue
 		var item = conveyor_items[grid_pos]
 		if item["progress"] < 1.0:
-			var speed := conveyor_speed
-			var block_id = main.placed_buildings.get(grid_pos, &"")
-			if block_id != &"":
-				var data = Registry.get_block(block_id)
-				if data != null and data.transport_speed > 0:
-					speed = data.transport_speed
+			var meta_adv: Dictionary = _conv_meta.get(grid_pos, {})
+			var speed: float = float(meta_adv.get("speed", conveyor_speed))
 			item["progress"] = minf(item["progress"] + speed * delta, 1.0)
 
 	# Pre-decide exit direction for router items so they animate correctly.
@@ -1765,9 +2115,10 @@ func _update_conveyors(delta: float) -> void:
 	# keeps its current exit_dir so a stalled item doesn't visually
 	# flicker between edges.
 	for grid_pos in conveyor_items:
-		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
+		if can_check_belt_block and main.is_belt_conveyance_blocked(grid_pos):
 			continue
-		if not _is_router_cell(grid_pos):
+		var meta_pick: Dictionary = _conv_meta.get(grid_pos, {})
+		if not bool(meta_pick.get("router", false)):
 			continue
 		var item = conveyor_items[grid_pos]
 		var current_exit: int = item.get("exit_dir", -1)
@@ -1792,14 +2143,15 @@ func _update_conveyors(delta: float) -> void:
 	# each tick by priority; if nothing accepts, the last choice is kept so a
 	# stalled item holds instead of flickering.
 	for grid_pos in conveyor_items:
-		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
+		if can_check_belt_block and main.is_belt_conveyance_blocked(grid_pos):
 			continue
-		var is_of: bool = _is_overflow_cell(grid_pos)
-		var is_uf: bool = _is_underflow_cell(grid_pos)
+		var meta_of: Dictionary = _conv_meta.get(grid_pos, {})
+		var is_of: bool = bool(meta_of.get("overflow", false))
+		var is_uf: bool = bool(meta_of.get("underflow", false))
 		if not is_of and not is_uf:
 			continue
 		var of_item = conveyor_items[grid_pos]
-		var of_rot: int = main.building_rotation.get(grid_pos, 0)
+		var of_rot: int = int(meta_of.get("rot", main.building_rotation.get(grid_pos, 0)))
 		var of_front: int = of_rot
 		var of_left: int = (of_rot + 3) % 4
 		var of_right: int = (of_rot + 1) % 4
@@ -1811,16 +2163,11 @@ func _update_conveyors(delta: float) -> void:
 
 	# Advance junction perpendicular-axis items too
 	for grid_pos in junction_items:
-		if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(grid_pos):
+		if can_check_belt_block and main.is_belt_conveyance_blocked(grid_pos):
 			continue
 		var item = junction_items[grid_pos]
 		if item["progress"] < 1.0:
-			var speed := conveyor_speed
-			var block_id = main.placed_buildings.get(grid_pos, &"")
-			if block_id != &"":
-				var data = Registry.get_block(block_id)
-				if data != null and data.transport_speed > 0:
-					speed = data.transport_speed
+			var speed: float = float(_conv_meta.get(grid_pos, {}).get("speed", conveyor_speed))
 			item["progress"] = minf(item["progress"] + speed * delta, 1.0)
 
 
@@ -1828,6 +2175,9 @@ func _update_conveyors(delta: float) -> void:
 ## Fluids are routed to pipes; items to conveyors.
 ## entry_dir: direction the item entered from (0-3), or -1 for default.
 func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) -> bool:
+	if _conv_meta_dirty:
+		_rebuild_conveyor_metadata()
+
 	# Reject transfers into any block that isn't fully built (under
 	# construction, deconstructing, or derelict). Items just pile up on the
 	# upstream belt until the destination finishes construction. The core
@@ -1836,6 +2186,14 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 	if not _is_core_cell(to) and main.has_method("is_building_inactive") and main.is_building_inactive(to):
 		return false
 
+	# The common case is conveyor -> conveyor. Handle it before the slower
+	# block/fluid/factory acceptance chain; cached conveyor metadata already
+	# excludes pipes, payload/freight transports, and non-transport blocks.
+	if _conv_meta.has(to):
+		if Registry.fluids.has(item_id):
+			return false
+		return _try_transfer_to_conveyor_fast(to, item_id, entry_dir)
+
 	# Incinerator: destroys items / fluids on input as long as it has
 	# power. With power down, the item bounces back upstream.
 	if _is_incinerator_cell(to):
@@ -1843,6 +2201,7 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 		var inc_anchor2: Vector2i = main.building_origins.get(to, to)
 		if power_sys_inc2 and power_sys_inc2.get_electrical_efficiency(inc_anchor2) <= 0.0:
 			return false
+		_incinerate_smoke(inc_anchor2)
 		return true
 
 	# Core absorbs if not full — reject if storage full (item stays on belt)
@@ -1857,33 +2216,25 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 		if _is_pipe_cell(to):
 			return _add_fluid_to_pipe(to, item_id, PIPE_PUSH_AMOUNT)
 	else:
-		# Junction: route to correct slot based on entry axis. Refuse to
-		# accept anything if the cell on the FAR side (the exit) has no
-		# placed building — items would otherwise queue forever inside a
-		# junction whose output spills onto bare terrain. They stay on the
-		# upstream belt until something exists for the junction to feed.
+		# Junction: route to the correct per-axis slot only when the
+		# opposite side is a real, currently-valid output for this item.
+		# Otherwise items would queue forever inside a junction whose far
+		# side is bare terrain, occupied, wrong-faction, or an incompatible
+		# block input. They stay on the upstream belt until the straight-
+		# through output can actually receive them.
 		if _is_junction_cell(to) and entry_dir >= 0:
-			var exit_dir: int = (entry_dir + 2) % 4
-			var exit_pos: Vector2i = to + DIR_VECTORS[exit_dir]
-			if not main.placed_buildings.has(exit_pos):
+			if not _junction_would_accept_item(to, item_id, entry_dir):
 				return false
 			if _is_junction_primary_axis(to, entry_dir):
-				if not conveyor_items.has(to):
-					conveyor_items[to] = {
-						"item_id": item_id,
-						"progress": 1.0,
-						"entry_dir": entry_dir,
-					}
-					return true
+				_set_conveyor_item(to, item_id, 1.0, entry_dir)
+				return true
 			else:
-				if not junction_items.has(to):
-					junction_items[to] = {
-						"item_id": item_id,
-						"progress": 1.0,
-						"entry_dir": entry_dir,
-					}
-					return true
-			return false
+				junction_items[to] = {
+					"item_id": item_id,
+					"progress": 1.0,
+					"entry_dir": entry_dir,
+				}
+				return true
 
 		# Special blocks: items pass through instantly (no visual sliding)
 		# Overflow / underflow are NOT instant — they animate the item across the
@@ -1903,11 +2254,7 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 
 		# Route item to conveyor
 		if _is_conveyor_cell(to) and not conveyor_items.has(to):
-			conveyor_items[to] = {
-				"item_id": item_id,
-				"progress": 1.0 if _is_instant else 0.0,
-				"entry_dir": entry_dir,
-			}
+			_set_conveyor_item(to, item_id, 1.0 if _is_instant else 0.0, entry_dir)
 			return true
 
 	# Factory accepts on input side (works for both items and fluids)
@@ -2171,6 +2518,8 @@ func _router_exit_accepts(grid_pos: Vector2i, dir: int, item_id: StringName) -> 
 		# Cell currently holding an item is not accepting.
 		if conveyor_items.has(next_pos):
 			return false
+		if _is_bridge_cell(next_pos) and _is_bridge_output(next_pos):
+			return false
 		if _is_junction_cell(next_pos):
 			var junction_entry: int = (dir + 2) % 4
 			return _junction_would_accept_item(next_pos, item_id, junction_entry)
@@ -2200,17 +2549,7 @@ func _router_exit_accepts(grid_pos: Vector2i, dir: int, item_id: StringName) -> 
 ## which split items in non-forward directions, so the simple lookahead
 ## above doesn't apply.
 func _is_simple_conveyor(grid_pos: Vector2i) -> bool:
-	if not _is_conveyor_cell(grid_pos):
-		return false
-	if _is_router_cell(grid_pos) or _is_junction_cell(grid_pos):
-		return false
-	if _is_sorter_cell(grid_pos) or _is_inverted_sorter_cell(grid_pos):
-		return false
-	if _is_overflow_cell(grid_pos) or _is_underflow_cell(grid_pos):
-		return false
-	if _is_bridge_cell(grid_pos):
-		return false
-	return true
+	return bool(_conveyor_meta(grid_pos).get("simple", false))
 
 
 func _pick_router_exit(grid_pos: Vector2i, item: Dictionary) -> int:
@@ -2307,6 +2646,17 @@ func _is_bridge_input(grid_pos: Vector2i) -> bool:
 	return false
 
 
+## Returns true if this bridge is the output end of a link (pair[1]).
+func _is_bridge_output(grid_pos: Vector2i) -> bool:
+	var power_sys = _power_sys_ref()
+	if power_sys == null:
+		return false
+	for pair in power_sys.linked_pairs:
+		if pair[1] == grid_pos:
+			return true
+	return false
+
+
 ## Teleports an item from an input bridge to one of its linked output
 ## bridges. Duct bridges may fan out to up to 3 destinations and merge
 ## from up to 3 sources; the dispatch picks the next round-robin
@@ -2342,11 +2692,7 @@ func _try_bridge_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 		# Push the item across.
 		var out_rot: int = main.building_rotation.get(partner, 0)
 		var entry_dir: int = (out_rot + 2) % 4  # enters from behind
-		conveyor_items[partner] = {
-			"item_id": item_id,
-			"progress": 0.0,
-			"entry_dir": entry_dir,
-		}
+		_set_conveyor_item(partner, item_id, 0.0, entry_dir)
 		# Advance round-robin so the next call tries the NEXT
 		# destination first — even spread across multi-output ducts.
 		bridge_output_rr[grid_pos] = (idx + 1) % partners.size()
@@ -2370,8 +2716,10 @@ func _is_junction_primary_axis(_grid_pos: Vector2i, entry_dir: int) -> bool:
 ## Non-mutating mirror of the junction accept path. Used by routers before
 ## committing an exit so they ignore junctions that would immediately reject
 ## the item because their straight-through far side is empty or occupied.
-func _junction_would_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int) -> bool:
+func _junction_would_accept_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int, depth: int = 0) -> bool:
 	if entry_dir < 0:
+		return false
+	if depth > 8:
 		return false
 	var exit_dir: int = (entry_dir + 2) % 4
 	var exit_pos: Vector2i = grid_pos + DIR_VECTORS[exit_dir]
@@ -2387,6 +2735,12 @@ func _junction_would_accept_item(grid_pos: Vector2i, item_id: StringName, entry_
 			return false
 	var next_entry: int = (exit_dir + 2) % 4
 	if _is_conveyor_cell(exit_pos):
+		if _is_junction_cell(exit_pos):
+			return _junction_would_accept_item(exit_pos, item_id, next_entry, depth + 1)
+		if _is_router_cell(exit_pos):
+			var router_rot: int = main.building_rotation.get(exit_pos, 0)
+			if next_entry != (router_rot + 2) % 4:
+				return false
 		return not conveyor_items.has(exit_pos)
 	return _could_block_accept_item(exit_pos, item_id, next_entry)
 
@@ -2508,6 +2862,456 @@ func _try_underflow_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 	if not _is_cross_faction(grid_pos, front_pos):
 		return _try_transfer_item(front_pos, item_id, front_entry)
 	return false
+
+
+# =========================
+# LANE SHIFTER
+# =========================
+
+func _lane_shifter_specs(data: BlockData) -> Dictionary:
+	if data == null or not data.tags.has("lane_shifter"):
+		return {}
+	if data.id == &"large_lane_shifter":
+		return {"banks": 2, "range": 6, "capacity": 3, "cooldown": 0.14, "travel": 0.28}
+	return {"banks": 1, "range": 4, "capacity": 2, "cooldown": 0.2, "travel": 0.32}
+
+
+func _default_lane_route() -> Dictionary:
+	return {
+		"item_id": &"",
+		"mode": "transfer",
+		"enabled": true,
+		"source": Vector2i(-2147483648, -2147483648),
+		"dest": Vector2i(-2147483648, -2147483648),
+		"stalled": 0.0,
+	}
+
+
+func _ensure_lane_shifter_state(anchor: Vector2i) -> Dictionary:
+	var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+	var specs: Dictionary = _lane_shifter_specs(data)
+	if specs.is_empty():
+		return {}
+	var bank_count: int = int(specs.get("banks", 1))
+	if not lane_shifter_state.has(anchor):
+		lane_shifter_state[anchor] = {"banks": []}
+	var state: Dictionary = lane_shifter_state[anchor]
+	if not state.has("inputs") or not (state["inputs"] is Array):
+		state["inputs"] = []
+	if not state.has("outputs") or not (state["outputs"] is Array):
+		state["outputs"] = []
+	if not state.has("banks") or not (state["banks"] is Array):
+		state["banks"] = []
+	var banks: Array = state["banks"]
+	while banks.size() < bank_count:
+		banks.append({
+			"routes": [_default_lane_route(), _default_lane_route()],
+			"suspended": [],
+			"cooldown": 0.0,
+			"route_rr": 0,
+		})
+	while banks.size() > bank_count:
+		banks.pop_back()
+	for bank in banks:
+		if not bank.has("routes") or not (bank["routes"] is Array):
+			bank["routes"] = []
+		while (bank["routes"] as Array).size() < 2:
+			(bank["routes"] as Array).append(_default_lane_route())
+		while (bank["routes"] as Array).size() > 2:
+			(bank["routes"] as Array).pop_back()
+		if not bank.has("suspended") or not (bank["suspended"] is Array):
+			bank["suspended"] = []
+		if not bank.has("cooldown"):
+			bank["cooldown"] = 0.0
+		if not bank.has("route_rr"):
+			bank["route_rr"] = 0
+	return state
+
+
+func get_lane_shifter_links(anchor: Vector2i) -> Dictionary:
+	var state: Dictionary = _ensure_lane_shifter_state(anchor)
+	if state.is_empty():
+		return {"inputs": [], "outputs": []}
+	return {"inputs": state.get("inputs", []), "outputs": state.get("outputs", [])}
+
+
+func set_lane_shifter_links(anchor: Vector2i, inputs: Array, outputs: Array) -> void:
+	var state: Dictionary = _ensure_lane_shifter_state(anchor)
+	if state.is_empty():
+		return
+	state["inputs"] = inputs
+	state["outputs"] = outputs
+	lane_shifter_state[anchor] = state
+
+
+func remove_lane_shifter_link_refs(pos: Vector2i) -> void:
+	for anchor in lane_shifter_state.keys():
+		var state: Dictionary = lane_shifter_state[anchor]
+		for key in ["inputs", "outputs"]:
+			var arr: Array = state.get(key, [])
+			for i in range(arr.size() - 1, -1, -1):
+				if not (arr[i] is Dictionary):
+					arr.remove_at(i)
+					continue
+				if Vector2i(arr[i].get("pos", Vector2i.ZERO)) == pos:
+					arr.remove_at(i)
+			state[key] = arr
+		lane_shifter_state[anchor] = state
+
+
+func set_lane_shifter_route(anchor: Vector2i, bank_idx: int, route_idx: int, item_id: StringName, mode: String = "") -> void:
+	var state: Dictionary = _ensure_lane_shifter_state(anchor)
+	if state.is_empty():
+		return
+	var banks: Array = state["banks"]
+	if bank_idx < 0 or bank_idx >= banks.size():
+		return
+	var routes: Array = banks[bank_idx]["routes"]
+	if route_idx < 0 or route_idx >= routes.size():
+		return
+	var route: Dictionary = routes[route_idx]
+	route["item_id"] = item_id
+	if mode != "":
+		route["mode"] = mode
+	route["enabled"] = item_id != &""
+	route["source"] = Vector2i(-2147483648, -2147483648)
+	route["dest"] = Vector2i(-2147483648, -2147483648)
+	route["stalled"] = 0.0
+	routes[route_idx] = route
+	banks[bank_idx]["routes"] = routes
+	state["banks"] = banks
+	lane_shifter_state[anchor] = state
+
+
+func set_lane_shifter_route_mode(anchor: Vector2i, bank_idx: int, route_idx: int, mode: String) -> void:
+	var state: Dictionary = _ensure_lane_shifter_state(anchor)
+	if state.is_empty():
+		return
+	var banks: Array = state["banks"]
+	if bank_idx < 0 or bank_idx >= banks.size():
+		return
+	var routes: Array = banks[bank_idx]["routes"]
+	if route_idx < 0 or route_idx >= routes.size():
+		return
+	var route: Dictionary = routes[route_idx]
+	route["mode"] = mode
+	routes[route_idx] = route
+	banks[bank_idx]["routes"] = routes
+	state["banks"] = banks
+	lane_shifter_state[anchor] = state
+
+
+func get_lane_shifter_route(anchor: Vector2i, bank_idx: int, route_idx: int) -> Dictionary:
+	var state: Dictionary = _ensure_lane_shifter_state(anchor)
+	if state.is_empty():
+		return {}
+	var banks: Array = state["banks"]
+	if bank_idx < 0 or bank_idx >= banks.size():
+		return {}
+	var routes: Array = banks[bank_idx]["routes"]
+	if route_idx < 0 or route_idx >= routes.size():
+		return {}
+	return routes[route_idx]
+
+
+func _is_lane_compatible_transport(cell: Vector2i) -> bool:
+	if not main.placed_buildings.has(cell):
+		return false
+	var id: StringName = main.placed_buildings[cell]
+	if id != &"conveyor_belt" and id != &"duct":
+		return false
+	if main.has_method("is_belt_conveyance_blocked") and main.is_belt_conveyance_blocked(cell):
+		return false
+	return true
+
+
+func _lane_forward_cells(anchor: Vector2i, data: BlockData, specs: Dictionary, bank_idx: int) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	var rot: int = main.building_rotation.get(anchor, 0) % 4
+	var forward: Vector2i = DIR_VECTORS[rot]
+	var range_tiles: int = int(specs.get("range", 4))
+	var banks: int = int(specs.get("banks", 1))
+	var front_cells: Array[Vector2i] = []
+	for x in range(data.grid_size.x):
+		for y in range(data.grid_size.y):
+			var footprint_cell: Vector2i = anchor + Vector2i(x, y)
+			var edge_cell: Vector2i = footprint_cell + forward
+			var behind_edge: Vector2i = footprint_cell - forward
+			if main.building_origins.get(behind_edge, behind_edge) == anchor:
+				continue
+			front_cells.append(edge_cell)
+	if banks == 2:
+		var split: int = front_cells.size() / 2
+		if bank_idx == 0:
+			front_cells = front_cells.slice(0, split)
+		else:
+			front_cells = front_cells.slice(split)
+	for depth in range(range_tiles):
+		for edge in front_cells:
+			var cell: Vector2i = edge + forward * depth
+			if not cells.has(cell):
+				cells.append(cell)
+	return cells
+
+
+func _lane_vec_valid(v) -> bool:
+	return v is Vector2i and v != Vector2i(-2147483648, -2147483648)
+
+
+func _lane_cells_are_sideways_parallel(source: Vector2i, dest: Vector2i) -> bool:
+	if not _is_lane_compatible_transport(source) or not _is_lane_compatible_transport(dest):
+		return false
+	if source == dest:
+		return false
+	var src_rot: int = main.building_rotation.get(source, 0) % 4
+	var dst_rot: int = main.building_rotation.get(dest, 0) % 4
+	if src_rot != dst_rot:
+		return false
+	var forward: Vector2i = DIR_VECTORS[src_rot]
+	var delta: Vector2i = dest - source
+	return delta.x * forward.x + delta.y * forward.y == 0
+
+
+func _lane_dest_has_room(dest: Vector2i) -> bool:
+	return _is_lane_compatible_transport(dest) \
+			and not conveyor_items.has(dest) \
+			and not (_is_bridge_cell(dest) and _is_bridge_output(dest))
+
+
+func _lane_try_deposit(dest: Vector2i, item_id: StringName) -> bool:
+	if not _lane_dest_has_room(dest):
+		return false
+	var dest_rot: int = main.building_rotation.get(dest, 0) % 4
+	_set_conveyor_item(dest, item_id, 0.0, (dest_rot + 2) % 4)
+	return true
+
+
+func _lane_forward_blocked(source: Vector2i, item_id: StringName) -> bool:
+	if not _is_lane_compatible_transport(source):
+		return false
+	var rot: int = main.building_rotation.get(source, 0) % 4
+	var next_pos: Vector2i = source + DIR_VECTORS[rot]
+	if _is_cross_faction(source, next_pos):
+		return true
+	return not _router_exit_accepts(source, rot, item_id)
+
+
+func _lane_density_near(cell: Vector2i, item_id: StringName) -> int:
+	if not _is_lane_compatible_transport(cell):
+		return 0
+	var rot: int = main.building_rotation.get(cell, 0) % 4
+	var dir: Vector2i = DIR_VECTORS[rot]
+	var total := 0
+	for offset in range(-2, 3):
+		var p: Vector2i = cell + dir * offset
+		if conveyor_items.has(p) and StringName(conveyor_items[p].get("item_id", &"")) == item_id:
+			total += 1
+	return total
+
+
+func _lane_route_allows_pickup(route: Dictionary, delta: float) -> bool:
+	var item_id: StringName = StringName(route.get("item_id", &""))
+	var source: Vector2i = route.get("source", Vector2i.ZERO)
+	var dest: Vector2i = route.get("dest", Vector2i.ZERO)
+	var mode: String = str(route.get("mode", "transfer"))
+	if item_id == &"" or not conveyor_items.has(source):
+		route["stalled"] = 0.0
+		return false
+	if StringName(conveyor_items[source].get("item_id", &"")) != item_id:
+		route["stalled"] = 0.0
+		return false
+	if not _lane_dest_has_room(dest):
+		return false
+	if mode == "overflow":
+		if _lane_forward_blocked(source, item_id):
+			route["stalled"] = float(route.get("stalled", 0.0)) + delta
+		else:
+			route["stalled"] = 0.0
+		return float(route.get("stalled", 0.0)) >= 0.55
+	if mode == "balance":
+		route["stalled"] = 0.0
+		return _lane_density_near(source, item_id) >= _lane_density_near(dest, item_id) + 2
+	route["stalled"] = 0.0
+	return true
+
+
+func _lane_find_pair(anchor: Vector2i, data: BlockData, specs: Dictionary, bank_idx: int, route: Dictionary) -> Dictionary:
+	var item_id: StringName = StringName(route.get("item_id", &""))
+	if item_id == &"":
+		return {}
+	var cells: Array[Vector2i] = _lane_forward_cells(anchor, data, specs, bank_idx)
+	var saved_source = route.get("source", Vector2i(-2147483648, -2147483648))
+	var saved_dest = route.get("dest", Vector2i(-2147483648, -2147483648))
+	if _lane_vec_valid(saved_source) and _lane_vec_valid(saved_dest) \
+			and cells.has(saved_source) and cells.has(saved_dest) \
+			and _lane_cells_are_sideways_parallel(saved_source, saved_dest):
+		return {"source": saved_source, "dest": saved_dest}
+	for source in cells:
+		if not conveyor_items.has(source):
+			continue
+		if StringName(conveyor_items[source].get("item_id", &"")) != item_id:
+			continue
+		for dest in cells:
+			if not _lane_dest_has_room(dest):
+				continue
+			if _lane_cells_are_sideways_parallel(source, dest):
+				return {"source": source, "dest": dest}
+	return {}
+
+
+func _lane_has_programmed_links(state: Dictionary) -> bool:
+	var inputs: Array = state.get("inputs", [])
+	var outputs: Array = state.get("outputs", [])
+	return not inputs.is_empty() and not outputs.is_empty()
+
+
+func _lane_find_programmed_pair(anchor: Vector2i, data: BlockData, specs: Dictionary, bank_idx: int, state: Dictionary) -> Dictionary:
+	var cells: Array[Vector2i] = _lane_forward_cells(anchor, data, specs, bank_idx)
+	var inputs: Array = state.get("inputs", [])
+	var outputs: Array = state.get("outputs", [])
+	for input_spec in inputs:
+		if not (input_spec is Dictionary):
+			continue
+		var source: Vector2i = Vector2i(input_spec.get("pos", Vector2i.ZERO))
+		if not cells.has(source) or not _is_lane_compatible_transport(source):
+			continue
+		if not conveyor_items.has(source):
+			continue
+		var item_id: StringName = StringName(conveyor_items[source].get("item_id", &""))
+		var filter: Array = input_spec.get("filter", [])
+		if not filter.is_empty() and not filter.has(item_id):
+			continue
+		for output_spec in outputs:
+			if not (output_spec is Dictionary):
+				continue
+			var dest: Vector2i = Vector2i(output_spec.get("pos", Vector2i.ZERO))
+			if dest == source:
+				continue
+			if not cells.has(dest) or not _lane_dest_has_room(dest):
+				continue
+			return {"source": source, "dest": dest, "item_id": item_id}
+	return {}
+
+
+func _lane_shifter_powered(anchor: Vector2i) -> bool:
+	var ps := _power_sys_ref()
+	return ps != null and ps.get_electrical_efficiency(anchor) > 0.0
+
+
+func _lane_transfer_moves_outward(anchor: Vector2i, data: BlockData, source: Vector2i, dest: Vector2i) -> bool:
+	var rot: int = main.building_rotation.get(anchor, 0) % 4
+	var forward: Vector2i = DIR_VECTORS[rot]
+	var source_depth: int = (source.x - anchor.x) * forward.x + (source.y - anchor.y) * forward.y
+	var dest_depth: int = (dest.x - anchor.x) * forward.x + (dest.y - anchor.y) * forward.y
+	if dest_depth != source_depth:
+		return dest_depth > source_depth
+	var gs: float = main.GRID_SIZE
+	var center: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs, data.grid_size.y * gs) * 0.5
+	var source_center: Vector2 = main.grid_to_world(source) + Vector2(gs * 0.5, gs * 0.5)
+	var dest_center: Vector2 = main.grid_to_world(dest) + Vector2(gs * 0.5, gs * 0.5)
+	return dest_center.distance_squared_to(center) >= source_center.distance_squared_to(center)
+
+
+func _update_lane_shifters(delta: float) -> void:
+	var anchors: Array[Vector2i] = []
+	for anchor in main.placed_buildings.keys():
+		if main.building_origins.get(anchor, anchor) != anchor:
+			continue
+		var data = Registry.get_block(main.placed_buildings[anchor])
+		if data != null and data.tags.has("lane_shifter"):
+			anchors.append(anchor)
+	for anchor in lane_shifter_state.keys():
+		if not anchors.has(anchor):
+			lane_shifter_state.erase(anchor)
+	for anchor in anchors:
+		var data = Registry.get_block(main.placed_buildings[anchor])
+		var specs: Dictionary = _lane_shifter_specs(data)
+		var state: Dictionary = _ensure_lane_shifter_state(anchor)
+		var powered: bool = _lane_shifter_powered(anchor)
+		var banks: Array = state.get("banks", [])
+		for bank_idx in banks.size():
+			var bank: Dictionary = banks[bank_idx]
+			if powered:
+				_update_lane_shifter_bank(anchor, data, specs, bank, bank_idx, delta, state)
+			banks[bank_idx] = bank
+		state["banks"] = banks
+		lane_shifter_state[anchor] = state
+
+
+func _update_lane_shifter_bank(anchor: Vector2i, data: BlockData, specs: Dictionary, bank: Dictionary, bank_idx: int, delta: float, state: Dictionary) -> void:
+	var travel_time: float = float(specs.get("travel", 0.3))
+	var suspended: Array = bank.get("suspended", [])
+	for i in range(suspended.size() - 1, -1, -1):
+		var transfer: Dictionary = suspended[i]
+		if str(transfer.get("state", "moving")) == "moving":
+			transfer["progress"] = minf(float(transfer.get("progress", 0.0)) + delta / maxf(travel_time, 0.01), 1.0)
+			if float(transfer["progress"]) >= 1.0:
+				transfer["state"] = "waiting"
+		if str(transfer.get("state", "waiting")) == "waiting":
+			if _lane_try_deposit(transfer.get("dest", Vector2i.ZERO), StringName(transfer.get("item_id", &""))):
+				suspended.remove_at(i)
+				continue
+		suspended[i] = transfer
+	bank["suspended"] = suspended
+	bank["cooldown"] = maxf(0.0, float(bank.get("cooldown", 0.0)) - delta)
+	if float(bank.get("cooldown", 0.0)) > 0.0:
+		return
+	var capacity: int = int(specs.get("capacity", 2))
+	if suspended.size() >= capacity:
+		return
+	if _lane_has_programmed_links(state):
+		var programmed_pair: Dictionary = _lane_find_programmed_pair(anchor, data, specs, bank_idx, state)
+		if programmed_pair.is_empty():
+			return
+		var programmed_item: StringName = StringName(programmed_pair.get("item_id", &""))
+		_erase_conveyor_item(programmed_pair["source"])
+		suspended.append({
+			"item_id": programmed_item,
+			"route": -1,
+			"source": programmed_pair["source"],
+			"dest": programmed_pair["dest"],
+			"progress": 0.0,
+			"state": "moving",
+		})
+		bank["suspended"] = suspended
+		bank["cooldown"] = float(specs.get("cooldown", 0.2))
+		return
+	var routes: Array = bank.get("routes", [])
+	if routes.is_empty():
+		return
+	var rr_start: int = int(bank.get("route_rr", 0)) % routes.size()
+	for attempt in routes.size():
+		var idx: int = (rr_start + attempt) % routes.size()
+		var route: Dictionary = routes[idx]
+		if not bool(route.get("enabled", true)):
+			continue
+		if StringName(route.get("item_id", &"")) == &"":
+			continue
+		var pair: Dictionary = _lane_find_pair(anchor, data, specs, bank_idx, route)
+		if pair.is_empty():
+			continue
+		route["source"] = pair["source"]
+		route["dest"] = pair["dest"]
+		if not _lane_route_allows_pickup(route, delta):
+			routes[idx] = route
+			continue
+		var item_id: StringName = StringName(route.get("item_id", &""))
+		_erase_conveyor_item(route["source"])
+		suspended.append({
+			"item_id": item_id,
+			"route": idx,
+			"source": route["source"],
+			"dest": route["dest"],
+			"progress": 0.0,
+			"state": "moving",
+		})
+		routes[idx] = route
+		bank["suspended"] = suspended
+		bank["routes"] = routes
+		bank["cooldown"] = float(specs.get("cooldown", 0.2))
+		bank["route_rr"] = (idx + 1) % routes.size()
+		return
+	bank["routes"] = routes
 
 
 # =========================
@@ -3513,7 +4317,17 @@ func _update_pipes(delta: float) -> void:
 			var entry_dir: int = (dir + 2) % 4  # Fluid enters factory from opposite side
 
 			if pipe["amount"] < units_needed:
-				break
+				if not _is_cross_faction(grid_pos, neighbor):
+					var stored_remainder: float = _try_accept_fluid_storage(
+						neighbor,
+						pipe["fluid_id"],
+						minf(pipe["amount"], PIPE_PUSH_AMOUNT * delta)
+					)
+					if stored_remainder > 0.0:
+						pipe["amount"] -= stored_remainder
+				if pipe["amount"] <= 0:
+					break
+				continue
 
 			# Block cross-faction pipe→factory feed
 			if _is_cross_faction(grid_pos, neighbor):
@@ -3530,6 +4344,16 @@ func _update_pipes(delta: float) -> void:
 			# booster references) into their generic fluid storage.
 			if _try_accept_booster_fluid(neighbor, pipe["fluid_id"]):
 				pipe["amount"] -= units_needed
+				if pipe["amount"] <= 0:
+					break
+				continue
+			var stored_amount: float = _try_accept_fluid_storage(
+				neighbor,
+				pipe["fluid_id"],
+				minf(pipe["amount"], PIPE_PUSH_AMOUNT * delta)
+			)
+			if stored_amount > 0.0:
+				pipe["amount"] -= stored_amount
 				if pipe["amount"] <= 0:
 					break
 
@@ -3563,17 +4387,34 @@ func _update_pipes(delta: float) -> void:
 			var neighbours: Array = spec["neighbors"]
 			var dirs: Array = spec["dirs"]
 			for i in range(neighbours.size()):
-				if jf_amount < jf_needed:
-					break
 				var nb_cell: Vector2i = j_anchor + neighbours[i]
 				var entry_dir: int = (int(dirs[i]) + 2) % 4
 				if _is_cross_faction(j_anchor, nb_cell):
+					continue
+				if jf_amount < jf_needed:
+					var stored_jf_remainder: float = _try_accept_fluid_storage(
+						nb_cell,
+						jf_id,
+						minf(jf_amount, PIPE_PUSH_AMOUNT * delta)
+					)
+					if stored_jf_remainder > 0.0:
+						jf_amount -= stored_jf_remainder
+					if jf_amount <= 0.0:
+						break
 					continue
 				if _try_accept_factory_item(nb_cell, jf_id, entry_dir):
 					jf_amount -= jf_needed
 					continue
 				if _try_accept_booster_fluid(nb_cell, jf_id):
 					jf_amount -= jf_needed
+					continue
+				var stored_jf_amount: float = _try_accept_fluid_storage(
+					nb_cell,
+					jf_id,
+					minf(jf_amount, PIPE_PUSH_AMOUNT * delta)
+				)
+				if stored_jf_amount > 0.0:
+					jf_amount -= stored_jf_amount
 			j_state[ak] = maxf(0.0, jf_amount)
 		pipe_junction_state[j_anchor] = j_state
 
@@ -4382,6 +5223,36 @@ func _block_uses_storage(data: BlockData) -> bool:
 		or data.tags.has("storage")
 
 
+## Pushes backlog from a drill's internal item storage out to its output cells,
+## one unit per stored item type per tick (matching the normal production
+## cadence). Runs every drill tick regardless of whether the drill is currently
+## mining, so a drill that filled up before a consumer/belt existed beside it
+## still offloads once one appears. Items are not re-counted toward `item_mined`
+## — that fired when they were first produced.
+func _drain_drill_storage_to_outputs(origin: Vector2i, data: BlockData, rot: int) -> void:
+	if not block_storage.has(origin):
+		return
+	var storage: Dictionary = block_storage[origin]
+	var items: Dictionary = storage.get("items", {})
+	if items.is_empty():
+		return
+	var output_cells = _get_all_output_cells(origin, data.grid_size, rot)
+	if data.tags.has("omnidirectional"):
+		output_cells = _get_full_ring(origin, data.grid_size)
+	for item_id in items.keys():
+		if int(items[item_id]) <= 0:
+			continue
+		for out_pos in output_cells:
+			if _is_cross_faction(origin, out_pos):
+				continue
+			var entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
+			if _try_push_item(out_pos, item_id, entry_dir):
+				items[item_id] = int(items[item_id]) - 1
+				if items[item_id] <= 0:
+					items.erase(item_id)
+				break
+
+
 ## Adds an item or fluid to a building's internal storage.
 ## Returns true if successfully stored, false if storage is full.
 func _add_to_storage(origin: Vector2i, item_id: StringName, data: BlockData) -> bool:
@@ -4626,13 +5497,13 @@ func _update_storage_unloading(_delta: float) -> void:
 				# Don't push onto a conveyor that's feeding INTO this building.
 				if _conveyor_feeds_toward_building(out_pos, origin, grid_size):
 					continue
+				if _is_bridge_cell(out_pos) and _is_bridge_output(out_pos):
+					continue
+				if not _router_accepts_from_building_side(out_pos, origin, grid_size):
+					continue
 				var entry_dir: int = _get_entry_dir_from_building(out_pos, origin, grid_size)
 				if _is_conveyor_cell(out_pos) and not conveyor_items.has(out_pos):
-					conveyor_items[out_pos] = {
-						"item_id": item_id,
-						"progress": 0.0,
-						"entry_dir": entry_dir,
-					}
+					_set_conveyor_item(out_pos, item_id, 0.0, entry_dir)
 					storage["items"][item_id] = int(storage["items"][item_id]) - 1
 					if int(storage["items"][item_id]) <= 0:
 						items_to_remove[item_id] = true
@@ -4660,8 +5531,8 @@ func _update_storage_unloading(_delta: float) -> void:
 
 		# Try to push stored fluids into adjacent pipes.
 		# Only fluids the block actually PRODUCES are released — input fluids
-		# (e.g. the Graphite Electrolyzer's water) must stay buffered to be
-		# consumed, never leaked back out. Blocks with no declared fluid
+		# (e.g. the Compound Mixer's water) must stay buffered to be consumed,
+		# never leaked back out. Non-factory sources with no declared fluid
 		# output (pumps, condensers) have an empty product set and drain
 		# everything they hold, as before.
 		var produced_fluids := {}
@@ -4671,6 +5542,7 @@ func _update_storage_unloading(_delta: float) -> void:
 				var osn := StringName(oid)
 				if Registry.get_fluid(osn) != null:
 					produced_fluids[osn] = true
+		var factory_only_outputs: bool = data != null and data.category == BlockData.BlockCategory.FACTORIES
 		var has_output_sides: bool = data != null and not data.output_sides.is_empty()
 		var fluids_to_remove := {}
 		for fluid_id in storage["fluids"]:
@@ -4679,7 +5551,10 @@ func _update_storage_unloading(_delta: float) -> void:
 				fluids_to_remove[fluid_id] = true
 				continue
 			# Skip inputs / anything this block doesn't produce.
-			if not produced_fluids.is_empty() and not produced_fluids.has(fsn):
+			if factory_only_outputs:
+				if not produced_fluids.has(fsn):
+					continue
+			elif not produced_fluids.is_empty() and not produced_fluids.has(fsn):
 				continue
 			# Honour output_sides routing: a routed fluid (e.g. hydrogen up /
 			# oxygen down) may ONLY exit its configured edge. Unrouted fluids
@@ -4695,6 +5570,9 @@ func _update_storage_unloading(_delta: float) -> void:
 				if _is_cross_faction(origin, neighbor):
 					continue
 				if _is_pipe_cell(neighbor):
+					if data != null and data.category == BlockData.BlockCategory.FACTORIES \
+							and _pipe_feeds_toward_building(neighbor, origin, grid_size):
+						continue
 					var from_dir: int = (_get_entry_dir_from_building(neighbor, origin, grid_size) + 2) % 4
 					if _add_fluid_to_pipe(neighbor, fluid_id, PIPE_PUSH_AMOUNT, from_dir):
 						storage["fluids"][fluid_id] = float(storage["fluids"][fluid_id]) - 1.0
@@ -4846,16 +5724,14 @@ func _update_belt_unloaders(_delta: float) -> void:
 		for sink_pos in sinks:
 			if conveyor_items.has(sink_pos):
 				continue
+			if _is_bridge_cell(sink_pos) and _is_bridge_output(sink_pos):
+				continue
 			var entry_dir: int = -1
 			for d in range(4):
 				if origin + DIR_VECTORS[d] == sink_pos:
 					entry_dir = (d + 2) % 4
 					break
-			conveyor_items[sink_pos] = {
-				"item_id": pulled_id,
-				"progress": 0.0,
-				"entry_dir": entry_dir,
-			}
+			_set_conveyor_item(sink_pos, pulled_id, 0.0, entry_dir)
 			pushed = true
 			break
 		if pushed:
@@ -4920,15 +5796,9 @@ func _absorb_item(item_id: StringName, core_grid_pos: Vector2i = Vector2i(-1, -1
 
 ## Returns true if the cell has an item transport (conveyor/belt, NOT pipes or payloads).
 func _is_conveyor_cell(grid_pos: Vector2i) -> bool:
-	if not main.placed_buildings.has(grid_pos):
-		return false
-	var data = Registry.get_block(main.placed_buildings[grid_pos])
-	if data == null:
-		return false
-	# Payload/freight conveyors are NOT regular conveyors
-	if data.tags.has("payload") or data.tags.has("freight"):
-		return false
-	return data.is_transport() and not data.transports_fluid
+	if _conv_meta_dirty:
+		_rebuild_conveyor_metadata()
+	return _conv_meta.has(grid_pos)
 
 
 ## Returns true if the cell at conv_pos is a conveyor whose direction points
@@ -4943,6 +5813,17 @@ func _conveyor_feeds_into(conv_pos: Vector2i, toward_pos: Vector2i) -> bool:
 	return conv_pos + forward == toward_pos
 
 
+## Returns true if the cell at pipe_pos is a fluid transport whose direction
+## points toward toward_pos. Used to prevent factory fluid outputs from
+## back-flowing into a pipe/bridge that is feeding that factory.
+func _pipe_feeds_into(pipe_pos: Vector2i, toward_pos: Vector2i) -> bool:
+	if not _is_pipe_cell(pipe_pos):
+		return false
+	var rot: int = main.building_rotation.get(pipe_pos, 0)
+	var forward: Vector2i = DIR_VECTORS[rot % 4]
+	return pipe_pos + forward == toward_pos
+
+
 ## Returns true if the cell has a fluid transport (pipe, NOT pumps).
 func _is_pipe_cell(grid_pos: Vector2i) -> bool:
 	if not main.placed_buildings.has(grid_pos):
@@ -4955,15 +5836,13 @@ func _is_pipe_cell(grid_pos: Vector2i) -> bool:
 
 ## Returns true if the cell is a router (splits items to 3 outputs like Mindustry).
 func _is_router_cell(grid_pos: Vector2i) -> bool:
-	if not main.placed_buildings.has(grid_pos):
-		return false
-	var data = Registry.get_block(main.placed_buildings[grid_pos])
-	if data == null:
-		return false
-	return data.tags.has("router")
+	return bool(_conveyor_meta(grid_pos).get("router", false))
 
 
 func _has_block_tag(grid_pos: Vector2i, tag: String) -> bool:
+	var meta: Dictionary = _conveyor_meta(grid_pos)
+	if not meta.is_empty() and meta.has(tag):
+		return bool(meta[tag])
 	if not main.placed_buildings.has(grid_pos):
 		return false
 	var data = Registry.get_block(main.placed_buildings[grid_pos])
@@ -5023,6 +5902,30 @@ func _is_incinerator_cell(grid_pos: Vector2i) -> bool:
 	return data.tags.has("incinerator")
 
 
+## Spawns a small gray smoke puff just above an incinerator when it burns an
+## item. Throttled per anchor so a high-throughput feed reads as a steady wisp
+## rather than spamming a particle node per item. Skipped while paused.
+func _incinerate_smoke(anchor: Vector2i) -> void:
+	if "world_paused" in main and main.world_paused:
+		return
+	var now: int = Time.get_ticks_msec()
+	if now < int(_incinerate_smoke_next.get(anchor, 0)):
+		return
+	_incinerate_smoke_next[anchor] = now + 110  # ~9 puffs/sec max
+	var overlay = get_node_or_null("/root/Main/ParticleOverlay")
+	if overlay == null or not overlay.has_method("spawn_burst"):
+		return
+	var gs: float = float(main.GRID_SIZE)
+	var gsize := Vector2i(1, 1)
+	if main.placed_buildings.has(anchor):
+		var bdata = Registry.get_block(main.placed_buildings[anchor])
+		if bdata != null:
+			gsize = bdata.grid_size
+	# Centered horizontally, just above the block's top edge.
+	var pos: Vector2 = main.grid_to_world(anchor) + Vector2(gsize.x * gs * 0.5, -gs * 0.1)
+	overlay.spawn_burst(pos, "incinerate_smoke")
+
+
 # =========================
 # BUILDING EVENTS
 # =========================
@@ -5031,6 +5934,7 @@ func _on_building_placed(block_id: StringName, grid_pos: Vector2i) -> void:
 	# Structural change — the role buckets must be rebuilt before next use.
 	_buckets_dirty = true
 	_pipe_net_dirty = true
+	_mark_conveyor_cache_dirty()
 	_clear_drill_scan_cache()
 	var data = Registry.get_block(block_id)
 	if data == null:
@@ -5098,10 +6002,12 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	# Structural change — the role buckets must be rebuilt before next use.
 	_buckets_dirty = true
 	_pipe_net_dirty = true
+	_mark_conveyor_cache_dirty()
 	_clear_drill_scan_cache()
-	conveyor_items.erase(grid_pos)
+	_erase_conveyor_item(grid_pos)
 	pipe_contents.erase(grid_pos)
 	drill_timers.erase(grid_pos)
+	drill_active.erase(grid_pos)
 	pump_timers.erase(grid_pos)
 	extractor_efficiency.erase(grid_pos)
 	factory_buffers.erase(grid_pos)
@@ -5110,6 +6016,7 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 	junction_items.erase(grid_pos)
 	sorter_filters.erase(grid_pos)
 	sorter_side_index.erase(grid_pos)
+	lane_shifter_state.erase(grid_pos)
 	payload_items.erase(grid_pos)
 	payload_router_idx.erase(grid_pos)
 	constructor_state.erase(grid_pos)
@@ -5137,6 +6044,7 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 ## the live pipe partition — so invalidate the cached networks.
 func _on_building_completed_for_pipes(_block_id: StringName, _grid_pos: Vector2i) -> void:
 	_pipe_net_dirty = true
+	_mark_conveyor_cache_dirty()
 
 
 # =========================
@@ -5302,6 +6210,37 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 	storage["fluids"] = fluids
 	block_storage[origin] = storage
 	return true
+
+
+func _try_accept_fluid_storage(grid_pos: Vector2i, fluid_id: StringName, amount: float) -> float:
+	if amount <= 0.0 or not main.placed_buildings.has(grid_pos):
+		return 0.0
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null or not data.tags.has("fluid_storage") or data.liquid_capacity <= 0.0:
+		return 0.0
+	var fluid = Registry.get_fluid(fluid_id)
+	if fluid == null:
+		return 0.0
+	var anchor = main.get_building_anchor(grid_pos)
+	var origin: Vector2i = anchor if anchor != null else grid_pos
+	if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+		return 0.0
+	if not block_storage.has(origin):
+		block_storage[origin] = {"items": {}, "fluids": {}}
+	var storage: Dictionary = block_storage[origin]
+	if not storage.has("fluids"):
+		storage["fluids"] = {}
+	var fluids: Dictionary = storage["fluids"]
+	var total: float = 0.0
+	for k in fluids:
+		total += float(fluids[k])
+	var accepted: float = minf(amount, maxf(0.0, float(data.liquid_capacity) - total))
+	if accepted <= 0.0:
+		return 0.0
+	fluids[fluid_id] = float(fluids.get(fluid_id, 0.0)) + accepted
+	storage["fluids"] = fluids
+	block_storage[origin] = storage
+	return accepted
 
 
 func _try_accept_turret_ammo(grid_pos: Vector2i, item_id: StringName) -> bool:
@@ -6344,7 +7283,7 @@ func _update_loaders(_delta: float) -> void:
 					if not payload_data.has("stored_items"):
 						payload_data["stored_items"] = {}
 					payload_data["stored_items"][item_id] = int(payload_data["stored_items"].get(item_id, 0)) + 1
-					conveyor_items.erase(edge_pos)
+					_erase_conveyor_item(edge_pos)
 					total_stored += 1
 
 
@@ -6518,6 +7457,89 @@ func _update_unloaders(_delta: float) -> void:
 				# If no payload and no internal storage, go idle
 				if state["payload"] == null and internal.is_empty():
 					state["phase"] = "idle"
+
+
+func _update_fluid_unloaders(delta: float) -> void:
+	var processed := {}
+	for grid_pos in _bucket("fluid_unloader"):
+		var block_id = main.placed_buildings[grid_pos]
+		var data = Registry.get_block(block_id)
+		if data == null or not data.tags.has("fluid_unloader"):
+			continue
+
+		var anchor = main.get_building_anchor(grid_pos)
+		var origin: Vector2i = anchor if anchor != null else grid_pos
+		if processed.has(origin):
+			continue
+		processed[origin] = true
+
+		var sector_script = _sector_script_ref()
+		if sector_script and sector_script.is_building_disabled(origin):
+			continue
+		if main.has_method("is_building_inactive") and main.is_building_inactive(origin):
+			continue
+
+		var rot: int = main.building_rotation.get(origin, 0)
+		var output_cells: Array[Vector2i] = _get_front_edge(origin, data.grid_size, rot)
+		if output_cells.is_empty():
+			continue
+		var rate: float = data.transport_speed if data.transport_speed > 0.0 else PIPE_PUSH_AMOUNT
+		var remaining: float = rate * delta
+		if remaining <= 0.0:
+			continue
+
+		var perimeter: Array[Vector2i] = _get_all_perimeter_cells(origin, data.grid_size)
+		for source_cell in perimeter:
+			if remaining <= 0.0:
+				break
+			if _is_cross_faction(origin, source_cell):
+				continue
+			if not main.placed_buildings.has(source_cell):
+				continue
+			var source_anchor: Vector2i = main.building_origins.get(source_cell, source_cell)
+			if source_anchor == origin:
+				continue
+			var source_data = Registry.get_block(main.placed_buildings.get(source_anchor, &""))
+			if source_data == null or not source_data.tags.has("fluid_storage"):
+				continue
+			if main.has_method("is_building_inactive") and main.is_building_inactive(source_anchor):
+				continue
+			if not block_storage.has(source_anchor):
+				continue
+			var storage: Dictionary = block_storage[source_anchor]
+			var fluids: Dictionary = storage.get("fluids", {})
+			if fluids.is_empty():
+				continue
+
+			for fluid_id in fluids.keys():
+				if remaining <= 0.0:
+					break
+				var available: float = float(fluids.get(fluid_id, 0.0))
+				if available <= 0.0:
+					continue
+				for out_pos in output_cells:
+					if remaining <= 0.0 or available <= 0.0:
+						break
+					if _is_cross_faction(origin, out_pos):
+						continue
+					if not _is_pipe_cell(out_pos):
+						continue
+					var from_dir := (_get_entry_dir_from_building(out_pos, origin, data.grid_size) + 2) % 4
+					var space: float = _pipe_fluid_space(out_pos, StringName(fluid_id), from_dir)
+					if space <= 0.0:
+						continue
+					var moved: float = minf(minf(available, remaining), space)
+					if moved <= 0.0:
+						continue
+					if _add_fluid_to_pipe(out_pos, StringName(fluid_id), moved, from_dir):
+						available -= moved
+						remaining -= moved
+						if available <= 0.0:
+							fluids.erase(fluid_id)
+						else:
+							fluids[fluid_id] = available
+			storage["fluids"] = fluids
+			block_storage[source_anchor] = storage
 
 
 # =========================
@@ -6911,6 +7933,7 @@ func _update_mass_drivers(delta: float) -> void:
 
 func _draw() -> void:
 	_draw_items()
+	_draw_lane_shifters()
 	_draw_payloads()
 	_draw_mass_drivers()
 	# In-world cycle progress bars were removed — the player reads
@@ -7073,21 +8096,22 @@ func _draw_items() -> void:
 		if _la_items and _la_items.has_method("is_block_hidden") \
 				and _la_items.is_block_hidden(main.building_origins.get(grid_pos, grid_pos)):
 			continue
+		var meta: Dictionary = _conv_meta.get(grid_pos, {})
 		# Bridges are visually "underground" — items inside one are
 		# being teleported between the input and output ends and
 		# shouldn't appear on the conveyor surface. Skip the draw.
-		if _is_bridge_cell(grid_pos):
+		if bool(meta.get("bridge", false)):
 			continue
 		var entry = conveyor_items[grid_pos]
 		var item_id: StringName = entry["item_id"]
 		var progress: float = entry["progress"]
 
-		var item = Registry.get_item_or_fluid(item_id)
+		var item = _item_visual_data(item_id)
 		if item == null:
 			continue
 
 		# Figure out which direction this conveyor faces
-		var rotation = main.building_rotation.get(grid_pos, 0)
+		var rotation: int = int(meta.get("rot", main.building_rotation.get(grid_pos, 0)))
 		# Routers use their pre-decided exit_dir instead of cell rotation.
 		# Until the picker commits one, hold the item at cell center
 		# instead of animating it toward the cell's `rotation` — which on
@@ -7097,8 +8121,8 @@ func _draw_items() -> void:
 		var exit_dir: int = entry.get("exit_dir", -1)
 		# Routers and overflow/underflow belts hold the item at cell centre until
 		# an exit is decided, then animate it out toward that face.
-		var holds_center: bool = _is_router_cell(grid_pos) \
-			or _is_overflow_cell(grid_pos) or _is_underflow_cell(grid_pos)
+		var holds_center: bool = bool(meta.get("router", false)) \
+			or bool(meta.get("overflow", false)) or bool(meta.get("underflow", false))
 		if holds_center and exit_dir < 0:
 			var cw: Vector2 = main.grid_to_world(grid_pos) \
 				+ Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
@@ -7113,6 +8137,10 @@ func _draw_items() -> void:
 				draw_circle(ip, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
 				draw_arc(ip, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
 			continue
+		if bool(meta.get("junction", false)):
+			var j_entry_dir: int = int(entry.get("entry_dir", -1))
+			if j_entry_dir >= 0 and j_entry_dir <= 3:
+				exit_dir = (j_entry_dir + 2) % 4
 		var effective_dir: int = exit_dir if exit_dir >= 0 else rotation
 		var dir_vec = Vector2(DIR_VECTORS[effective_dir])
 
@@ -7170,7 +8198,7 @@ func _draw_items() -> void:
 		var item_id: StringName = entry["item_id"]
 		var progress: float = entry["progress"]
 
-		var item = Registry.get_item_or_fluid(item_id)
+		var item = _item_visual_data(item_id)
 		if item == null:
 			continue
 
@@ -7201,11 +8229,143 @@ func _draw_items() -> void:
 			draw_arc(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
 
 
+func _lane_shifter_effect_geometry(anchor: Vector2i, data: BlockData, specs: Dictionary,
+		building_sys: Node) -> Dictionary:
+	var gs: float = main.GRID_SIZE
+	var rot: int = main.building_rotation.get(anchor, 0) % 4
+	var forward := Vector2(DIR_VECTORS[rot])
+	var right := Vector2(DIR_VECTORS[(rot + 1) % 4])
+	var front_cells: Array[Vector2i] = _get_front_edge(anchor, data.grid_size, rot)
+	if front_cells.is_empty():
+		return {}
+	var top_offset := Vector2.ZERO
+	if building_sys:
+		top_offset = building_sys._get_top_offset(Vector2.ZERO)
+	var front_center := Vector2.ZERO
+	for cell in front_cells:
+		front_center += main.grid_to_world(cell) + Vector2(gs * 0.5, gs * 0.5)
+	front_center /= float(front_cells.size())
+	var base_center: Vector2 = front_center - forward * (gs * 0.5) + top_offset
+	var range_px: float = float(int(specs.get("range", 4))) * gs
+	var width_px: float = float(maxi(front_cells.size(), 1)) * gs
+	var end_center: Vector2 = base_center + forward * range_px
+	return {
+		"base": base_center,
+		"end": end_center,
+		"forward": forward,
+		"right": right,
+		"range_px": range_px,
+		"width_px": width_px,
+	}
+
+
+func _draw_lane_shifter_field(effect: Dictionary, cobalt: Color) -> void:
+	if effect.is_empty():
+		return
+	var base: Vector2 = effect["base"]
+	var end: Vector2 = effect["end"]
+	var right: Vector2 = effect["right"]
+	var half_width: float = float(effect["width_px"]) * 0.5
+	var pts := PackedVector2Array([
+		base - right * half_width,
+		base + right * half_width,
+		end + right * half_width,
+		end - right * half_width,
+	])
+	var cols := PackedColorArray([
+		Color(cobalt.r, cobalt.g, cobalt.b, 0.7),
+		Color(cobalt.r, cobalt.g, cobalt.b, 0.7),
+		Color(cobalt.r, cobalt.g, cobalt.b, 0.0),
+		Color(cobalt.r, cobalt.g, cobalt.b, 0.0),
+	])
+	draw_polygon(pts, cols)
+
+
+func _draw_lane_shifter_particles(effect: Dictionary, transfer: Dictionary, anchor: Vector2i,
+		data: BlockData, cobalt: Color) -> void:
+	if effect.is_empty():
+		return
+	var source: Vector2i = transfer.get("source", Vector2i.ZERO)
+	var dest: Vector2i = transfer.get("dest", Vector2i.ZERO)
+	var outward: bool = _lane_transfer_moves_outward(anchor, data, source, dest)
+	var t: float = _lane_shifter_visual_clock
+	var base: Vector2 = effect["base"]
+	var forward: Vector2 = effect["forward"]
+	var right: Vector2 = effect["right"]
+	var range_px: float = float(effect["range_px"])
+	var width_px: float = float(effect["width_px"])
+	var particle_count: int = maxi(12, int(width_px / main.GRID_SIZE) * 14)
+	var square_size: float = maxf(1.5, main.GRID_SIZE * 0.052 * main.SPRITE_SCALE_FACTOR)
+	var seed: float = float((source.x * 31 + source.y * 17 + dest.x * 13 + dest.y * 7) % 97) / 97.0
+	for i in range(particle_count):
+		var scatter_a: float = fposmod(sin(float(i) * 127.1 + seed * 311.7) * 43758.5453, 1.0)
+		var scatter_b: float = fposmod(sin(float(i) * 269.5 + seed * 183.3) * 24634.6345, 1.0)
+		var scatter_c: float = fposmod(sin(float(i) * 419.2 + seed * 97.9) * 15731.7431, 1.0)
+		var lateral: float = (scatter_a - 0.5) * width_px * 0.86
+		var depth: float = fposmod(t * 0.75 + seed + scatter_b, 1.0)
+		depth = depth if outward else 1.0 - depth
+		var pos: Vector2 = base + forward * (depth * range_px) + right * lateral
+		var fade: float = 1.0 - (depth if outward else 1.0 - depth)
+		var pulse: float = 0.65 + 0.35 * sin(t * 6.0 + float(i))
+		var alpha: float = clampf(0.18 + fade * 0.52, 0.0, 0.72) * pulse
+		var size: float = square_size * (0.75 + 0.35 * scatter_c)
+		draw_rect(Rect2(pos - Vector2(size, size) * 0.5, Vector2(size, size)),
+			Color(cobalt.r, cobalt.g, cobalt.b, alpha), true)
+
+
+func _draw_lane_shifters() -> void:
+	if lane_shifter_state.is_empty():
+		return
+	var building_sys = _building_sys_ref()
+	var _ss_lane = _sector_script_ref()
+	var gs: float = main.GRID_SIZE
+	var cobalt := Color(0.25, 0.62, 1.0, 0.72)
+	for anchor in lane_shifter_state:
+		if not main.placed_buildings.has(anchor):
+			continue
+		var data = Registry.get_block(main.placed_buildings[anchor])
+		if data == null or not data.tags.has("lane_shifter"):
+			continue
+		if _ss_lane and _ss_lane.is_tile_hidden(anchor):
+			continue
+		var state: Dictionary = lane_shifter_state[anchor]
+		var banks: Array = state.get("banks", [])
+		var specs: Dictionary = _lane_shifter_specs(data)
+		var active_transfers: Array = []
+		for bank in banks:
+			var suspended: Array = bank.get("suspended", [])
+			for transfer in suspended:
+				if transfer is Dictionary:
+					active_transfers.append(transfer)
+		if not active_transfers.is_empty():
+			var effect: Dictionary = _lane_shifter_effect_geometry(anchor, data, specs, building_sys)
+			_draw_lane_shifter_field(effect, cobalt)
+			for transfer_p in active_transfers:
+				_draw_lane_shifter_particles(effect, transfer_p, anchor, data, cobalt)
+			for transfer in active_transfers:
+				var item_id_t: StringName = StringName(transfer.get("item_id", &""))
+				var source_t = transfer.get("source", Vector2i.ZERO)
+				var dest_t = transfer.get("dest", Vector2i.ZERO)
+				var progress_t: float = float(transfer.get("progress", 1.0))
+				var from_pos: Vector2 = main.grid_to_world(source_t) + Vector2(gs * 0.5, gs * 0.5)
+				var to_pos: Vector2 = main.grid_to_world(dest_t) + Vector2(gs * 0.5, gs * 0.5)
+				if building_sys:
+					from_pos += building_sys._get_top_offset(main.grid_to_world(source_t))
+					to_pos += building_sys._get_top_offset(main.grid_to_world(dest_t))
+				var item_pos: Vector2 = from_pos.lerp(to_pos, progress_t)
+				item_pos.y -= sin(progress_t * PI) * gs * 0.18
+				var item = Registry.get_item_or_fluid(item_id_t)
+				if item != null and item.icon != null:
+					var tex_size := Vector2(ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR, ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR)
+					draw_texture_rect(item.icon, Rect2(item_pos - tex_size * 0.5, tex_size), false)
+				elif item != null:
+					draw_circle(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
+
+
 ## Draws payloads on payload/freight conveyors.
 ## Building payloads draw their block icon; unit payloads draw the unit icon.
 ## Size is ~48px, centered on the cell, interpolated between cells based on progress.
 func _draw_payloads() -> void:
-	var building_sys = _building_sys_ref()
 	var _ss_payload = _sector_script_ref()
 	var _la_payload = _launch_anim_ref()
 	var gs: float = main.GRID_SIZE
@@ -7435,28 +8595,36 @@ func _draw_pump_progress_bars() -> void:
 		var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
 		if anchor != grid_pos:
 			continue
-		# Need a liquid underneath at all.
-		var max_depth: int = 0
-		var has_liquid := false
-		for x in range(data.grid_size.x):
-			for y in range(data.grid_size.y):
-				var cp: Vector2i = anchor + Vector2i(x, y)
-				var lt = terrain.get_liquid_at(cp)
-				if lt != null and lt.extracted_liquid != &"":
-					has_liquid = true
-					if terrain.has_method("get_water_depth_at"):
-						var d_here: int = int(terrain.get_water_depth_at(cp))
-						if d_here > max_depth:
-							max_depth = d_here
-		if not has_liquid:
+		var depth_mult: float = 0.0
+		var max_eff: float = 1.5
+		if data.vent_fluid != &"":
+			depth_mult = float(extractor_efficiency.get(anchor, compute_extractor_preview_efficiency(anchor, data, 0)))
+			max_eff = 1.0
+		else:
+			# Need a liquid underneath at all.
+			var max_depth: int = 0
+			var has_liquid := false
+			for x in range(data.grid_size.x):
+				for y in range(data.grid_size.y):
+					var cp: Vector2i = anchor + Vector2i(x, y)
+					var lt = terrain.get_liquid_at(cp)
+					if lt != null and lt.extracted_liquid != &"":
+						has_liquid = true
+						if terrain.has_method("get_water_depth_at"):
+							var d_here: int = int(terrain.get_water_depth_at(cp))
+							if d_here > max_depth:
+								max_depth = d_here
+			if not has_liquid:
+				continue
+			if max_depth <= 0:
+				max_depth = 2
+			depth_mult = float(max_depth) / 2.0
+		if depth_mult <= 0.0:
 			continue
-		if max_depth <= 0:
-			max_depth = 2
-		var depth_mult: float = float(max_depth) / 2.0
 		var net_eff: float = 1.0
 		if power_sys and power_sys.has_method("get_electrical_efficiency"):
 			net_eff = clampf(float(power_sys.get_electrical_efficiency(anchor)), 0.0, 1.0)
-		var pct: float = clampf(depth_mult * net_eff, 0.0, 1.5) / 1.5
+		var pct: float = clampf(depth_mult * net_eff, 0.0, max_eff) / maxf(max_eff, 0.0001)
 
 		var world_pos = main.grid_to_world(anchor)
 		var offset = Vector2.ZERO
@@ -7552,7 +8720,7 @@ func _update_factories(delta: float) -> void:
 
 		var state = factory_buffers[origin]
 
-		# Recipe-select factories (Rod Shapper etc.) stay idle until the
+		# Recipe-select factories (Rod Shaper etc.) stay idle until the
 		# player picks a recipe via the world menu. Without a selection the
 		# factory refuses inputs and does not advance — matches the Unit
 		# Refabricator's "pick a T2 first" gate.
@@ -7966,11 +9134,17 @@ func _factory_has_output_route(origin: Vector2i, data: BlockData) -> bool:
 				continue
 			if is_fluid:
 				if _is_pipe_cell(cell):
+					if _pipe_feeds_toward_building(cell, origin, data.grid_size):
+						continue
 					return true
 			else:
 				if _is_core_cell(cell):
 					return true
 				if _is_conveyor_cell(cell) and not conveyor_items.has(cell):
+					if _is_bridge_cell(cell) and _is_bridge_output(cell):
+						continue
+					if not _router_accepts_from_building_side(cell, origin, data.grid_size):
+						continue
 					return true
 	return false
 
@@ -8012,6 +9186,13 @@ func _factory_try_output(origin: Vector2i, data: BlockData, state: Dictionary) -
 				# Skip conveyors that are pointing INTO the factory (feeders).
 				if _conveyor_feeds_toward_building(target_pos, origin, data.grid_size):
 					continue
+				if _is_bridge_cell(target_pos) and _is_bridge_output(target_pos):
+					continue
+				if not _router_accepts_from_building_side(target_pos, origin, data.grid_size):
+					continue
+				if Registry.get_fluid(out_item) != null \
+						and _pipe_feeds_toward_building(target_pos, origin, data.grid_size):
+					continue
 				var push_entry_dir := _get_entry_dir_from_building(target_pos, origin, data.grid_size)
 				if _try_push_item(target_pos, out_item, push_entry_dir):
 					pushed = true
@@ -8046,6 +9227,18 @@ func _factory_try_output(origin: Vector2i, data: BlockData, state: Dictionary) -
 				if _add_to_storage(origin, out_item, data):
 					delivered.append(rel_dir_key)
 				continue
+			if Registry.get_fluid(out_item) != null and _pipe_feeds_toward_building(target_pos, origin, data.grid_size):
+				if _add_to_storage(origin, out_item, data):
+					delivered.append(rel_dir_key)
+				continue
+			if _is_bridge_cell(target_pos) and _is_bridge_output(target_pos):
+				if _add_to_storage(origin, out_item, data):
+					delivered.append(rel_dir_key)
+				continue
+			if not _router_accepts_from_building_side(target_pos, origin, data.grid_size):
+				if _add_to_storage(origin, out_item, data):
+					delivered.append(rel_dir_key)
+				continue
 
 			# Block cross-faction factory output
 			if _is_cross_faction(origin, target_pos):
@@ -8075,6 +9268,28 @@ func _conveyor_feeds_toward_building(conv_pos: Vector2i, origin: Vector2i, grid_
 	and target.y >= origin.y and target.y < origin.y + grid_size.y:
 		return true
 	return false
+
+
+## Returns false when `conv_pos` is a belt/duct router and the building
+## would be pushing into one of that router's output sides. Routers only
+## accept from their back/input face; front/left/right are output-only.
+func _router_accepts_from_building_side(conv_pos: Vector2i, origin: Vector2i, grid_size: Vector2i) -> bool:
+	var meta: Dictionary = _conveyor_meta(conv_pos)
+	if meta.is_empty() or not bool(meta.get("router", false)):
+		return true
+	var entry_dir: int = _get_entry_dir_from_building(conv_pos, origin, grid_size)
+	return entry_dir == int(meta.get("router_entry", (int(meta.get("rot", 0)) + 2) % 4))
+
+
+## Multi-tile variant of _pipe_feeds_into.
+func _pipe_feeds_toward_building(pipe_pos: Vector2i, origin: Vector2i, grid_size: Vector2i) -> bool:
+	if not _is_pipe_cell(pipe_pos):
+		return false
+	var rot: int = main.building_rotation.get(pipe_pos, 0)
+	var forward: Vector2i = DIR_VECTORS[rot % 4]
+	var target: Vector2i = pipe_pos + forward
+	return target.x >= origin.x and target.x < origin.x + grid_size.x \
+			and target.y >= origin.y and target.y < origin.y + grid_size.y
 
 
 ## Attempts to deliver a freshly-built unit out of a fabricator.
@@ -8298,6 +9513,8 @@ func _spawn_unit_at_building_front(origin: Vector2i, data: BlockData, unit_id: S
 	var unit_mgr = _unit_mgr_ref()
 	if unit_mgr:
 		var faction: int = main.get_building_faction(origin)
+		var team: int = UnitData.Team.ENEMY if faction == main.Faction.FEROX else UnitData.Team.PLAYER
+		spawn_world = _spread_fabricator_spawn_position(spawn_world, rot, unit_data, team, unit_mgr)
 		var spawn_facing: float = rot * PI / 2.0
 		if faction == main.Faction.FEROX:
 			# Route through the fabricator-squad system: the new unit
@@ -8320,6 +9537,59 @@ func _spawn_unit_at_building_front(origin: Vector2i, data: BlockData, unit_id: S
 			var sector_script = _sector_script_ref()
 			if sector_script:
 				sector_script.on_unit_produced(unit_id)
+
+
+func _spread_fabricator_spawn_position(base_pos: Vector2, rot: int, unit_data: UnitData, team: int, unit_mgr: Node) -> Vector2:
+	if unit_data == null or unit_mgr == null:
+		return base_pos
+	var gs: float = float(main.GRID_SIZE)
+	var forward := Vector2.RIGHT
+	match rot:
+		0:
+			forward = Vector2.RIGHT
+		1:
+			forward = Vector2.DOWN
+		2:
+			forward = Vector2.LEFT
+		3:
+			forward = Vector2.UP
+	var side := Vector2(-forward.y, forward.x)
+	var candidates: Array[Vector2] = []
+	var lateral_steps: Array[float] = [0.0, -0.65, 0.65, -1.3, 1.3, -1.95, 1.95]
+	var forward_steps: Array[float] = [0.0, 0.55, 1.1, 1.65]
+	for f in forward_steps:
+		for l in lateral_steps:
+			candidates.append(base_pos + forward * float(f) * gs + side * float(l) * gs)
+
+	var ml: int = unit_data.movement_layer
+	var best: Vector2 = base_pos
+	var best_score := -INF
+	for candidate in candidates:
+		if unit_mgr.has_method("is_world_pos_walkable") and not unit_mgr.is_world_pos_walkable(candidate, ml, team):
+			continue
+		var score: float = _fabricator_spawn_clearance_score(candidate, base_pos, ml, unit_mgr)
+		if score > best_score:
+			best_score = score
+			best = candidate
+	return best
+
+
+func _fabricator_spawn_clearance_score(candidate: Vector2, base_pos: Vector2, ml: int, unit_mgr: Node) -> float:
+	var min_d2 := INF
+	for pool_name in ["player_units", "enemies"]:
+		if not (pool_name in unit_mgr):
+			continue
+		for other in unit_mgr.get(pool_name):
+			if other == null or not is_instance_valid(other):
+				continue
+			if "is_dead" in other and other.is_dead:
+				continue
+			if not ("data" in other) or other.data == null or other.data.movement_layer != ml:
+				continue
+			min_d2 = minf(min_d2, candidate.distance_squared_to(other.position))
+	if min_d2 == INF:
+		min_d2 = main.GRID_SIZE * main.GRID_SIZE * 100.0
+	return min_d2 - candidate.distance_squared_to(base_pos) * 0.35
 
 
 ## Tries to accept an item into a factory's input buffer.
@@ -8456,7 +9726,7 @@ func _try_accept_factory_item(grid_pos: Vector2i, item_id: StringName, entry_dir
 	# amount so the factory can keep running for a while without a belt
 	# refilling every cycle).
 	if is_omni or is_unit_fab_early:
-		# Pass `origin` so recipe-select factories (Rod Shapper, Compound Mixer,
+		# Pass `origin` so recipe-select factories (Rod Shaper, Compound Mixer,
 		# Water Centrifuge) resolve the ACTIVE recipe's inputs. Without the
 		# anchor this returned {} for any recipe-select factory and the omni
 		# path rejected every ingredient.

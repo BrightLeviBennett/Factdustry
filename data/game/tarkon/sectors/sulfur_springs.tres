@@ -14,6 +14,6 @@ hex_q = -22
 available_resources = PackedStringArray("mat_copper", "mat_graphite", "mat_sand", "mat_sulfur")
 wave_units_data = PackedStringArray()
 unlocks = PackedStringArray("aluminum_mountains")
-required_sectors = PackedStringArray("zinc_deposits")
+required_sectors = PackedStringArray("huge_lagoon")
 map_path = "res://data/game/tarkon/maps/SS.sector.json"
 tags = PackedStringArray("campaign", "sector")

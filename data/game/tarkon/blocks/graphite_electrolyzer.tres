@@ -7,7 +7,7 @@
 [resource]
 script = ExtResource("1")
 id = &"graphite_electrolyzer"
-display_name = "Graphite Electrolyzer"
+display_name = "Electrolyzer"
 description = "Splits water across graphite electrodes into oxygen and hydrogen gas. Requires electrical power."
 icon = ExtResource("2")
 category = 2

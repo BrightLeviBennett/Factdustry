@@ -290,8 +290,7 @@ func tick_vent_condensers(delta: float) -> void:
 		if data == null or data.id != &"vent_condenser":
 			to_erase.append(anchor)
 			continue
-		var active: bool = not (main.has_method("is_building_inactive") \
-			and main.is_building_inactive(anchor))
+		var active: bool = is_vent_condenser_spinning(anchor, data)
 		var target: float = VENT_CONDENSER_SPIN if active else 0.0
 		var s: Dictionary = bsys._vent_condenser_state[anchor]
 		var step: float = VENT_CONDENSER_ACCEL * delta
@@ -299,6 +298,21 @@ func tick_vent_condensers(delta: float) -> void:
 		s["angle"] = fposmod(float(s["angle"]) + float(s["vel"]) * delta, TAU)
 	for a in to_erase:
 		bsys._vent_condenser_state.erase(a)
+
+
+func is_vent_condenser_spinning(anchor: Vector2i, data: BlockData) -> bool:
+	if data == null:
+		return false
+	if main.has_method("is_building_inactive") and main.is_building_inactive(anchor):
+		return false
+	var ss = main.get_node_or_null("SectorScript")
+	if ss and ss.has_method("is_building_disabled") and ss.is_building_disabled(anchor):
+		return false
+	if data.electrical_power_use > 0:
+		var ps = main.get_node_or_null("PowerSystem")
+		if ps == null or ps.get_electrical_efficiency(anchor) <= 0.0:
+			return false
+	return true
 
 
 # =========================
