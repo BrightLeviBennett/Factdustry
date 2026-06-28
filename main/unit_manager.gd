@@ -258,7 +258,7 @@ func _ready() -> void:
 
 	_setup_astar()
 	_setup_path_worker()
-	_target_icon_tex = load("res://textures/mouse heads/TargetMouse.png") as Texture2D
+	_target_icon_tex = load("res://textures/cursors/Target.png") as Texture2D
 	main.building_placed.connect(_on_building_placed)
 	call_deferred("_spawn_test_nests")
 
@@ -643,7 +643,7 @@ func _command_payload_target(anchor: Vector2i) -> bool:
 	for unit in selected_units:
 		if not is_instance_valid(unit) or unit.is_dead:
 			continue
-		if unit == controlled_entity:
+		if _is_controlled_unit_node(unit):
 			continue
 		if not ("enter_payload_when_able" in unit and unit.enter_payload_when_able):
 			continue
@@ -667,7 +667,7 @@ func _command_attack_unit(enemy: Node2D) -> void:
 	for unit in selected_units:
 		if not is_instance_valid(unit) or unit.is_dead:
 			continue
-		if unit == controlled_entity:
+		if _is_controlled_unit_node(unit):
 			continue
 		unit.manual_target_unit = enemy
 		unit.manual_target_building = null
@@ -691,7 +691,7 @@ func _command_attack_building(bldg_anchor: Vector2i) -> void:
 	for unit in selected_units:
 		if not is_instance_valid(unit) or unit.is_dead:
 			continue
-		if unit == controlled_entity:
+		if _is_controlled_unit_node(unit):
 			continue
 		unit.manual_target_building = bldg_anchor
 		unit.manual_target_unit = null
@@ -735,7 +735,7 @@ func _command_move(world_pos: Vector2) -> void:
 	var living: Array[Node2D] = []
 	for unit in selected_units:
 		if is_instance_valid(unit) and not unit.is_dead:
-			if unit == controlled_entity:
+			if _is_controlled_unit_node(unit):
 				continue
 			# Clear any previous manual target — this is a plain move order.
 			unit.manual_target_unit = null
@@ -3391,6 +3391,18 @@ func get_nearby_units_any_layer(world_pos: Vector2) -> Array:
 	return out
 
 
+func _is_controlled_unit_node(node: Variant) -> bool:
+	return controlled_entity is Node2D and node == controlled_entity
+
+
+func _unit_is_moving_for_collision(unit: Node2D) -> bool:
+	if unit == null or not is_instance_valid(unit):
+		return false
+	var has_path: bool = ("path" in unit and unit.path.size() > 0)
+	var path_idx: int = int(unit.path_index) if "path_index" in unit else 0
+	return (has_path and path_idx < unit.path.size()) or _is_controlled_unit_node(unit)
+
+
 func _resolve_unit_collisions(_delta: float) -> void:
 	# Manual control can move a unit after another unit has already touched
 	# the per-frame neighbour cache. Rebuild here so collision uses the
@@ -3421,8 +3433,7 @@ func _resolve_unit_collisions(_delta: float) -> void:
 	for i in range(count):
 		var a: Node2D = all_units[i]
 		var radius_a: float = a.unit_size
-		var a_moving: bool = (a.path.size() > 0 and a.path_index < a.path.size()) \
-				or a == controlled_entity
+		var a_moving: bool = _unit_is_moving_for_collision(a)
 		var neighbours: Array = get_nearby_units_any_layer(a.position)
 		for b: Node2D in neighbours:
 			var j_v: int = idx_of.get(b.get_instance_id(), -1)
@@ -3430,8 +3441,7 @@ func _resolve_unit_collisions(_delta: float) -> void:
 				continue
 			var j: int = j_v
 			var radius_b: float = b.unit_size
-			var b_moving: bool = (b.path.size() > 0 and b.path_index < b.path.size()) \
-					or b == controlled_entity
+			var b_moving: bool = _unit_is_moving_for_collision(b)
 			var min_dist := radius_a + radius_b
 			var diff := a.position - b.position
 			var dist := diff.length()
@@ -3445,12 +3455,12 @@ func _resolve_unit_collisions(_delta: float) -> void:
 					push_dir = diff / dist
 
 				var overlap := min_dist - dist
-				var pair_has_controlled: bool = a == controlled_entity or b == controlled_entity
+				var pair_has_controlled: bool = _is_controlled_unit_node(a) or _is_controlled_unit_node(b)
 
 				if pair_has_controlled:
 					var shove := push_dir * (overlap + 1.0)
 					var controlled_share := 0.25
-					if a == controlled_entity:
+					if _is_controlled_unit_node(a):
 						offsets[i] += shove * controlled_share
 						offsets[j] -= shove * (1.0 - controlled_share)
 					else:

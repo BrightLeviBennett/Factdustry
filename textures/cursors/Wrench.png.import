@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://3tmsbjxuyx6k"
-path="res://.godot/imported/DefualtMouse.png-3f0b29776091d5763bc8531ddc6daa5a.ctex"
+uid="uid://ck5uklc4moucy"
+path="res://.godot/imported/Wrench.png-8584cb987d8e8780878aad5c3b038d15.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/mouse heads/DefualtMouse.png"
-dest_files=["res://.godot/imported/DefualtMouse.png-3f0b29776091d5763bc8531ddc6daa5a.ctex"]
+source_file="res://textures/cursors/Wrench.png"
+dest_files=["res://.godot/imported/Wrench.png-8584cb987d8e8780878aad5c3b038d15.ctex"]
 
 [params]
 

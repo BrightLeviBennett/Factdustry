@@ -134,14 +134,16 @@ var _last_hovered_grid := Vector2i(-9999, -9999)
 # because libGDX talks to the platform API directly; for us, the
 # robust equivalent is "hide the system cursor, paint our own sprite
 # at the mouse position".
-const _CURSOR_DRILL_PATH := "res://textures/mouse heads/DrillMouse.png"
-const _CURSOR_TARGET_PATH := "res://textures/mouse heads/TargetMouse.png"
-const _CURSOR_DEFAULT_PATH := "res://textures/mouse heads/DefualtMouse.png"
-const _CURSOR_WRENCH_PATH := "res://textures/mouse heads/WrenchMouse.png"
+const _CURSOR_DRILL_PATH := "res://textures/cursors/Drill.png"
+const _CURSOR_TARGET_PATH := "res://textures/cursors/Target.png"
+const _CURSOR_DEFAULT_PATH := "res://textures/cursors/Defualt.png"
+const _CURSOR_WRENCH_PATH := "res://textures/cursors/Wrench.png"
+const _CURSOR_UNLOAD_PATH := "res://textures/cursors/UnloadItems.png"
 var _cursor_drill_tex: Texture2D = null
 var _cursor_target_tex: Texture2D = null
 var _cursor_default_tex: Texture2D = null
 var _cursor_wrench_tex: Texture2D = null
+var _cursor_unload_tex: Texture2D = null
 var _cursor_layer: CanvasLayer = null
 var _cursor_sprite: TextureRect = null
 # Current custom texture (or null = show system cursor)
@@ -310,6 +312,7 @@ func _ready() -> void:
 	_cursor_target_tex = load(_CURSOR_TARGET_PATH) as Texture2D
 	_cursor_default_tex = load(_CURSOR_DEFAULT_PATH) as Texture2D
 	_cursor_wrench_tex = load(_CURSOR_WRENCH_PATH) as Texture2D
+	_cursor_unload_tex = load(_CURSOR_UNLOAD_PATH) as Texture2D
 	_create_custom_cursor()
 
 	_create_portrait_panel()
@@ -548,8 +551,16 @@ func _create_custom_cursor() -> void:
 ## custom texture changes (or clears).
 func _update_mouse_cursor(hovered_grid: Vector2i, in_unit_mode: bool, unit_mgr) -> void:
 	var desired_tex: Texture2D = null
+	# UNLOAD cursor — dragging items out of the drone's inventory onto a
+	# building (core / storage / factory input). Highest priority: it's an
+	# active drag the player initiated, so it overrides the passive world hints.
+	var drone_uc = main.get_node_or_null("PlayerDrone")
+	if _cursor_unload_tex != null and drone_uc != null \
+			and "_dragging_inventory" in drone_uc and bool(drone_uc._dragging_inventory) \
+			and main.placed_buildings.has(hovered_grid):
+		desired_tex = _cursor_unload_tex
 	# TARGET cursor — enemy under cursor + unit-mode + selection.
-	if in_unit_mode and unit_mgr != null and "selected_units" in unit_mgr \
+	elif in_unit_mode and unit_mgr != null and "selected_units" in unit_mgr \
 			and (unit_mgr.selected_units as Array).size() > 0 \
 			and _cursor_target_tex != null \
 			and main.placed_buildings.has(hovered_grid) \
@@ -1899,12 +1910,18 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 			var have_in: int = int(fin_state.get("inputs", {}).get(in_sn, 0))
 			_add_tooltip_fluid_bar(float(have_in), float(cap_in), in_fluid.color, in_fluid.display_name)
 
-	# --- Unit Fabricator Unit Count ---
-	if data.produced_unit != &"":
+	var is_refab: bool = data.tags.has("refabricator")
+	var displayed_unit_id: StringName = data.produced_unit
+	if displayed_unit_id == &"" and _logistics and is_refab \
+			and "refabricator_state" in _logistics and _logistics.refabricator_state.has(origin):
+		displayed_unit_id = StringName(_logistics.refabricator_state[origin].get("selected_t2", &""))
+
+	# --- Unit Fabricator / Refabricator Unit Count ---
+	if displayed_unit_id != &"":
 		# Show current count / max for this unit type
-		var unit_data = Registry.get_unit(data.produced_unit)
-		var unit_name: String = unit_data.display_name if unit_data else str(data.produced_unit)
-		var current_count: int = main.get_player_unit_count(data.produced_unit)
+		var unit_data = Registry.get_unit(displayed_unit_id)
+		var unit_name: String = unit_data.display_name if unit_data else str(displayed_unit_id)
+		var current_count: int = main.get_player_unit_count(displayed_unit_id)
 		var max_count: int = main.get_unit_cap_per_type()
 		var at_cap: bool = current_count >= max_count
 		var count_color := Color(0.9, 0.3, 0.3) if at_cap else Color(0.7, 0.9, 0.7)
@@ -1914,7 +1931,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 	# Non-unit producers show each required input as an icon + amount, with a
 	# diagonal red line struck through it when the building currently lacks
 	# that input. Unit fabricators already get per-input progress bars above.
-	if data.produced_unit == &"":
+	if data.produced_unit == &"" and not is_refab:
 		_add_tooltip_requirements(origin, data)
 
 	# (Conveyor "Carrying:" line removed — what's on the belt is
@@ -2040,7 +2057,10 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		else:
 			eff_color = Color(0.9, 0.4, 0.4)
 		_add_tooltip_line("Efficiency: %d%% (%.2f/s)" % [eff_pct, rate], eff_color)
-	elif data.tags.has("pump"):
+	elif data.tags.has("pump") and data.id != &"vent_turbine":
+		# Vent turbines are primarily power generators; their pump/condenser
+		# "Efficiency" (50% on a vent) reads as the whole block underperforming,
+		# which is misleading. Skip the line for them entirely.
 		var pump_eff: float = 1.0
 		var rate: float = 0.0
 		if _logistics and _logistics.has_method("compute_extractor_preview_efficiency"):
@@ -2108,6 +2128,37 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 						hbox.add_child(lbl)
 						tooltip_vbox.add_child(hbox)
 
+		# Nuclear reactor: show fuel rods plus coolant requirements. Reactors
+		# don't use factory_buffers, so their runtime inputs live in block_storage.
+		elif data.tags.has("nuclear_reactor"):
+			var reactor_reqs: Dictionary = _nuclear_reactor_requirements(data)
+			var reactor_have: Dictionary = _collect_tooltip_requirement_holdings(origin)
+			if not reactor_reqs.is_empty():
+				_add_tooltip_separator()
+				for raw_id in reactor_reqs:
+					var sn_id := StringName(raw_id)
+					var needed: float = float(reactor_reqs[raw_id])
+					var have: float = float(reactor_have.get(sn_id, 0.0))
+					var item = Registry.get_item_or_fluid(sn_id)
+					var hbox = HBoxContainer.new()
+					hbox.add_theme_constant_override("separation", 4)
+					hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+					if item and item.icon:
+						var tex = TextureRect.new()
+						tex.texture = item.icon
+						tex.custom_minimum_size = Vector2(16, 16)
+						tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+						tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+						tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+						hbox.add_child(tex)
+					var lbl = Label.new()
+					lbl.text = "%s / %s" % [_format_req_amount(have), _format_req_amount(needed)]
+					lbl.add_theme_font_size_override("font_size", 12)
+					lbl.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3) if have + 0.0001 >= needed else Color(0.9, 0.5, 0.3))
+					lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+					hbox.add_child(lbl)
+					tooltip_vbox.add_child(hbox)
+
 		# Factory: show input requirements and what's buffered.
 		# Unit fabricators consume the produced unit's build_cost rather
 		# than the BlockData's input_items (which often only lists one
@@ -2116,7 +2167,7 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 		# Refabricators additionally support per-tier-2 overrides via
 		# `refab_recipes` — pick up the currently-selected tier-2's recipe
 		# when there is one, else fall back to `input_items`.
-		elif not data.input_items.is_empty() or data.produced_unit != &"":
+		elif not data.input_items.is_empty() or data.produced_unit != &"" or is_refab:
 			# Don't gate on the runtime factory buffer existing — an unpowered or
 			# not-yet-ticked fabricator (e.g. a naval fabricator placed by the
 			# water before its power line is run) has no buffer entry yet, but the
@@ -2136,6 +2187,10 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 					var custom = data.refab_recipes[rsel]
 					if custom is Dictionary and not custom.is_empty():
 						effective_recipe = custom
+				elif rsel != &"":
+					var refab_unit = Registry.get_unit(rsel)
+					if refab_unit != null and not refab_unit.build_cost.is_empty():
+						effective_recipe = refab_unit.build_cost
 			if _logistics.has_method("_normalize_item_keys"):
 				effective_recipe = _logistics._normalize_item_keys(effective_recipe)
 			# Omnidirectional factories buffer inputs up to max_stored_items.
@@ -2222,41 +2277,6 @@ func _update_block_tooltip(grid_pos: Vector2i) -> void:
 				var ud = Registry.get_unit(StringName(lpayload.get("unit_id", "")))
 				var un: String = ud.display_name if ud else String(lpayload.get("unit_id", "?"))
 				_add_tooltip_line("Holding: %s" % un, Color(0.7, 0.85, 1.0))
-
-	# Refabricator: keep the "Selected Unit: (none — click to pick)"
-	# nudge when nothing's queued (it's a call to action, not status).
-	# The "Producing:" / "Phase:" lines + the held / output unit echo
-	# are dropped — picking the t2 is in the world menu, and the input
-	# bars above already convey progress. Plain factories drop the
-	# phase line for the same reason.
-	var is_refab: bool = data.tags.has("refabricator")
-	if _logistics and is_refab and "refabricator_state" in _logistics and _logistics.refabricator_state.has(origin):
-		var rstate: Dictionary = _logistics.refabricator_state[origin]
-		var sel_t2: StringName = StringName(rstate.get("selected_t2", &""))
-		if sel_t2 == &"":
-			_add_tooltip_line("Selected Unit: (none — click to pick)", Color(0.9, 0.7, 0.3))
-		else:
-			# Show the chosen tier-2 unit and how many of them are alive
-			# on the map. Counts ENEMY/PLAYER-team variants by ID.
-			var udata = Registry.get_unit(sel_t2)
-			var uname: String = udata.display_name if udata and udata.display_name != "" else String(sel_t2)
-			var alive_n: int = 0
-			var unit_mgr = main.get_node_or_null("UnitManager")
-			if unit_mgr:
-				var pools: Array = []
-				if "player_units" in unit_mgr:
-					pools.append(unit_mgr.player_units)
-				if "enemies" in unit_mgr:
-					pools.append(unit_mgr.enemies)
-				for pool in pools:
-					for u in pool:
-						if u == null or not is_instance_valid(u):
-							continue
-						if "is_dead" in u and u.is_dead:
-							continue
-						if "data" in u and u.data and StringName(u.data.id) == sel_t2:
-							alive_n += 1
-			_add_tooltip_line("Selected Unit: %s · %d alive" % [uname, alive_n], Color(0.9, 0.9, 0.6))
 
 	# --- Shield: live HP bar (or recharge countdown when broken) ---
 	# Only shown once the building is BOTH built and powered — i.e. once
@@ -2718,7 +2738,9 @@ func _add_tooltip_separator() -> void:
 func _add_tooltip_requirements(origin: Vector2i, data: BlockData) -> void:
 	# Active inputs — recipe-select factories override input_items.
 	var inputs: Dictionary = {}
-	if _logistics and _logistics.has_method("_get_effective_inputs"):
+	if data.tags.has("nuclear_reactor"):
+		inputs = _nuclear_reactor_requirements(data)
+	elif _logistics and _logistics.has_method("_get_effective_inputs"):
 		inputs = _logistics._get_effective_inputs(data, origin)
 	else:
 		inputs = data.input_items
@@ -2727,10 +2749,7 @@ func _add_tooltip_requirements(origin: Vector2i, data: BlockData) -> void:
 
 	# Current holdings — includes factory input buffers (water etc.) via
 	# _collect_block_stored_items, so fluid inputs are covered too.
-	var bs = main.get_node_or_null("BuildingSystem")
-	var held_items: Dictionary = {}
-	if bs and bs.has_method("_collect_block_stored_items"):
-		held_items = bs._collect_block_stored_items(origin)
+	var held_items: Dictionary = _collect_tooltip_requirement_holdings(origin)
 
 	var row = HBoxContainer.new()
 	row.add_theme_constant_override("separation", 6)
@@ -2781,6 +2800,40 @@ func _add_tooltip_requirements(origin: Vector2i, data: BlockData) -> void:
 		row.add_child(cell)
 
 	tooltip_vbox.add_child(row)
+
+
+func _nuclear_reactor_requirements(data: BlockData) -> Dictionary:
+	var reqs: Dictionary = {
+		&"mat_uranium_rod": 1.0,
+		&"mat_graphite_rod": 1.0,
+	}
+	for entry in data.boosters:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var item_id: StringName = StringName(entry.get("item_id", &""))
+		if item_id == &"":
+			continue
+		var amount: float = float(entry.get("per_sec", 1.0))
+		reqs[item_id] = maxf(amount, 1.0)
+	return reqs
+
+
+func _collect_tooltip_requirement_holdings(origin: Vector2i) -> Dictionary:
+	var held: Dictionary = {}
+	var bs = main.get_node_or_null("BuildingSystem")
+	if bs and bs.has_method("_collect_block_stored_items"):
+		held = bs._collect_block_stored_items(origin)
+	if _logistics and "block_storage" in _logistics and _logistics.block_storage.has(origin):
+		var storage: Dictionary = _logistics.block_storage[origin]
+		var fluids: Dictionary = storage.get("fluids", {})
+		for k in fluids:
+			var sn := StringName(k)
+			held[sn] = float(held.get(sn, 0.0)) + float(fluids[k])
+	return held
+
+
+func _format_req_amount(amount: float) -> String:
+	return str(int(roundf(amount))) if absf(amount - roundf(amount)) < 0.001 else "%.1f" % amount
 
 
 ## Draws the ReqImage red strike (dark backing line + bright red line) from
@@ -6162,7 +6215,11 @@ func _on_abandon() -> void:
 				if not cores_to_destroy.has(anchor):
 					cores_to_destroy.append(anchor)
 	for anchor in cores_to_destroy:
-		main.destroy_building(anchor)
+		# by_enemy = true so the core-destruction flow fires the full core
+		# explosion (the `building_destroyed_by_enemy` signal that ParticleOverlay
+		# listens for). Without it, abandoning a sector silently deletes the core
+		# with no boom, unlike losing it in combat.
+		main.destroy_building(anchor, true)
 
 	# Wipe the on-disk sector save so re-launching the sector starts fresh.
 	# (main.sector_lost is set by the core-destruction flow, which stops the

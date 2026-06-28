@@ -1,22 +1,23 @@
 [gd_resource type="Resource" script_class="BlockData" format=3 uid="uid://b267jfsskd8ug"]
 
 [ext_resource type="Script" uid="uid://bvgrexmcdqugc" path="res://data/game/tarkon/blocks/block_data.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://b8oc5ts5n5lcd" path="res://textures/blocks/item transportation/SmallContainer.png" id="2"]
+[ext_resource type="Texture2D" uid="uid://cprpjveickf2g" path="res://textures/blocks/item transportation/MediumContainer.png" id="1_qfqje"]
 
 [resource]
 script = ExtResource("1")
 id = &"large_container"
 display_name = "Large Container"
 description = "A larger storage container. Can be loaded onto payload conveyors and filled/emptied by loaders and unloaders."
-icon = ExtResource("2")
+icon = ExtResource("1_qfqje")
 tags = PackedStringArray("storage")
 color = Color(0.6, 0.5, 0.3, 1)
 grid_size = Vector2i(3, 3)
-top_sprite = ExtResource("2")
+top_sprite = ExtResource("1_qfqje")
 max_health = 400.0
 build_cost = {
 "copper": 220,
 "silicon": 60
 }
 build_time = 1.5
+vent_tiles = PackedStringArray()
 max_stored_items = 300

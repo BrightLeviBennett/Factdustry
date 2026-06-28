@@ -115,7 +115,7 @@ const _FEROX_PRESSURE_RADIUS_TILES: float = 18.0
 
 # --- FEROX SHARDLING REBUILD TIMER ---
 # When a FEROX shardling is in build_range of its current rebuild
-# target, it spends FEROX_REBUILD_TIME seconds rebuilding the block. The
+# target, it spends the block's build_time rebuilding the block. The
 # block is placed up-front (as FEROX) the moment building starts and the
 # left-to-right construction reveal plays over the timer — same visual
 # the player's drone builds get — then `building_completed` fires when the
@@ -130,7 +130,7 @@ var _ferox_rebuild_placed: bool = false
 # priority. Counts down in `_ferox_step_rebuild`.
 var _ferox_rebuild_cooldown: float = 0.0
 const FEROX_REBUILD_RETRY_COOLDOWN: float = 2.5
-const FEROX_REBUILD_TIME: float = 1.5
+const FEROX_REBUILD_TIME_FALLBACK: float = 1.5
 
 # --- DATA ---
 # The UnitData resource loaded from player_drone.tres
@@ -593,14 +593,22 @@ func _unhandled_input(event: InputEvent) -> void:
 							# the held stack just vanishes (no add to
 							# main.resources, no overflow).
 							if main.has_method("is_incinerated_at_core") and main.is_incinerated_at_core(item_id):
+								if main.has_signal("item_absorbed_in_core"):
+									for _i in range(have):
+										main.item_absorbed_in_core.emit(item_id)
 								mined_inventory[item_id] = 0
 								continue
+							var accepted := 0
 							while have > 0:
 								if main.has_method("can_accept_resource") \
 										and not main.can_accept_resource(item_id):
 									break
 								main.resources[item_id] = int(main.resources.get(item_id, 0)) + 1
 								have -= 1
+								accepted += 1
+							if accepted > 0 and main.has_signal("item_absorbed_in_core"):
+								for _i in range(accepted):
+									main.item_absorbed_in_core.emit(item_id)
 							mined_inventory[item_id] = have
 						main.resources_changed.emit(main.resources)
 						handled = true
@@ -993,11 +1001,11 @@ func _update_transfers(delta: float) -> void:
 		if _transfer_items[i]["t"] >= 1.0:
 			# Arrived at core — incinerate or deposit.
 			var item_id: StringName = _transfer_items[i]["item_id"]
-			# Coal / sand vanish at the core (fuel + waste). Still emit
-			# `item_absorbed_in_core` so tech-tree progression unlocks
-			# fire on the first delivery.
+			# Core-unit auto-delivery feeds the player's resource pool but
+			# deliberately does not emit `item_absorbed_in_core`: sector
+			# "deposit X in core" objectives should require an actual
+			# deposit path, not mining while standing near the core.
 			if main.has_method("is_incinerated_at_core") and main.is_incinerated_at_core(item_id):
-				main.item_absorbed_in_core.emit(item_id)
 				to_remove.append(i)
 				continue
 			if not main.can_accept_resource(item_id):
@@ -1010,7 +1018,6 @@ func _update_transfers(delta: float) -> void:
 			else:
 				main.resources[item_id] = 1
 			main.resources_changed.emit(main.resources)
-			main.item_absorbed_in_core.emit(item_id)
 			to_remove.append(i)
 
 	# Remove completed transfers (reverse order)
@@ -1361,14 +1368,15 @@ func _ferox_step_rebuild(delta: float) -> Vector2i:
 	# In range and building — advance the construction reveal.
 	_ferox_rebuild_timer += delta
 	_ferox_advance_rebuild_progress()
-	if _ferox_rebuild_timer >= FEROX_REBUILD_TIME:
+	var rebuild_time := _ferox_rebuild_target_time()
+	if rebuild_time <= 0.0 or _ferox_rebuild_timer >= rebuild_time:
 		_ferox_finish_rebuild()
 	return target_gp
 
 
 # Lays the rebuild target down as an under-construction FEROX block and
 # opens a build-progress entry so the left-to-right construction reveal
-# animates over FEROX_REBUILD_TIME. Returns a reason code WITHOUT placing on
+# animates over the target block's build_time. Returns a reason code WITHOUT placing on
 # failure: "bad_data", "occupied", or "broke" (FEROX pool can't afford it);
 # "ok" on success. The caller decides what to do with the target — this no
 # longer mutates the rebuild queue. Does NOT touch `work_order` (the player's
@@ -1432,9 +1440,18 @@ func _ferox_begin_rebuild() -> String:
 	return "ok"
 
 
+func _ferox_rebuild_target_time() -> float:
+	if _ferox_rebuild_target is Dictionary:
+		var target: Dictionary = _ferox_rebuild_target
+		var bdata = Registry.get_block(StringName(target.get("block_id", &"")))
+		if bdata != null:
+			return maxf(float(bdata.build_time), 0.0)
+	return FEROX_REBUILD_TIME_FALLBACK
+
+
 # Tracks the construction reveal to the rebuild timer. The reveal draw uses
-# `building_build_progress[anchor] / build_time`, so scale our timer
-# (0..FEROX_REBUILD_TIME) onto the block's build_time.
+# `building_build_progress[anchor] / build_time`, so the timer can map
+# straight onto the block's build_time.
 func _ferox_advance_rebuild_progress() -> void:
 	if _ferox_rebuild_target == null or not _ferox_rebuild_placed:
 		return
@@ -1446,7 +1463,7 @@ func _ferox_advance_rebuild_progress() -> void:
 	var bdata = Registry.get_block(_ferox_rebuild_target["block_id"])
 	if bdata == null or bdata.build_time <= 0.0:
 		return
-	var frac: float = clampf(_ferox_rebuild_timer / FEROX_REBUILD_TIME, 0.0, 1.0)
+	var frac: float = clampf(_ferox_rebuild_timer / bdata.build_time, 0.0, 1.0)
 	main.building_build_progress[grid_pos] = frac * bdata.build_time
 
 

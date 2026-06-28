@@ -33,6 +33,7 @@ const EXPLOSION_RADIUS_OUTER := 15
 const EXPLOSION_DMG_INNER := 600.0
 const EXPLOSION_DMG_MID := 400.0
 const EXPLOSION_DMG_OUTER := 150.0
+const FIRE_RADIUS_TILES := 7.0
 
 @onready var main: Node2D = get_node_or_null("/root/Main")
 
@@ -241,17 +242,10 @@ func _explode(anchor: Vector2i, data: BlockData) -> void:
 		var dmg_d: float = _falloff_damage(d_tiles_d)
 		if dmg_d > 0.0 and drone.has_method("take_damage"):
 			drone.take_damage(dmg_d)
-	# Big shake + visible blast effect at the reactor centre + remove
-	# the reactor anchor entirely. damage_building call at full HP+1
-	# guarantees the reactor's block_destroyed path fires.
-	var fb = main.get_node_or_null("FeedbackSystem")
-	if fb and fb.has_method("add_shake"):
-		fb.add_shake(60.0)
-	var expl = main.get_node_or_null("ExplosionSystem")
-	if expl and expl.has_method("explode"):
-		# Reactor blast: bigger ring than a normal block burst — match
-		# the inner damage radius (5 tiles) so the player can see it.
-		expl.explode(center_world, 5.0)
+	_ignite_nearby_buildings(center_world, gs)
+	# Remove the reactor anchor entirely. The building destruction signal
+	# triggers ExplosionSystem.reactor_explosion through ParticleOverlay, so
+	# the visual stays in the same path as other major block deaths.
 	if main.has_method("damage_building"):
 		main.damage_building(anchor, data.max_health + 1.0)
 	# Clear the reactor's HUD alerts so the panel doesn't keep flashing
@@ -268,3 +262,25 @@ func _falloff_damage(d_tiles: float) -> float:
 	if d_tiles <= float(EXPLOSION_RADIUS_OUTER):
 		return EXPLOSION_DMG_OUTER
 	return 0.0
+
+
+func _ignite_nearby_buildings(center_world: Vector2, gs: float) -> void:
+	var fire_sys = main.get_node_or_null("FireSystem")
+	if fire_sys == null or not fire_sys.has_method("ignite_building"):
+		return
+	var ignited: Dictionary = {}
+	for cell in main.placed_buildings.keys():
+		var anchor: Vector2i = main.building_origins.get(cell, cell)
+		if ignited.has(anchor):
+			continue
+		var data = Registry.get_block(main.placed_buildings.get(anchor, &""))
+		if data == null:
+			continue
+		var bcenter: Vector2 = main.grid_to_world(anchor) + Vector2(
+			float(data.grid_size.x) * gs * 0.5,
+			float(data.grid_size.y) * gs * 0.5)
+		var d_tiles: float = center_world.distance_to(bcenter) / gs
+		if d_tiles > FIRE_RADIUS_TILES:
+			continue
+		ignited[anchor] = true
+		fire_sys.ignite_building(anchor, true)

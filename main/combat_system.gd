@@ -2010,6 +2010,11 @@ func _spawn_projectile(
 		"drag": float(extras.get("drag", 0.0)),
 		# Scales the Mindustry-style hit / despawn FX when this bullet ends.
 		"impact_scale": float(extras.get("impact_scale", 1.0)),
+		# Collision-only target marker. Range-based shots can still fly to
+		# max range, while transport tiles under/near the shooter can be
+		# ignored when they are not the thing being attacked.
+		"intended_target_ref": extras.get("intended_target_ref", null),
+		"intended_target_type": String(extras.get("intended_target_type", "")),
 	}
 	var sid: int = int(proj["shot_id"])
 	if sid != 0:
@@ -2418,7 +2423,7 @@ func _update_projectiles(delta: float) -> void:
 					_spawn_frags(proj, proj["pos"])
 				to_remove.append(i)
 				continue
-			var hit_bldg: Vector2i = _check_bullet_hit_building(move_pos, proj["pos"], src_faction)
+			var hit_bldg: Vector2i = _check_bullet_hit_building(move_pos, proj["pos"], src_faction, proj)
 			if hit_bldg != Vector2i(-1, -1):
 				main.damage_building(hit_bldg, _shot_damage(proj, hit_bldg, proj["damage"]))
 				_spawn_frags(proj, proj["pos"])
@@ -3058,7 +3063,7 @@ func _is_friendly_wall(grid_pos: Vector2i, source_faction: int) -> bool:
 	return false
 
 
-func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, source_faction: int) -> Vector2i:
+func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, source_faction: int, proj: Dictionary = {}) -> Vector2i:
 	var opposing_faction: int = main.Faction.FEROX if source_faction == main.Faction.LUMINA else main.Faction.LUMINA
 
 	# Check grid cells along the bullet path
@@ -3068,7 +3073,8 @@ func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, sourc
 	if seg_len < 1.0:
 		# Just check the single cell at bullet_pos
 		var grid_pos: Vector2i = main.world_to_grid(bullet_pos)
-		if main.placed_buildings.has(grid_pos) and main.get_building_faction(grid_pos) == opposing_faction:
+		if main.placed_buildings.has(grid_pos) and main.get_building_faction(grid_pos) == opposing_faction \
+				and not _projectile_ignores_building_cell(grid_pos, proj):
 			return main.building_origins.get(grid_pos, grid_pos)
 		return Vector2i(-1, -1)
 
@@ -3087,10 +3093,46 @@ func _check_bullet_hit_building(bullet_pos: Vector2, bullet_prev: Vector2, sourc
 		checked[grid_pos] = true
 
 		if main.placed_buildings.has(grid_pos) and main.get_building_faction(grid_pos) == opposing_faction:
+			if _projectile_ignores_building_cell(grid_pos, proj):
+				continue
 			# Return the anchor so damage goes to the right cell
 			return main.building_origins.get(grid_pos, grid_pos)
 
 	return Vector2i(-1, -1)
+
+
+func _projectile_ignores_building_cell(grid_pos: Vector2i, proj: Dictionary) -> bool:
+	if proj.is_empty() or not main.placed_buildings.has(grid_pos):
+		return false
+	var anchor: Vector2i = main.building_origins.get(grid_pos, grid_pos)
+	if String(proj.get("target_type", "")) == "building":
+		var target = proj.get("target_ref", null)
+		if target is Vector2i:
+			var target_anchor: Vector2i = main.building_origins.get(target, target)
+			if target_anchor == anchor:
+				return false
+	if String(proj.get("intended_target_type", "")) == "building":
+		var intended = proj.get("intended_target_ref", null)
+		if intended is Vector2i:
+			var intended_anchor: Vector2i = main.building_origins.get(intended, intended)
+			if intended_anchor == anchor:
+				return false
+	var data = Registry.get_block(main.placed_buildings.get(anchor, main.placed_buildings[grid_pos]))
+	if data == null or not _is_low_profile_transport(data):
+		return false
+	return true
+
+
+func _is_low_profile_transport(data: BlockData) -> bool:
+	if data == null or not data.tags.has("transport"):
+		return false
+	if data.tags.has("pump") or data.tags.has("condenser") \
+			or data.tags.has("payload_loader") or data.tags.has("payload_unloader") \
+			or data.tags.has("freight_loader") or data.tags.has("freight_unloader") \
+			or data.tags.has("mass_driver"):
+		return false
+	return data.tags.has("belt") or data.tags.has("duct") or data.tags.has("fluid") \
+		or data.tags.has("payload") or data.tags.has("freight")
 
 
 # =========================

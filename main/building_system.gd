@@ -36,6 +36,7 @@ var _popup_overlay: PopupOverlay = null
 ## render on top of the wires. Created in _ready alongside the popup
 ## overlay; calls back to `_draw_cable_links(self)` for the actual
 ## drawing so all the texture / state still lives on BuildingSystem.
+var _fabricator_unit_overlay: Node2D = null
 var _cable_overlay: Node2D = null
 var _crane_overlay: Node2D = null
 # When non-null (set by _crane_overlay before invoking the crane
@@ -359,10 +360,11 @@ const _ARCHIVE_SCAN_FADE_RATE: float = 4.0  # alpha units / second
 # --- CABLE WIRE TEXTURE ---
 var _wire_texture: Texture2D
 
-# --- BRIDGE LINK VISUALIZER TEXTURE ---
-# Tiled along belt / duct bridge links (Mindustry-style) instead of a
+# --- BRIDGE LINK VISUALIZER TEXTURES ---
+# Tiled along belt / duct / pipe bridge links (Mindustry-style) instead of a
 # dashed line. Repeated end-to-end and clipped to the exact span length.
 var _bridge_visualizer_texture: Texture2D
+var _fluid_bridge_visualizer_texture: Texture2D
 
 # --- CACHED REFERENCES ---
 # SectorScript is created by Main._ready AFTER its Registry await, which can
@@ -521,11 +523,11 @@ var link_source := Vector2i(-1, -1)
 ## change. Anchor of the previous source after a successful link.
 var _link_just_linked := Vector2i(-1, -1)
 
-# Anchor of the turret currently sitting under the cursor (or
-# `Vector2i(-1, -1)` if none). Used to drive the hover range circle —
-# `_process` queues a redraw whenever this flips so the circle appears
-# / disappears as the cursor enters / leaves a turret tile.
-var _last_hovered_turret_anchor := Vector2i(-1, -1)
+# Anchor of the range-showing block currently sitting under the cursor
+# (or `Vector2i(-1, -1)` if none). Used to drive the hover range circle —
+# `_process` queues a redraw whenever this flips so the circle appears /
+# disappears as the cursor enters / leaves a range-capable block.
+var _last_hovered_range_anchor := Vector2i(-1, -1)
 
 
 func _ready() -> void:
@@ -570,6 +572,17 @@ func _ready() -> void:
 	_popup_overlay.z_as_relative = false
 	_popup_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	add_child(_popup_overlay)
+	# Fabricated units can intentionally overhang the fabricator footprint
+	# while ejecting/holding. Draw them on a separate layer above placed
+	# blocks so neighboring blocks don't slice off the overhanging portion.
+	_fabricator_unit_overlay = Node2D.new()
+	_fabricator_unit_overlay.name = "FabricatorUnitOverlay"
+	_fabricator_unit_overlay.z_index = 53
+	_fabricator_unit_overlay.z_as_relative = false
+	_fabricator_unit_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	_fabricator_unit_overlay.set_script(preload("res://main/fabricator_unit_overlay.gd"))
+	_fabricator_unit_overlay.set("building_sys", self)
+	add_child(_fabricator_unit_overlay)
 	# Cable wires render on their own layer (z 52, absolute) so the
 	# LogisticsSystem at z 51 can't draw items over them. Same pattern
 	# as the popup overlay above — separate Node2D, callback into
@@ -933,6 +946,7 @@ const _PIPE_TEX_PATHS := {
 const _PUMP_TEX_PATH := "res://textures/blocks/fluid transportation/FluidPumpTop.png"
 const _WIRE_TEX_PATH := "res://textures/blocks/power/CopperWire.png"
 const _BRIDGE_VISUALIZER_TEX_PATH := "res://textures/blocks/item transportation/BridgeVisualizer.png"
+const _FLUID_BRIDGE_VISUALIZER_TEX_PATH := "res://textures/blocks/fluid transportation/FluidBridgeVisualizer.png"
 const _CRUSHER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallCrusher/CrusherHead.png"
 const _GRINDER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/WallGrinder/GrinderHead.png"
 const _SCRAPER_HEAD_TEX_PATH := "res://textures/blocks/resource extractors/Ground Scraper/GroundScraperHead.png"
@@ -977,6 +991,7 @@ func _queue_texture_loads() -> void:
 	ResourceLoader.load_threaded_request(_PUMP_TEX_PATH)
 	ResourceLoader.load_threaded_request(_WIRE_TEX_PATH)
 	ResourceLoader.load_threaded_request(_BRIDGE_VISUALIZER_TEX_PATH)
+	ResourceLoader.load_threaded_request(_FLUID_BRIDGE_VISUALIZER_TEX_PATH)
 	ResourceLoader.load_threaded_request(_CRUSHER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_GRINDER_HEAD_TEX_PATH)
 	ResourceLoader.load_threaded_request(_SCRAPER_HEAD_TEX_PATH)
@@ -1000,47 +1015,141 @@ func _queue_texture_loads() -> void:
 		ResourceLoader.load_threaded_request(_PAYLOAD_CONV_TEX_PATHS[key])
 
 
-## Blocks until all queued textures are resolved, then stashes them.
-## Called once before the first real draw — at that point the threaded
-## loads are typically already done so this is effectively free.
+## Polls queued texture loads without blocking the draw thread. Any texture
+## that has finished is stashed immediately; textures still loading simply
+## keep using the renderer's existing fallback paths until a later redraw.
 func _ensure_textures_loaded() -> void:
 	if _textures_ready:
 		return
+	var all_done := true
 	for key in _BELT_TEX_PATHS:
-		_belt_textures[key] = ResourceLoader.load_threaded_get(_BELT_TEX_PATHS[key])
+		if not _belt_textures.has(key):
+			var res_belt: Array = _poll_threaded_texture(_BELT_TEX_PATHS[key])
+			all_done = all_done and bool(res_belt[0])
+			if res_belt[1] != null:
+				_belt_textures[key] = res_belt[1]
 	for key in _DUCT_TEX_PATHS:
-		_duct_textures[key] = ResourceLoader.load_threaded_get(_DUCT_TEX_PATHS[key])
+		if not _duct_textures.has(key):
+			var res_duct: Array = _poll_threaded_texture(_DUCT_TEX_PATHS[key])
+			all_done = all_done and bool(res_duct[0])
+			if res_duct[1] != null:
+				_duct_textures[key] = res_duct[1]
 	for key in _DRILL_HEAD_TEX_PATHS:
-		_drill_head_textures[key] = ResourceLoader.load_threaded_get(_DRILL_HEAD_TEX_PATHS[key])
+		if not _drill_head_textures.has(key):
+			var res_drill: Array = _poll_threaded_texture(_DRILL_HEAD_TEX_PATHS[key])
+			all_done = all_done and bool(res_drill[0])
+			if res_drill[1] != null:
+				_drill_head_textures[key] = res_drill[1]
 	for key in _PIPE_TEX_PATHS:
-		_pipe_textures[key] = ResourceLoader.load_threaded_get(_PIPE_TEX_PATHS[key])
-	_pump_texture = ResourceLoader.load_threaded_get(_PUMP_TEX_PATH)
-	_wire_texture = ResourceLoader.load_threaded_get(_WIRE_TEX_PATH)
-	_bridge_visualizer_texture = ResourceLoader.load_threaded_get(_BRIDGE_VISUALIZER_TEX_PATH)
-	_crusher_head_texture = ResourceLoader.load_threaded_get(_CRUSHER_HEAD_TEX_PATH)
-	_grinder_head_texture = ResourceLoader.load_threaded_get(_GRINDER_HEAD_TEX_PATH)
-	_scraper_head_texture = ResourceLoader.load_threaded_get(_SCRAPER_HEAD_TEX_PATH)
-	_impact_head_texture = ResourceLoader.load_threaded_get(_IMPACT_HEAD_TEX_PATH)
-	_incinerator_powered_texture = ResourceLoader.load_threaded_get(_INCINERATOR_POWERED_TEX_PATH)
-	_incinerator_unpowered_texture = ResourceLoader.load_threaded_get(_INCINERATOR_UNPOWERED_TEX_PATH)
-	_payload_crane_arm_texture = ResourceLoader.load_threaded_get(_PAYLOAD_CRANE_ARM_TEX_PATH)
-	_payload_crane_head_texture = ResourceLoader.load_threaded_get(_PAYLOAD_CRANE_HEAD_TEX_PATH)
-	_vent_turbine_base_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_BASE_TEX_PATH)
-	_vent_turbine_inner_texture = ResourceLoader.load_threaded_get(_VENT_TURBINE_INNER_TEX_PATH)
+		if not _pipe_textures.has(key):
+			var res_pipe: Array = _poll_threaded_texture(_PIPE_TEX_PATHS[key])
+			all_done = all_done and bool(res_pipe[0])
+			if res_pipe[1] != null:
+				_pipe_textures[key] = res_pipe[1]
+	var res_pump: Array = _poll_threaded_texture(_PUMP_TEX_PATH) if _pump_texture == null else [true, _pump_texture]
+	all_done = all_done and bool(res_pump[0])
+	if _pump_texture == null and res_pump[1] != null:
+		_pump_texture = res_pump[1]
+	var res_wire: Array = _poll_threaded_texture(_WIRE_TEX_PATH) if _wire_texture == null else [true, _wire_texture]
+	all_done = all_done and bool(res_wire[0])
+	if _wire_texture == null and res_wire[1] != null:
+		_wire_texture = res_wire[1]
+	var res_bridge: Array = _poll_threaded_texture(_BRIDGE_VISUALIZER_TEX_PATH) if _bridge_visualizer_texture == null else [true, _bridge_visualizer_texture]
+	all_done = all_done and bool(res_bridge[0])
+	if _bridge_visualizer_texture == null and res_bridge[1] != null:
+		_bridge_visualizer_texture = res_bridge[1]
+	var res_fluid_bridge: Array = _poll_threaded_texture(_FLUID_BRIDGE_VISUALIZER_TEX_PATH) if _fluid_bridge_visualizer_texture == null else [true, _fluid_bridge_visualizer_texture]
+	all_done = all_done and bool(res_fluid_bridge[0])
+	if _fluid_bridge_visualizer_texture == null and res_fluid_bridge[1] != null:
+		_fluid_bridge_visualizer_texture = res_fluid_bridge[1]
+	var res_crusher: Array = _poll_threaded_texture(_CRUSHER_HEAD_TEX_PATH) if _crusher_head_texture == null else [true, _crusher_head_texture]
+	all_done = all_done and bool(res_crusher[0])
+	if _crusher_head_texture == null and res_crusher[1] != null:
+		_crusher_head_texture = res_crusher[1]
+	var res_grinder: Array = _poll_threaded_texture(_GRINDER_HEAD_TEX_PATH) if _grinder_head_texture == null else [true, _grinder_head_texture]
+	all_done = all_done and bool(res_grinder[0])
+	if _grinder_head_texture == null and res_grinder[1] != null:
+		_grinder_head_texture = res_grinder[1]
+	var res_scraper: Array = _poll_threaded_texture(_SCRAPER_HEAD_TEX_PATH) if _scraper_head_texture == null else [true, _scraper_head_texture]
+	all_done = all_done and bool(res_scraper[0])
+	if _scraper_head_texture == null and res_scraper[1] != null:
+		_scraper_head_texture = res_scraper[1]
+	var res_impact: Array = _poll_threaded_texture(_IMPACT_HEAD_TEX_PATH) if _impact_head_texture == null else [true, _impact_head_texture]
+	all_done = all_done and bool(res_impact[0])
+	if _impact_head_texture == null and res_impact[1] != null:
+		_impact_head_texture = res_impact[1]
+	var res_inc_p: Array = _poll_threaded_texture(_INCINERATOR_POWERED_TEX_PATH) if _incinerator_powered_texture == null else [true, _incinerator_powered_texture]
+	all_done = all_done and bool(res_inc_p[0])
+	if _incinerator_powered_texture == null and res_inc_p[1] != null:
+		_incinerator_powered_texture = res_inc_p[1]
+	var res_inc_np: Array = _poll_threaded_texture(_INCINERATOR_UNPOWERED_TEX_PATH) if _incinerator_unpowered_texture == null else [true, _incinerator_unpowered_texture]
+	all_done = all_done and bool(res_inc_np[0])
+	if _incinerator_unpowered_texture == null and res_inc_np[1] != null:
+		_incinerator_unpowered_texture = res_inc_np[1]
+	var res_crane_arm: Array = _poll_threaded_texture(_PAYLOAD_CRANE_ARM_TEX_PATH) if _payload_crane_arm_texture == null else [true, _payload_crane_arm_texture]
+	all_done = all_done and bool(res_crane_arm[0])
+	if _payload_crane_arm_texture == null and res_crane_arm[1] != null:
+		_payload_crane_arm_texture = res_crane_arm[1]
+	var res_crane_head: Array = _poll_threaded_texture(_PAYLOAD_CRANE_HEAD_TEX_PATH) if _payload_crane_head_texture == null else [true, _payload_crane_head_texture]
+	all_done = all_done and bool(res_crane_head[0])
+	if _payload_crane_head_texture == null and res_crane_head[1] != null:
+		_payload_crane_head_texture = res_crane_head[1]
+	var res_vent_base: Array = _poll_threaded_texture(_VENT_TURBINE_BASE_TEX_PATH) if _vent_turbine_base_texture == null else [true, _vent_turbine_base_texture]
+	all_done = all_done and bool(res_vent_base[0])
+	if _vent_turbine_base_texture == null and res_vent_base[1] != null:
+		_vent_turbine_base_texture = res_vent_base[1]
+	var res_vent_inner: Array = _poll_threaded_texture(_VENT_TURBINE_INNER_TEX_PATH) if _vent_turbine_inner_texture == null else [true, _vent_turbine_inner_texture]
+	all_done = all_done and bool(res_vent_inner[0])
+	if _vent_turbine_inner_texture == null and res_vent_inner[1] != null:
+		_vent_turbine_inner_texture = res_vent_inner[1]
 	for bid in _LAYERED_SPINNERS:
-		var entry: Dictionary = _LAYERED_SPINNERS[bid]
-		_layered_spinner_textures[bid] = {
-			"base": ResourceLoader.load_threaded_get(entry["base"]),
-			"head": ResourceLoader.load_threaded_get(entry["head"]),
-			"top":  ResourceLoader.load_threaded_get(entry["top"]),
-		}
-	_vent_condenser_base_texture = ResourceLoader.load_threaded_get(_VENT_CONDENSER_BASE_TEX_PATH)
-	_vent_condenser_inner_texture = ResourceLoader.load_threaded_get(_VENT_CONDENSER_INNER_TEX_PATH)
-	_faction_overlay_ferox = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_FEROX_PATH)
-	_faction_overlay_derelict = ResourceLoader.load_threaded_get(_FACTION_OVERLAY_DERELICT_PATH)
+		if not _layered_spinner_textures.has(bid):
+			var entry: Dictionary = _LAYERED_SPINNERS[bid]
+			var res_ls_base: Array = _poll_threaded_texture(entry["base"])
+			var res_ls_head: Array = _poll_threaded_texture(entry["head"])
+			var res_ls_top: Array = _poll_threaded_texture(entry["top"])
+			all_done = all_done and bool(res_ls_base[0]) and bool(res_ls_head[0]) and bool(res_ls_top[0])
+			if bool(res_ls_base[0]) and bool(res_ls_head[0]) and bool(res_ls_top[0]):
+				_layered_spinner_textures[bid] = {
+					"base": res_ls_base[1],
+					"head": res_ls_head[1],
+					"top": res_ls_top[1],
+				}
+	var res_cond_base: Array = _poll_threaded_texture(_VENT_CONDENSER_BASE_TEX_PATH) if _vent_condenser_base_texture == null else [true, _vent_condenser_base_texture]
+	all_done = all_done and bool(res_cond_base[0])
+	if _vent_condenser_base_texture == null and res_cond_base[1] != null:
+		_vent_condenser_base_texture = res_cond_base[1]
+	var res_cond_inner: Array = _poll_threaded_texture(_VENT_CONDENSER_INNER_TEX_PATH) if _vent_condenser_inner_texture == null else [true, _vent_condenser_inner_texture]
+	all_done = all_done and bool(res_cond_inner[0])
+	if _vent_condenser_inner_texture == null and res_cond_inner[1] != null:
+		_vent_condenser_inner_texture = res_cond_inner[1]
+	var res_ferox: Array = _poll_threaded_texture(_FACTION_OVERLAY_FEROX_PATH) if _faction_overlay_ferox == null else [true, _faction_overlay_ferox]
+	all_done = all_done and bool(res_ferox[0])
+	if _faction_overlay_ferox == null and res_ferox[1] != null:
+		_faction_overlay_ferox = res_ferox[1]
+	var res_derelict: Array = _poll_threaded_texture(_FACTION_OVERLAY_DERELICT_PATH) if _faction_overlay_derelict == null else [true, _faction_overlay_derelict]
+	all_done = all_done and bool(res_derelict[0])
+	if _faction_overlay_derelict == null and res_derelict[1] != null:
+		_faction_overlay_derelict = res_derelict[1]
 	for key in _PAYLOAD_CONV_TEX_PATHS:
-		_payload_conveyor_textures[key] = ResourceLoader.load_threaded_get(_PAYLOAD_CONV_TEX_PATHS[key])
-	_textures_ready = true
+		if not _payload_conveyor_textures.has(key):
+			var res_payload: Array = _poll_threaded_texture(_PAYLOAD_CONV_TEX_PATHS[key])
+			all_done = all_done and bool(res_payload[0])
+			if res_payload[1] != null:
+				_payload_conveyor_textures[key] = res_payload[1]
+	_textures_ready = all_done
+	if not _textures_ready:
+		queue_redraw()
+
+
+func _poll_threaded_texture(path: String) -> Array:
+	var status: int = ResourceLoader.load_threaded_get_status(path)
+	if status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+		return [false, null]
+	if status == ResourceLoader.THREAD_LOAD_LOADED:
+		var tex := ResourceLoader.load_threaded_get(path) as Texture2D
+		return [true, tex]
+	return [true, null]
 
 
 ## Maximum supported extension level (capped at the number of L*/R*
@@ -1454,8 +1563,8 @@ func _draw_impact_head(grid_pos: Vector2i, top_pos: Vector2, width: float, heigh
 
 
 
-## Draws a dashed circle at `radius` around `center`. Used by the
-## turret-range visualisers (placement preview + hover-over-existing).
+## Draws a dashed circle at `radius` around `center`. Used by range
+## visualizers (placement preview + hover-over-existing blocks).
 ## Each dash is a `draw_polyline` rather than a `draw_arc` so the line
 ## caps and segment joins are flat — `draw_arc` was leaving slight
 ## connector slivers between adjacent calls that read as a faint gray
@@ -1549,10 +1658,6 @@ func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: fl
 		draw_polyline(pts, color, width, false)
 
 
-## Hover-over-turret range indicator: when the cursor is sitting on a
-## placed turret, paint its `attack_range` as a dashed white circle so
-## the player can see how far it'll shoot. Skipped while placement /
-## drag preview is showing the same circle for the selected block.
 ## Hover preview for any placed LUMINA extractor / pump — paints a
 ## small floating icon above the building showing which item / fluid
 ## it's currently outputting. Same data path the placement preview
@@ -1606,7 +1711,25 @@ func _draw_hovered_extractor_output() -> void:
 	draw_texture_rect(icon_tex, icon_rect, false)
 
 
-func _draw_hovered_turret_range() -> void:
+func _hover_range_info(data: BlockData) -> Dictionary:
+	if data == null:
+		return {}
+	var is_overdrive: bool = data.tags.has("overdrive") and data.overdrive_radius > 0.0
+	var is_mender: bool = data.tags.has("mender") and data.mend_radius > 0.0
+	if data.is_turret() and data.attack_range > 0.0:
+		return {"range": data.attack_range, "color": Color(1, 1, 1, 0.85), "overdrive": false, "mender": false}
+	if data.tags.has("crane") and data.crane_range > 0.0:
+		return {"range": data.crane_range, "color": Color(1, 1, 1, 0.85), "overdrive": false, "mender": false}
+	if data.tags.has("linkable") and data.link_range > 0.0:
+		return {"range": data.link_range, "color": Color(1, 1, 1, 0.85), "overdrive": false, "mender": false}
+	if is_overdrive:
+		return {"range": data.overdrive_radius, "color": Color(1.0, 0.65, 0.15, 0.85), "overdrive": true, "mender": false}
+	if is_mender:
+		return {"range": data.mend_radius, "color": Color(0.4, 1.0, 0.5, 0.85), "overdrive": false, "mender": true}
+	return {}
+
+
+func _draw_hovered_block_range() -> void:
 	# Don't compete with the placement preview's range circle.
 	if main.selected_building != &"":
 		return
@@ -1627,29 +1750,18 @@ func _draw_hovered_turret_range() -> void:
 	if data == null:
 		return
 	# Pick the appropriate range based on what kind of block this is:
-	#   - turret   → attack_range (firing radius)
-	#   - crane    → crane_range  (reach of the grabber)
-	#   - mass_driver → link_range (max partner distance)
+	#   - turret   → attack_range  (firing radius)
+	#   - crane    → crane_range   (reach of the grabber)
+	#   - linkable → link_range    (bridge / mass-driver partner distance)
 	#   - overdrive → overdrive_radius (boost zone radius)
 	#   - mender   → mend_radius  (heal zone radius)
-	var range_tiles: float = 0.0
-	var ring_color := Color(1, 1, 1, 0.85)
-	var is_overdrive: bool = data.tags.has("overdrive") and data.overdrive_radius > 0.0
-	var is_mender: bool = data.tags.has("mender") and data.mend_radius > 0.0
-	if data.is_turret() and data.attack_range > 0.0:
-		range_tiles = data.attack_range
-	elif data.tags.has("crane") and data.crane_range > 0.0:
-		range_tiles = data.crane_range
-	elif data.tags.has("mass_driver") and data.link_range > 0.0:
-		range_tiles = data.link_range
-	elif is_overdrive:
-		range_tiles = data.overdrive_radius
-		ring_color = Color(1.0, 0.65, 0.15, 0.85)
-	elif is_mender:
-		range_tiles = data.mend_radius
-		ring_color = Color(0.4, 1.0, 0.5, 0.85)
+	var info: Dictionary = _hover_range_info(data)
+	var range_tiles: float = float(info.get("range", 0.0))
 	if range_tiles <= 0.0:
 		return
+	var ring_color: Color = info.get("color", Color(1, 1, 1, 0.85))
+	var is_overdrive: bool = bool(info.get("overdrive", false))
+	var is_mender: bool = bool(info.get("mender", false))
 	var gs: float = float(main.GRID_SIZE)
 	var center: Vector2 = main.grid_to_world(anchor) + Vector2(
 		data.grid_size.x * gs * 0.5,
@@ -2543,9 +2655,9 @@ func _process(_delta: float) -> void:
 				_world_ui.storage_panel_hovered = sh
 				queue_redraw()
 
-	# When nothing is selected for placement, still tick the
-	# hover-over-turret range indicator: redraw whenever the hovered
-	# turret anchor changes (entering / leaving / different turret).
+	# When nothing is selected for placement, still tick the hover range
+	# indicator: redraw whenever the hovered range-capable anchor changes
+	# (entering / leaving / different turret, bridge, crane, etc.).
 	if main.selected_building == &"":
 		_drag_placing = false
 		_drag_cells.clear()
@@ -2553,9 +2665,9 @@ func _process(_delta: float) -> void:
 		var idle_grid: Vector2i = main.world_to_grid(idle_mw)
 		var idle_anchor: Vector2i = main.building_origins.get(idle_grid, Vector2i(-1, -1))
 		var idle_data: BlockData = Registry.get_block(main.placed_buildings.get(idle_anchor, &""))
-		var hover_turret: Vector2i = idle_anchor if (idle_data != null and idle_data.is_turret()) else Vector2i(-1, -1)
-		if hover_turret != _last_hovered_turret_anchor:
-			_last_hovered_turret_anchor = hover_turret
+		var hover_range_anchor: Vector2i = idle_anchor if not _hover_range_info(idle_data).is_empty() else Vector2i(-1, -1)
+		if hover_range_anchor != _last_hovered_range_anchor:
+			_last_hovered_range_anchor = hover_range_anchor
 			queue_redraw()
 		return
 	var mouse_world = get_global_mouse_position()
@@ -5112,7 +5224,7 @@ func _draw() -> void:
 	# and bullets. The overlay calls into us with `_crane_draw_canvas`
 	# set so every draw call lands on its higher-z surface.
 	_draw_crane_link_overlays()
-	_draw_hovered_turret_range()
+	_draw_hovered_block_range()
 	_draw_hovered_lane_shifter_range()
 	_draw_hovered_extractor_output()
 	_draw_archive_scan_overlay()
@@ -6010,6 +6122,9 @@ func _deposit_items_into_block(anchor: Vector2i, item_id: StringName, count: int
 			accepted_c += 1
 		if accepted_c > 0 and "resources_changed" in main:
 			main.resources_changed.emit(main.resources)
+		if accepted_c > 0 and main.has_signal("item_absorbed_in_core"):
+			for _i in range(accepted_c):
+				main.item_absorbed_in_core.emit(item_id)
 		return accepted_c
 
 	# Factory input buffer: only accept items the *effective* recipe
@@ -6189,6 +6304,7 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 	var unit_data = Registry.get_unit(data.produced_unit)
 	if unit_data == null:
 		return
+	var c: CanvasItem = _ccanvas()
 	var center: Vector2 = top_pos + Vector2(width / 2.0, height / 2.0)
 	var dir_vec: Vector2
 	match rot:
@@ -6283,19 +6399,19 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 			"facing_angle": unit_angle, "aim_angle": unit_angle,
 			"unit_id": String(unit_data.id),
 		}
-		EnemyUnit.draw_unit_payload(self, unit_data, synth, unit_pos, 1.0, 0.0, alpha_mul)
+		EnemyUnit.draw_unit_payload(c, unit_data, synth, unit_pos, 1.0, 0.0, alpha_mul)
 	elif unit_data.icon != null:
 		var i_size: Vector2 = _fit_texture_size(unit_data.icon, base_sz)
-		draw_set_transform(unit_pos, unit_angle + PI / 2.0)
-		draw_texture_rect(
+		c.draw_set_transform(unit_pos, unit_angle + PI / 2.0)
+		c.draw_texture_rect(
 			unit_data.icon,
 			Rect2(-i_size * 0.5, i_size),
 			false,
 			Color(1, 1, 1, alpha_mul)
 		)
-		draw_set_transform(Vector2.ZERO, 0.0)
+		c.draw_set_transform(Vector2.ZERO, 0.0)
 	else:
-		draw_rect(
+		c.draw_rect(
 			Rect2(unit_pos - Vector2(base_sz, base_sz) * 0.5, Vector2(base_sz, base_sz)),
 			Color(0.6, 0.7, 0.9, 0.95 * alpha_mul),
 			true
@@ -6341,9 +6457,9 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 			)
 			var dst := Rect2(lmin, lmax - lmin)
 			if dst.size.x > 0.0 and dst.size.y > 0.0:
-				draw_set_transform(b_origin, b_angle)
-				draw_texture_rect_region(data.base_sprite, dst, src)
-				draw_set_transform(Vector2.ZERO, 0.0)
+				c.draw_set_transform(b_origin, b_angle)
+				c.draw_texture_rect_region(data.base_sprite, dst, src)
+				c.draw_set_transform(Vector2.ZERO, 0.0)
 
 	# Yellow build-front line at the construction edge (the boundary between the
 	# revealed unit and the freshly-covered unbuilt side). Its half-length is the
@@ -6355,7 +6471,7 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 		var t: float = (dx / uh_x) if uh_x > 0.0 else 2.0
 		var chord_half: float = (uh_y * sqrt(maxf(0.0, 1.0 - t * t))) if absf(t) <= 1.0 else 0.0
 		if chord_half > 0.5:
-			draw_line(
+			c.draw_line(
 				Vector2(edge_x, center.y - chord_half),
 				Vector2(edge_x, center.y + chord_half),
 				Color(1.0, 0.9, 0.2, 0.9), 1.5
@@ -6364,6 +6480,46 @@ func _draw_fabricator_unit_layer(grid_pos: Vector2i, data: BlockData, top_pos: V
 	# variable name around for readers.
 	if drew_layered:
 		pass
+
+
+func _draw_fabricator_unit_overlays(canvas: CanvasItem) -> void:
+	if canvas == null or _logistics == null:
+		return
+	var previous_canvas: CanvasItem = _crane_draw_canvas
+	_crane_draw_canvas = canvas
+	var gs: int = main.GRID_SIZE
+	var ss = _sector_script_ref()
+	var has_decon: bool = "building_deconstruct_progress" in main
+	var has_build_progress: bool = "building_build_progress" in main
+	for origin in _logistics.factory_buffers.keys():
+		if not (origin is Vector2i):
+			continue
+		var grid_pos: Vector2i = origin
+		if not main.placed_buildings.has(grid_pos):
+			continue
+		if ss and ss.is_tile_hidden(grid_pos):
+			continue
+		if has_decon and main.building_deconstruct_progress.has(grid_pos):
+			continue
+		if has_build_progress and main.building_build_progress.has(grid_pos) \
+				and main.get_build_progress_pct(grid_pos) < 1.0:
+			continue
+		var data: BlockData = Registry.get_block(main.placed_buildings[grid_pos])
+		if data == null or data.produced_unit == &"" or data.base_sprite == null or data.top_sprite == null:
+			continue
+		var state: Dictionary = _logistics.factory_buffers[grid_pos]
+		var phase: String = String(state.get("phase", ""))
+		if phase != "processing" and phase != "ejecting" and phase != "holding":
+			continue
+		var world_pos: Vector2 = main.grid_to_world(grid_pos)
+		var top_pos: Vector2 = world_pos + _get_top_offset(world_pos)
+		var width: float = float(data.grid_size.x * gs)
+		var height: float = float(data.grid_size.y * gs)
+		var is_dir: bool = _is_directional(data.id)
+		var rot: int = main.building_rotation.get(grid_pos, 0) if is_dir else 0
+		_draw_fabricator_unit_layer(grid_pos, data, top_pos, width, height, rot)
+		_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
+	_crane_draw_canvas = previous_canvas
 
 
 ## Draws the block currently being constructed (or deconstructed) between
@@ -7771,7 +7927,6 @@ func _draw_placed_buildings() -> void:
 			# Unit fabricator layered rendering: base + unit-in-construction + top
 			if data and data.produced_unit != &"" and data.base_sprite and data.top_sprite:
 				_draw_block_texture(data.base_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
-				_draw_fabricator_unit_layer(grid_pos, data, top_pos, width, height, rot)
 				_draw_block_texture(data.top_sprite, top_pos, width, height, rot, Color.WHITE, is_dir)
 			# Refabricator: base + per-side input overlays reflecting
 			# adjacent payload conveyors.
@@ -8506,6 +8661,7 @@ func _draw_paused_queue() -> void:
 				draw_rect(Rect2(top_pos, Vector2(w, h)), _plan_rect_ghost_color(block_id, true), true)
 		else:
 			var q_rot: int = rotation if _is_directional(block_id) else 0
+			var q_dir: bool = _is_directional(block_id)
 			var tint := _plan_ghost_tint(true)
 			# Prefer world-facing top/base sprites. data.icon is UI-only.
 			var q_tex: Texture2D = null
@@ -8529,20 +8685,20 @@ func _draw_paused_queue() -> void:
 			# Fabricators/refabricators layer base + top so the block reads
 			# as a whole building, not just its overlay.
 			elif data.base_sprite and data.top_sprite:
-				_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
-				_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint)
+				_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint, q_dir)
+				_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint, q_dir)
 				q_drew_layered = true
 			elif data.base_sprite and (data.feed_overlay_back or data.feed_overlay_left or data.feed_overlay_right):
-				_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
+				_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint, q_dir)
 				if data.feed_overlay_back:
-					_draw_block_texture(data.feed_overlay_back, top_pos, w, h, q_rot, tint)
+					_draw_block_texture(data.feed_overlay_back, top_pos, w, h, q_rot, tint, q_dir)
 				q_drew_layered = true
 			elif data.top_sprite:
 				q_tex = data.top_sprite
 			elif data.base_sprite:
 				q_tex = data.base_sprite
 			if q_tex:
-				_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint)
+				_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint, q_dir)
 			elif not q_drew_layered:
 				draw_rect(Rect2(top_pos, Vector2(w, h)), _plan_rect_ghost_color(block_id, true), true)
 				# Draw direction arrow for directional blocks without textures
@@ -8593,6 +8749,7 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 			c.draw_set_transform(Vector2.ZERO, 0.0)
 			return
 	var q_rot: int = rot if _is_directional(block_id) else 0
+	var q_dir: bool = _is_directional(block_id)
 	var q_tex: Texture2D = null
 	var q_drew_layered := false
 	# Layered spinner blocks (brass mixer, silicon refinery) have no
@@ -8609,20 +8766,20 @@ func _draw_block_ghost_preview(grid_pos: Vector2i, block_id: StringName, data: B
 		_draw_vent_condenser_preview(top_pos, w, h, tint)
 		q_drew_layered = true
 	elif data.base_sprite and data.top_sprite:
-		_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
-		_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint)
+		_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint, q_dir)
+		_draw_block_texture(data.top_sprite, top_pos, w, h, q_rot, tint, q_dir)
 		q_drew_layered = true
 	elif data.base_sprite and (data.feed_overlay_back or data.feed_overlay_left or data.feed_overlay_right):
-		_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint)
+		_draw_block_texture(data.base_sprite, top_pos, w, h, q_rot, tint, q_dir)
 		if data.feed_overlay_back:
-			_draw_block_texture(data.feed_overlay_back, top_pos, w, h, q_rot, tint)
+			_draw_block_texture(data.feed_overlay_back, top_pos, w, h, q_rot, tint, q_dir)
 		q_drew_layered = true
 	elif data.top_sprite:
 		q_tex = data.top_sprite
 	elif data.base_sprite:
 		q_tex = data.base_sprite
 	if q_tex:
-		_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint)
+		_draw_block_texture(q_tex, top_pos, w, h, q_rot, tint, q_dir)
 	elif not q_drew_layered:
 		c.draw_rect(Rect2(top_pos, Vector2(w, h)), _plan_rect_ghost_color(block_id, true), true)
 		if _is_directional(block_id):
@@ -8746,7 +8903,7 @@ func _draw_preview() -> void:
 					pass
 				elif cell_tex:
 					var draw_rot: int = (cell_rot + 1) % 4 if cell_data.tags.has("shaft") else cell_rot
-					_draw_block_texture(cell_tex, cell_pos, w, h, draw_rot, tint)
+					_draw_block_texture(cell_tex, cell_pos, w, h, draw_rot, tint, _is_directional(cell_block_id))
 				else:
 					var color: Color = _plan_rect_ghost_color(cell_block_id, cell_ok)
 					draw_rect(Rect2(cell_pos, Vector2(w, h)), color, true)
@@ -8869,27 +9026,27 @@ func _draw_preview() -> void:
 				hover_layered = true
 				hover_used_bake = true
 			elif data.base_sprite and data.top_sprite:
-				_draw_block_texture(data.base_sprite, top_pos, width, height, hover_rot, tint)
-				_draw_block_texture(data.top_sprite, top_pos, width, height, hover_rot, tint)
+				_draw_block_texture(data.base_sprite, top_pos, width, height, hover_rot, tint, is_dir)
+				_draw_block_texture(data.top_sprite, top_pos, width, height, hover_rot, tint, is_dir)
 				hover_layered = true
 			elif data.base_sprite:
-				_draw_block_texture(data.base_sprite, top_pos, width, height, hover_rot, tint)
+				_draw_block_texture(data.base_sprite, top_pos, width, height, hover_rot, tint, is_dir)
 				if data.lumina_overlay:
 					var ow: float = width * 0.7
 					var oh: float = height * 0.7
 					var op: Vector2 = top_pos + Vector2((width - ow) * 0.5, (height - oh) * 0.5)
-					_draw_block_texture(data.lumina_overlay, op, ow, oh, hover_rot, tint)
+					_draw_block_texture(data.lumina_overlay, op, ow, oh, hover_rot, tint, is_dir)
 				hover_layered = true
 		elif data and data.base_sprite and data.top_sprite:
 			var draw_rot_l: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
-			_draw_block_texture(data.base_sprite, top_pos, width, height, draw_rot_l, tint)
-			_draw_block_texture(data.top_sprite, top_pos, width, height, draw_rot_l, tint)
+			_draw_block_texture(data.base_sprite, top_pos, width, height, draw_rot_l, tint, is_dir)
+			_draw_block_texture(data.top_sprite, top_pos, width, height, draw_rot_l, tint, is_dir)
 			hover_layered = true
 		elif data and data.base_sprite and (data.feed_overlay_back or data.feed_overlay_left or data.feed_overlay_right):
 			var draw_rot_l: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
-			_draw_block_texture(data.base_sprite, top_pos, width, height, draw_rot_l, tint)
+			_draw_block_texture(data.base_sprite, top_pos, width, height, draw_rot_l, tint, is_dir)
 			if data.feed_overlay_back:
-				_draw_block_texture(data.feed_overlay_back, top_pos, width, height, draw_rot_l, tint)
+				_draw_block_texture(data.feed_overlay_back, top_pos, width, height, draw_rot_l, tint, is_dir)
 			hover_layered = true
 		elif data:
 			if data.top_sprite:
@@ -8898,7 +9055,7 @@ func _draw_preview() -> void:
 				hover_tex = data.base_sprite
 		if hover_tex:
 			var draw_rot: int = (hover_rot + 1) % 4 if data.tags.has("shaft") else hover_rot
-			_draw_block_texture(hover_tex, top_pos, width, height, draw_rot, tint)
+			_draw_block_texture(hover_tex, top_pos, width, height, draw_rot, tint, is_dir)
 		elif not hover_layered:
 			color = _plan_rect_ghost_color(main.selected_building, cell_ok)
 			draw_rect(Rect2(top_pos, Vector2(width, height)), color, true)
@@ -8956,12 +9113,16 @@ func _draw_preview() -> void:
 		var c_tint: Color = _plan_ghost_tint(can_place_excluding_range)
 		_draw_crane_preview(top_pos, width, height, c_tint)
 
-	# Turret attack-range circle in the placement preview — dashed, same
-	# look as the hover-over-existing-turret indicator.
-	if data and data.is_turret() and data.attack_range > 0.0:
+	# Range circle in the placement preview — dashed, same look as the
+	# hover-over-existing-block indicator. Covers turrets, cranes,
+	# linkable bridges / mass drivers, overdrives, and menders.
+	var preview_range_info: Dictionary = _hover_range_info(data)
+	var preview_range_tiles: float = float(preview_range_info.get("range", 0.0))
+	if data and preview_range_tiles > 0.0:
 		var range_center: Vector2 = top_pos + Vector2(width * 0.5, height * 0.5)
-		var range_px: float = data.attack_range * float(main.GRID_SIZE)
-		_draw_dashed_circle(range_center, range_px, Color(1, 1, 1, 0.85), 3.0)
+		var range_px: float = preview_range_tiles * float(main.GRID_SIZE)
+		var range_color: Color = preview_range_info.get("color", Color(1, 1, 1, 0.85))
+		_draw_dashed_circle(range_center, range_px, range_color, 3.0)
 
 	# Drill heads preview: always shows the heads (L0/R0 by default
 	# when no ore is in scan range) so the ghost reads as a complete
@@ -9780,7 +9941,7 @@ func _draw_cable_links(canvas: CanvasItem) -> void:
 			canvas.draw_set_transform(Vector2.ZERO, 0.0)
 
 
-## Draws every belt / duct bridge link's tiled visualizer strip onto
+## Draws every belt / duct / pipe bridge link's tiled visualizer strip onto
 ## `canvas`. Hosted on the cable overlay (z=52) so the strips render OVER
 ## copper cables instead of under them. Each strip runs from the EDGE of
 ## the start bridge's footprint to the EDGE of the end bridge's footprint
@@ -9791,7 +9952,7 @@ func _draw_bridge_links(canvas: CanvasItem) -> void:
 	var power_sys = get_node_or_null("/root/Main/PowerSystem")
 	if power_sys == null or not ("linked_pairs" in power_sys):
 		return
-	if _bridge_visualizer_texture == null:
+	if _bridge_visualizer_texture == null and _fluid_bridge_visualizer_texture == null:
 		return
 	var _ss_link = get_node_or_null("/root/Main/SectorScript")
 	var gs: float = main.GRID_SIZE
@@ -9804,15 +9965,19 @@ func _draw_bridge_links(canvas: CanvasItem) -> void:
 			continue
 		var data_a = Registry.get_block(main.placed_buildings[pos_a])
 		var data_b = Registry.get_block(main.placed_buildings[pos_b])
-		# Belt/duct bridge pair only: both ends carry the bridge tag AND the
-		# same belt or duct transport tag.
+		# Transport bridge pair only: both ends carry the bridge tag AND the
+		# same belt, duct, or fluid transport tag.
 		var is_belt_bridge: bool = data_a != null and data_b != null \
 			and data_a.tags.has("bridge") and data_b.tags.has("bridge") \
 			and data_a.tags.has("belt") and data_b.tags.has("belt")
 		var is_duct_bridge: bool = data_a != null and data_b != null \
 			and data_a.tags.has("bridge") and data_b.tags.has("bridge") \
 			and data_a.tags.has("duct") and data_b.tags.has("duct")
-		if not (is_belt_bridge or is_duct_bridge):
+		var is_pipe_bridge: bool = data_a != null and data_b != null \
+			and data_a.tags.has("bridge") and data_b.tags.has("bridge") \
+			and data_a.tags.has("fluid") and data_b.tags.has("fluid")
+		var visualizer_tex: Texture2D = _fluid_bridge_visualizer_texture if is_pipe_bridge else _bridge_visualizer_texture
+		if not (is_belt_bridge or is_duct_bridge or is_pipe_bridge) or visualizer_tex == null:
 			continue
 		var size_a: Vector2 = Vector2(data_a.grid_size) * gs
 		var size_b: Vector2 = Vector2(data_b.grid_size) * gs
@@ -9835,7 +10000,13 @@ func _draw_bridge_links(canvas: CanvasItem) -> void:
 		# Degenerate (bridges overlapping / adjacent): nothing to draw.
 		if (edge_b - edge_a).dot(fwd) <= 0.0:
 			continue
-		_draw_bridge_visualizer(canvas, edge_a, edge_b)
+		if is_pipe_bridge:
+			var fluid_tint: Color = _bridge_pipe_visualizer_tint(pos_a, pos_b)
+			if fluid_tint.a > 0.0:
+				_draw_bridge_fluid_tint_underlay(canvas, edge_a, edge_b, visualizer_tex, fluid_tint)
+		_draw_bridge_visualizer(canvas, edge_a, edge_b, visualizer_tex)
+		if is_belt_bridge or is_duct_bridge:
+			_draw_bridge_item_visuals(canvas, edge_a, edge_b, pos_a, pos_b)
 
 
 ## Returns the point where a ray from `origin` along unit vector `d` leaves
@@ -9857,7 +10028,7 @@ func _ray_exit_point(origin: Vector2, d: Vector2, rect: Rect2) -> Vector2:
 	return origin + d * t_max
 
 
-## Mindustry-style bridge link visual: tiles `_bridge_visualizer_texture`
+## Mindustry-style bridge link visual: tiles `visualizer_tex`
 ## end-to-end from `world_a` to `world_b`, clipping the final partial tile
 ## so the strip is exactly the span length (no stretch). Mirrors the cable
 ## tiling in `_draw_cable_links`: source rect matches destination 1:1 so
@@ -9866,8 +10037,12 @@ func _ray_exit_point(origin: Vector2, d: Vector2, rect: Rect2) -> Vector2:
 ## of its native pixel size (kept uniform so the art isn't distorted), then
 ## tiled+clipped along the span. Lower = smaller / thinner.
 const _BRIDGE_VISUALIZER_SCALE := 0.28
-func _draw_bridge_visualizer(canvas: CanvasItem, world_a: Vector2, world_b: Vector2) -> void:
-	if _bridge_visualizer_texture == null:
+const _BRIDGE_FLUID_UNDERLAY_WIDTH_SCALE := 0.82
+const _BRIDGE_ITEM_ICON_SCALE := 0.16
+const _BRIDGE_ITEM_DOT_SCALE := 0.055
+
+func _draw_bridge_visualizer(canvas: CanvasItem, world_a: Vector2, world_b: Vector2, visualizer_tex: Texture2D, tint: Color = Color.WHITE) -> void:
+	if visualizer_tex == null:
 		return
 	var dir: Vector2 = world_b - world_a
 	var length: float = dir.length()
@@ -9880,14 +10055,13 @@ func _draw_bridge_visualizer(canvas: CanvasItem, world_a: Vector2, world_b: Vect
 	var s: float = _BRIDGE_VISUALIZER_SCALE
 	# On-screen size = native × scale, so the strip is much smaller than the
 	# full-resolution texture while keeping its aspect ratio undistorted.
-	var native_w: float = _bridge_visualizer_texture.get_width()
-	var native_h: float = _bridge_visualizer_texture.get_height()
+	var native_w: float = visualizer_tex.get_width()
+	var native_h: float = visualizer_tex.get_height()
 	if native_h < 1.0 or native_w < 1.0:
 		return
 	var draw_w: float = native_w * s
 	var hw: float = draw_w / 2.0
 	var tile_world_h: float = native_h * s   # one tile's on-screen length
-	var tint := Color(1, 1, 1, 1)
 	var segments: int = ceili(length / tile_world_h)
 	for i in range(segments):
 		var t0: float = i * tile_world_h
@@ -9898,11 +10072,89 @@ func _draw_bridge_visualizer(canvas: CanvasItem, world_a: Vector2, world_b: Vect
 		# final partial tile is CLIPPED (not scaled): dest_h / scale texels.
 		var src := Rect2(0, 0, native_w, this_world_h / s)
 		canvas.draw_texture_rect_region(
-			_bridge_visualizer_texture,
+			visualizer_tex,
 			Rect2(-hw, -this_world_h / 2.0, draw_w, this_world_h),
 			src, tint,
 		)
 		canvas.draw_set_transform(Vector2.ZERO, 0.0)
+
+
+func _draw_bridge_fluid_tint_underlay(canvas: CanvasItem, world_a: Vector2, world_b: Vector2, visualizer_tex: Texture2D, tint: Color) -> void:
+	if visualizer_tex == null or tint.a <= 0.0:
+		return
+	var dir: Vector2 = world_b - world_a
+	var length: float = dir.length()
+	if length < 0.01:
+		return
+	var forward: Vector2 = dir / length
+	var angle: float = forward.angle() + PI / 2.0
+	var draw_w: float = visualizer_tex.get_width() * _BRIDGE_VISUALIZER_SCALE * _BRIDGE_FLUID_UNDERLAY_WIDTH_SCALE
+	canvas.draw_set_transform(world_a + forward * (length * 0.5), angle)
+	canvas.draw_rect(Rect2(-draw_w * 0.5, -length * 0.5, draw_w, length), tint, true)
+	canvas.draw_set_transform(Vector2.ZERO, 0.0)
+
+
+func _bridge_pipe_visualizer_tint(pos_a: Vector2i, pos_b: Vector2i) -> Color:
+	var logistics = _logistics if _logistics != null else _logistics_ref()
+	if logistics == null or not ("pipe_contents" in logistics):
+		return Color.TRANSPARENT
+	var best_fluid: StringName = &""
+	var best_amount: float = 0.0
+	for pos in [pos_a, pos_b]:
+		if not logistics.pipe_contents.has(pos):
+			continue
+		var pipe: Dictionary = logistics.pipe_contents[pos]
+		var fluid_id: StringName = StringName(pipe.get("fluid_id", &""))
+		var amount: float = float(pipe.get("amount", 0.0))
+		if fluid_id != &"" and amount > best_amount:
+			best_fluid = fluid_id
+			best_amount = amount
+	if best_fluid == &"" or best_amount <= 0.0:
+		return Color.TRANSPARENT
+	var fluid = Registry.get_fluid(best_fluid)
+	if fluid == null:
+		return Color.TRANSPARENT
+	var cap: float = fluid.units_per_segment if fluid.units_per_segment > 0.0 else 10.0
+	var fill_ratio: float = clampf(best_amount / cap, 0.0, 1.0)
+	var tint := Color(fluid.color)
+	tint.a = lerpf(0.35, fluid.opacity, fill_ratio)
+	return tint
+
+
+func _draw_bridge_item_visuals(canvas: CanvasItem, edge_a: Vector2, edge_b: Vector2, pos_a: Vector2i, pos_b: Vector2i) -> void:
+	var logistics = _logistics if _logistics != null else _logistics_ref()
+	if logistics == null or not logistics.has_method("get_bridge_item_visuals"):
+		return
+	var visuals: Array = logistics.get_bridge_item_visuals()
+	if visuals.is_empty():
+		return
+	var icon_size := Vector2(main.GRID_SIZE * _BRIDGE_ITEM_ICON_SCALE, main.GRID_SIZE * _BRIDGE_ITEM_ICON_SCALE)
+	var dot_radius: float = main.GRID_SIZE * _BRIDGE_ITEM_DOT_SCALE
+	for visual in visuals:
+		var from_cell: Vector2i = visual.get("from", Vector2i(-1, -1))
+		var to_cell: Vector2i = visual.get("to", Vector2i(-1, -1))
+		var start: Vector2
+		var end: Vector2
+		if from_cell == pos_a and to_cell == pos_b:
+			start = edge_a
+			end = edge_b
+		elif from_cell == pos_b and to_cell == pos_a:
+			start = edge_b
+			end = edge_a
+		else:
+			continue
+		var t: float = clampf(float(visual.get("t", 0.0)), 0.0, 1.0)
+		var item_id: StringName = StringName(visual.get("item_id", &""))
+		var item = Registry.get_item_or_fluid(item_id)
+		var item_pos: Vector2 = start.lerp(end, t)
+		if item != null and "icon" in item and item.icon != null:
+			canvas.draw_texture_rect(item.icon, Rect2(item_pos - icon_size * 0.5, icon_size), false)
+		else:
+			var color := Color(0.85, 0.85, 0.85, 1.0)
+			if item != null and "color" in item:
+				color = Color(item.color)
+			canvas.draw_circle(item_pos, dot_radius, color.darkened(0.15))
+			canvas.draw_arc(item_pos, dot_radius, 0.0, TAU, 16, color.lightened(0.35), 1.5)
 
 
 func _draw_links() -> void:
@@ -10023,8 +10275,21 @@ func _draw_links() -> void:
 	for a in to_highlight:
 		draw_block_outline.call(a, role_outline_for.call(a))
 
-	# (No extending source→mouse line and no link-range circle — the block
-	# outlines above already show what's selectable / connected.)
+	# Link-range ring around the source — drawn like a turret's range circle
+	# so the player can see how far this bridge / mass-driver can reach while
+	# they're picking a partner. The hover ring (`_draw_hovered_block_range`)
+	# only fires when the cursor is over the block; once link mode is active
+	# the cursor has moved off to hunt for a target, so without this the
+	# reach would be invisible exactly when it matters most.
+	if src_data.link_range > 0.0:
+		var src_center: Vector2 = main.grid_to_world(link_source) + Vector2(
+			src_data.grid_size.x * gs * 0.5,
+			src_data.grid_size.y * gs * 0.5,
+		)
+		_draw_dashed_circle(src_center, src_data.link_range * gs, Color(1, 1, 1, 0.7), 3.0)
+
+	# No extending source→mouse line here — the block outlines show
+	# what's selectable / connected, and the ring above shows the reach.
 
 
 ## Draws a dashed line between two points.
@@ -10617,9 +10882,10 @@ func _draw_cranes() -> void:
 		var base: Vector2 = main.grid_to_world(anchor) + Vector2(data.grid_size.x * gs / 2.0, data.grid_size.y * gs / 2.0)
 
 		_draw_crane_pose(state, data, base, gs, 0.0)
-		# Range overlay for cranes is now unified with turrets via the
-		# hover-driven `_draw_hovered_turret_range`. The old per-frame
-		# green arc was redundant and only appeared while controlling.
+		# Range overlay for cranes is now unified with other block ranges
+		# via the hover-driven `_draw_hovered_block_range`. The old
+		# per-frame green arc was redundant and only appeared while
+		# controlling.
 
 
 ## Returns the canvas crane drawing should target — `_crane_draw_canvas`

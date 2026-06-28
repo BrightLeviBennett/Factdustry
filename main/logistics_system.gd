@@ -86,6 +86,14 @@ var _conv_meta: Dictionary = {}          # Vector2i -> Dictionary
 var _conv_meta_dirty: bool = true
 var _ready_conveyor_cells: Array[Vector2i] = []
 var _item_visual_cache: Dictionary = {}  # StringName -> ItemData/FluidData/null
+var _bridge_item_visuals: Array[Dictionary] = []
+var _petroleum_mixer_debug_last := {}
+
+const _BRIDGE_ITEM_VISUAL_MIN_DURATION := 0.22
+const _BRIDGE_ITEM_VISUAL_SECONDS_PER_TILE := 0.08
+const _BRIDGE_ITEM_VISUAL_MAX_DURATION := 0.75
+const DEBUG_PETROLEUM_MIXER := true
+const _PETROLEUM_MIXER_DEBUG_INTERVAL_MS := 1000
 
 # --- PIPE STATE ---
 # Key = Vector2i (grid position of a pipe cell)
@@ -377,6 +385,10 @@ const PIPE_LEAK_RATE := 5.0
 ## main.SPRITE_SCALE_FACTOR so items scale with GRID_SIZE.
 const ITEM_RADIUS := 8.0
 const ITEM_TEXTURE_SIZE := 20.0
+## Global multiplier on belt/duct item travel speed (1.0 = the block's full
+## transport_speed). Was inadvertently dropped to 0.7 during the belt/duct
+## optimization, which made every item crawl at 70% speed.
+const ITEM_PROGRESS_SPEED_SCALE := 1.0
 
 
 
@@ -473,6 +485,7 @@ func _process(delta: float) -> void:
 		_accum_factory = 0.0
 	# Item / fluid / payload motion stays at full frame rate for smoothness.
 	_update_fabricator_ejection_visuals(delta)
+	_update_bridge_item_visuals(delta)
 	_update_conveyors(delta)
 	_update_lane_shifters(delta)
 	_update_payloads(delta)
@@ -871,6 +884,17 @@ func _wall_miner_outputs_for_wall(data: BlockData, wall_id: StringName) -> Dicti
 	for raw_id in data.output_items:
 		produced[StringName(raw_id)] = int(data.output_items[raw_id])
 	return produced
+
+
+func _emit_extractor_produced_event(data: BlockData, item_id: StringName) -> void:
+	if main == null:
+		return
+	if data != null and data.id == &"mineral_extractor":
+		if main.has_signal("item_produced"):
+			main.item_produced.emit(item_id)
+	else:
+		if main.has_signal("item_mined"):
+			main.item_mined.emit(item_id)
 
 
 func _extractor_amount_for_resource(data: BlockData, resource_key: StringName) -> int:
@@ -1331,13 +1355,13 @@ func _update_drills(delta: float) -> void:
 					var push_entry_dir := _get_entry_dir_from_building(out_pos, origin, data.grid_size)
 					if _try_push_item(out_pos, item_id, push_entry_dir):
 						pushed = true
-						if drill_is_lumina and main.has_signal("item_mined"):
-							main.item_mined.emit(item_id)
+						if drill_is_lumina:
+							_emit_extractor_produced_event(data, item_id)
 						break
 				if not pushed:
 					if _add_to_storage(origin, item_id, data):
-						if drill_is_lumina and main.has_signal("item_mined"):
-							main.item_mined.emit(item_id)
+						if drill_is_lumina:
+							_emit_extractor_produced_event(data, item_id)
 
 ## True when the drill at `origin` is genuinely mining (built, enabled, powered,
 ## ore in range, output not full). The plasma-bore renderer uses this to hide
@@ -1807,6 +1831,11 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 		# Route item to conveyor
 		var meta: Dictionary = _conv_meta.get(grid_pos, {})
 		if not meta.is_empty():
+			# Junctions are pass-through crossovers. Check the straight-through
+			# destination before the generic occupied-cell gate so they never
+			# reserve or animate an item on the junction tile.
+			if bool(meta.get("junction", false)) and entry_dir >= 0:
+				return _try_transfer_through_junction(grid_pos, item_id, entry_dir)
 			if conveyor_items.has(grid_pos):
 				return false
 			if bool(meta.get("bridge", false)) and entry_dir >= 0 and _is_bridge_output(grid_pos):
@@ -1821,7 +1850,10 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 			if bool(meta.get("router", false)) and entry_dir >= 0:
 				if entry_dir != int(meta.get("router_entry", (int(meta.get("rot", 0)) + 2) % 4)):
 					return false
-			_set_conveyor_item(grid_pos, item_id, 0.0, entry_dir)
+			var direct_exit_dir: int = -1
+			if bool(meta.get("router", false)):
+				direct_exit_dir = _pick_router_exit(grid_pos, {"item_id": item_id, "entry_dir": entry_dir})
+			_set_conveyor_item(grid_pos, item_id, 0.0, entry_dir, direct_exit_dir)
 			return true
 
 	# Accept into factory input side (works for both items and fluids)
@@ -1845,6 +1877,16 @@ func _try_push_item(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1
 		return true
 
 	return false
+
+
+## Factory recipe outputs are discrete produced units. The generic push helper
+## uses PIPE_PUSH_AMOUNT for fluid transport rate, which is correct for pumps /
+## pipes but wrong for a recipe output slot such as "4 petroleum".
+func _try_push_factory_output(grid_pos: Vector2i, item_id: StringName, entry_dir: int = -1) -> bool:
+	if Registry.fluids.has(item_id) and _is_pipe_cell(grid_pos):
+		var from_dir: int = (entry_dir + 2) % 4 if entry_dir >= 0 else -1
+		return _add_fluid_to_pipe(grid_pos, item_id, 1.0, from_dir)
+	return _try_push_item(grid_pos, item_id, entry_dir)
 
 
 ## Routes a conveyor-fed item into a storage-tagged block's internal
@@ -1887,6 +1929,36 @@ func _set_conveyor_item(cell: Vector2i, item_id: StringName, progress: float, en
 	if exit_dir >= 0:
 		entry["exit_dir"] = exit_dir
 	conveyor_items[cell] = entry
+
+
+func _spawn_bridge_item_visual(from_cell: Vector2i, to_cell: Vector2i, item_id: StringName) -> void:
+	var delta_cells: Vector2i = to_cell - from_cell
+	var tile_distance: float = Vector2(delta_cells.x, delta_cells.y).length()
+	var duration: float = clampf(
+		tile_distance * _BRIDGE_ITEM_VISUAL_SECONDS_PER_TILE,
+		_BRIDGE_ITEM_VISUAL_MIN_DURATION,
+		_BRIDGE_ITEM_VISUAL_MAX_DURATION,
+	)
+	_bridge_item_visuals.append({
+		"from": from_cell,
+		"to": to_cell,
+		"item_id": item_id,
+		"t": 0.0,
+		"duration": duration,
+	})
+
+
+func _update_bridge_item_visuals(delta: float) -> void:
+	for i in range(_bridge_item_visuals.size() - 1, -1, -1):
+		var visual: Dictionary = _bridge_item_visuals[i]
+		var duration: float = maxf(float(visual.get("duration", _BRIDGE_ITEM_VISUAL_MIN_DURATION)), 0.001)
+		visual["t"] = float(visual.get("t", 0.0)) + delta / duration
+		if float(visual["t"]) >= 1.0:
+			_bridge_item_visuals.remove_at(i)
+
+
+func get_bridge_item_visuals() -> Array:
+	return _bridge_item_visuals
 
 
 func _rebuild_conveyor_metadata() -> void:
@@ -1941,32 +2013,26 @@ func _try_transfer_to_conveyor_fast(to: Vector2i, item_id: StringName, entry_dir
 	var meta: Dictionary = _conv_meta.get(to, {})
 	if meta.is_empty():
 		return false
+
+	# Junctions are pass-through crossovers and only accept when their
+	# straight-through destination can take the item immediately.
+	if bool(meta.get("junction", false)) and entry_dir >= 0:
+		return _try_transfer_through_junction(to, item_id, entry_dir)
+
 	if conveyor_items.has(to):
 		return false
 
 	if bool(meta.get("bridge", false)) and entry_dir >= 0 and _is_bridge_output(to):
 		return false
 
-	# Junctions have two independent lanes and need their straight-through
-	# acceptance check before occupying either lane.
-	if bool(meta.get("junction", false)) and entry_dir >= 0:
-		if not _junction_would_accept_item(to, item_id, entry_dir):
-			return false
-		if _is_junction_primary_axis(to, entry_dir):
-			_set_conveyor_item(to, item_id, 1.0, entry_dir)
-		else:
-			junction_items[to] = {
-				"item_id": item_id,
-				"progress": 1.0,
-				"entry_dir": entry_dir,
-			}
-		return true
-
 	if bool(meta.get("router", false)) and entry_dir >= 0:
 		if entry_dir != int(meta.get("router_entry", (int(meta.get("rot", 0)) + 2) % 4)):
 			return false
 
-	_set_conveyor_item(to, item_id, 1.0 if bool(meta.get("instant", false)) else 0.0, entry_dir)
+	var exit_dir: int = -1
+	if bool(meta.get("router", false)):
+		exit_dir = _pick_router_exit(to, {"item_id": item_id, "entry_dir": entry_dir})
+	_set_conveyor_item(to, item_id, 1.0 if bool(meta.get("instant", false)) else 0.0, entry_dir, exit_dir)
 	return true
 
 func _update_conveyors(delta: float) -> void:
@@ -2051,10 +2117,15 @@ func _update_conveyors(delta: float) -> void:
 						_erase_conveyor_item(grid_pos)
 					else:
 						# Pre-decided path blocked. Try the other outputs; if any
-						# succeeds, transfer. If ALL blocked, leave exit_dir intact
-						# so the item visually stalls at the chosen exit instead
-						# of flicking through all 3 edges every frame.
-						if _try_router_transfer(grid_pos, item):
+						# succeeds, transfer (and re-stamp exit_dir so the draw
+						# follows). If ALL blocked, leave exit_dir intact so the
+						# item visually stalls at the chosen exit instead of
+						# flicking through all 3 edges every frame.
+						# force_scan bypasses the cached-exit short-circuit in
+						# _try_router_transfer — otherwise it would just retry the
+						# same blocked face and the item would clog the router even
+						# with two free outputs.
+						if _try_router_transfer(grid_pos, item, true):
 							_erase_conveyor_item(grid_pos)
 				else:
 					if _try_router_transfer(grid_pos, item):
@@ -2104,7 +2175,7 @@ func _update_conveyors(delta: float) -> void:
 		if item["progress"] < 1.0:
 			var meta_adv: Dictionary = _conv_meta.get(grid_pos, {})
 			var speed: float = float(meta_adv.get("speed", conveyor_speed))
-			item["progress"] = minf(item["progress"] + speed * delta, 1.0)
+			item["progress"] = minf(item["progress"] + speed * delta * ITEM_PROGRESS_SPEED_SCALE, 1.0)
 
 	# Pre-decide exit direction for router items so they animate correctly.
 	# Items keep their cached exit_dir as long as that direction still has
@@ -2168,7 +2239,7 @@ func _update_conveyors(delta: float) -> void:
 		var item = junction_items[grid_pos]
 		if item["progress"] < 1.0:
 			var speed: float = float(_conv_meta.get(grid_pos, {}).get("speed", conveyor_speed))
-			item["progress"] = minf(item["progress"] + speed * delta, 1.0)
+			item["progress"] = minf(item["progress"] + speed * delta * ITEM_PROGRESS_SPEED_SCALE, 1.0)
 
 
 ## Tries to move an item into the destination cell.
@@ -2223,18 +2294,7 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 		# block input. They stay on the upstream belt until the straight-
 		# through output can actually receive them.
 		if _is_junction_cell(to) and entry_dir >= 0:
-			if not _junction_would_accept_item(to, item_id, entry_dir):
-				return false
-			if _is_junction_primary_axis(to, entry_dir):
-				_set_conveyor_item(to, item_id, 1.0, entry_dir)
-				return true
-			else:
-				junction_items[to] = {
-					"item_id": item_id,
-					"progress": 1.0,
-					"entry_dir": entry_dir,
-				}
-				return true
+			return _try_transfer_through_junction(to, item_id, entry_dir)
 
 		# Special blocks: items pass through instantly (no visual sliding)
 		# Overflow / underflow are NOT instant — they animate the item across the
@@ -2282,7 +2342,7 @@ func _try_transfer_item(to: Vector2i, item_id: StringName, entry_dir: int = -1) 
 ## Handles router item distribution: tries to push the item to 3 output
 ## directions (all except the entry direction), using round-robin so items
 ## spread evenly across outputs — just like Mindustry routers.
-func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
+func _try_router_transfer(grid_pos: Vector2i, item: Dictionary, force_scan: bool = false) -> bool:
 	# Routers reserve their BACK face for input only — outputs are the
 	# other three sides regardless of which face the item entered from.
 	var rot: int = main.building_rotation.get(grid_pos, 0)
@@ -2305,7 +2365,7 @@ func _try_router_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 	# the item stall; the next picker pass will re-commit `exit_dir`
 	# to whichever side is accepting now.
 	var cached_exit: int = item.get("exit_dir", -1)
-	if cached_exit >= 0 and cached_exit != exclude_dir \
+	if not force_scan and cached_exit >= 0 and cached_exit != exclude_dir \
 			and not _is_cross_faction(grid_pos, grid_pos + DIR_VECTORS[cached_exit]):
 		var cached_pos: Vector2i = grid_pos + DIR_VECTORS[cached_exit]
 		var cached_entry: int = (cached_exit + 2) % 4
@@ -2693,6 +2753,7 @@ func _try_bridge_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
 		var out_rot: int = main.building_rotation.get(partner, 0)
 		var entry_dir: int = (out_rot + 2) % 4  # enters from behind
 		_set_conveyor_item(partner, item_id, 0.0, entry_dir)
+		_spawn_bridge_item_visual(grid_pos, partner, item_id)
 		# Advance round-robin so the next call tries the NEXT
 		# destination first — even spread across multi-output ducts.
 		bridge_output_rr[grid_pos] = (idx + 1) % partners.size()
@@ -2727,12 +2788,6 @@ func _junction_would_accept_item(grid_pos: Vector2i, item_id: StringName, entry_
 		return false
 	if _is_cross_faction(grid_pos, exit_pos):
 		return false
-	if _is_junction_primary_axis(grid_pos, entry_dir):
-		if conveyor_items.has(grid_pos):
-			return false
-	else:
-		if junction_items.has(grid_pos):
-			return false
 	var next_entry: int = (exit_dir + 2) % 4
 	if _is_conveyor_cell(exit_pos):
 		if _is_junction_cell(exit_pos):
@@ -2745,20 +2800,30 @@ func _junction_would_accept_item(grid_pos: Vector2i, item_id: StringName, entry_
 	return _could_block_accept_item(exit_pos, item_id, next_entry)
 
 
-## Pass item straight through the junction (exit = opposite of entry).
-func _try_junction_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
-	var entry_dir: int = item.get("entry_dir", -1)
+## Pass item straight through the junction (exit = opposite of entry), with no
+## intermediate item stored or animated on the junction cell.
+func _try_transfer_through_junction(grid_pos: Vector2i, item_id: StringName, entry_dir: int, depth: int = 0) -> bool:
 	if entry_dir < 0:
 		# Fallback: use junction's facing direction
 		entry_dir = (main.building_rotation.get(grid_pos, 0) + 2) % 4
+	if depth > 8:
+		return false
 	var exit_dir: int = (entry_dir + 2) % 4  # straight through
 	var next_pos: Vector2i = grid_pos + DIR_VECTORS[exit_dir]
 	var next_entry: int = (exit_dir + 2) % 4
 
 	if _is_cross_faction(grid_pos, next_pos):
 		return false
+	if _is_junction_cell(next_pos):
+		return _try_transfer_through_junction(next_pos, item_id, next_entry, depth + 1)
 
-	return _try_transfer_item(next_pos, item["item_id"], next_entry)
+	return _try_transfer_item(next_pos, item_id, next_entry)
+
+
+## Legacy drain for saves/runtime state created before junctions became
+## instant. New items should never sit on a junction.
+func _try_junction_transfer(grid_pos: Vector2i, item: Dictionary) -> bool:
+	return _try_transfer_through_junction(grid_pos, item["item_id"], int(item.get("entry_dir", -1)))
 
 
 # =========================
@@ -3790,7 +3855,10 @@ func _try_handoff_payload_to_block(out_pos: Vector2i, payload_data: Dictionary, 
 # PIPE LOGIC
 # =========================
 
-## Adds fluid to a pipe cell. Returns true if successful.
+## Adds fluid to a pipe cell. Returns true only when the whole transfer packet
+## fits. Callers usually remove one produced fluid unit from storage after this
+## returns true, so partial top-ups would silently destroy the overflow whenever
+## a nearly-full pipe was topped up.
 ##
 ## When `grid_pos` is a junction, the new fluid is routed into the
 ## junction's V (vertical N↔S) or H (horizontal E↔W) channel based on
@@ -3809,6 +3877,9 @@ func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float,
 	var fluid = Registry.get_fluid(fluid_id)
 	if fluid == null:
 		return false
+	var packet_amount: float = minf(amount, fluid.units_per_segment)
+	if packet_amount <= 0.0:
+		return false
 	# Junction handling: route into the correct axis compartment.
 	if _is_junction_cell(grid_pos):
 		if from_dir < 0:
@@ -3826,10 +3897,10 @@ func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float,
 		var existing_amount: float = float(state.get(amount_key, 0.0))
 		if existing_fluid != &"" and existing_fluid != fluid_id:
 			return false
-		if existing_amount >= fluid.units_per_segment:
+		if existing_amount + packet_amount > fluid.units_per_segment:
 			return false
 		state[fluid_key] = fluid_id
-		state[amount_key] = minf(existing_amount + amount, fluid.units_per_segment)
+		state[amount_key] = existing_amount + packet_amount
 		pipe_junction_state[grid_pos] = state
 		return true
 
@@ -3839,13 +3910,13 @@ func _add_fluid_to_pipe(grid_pos: Vector2i, fluid_id: StringName, amount: float,
 		if pipe["fluid_id"] != fluid_id:
 			return false
 		# Cap at units_per_segment
-		if pipe["amount"] >= fluid.units_per_segment:
+		if float(pipe["amount"]) + packet_amount > fluid.units_per_segment:
 			return false
-		pipe["amount"] = minf(pipe["amount"] + amount, fluid.units_per_segment)
+		pipe["amount"] = float(pipe["amount"]) + packet_amount
 	else:
 		pipe_contents[grid_pos] = {
 			"fluid_id": fluid_id,
-			"amount": minf(amount, fluid.units_per_segment),
+			"amount": packet_amount,
 		}
 	return true
 
@@ -4277,7 +4348,10 @@ func _update_pipes(delta: float) -> void:
 			to_clean.append(grid_pos)
 			continue
 
-		# Only leak if this pipe has NO pipe/factory neighbor in any direction
+		# Only leak if this pipe has NO valid fluid neighbor in any direction.
+		# Fluid-ammo turrets and booster blocks are valid consumers too; if we
+		# only count factory-style side inputs, a pipe beside a Flarecaster can
+		# misclassify itself as orphaned and leak away before the turret loads.
 		var has_any_neighbor := false
 		for dir in range(4):
 			var nb: Vector2i = grid_pos + DIR_VECTORS[dir]
@@ -4285,6 +4359,9 @@ func _update_pipes(delta: float) -> void:
 				has_any_neighbor = true
 				break
 			if _factory_accepts_fluid_from(nb, pipe["fluid_id"], (dir + 2) % 4):
+				has_any_neighbor = true
+				break
+			if _fluid_consumer_neighbor_accepts(nb, pipe["fluid_id"]):
 				has_any_neighbor = true
 				break
 			# Also check if a pump is adjacent (source)
@@ -4315,38 +4392,52 @@ func _update_pipes(delta: float) -> void:
 		for dir in range(4):
 			var neighbor: Vector2i = grid_pos + DIR_VECTORS[dir]
 			var entry_dir: int = (dir + 2) % 4  # Fluid enters factory from opposite side
+			var network_amount: float = _connected_pipe_fluid_amount(grid_pos, pipe["fluid_id"])
 
-			if pipe["amount"] < units_needed:
-				if not _is_cross_faction(grid_pos, neighbor):
-					var stored_remainder: float = _try_accept_fluid_storage(
-						neighbor,
-						pipe["fluid_id"],
-						minf(pipe["amount"], PIPE_PUSH_AMOUNT * delta)
-					)
-					if stored_remainder > 0.0:
-						pipe["amount"] -= stored_remainder
-				if pipe["amount"] <= 0:
-					break
-				continue
-
-			# Block cross-faction pipe→factory feed
+			# Block cross-faction pipe→consumer feed
 			if _is_cross_faction(grid_pos, neighbor):
 				continue
 
-			if _try_accept_factory_item(neighbor, pipe["fluid_id"], entry_dir):
-				pipe["amount"] -= units_needed
+			var offered_factory_units: float = minf(network_amount, PIPE_PUSH_AMOUNT * delta)
+			var accepted_factory_units: float = _try_accept_factory_fluid_amount(
+				neighbor,
+				pipe["fluid_id"],
+				entry_dir,
+				offered_factory_units
+			)
+			if accepted_factory_units > 0.0:
+				network_amount -= _drain_connected_pipe_fluid(grid_pos, pipe["fluid_id"], accepted_factory_units)
+				if network_amount <= 0.0:
+					break
+				continue
+
+			# Generic fluid buffers (fluid-ammo turrets, booster-fed blocks,
+			# launchpads) receive actual fluid units. Even a below-recipe-size
+			# remainder should move into them instead of waiting in the pipe.
+			var offered_units: float = minf(network_amount, PIPE_PUSH_AMOUNT * delta)
+			var accepted_units: float = _try_accept_booster_fluid_amount(
+				neighbor,
+				pipe["fluid_id"],
+				offered_units
+			)
+			if accepted_units > 0.0:
+				network_amount -= _drain_connected_pipe_fluid(grid_pos, pipe["fluid_id"], accepted_units)
+				if network_amount <= 0.0:
+					break
+				continue
+
+			if network_amount < units_needed:
+				var stored_remainder: float = _try_accept_fluid_storage(
+					neighbor,
+					pipe["fluid_id"],
+					minf(pipe["amount"], PIPE_PUSH_AMOUNT * delta)
+				)
+				if stored_remainder > 0.0:
+					pipe["amount"] -= stored_remainder
 				if pipe["amount"] <= 0:
 					break
 				continue
-			# Booster-fluid sip: blocks like the double-barrel /
-			# payload crane that declare a fluid-based booster but
-			# aren't factories siphon water (or whatever fluid the
-			# booster references) into their generic fluid storage.
-			if _try_accept_booster_fluid(neighbor, pipe["fluid_id"]):
-				pipe["amount"] -= units_needed
-				if pipe["amount"] <= 0:
-					break
-				continue
+
 			var stored_amount: float = _try_accept_fluid_storage(
 				neighbor,
 				pipe["fluid_id"],
@@ -4391,6 +4482,29 @@ func _update_pipes(delta: float) -> void:
 				var entry_dir: int = (int(dirs[i]) + 2) % 4
 				if _is_cross_faction(j_anchor, nb_cell):
 					continue
+				var offered_jf_factory_units: float = minf(jf_amount, PIPE_PUSH_AMOUNT * delta)
+				var accepted_jf_factory_units: float = _try_accept_factory_fluid_amount(
+					nb_cell,
+					jf_id,
+					entry_dir,
+					offered_jf_factory_units
+				)
+				if accepted_jf_factory_units > 0.0:
+					jf_amount -= accepted_jf_factory_units
+					if jf_amount <= 0.0:
+						break
+					continue
+				var offered_jf_units: float = minf(jf_amount, PIPE_PUSH_AMOUNT * delta)
+				var accepted_jf_units: float = _try_accept_booster_fluid_amount(
+					nb_cell,
+					jf_id,
+					offered_jf_units
+				)
+				if accepted_jf_units > 0.0:
+					jf_amount -= accepted_jf_units
+					if jf_amount <= 0.0:
+						break
+					continue
 				if jf_amount < jf_needed:
 					var stored_jf_remainder: float = _try_accept_fluid_storage(
 						nb_cell,
@@ -4402,12 +4516,6 @@ func _update_pipes(delta: float) -> void:
 					if jf_amount <= 0.0:
 						break
 					continue
-				if _try_accept_factory_item(nb_cell, jf_id, entry_dir):
-					jf_amount -= jf_needed
-					continue
-				if _try_accept_booster_fluid(nb_cell, jf_id):
-					jf_amount -= jf_needed
-					continue
 				var stored_jf_amount: float = _try_accept_fluid_storage(
 					nb_cell,
 					jf_id,
@@ -4417,6 +4525,8 @@ func _update_pipes(delta: float) -> void:
 					jf_amount -= stored_jf_amount
 			j_state[ak] = maxf(0.0, jf_amount)
 		pipe_junction_state[j_anchor] = j_state
+
+	_cleanup_empty_pipe_contents()
 
 	# Clean up empty pipe entries
 	for pos in to_clean:
@@ -5185,17 +5295,100 @@ func _find_pipe_network(start: Vector2i) -> Array[Vector2i]:
 	return network
 
 
+func _pipe_network_for_cell(grid_pos: Vector2i) -> Array[Vector2i]:
+	for network: Array in _pipe_networks:
+		if network.has(grid_pos):
+			var typed_network: Array[Vector2i] = []
+			for pos in network:
+				typed_network.append(pos)
+			return typed_network
+	if _is_pipe_cell(grid_pos):
+		var single_cell: Array[Vector2i] = []
+		single_cell.append(grid_pos)
+		return single_cell
+	return []
+
+
+func _connected_pipe_fluid_amount(grid_pos: Vector2i, fluid_id: StringName) -> float:
+	var total := 0.0
+	for pos in _pipe_network_for_cell(grid_pos):
+		if not pipe_contents.has(pos):
+			continue
+		var pipe: Dictionary = pipe_contents[pos]
+		if StringName(pipe.get("fluid_id", &"")) != fluid_id:
+			continue
+		total += float(pipe.get("amount", 0.0))
+	return total
+
+
+func _drain_connected_pipe_fluid(grid_pos: Vector2i, fluid_id: StringName, amount: float) -> float:
+	var remaining: float = amount
+	var drained := 0.0
+	var ordered: Array[Vector2i] = []
+	ordered.append(grid_pos)
+	for pos in _pipe_network_for_cell(grid_pos):
+		if pos != grid_pos:
+			ordered.append(pos)
+
+	for pos in ordered:
+		if remaining <= 0.0:
+			break
+		if not pipe_contents.has(pos):
+			continue
+		var pipe: Dictionary = pipe_contents[pos]
+		if StringName(pipe.get("fluid_id", &"")) != fluid_id:
+			continue
+		var available: float = float(pipe.get("amount", 0.0))
+		if available <= 0.0:
+			continue
+		var take: float = minf(available, remaining)
+		pipe["amount"] = maxf(0.0, available - take)
+		remaining -= take
+		drained += take
+	return drained
+
+
+func _cleanup_empty_pipe_contents() -> void:
+	var empty_cells: Array[Vector2i] = []
+	for pos in pipe_contents:
+		if float(pipe_contents[pos].get("amount", 0.0)) <= 0.0:
+			empty_cells.append(pos)
+	for pos in empty_cells:
+		pipe_contents.erase(pos)
+
+
 ## Returns true if a factory at grid_pos would accept the given fluid from entry_dir.
 func _factory_accepts_fluid_from(grid_pos: Vector2i, fluid_id: StringName, entry_dir: int) -> bool:
 	if not main.placed_buildings.has(grid_pos):
 		return false
 	var data = Registry.get_block(main.placed_buildings[grid_pos])
-	if data == null or data.side_inputs.is_empty():
+	if data == null:
 		return false
 
 	var anchor = main.get_building_anchor(grid_pos)
 	var origin: Vector2i = anchor if anchor != null else grid_pos
 	var rot: int = main.building_rotation.get(origin, 0)
+	var is_omni: bool = data.tags.has("omnidirectional") \
+		or data.tags.has("refabricator") \
+		or data.tags.has("auto_recipe") \
+		or not data.output_sides.is_empty()
+
+	if is_omni or data.produced_unit != &"":
+		if data.factory_recipes != null and data.factory_recipes.size() > 0:
+			for entry in data.factory_recipes:
+				if typeof(entry) != TYPE_DICTIONARY:
+					continue
+				var recipe_inputs: Dictionary = _normalize_item_keys(entry.get("input", {}))
+				for raw_id in recipe_inputs:
+					if StringName(raw_id) == fluid_id:
+						return true
+		var effective_inputs := _get_effective_inputs(data, origin)
+		for raw_id in effective_inputs:
+			if StringName(raw_id) == fluid_id:
+				return true
+
+	if data.side_inputs.is_empty():
+		return false
 
 	for rel_dir_key in data.side_inputs:
 		var rel_dir: int = int(rel_dir_key)
@@ -5204,6 +5397,25 @@ func _factory_accepts_fluid_from(grid_pos: Vector2i, fluid_id: StringName, entry
 			var expected := StringName(data.side_inputs[rel_dir_key])
 			if fluid_id == expected:
 				return true
+	return false
+
+
+## Read-only version of the pipe-side generic fluid consumer check. Used by
+## orphan-leak detection so pipes attached to fluid-ammo turrets, boosters, or
+## storage tanks do not leak just because the neighbor is not a factory input.
+func _fluid_consumer_neighbor_accepts(grid_pos: Vector2i, fluid_id: StringName) -> bool:
+	if not main.placed_buildings.has(grid_pos):
+		return false
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null or data.liquid_capacity <= 0.0:
+		return false
+	if data.tags.has("launchpad") or data.tags.has("fluid_storage"):
+		return true
+	if data.is_turret() and not data.ammo_types.is_empty() and data.ammo_accepts(fluid_id):
+		return true
+	for entry in data.boosters:
+		if typeof(entry) == TYPE_DICTIONARY and StringName(entry.get("item_id", &"")) == fluid_id:
+			return true
 	return false
 
 
@@ -5574,8 +5786,11 @@ func _update_storage_unloading(_delta: float) -> void:
 							and _pipe_feeds_toward_building(neighbor, origin, grid_size):
 						continue
 					var from_dir: int = (_get_entry_dir_from_building(neighbor, origin, grid_size) + 2) % 4
-					if _add_fluid_to_pipe(neighbor, fluid_id, PIPE_PUSH_AMOUNT, from_dir):
-						storage["fluids"][fluid_id] = float(storage["fluids"][fluid_id]) - 1.0
+					var stored_amount: float = float(storage["fluids"][fluid_id])
+					var pipe_room: float = _pipe_fluid_space(neighbor, fluid_id, from_dir)
+					var move_amount: float = minf(minf(stored_amount, pipe_room), PIPE_PUSH_AMOUNT)
+					if move_amount > 0.0 and _add_fluid_to_pipe(neighbor, fluid_id, move_amount, from_dir):
+						storage["fluids"][fluid_id] = stored_amount - move_amount
 						if float(storage["fluids"][fluid_id]) <= 0:
 							fluids_to_remove[fluid_id] = true
 						break
@@ -5921,8 +6136,10 @@ func _incinerate_smoke(anchor: Vector2i) -> void:
 		var bdata = Registry.get_block(main.placed_buildings[anchor])
 		if bdata != null:
 			gsize = bdata.grid_size
-	# Centered horizontally, just above the block's top edge.
-	var pos: Vector2 = main.grid_to_world(anchor) + Vector2(gsize.x * gs * 0.5, -gs * 0.1)
+	# Centered on the incinerator's upper face. `grid_to_world` returns the
+	# tile's top-left, so keep the puff inside the footprint instead of
+	# floating above the sprite.
+	var pos: Vector2 = main.grid_to_world(anchor) + Vector2(gsize.x * gs * 0.5, gsize.y * gs * 0.32)
 	overlay.spawn_burst(pos, "incinerate_smoke")
 
 
@@ -6117,17 +6334,23 @@ func _try_accept_constructor_item(grid_pos: Vector2i, item_id: StringName) -> bo
 ## `liquid_capacity`. This is what lets a turret / crane sip water
 ## from an adjacent pipe even though it has no factory `side_inputs`.
 func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool:
+	return _try_accept_booster_fluid_amount(grid_pos, fluid_id, 1.0) > 0.0
+
+
+func _try_accept_booster_fluid_amount(grid_pos: Vector2i, fluid_id: StringName, amount: float) -> float:
+	if amount <= 0.0:
+		return 0.0
 	if not main.placed_buildings.has(grid_pos):
-		return false
+		return 0.0
 	var data = Registry.get_block(main.placed_buildings[grid_pos])
 	if data == null:
-		return false
+		return 0.0
 	# Launchpad: accepts any fluid into its passenger buffer, capped by
 	# liquid_capacity. The booster-table check below would reject this,
 	# so handle it up front.
 	if data.tags.has("launchpad"):
 		if data.liquid_capacity <= 0:
-			return false
+			return 0.0
 		var lp_anchor = main.get_building_anchor(grid_pos)
 		var lp_origin: Vector2i = lp_anchor if lp_anchor != null else grid_pos
 		if not block_storage.has(lp_origin):
@@ -6138,11 +6361,14 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 		for k in lp_fluids:
 			lp_total += float(lp_fluids[k])
 		if lp_total >= float(data.liquid_capacity):
-			return false
-		lp_fluids[fluid_id] = float(lp_fluids.get(fluid_id, 0.0)) + 1.0
+			return 0.0
+		var lp_accepted: float = minf(amount, float(data.liquid_capacity) - lp_total)
+		if lp_accepted <= 0.0:
+			return 0.0
+		lp_fluids[fluid_id] = float(lp_fluids.get(fluid_id, 0.0)) + lp_accepted
 		lp_storage["fluids"] = lp_fluids
 		block_storage[lp_origin] = lp_storage
-		return true
+		return lp_accepted
 	# Turret fluid-ammo intake: a turret whose ammo_types reference this fluid
 	# (Corrosion → acid, Fume → sulfur fumes) draws it straight from an
 	# adjacent pipe into its fluid buffer, capped by liquid_capacity. This is
@@ -6166,19 +6392,22 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 			var grp: Array = data.ammo_group_ids(fluid_id)
 			for f in t_fluids:
 				if float(t_fluids[f]) > 0.0 and not grp.has(f):
-					return false
+					return 0.0
 			# Cap PER FLUID (not total) so a turret needing two distinct ammo
 			# fluids gives each its own liquid_capacity buffer — otherwise the
 			# first fluid fills the shared cap and starves the second.
 			if float(t_fluids.get(fluid_id, 0.0)) >= float(data.liquid_capacity):
-				return false
-			t_fluids[fluid_id] = float(t_fluids.get(fluid_id, 0.0)) + 1.0
+				return 0.0
+			var t_accepted: float = minf(amount, float(data.liquid_capacity) - float(t_fluids.get(fluid_id, 0.0)))
+			if t_accepted <= 0.0:
+				return 0.0
+			t_fluids[fluid_id] = float(t_fluids.get(fluid_id, 0.0)) + t_accepted
 			t_storage["fluids"] = t_fluids
 			block_storage[t_origin] = t_storage
-			return true
+			return t_accepted
 
 	if data.liquid_capacity <= 0 or data.boosters.is_empty():
-		return false
+		return 0.0
 	# Match against the booster table: at least one entry must reference
 	# this fluid id, otherwise the block has no business storing it.
 	var accepted := false
@@ -6189,7 +6418,7 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 			accepted = true
 			break
 	if not accepted:
-		return false
+		return 0.0
 	# Multi-tile blocks share one buffer at the anchor.
 	var anchor = main.get_building_anchor(grid_pos)
 	var origin: Vector2i = anchor if anchor != null else grid_pos
@@ -6205,11 +6434,94 @@ func _try_accept_booster_fluid(grid_pos: Vector2i, fluid_id: StringName) -> bool
 	for k in fluids:
 		total += float(fluids[k])
 	if total >= float(data.liquid_capacity):
-		return false
-	fluids[fluid_id] = float(fluids.get(fluid_id, 0.0)) + 1.0
+		return 0.0
+	var booster_accepted: float = minf(amount, float(data.liquid_capacity) - total)
+	if booster_accepted <= 0.0:
+		return 0.0
+	fluids[fluid_id] = float(fluids.get(fluid_id, 0.0)) + booster_accepted
 	storage["fluids"] = fluids
 	block_storage[origin] = storage
-	return true
+	return booster_accepted
+
+
+func _try_accept_factory_fluid_amount(grid_pos: Vector2i, fluid_id: StringName, entry_dir: int, amount: float) -> float:
+	if amount <= 0.0 or Registry.get_fluid(fluid_id) == null:
+		return 0.0
+	if not main.placed_buildings.has(grid_pos):
+		return 0.0
+	var data = Registry.get_block(main.placed_buildings[grid_pos])
+	if data == null:
+		return 0.0
+
+	var is_omni: bool = data.tags.has("omnidirectional") or data.tags.has("refabricator") or not data.output_sides.is_empty()
+	var is_unit_fab: bool = data.produced_unit != &""
+	if not is_omni and not is_unit_fab and data.side_inputs.is_empty():
+		return 0.0
+
+	var anchor = main.get_building_anchor(grid_pos)
+	var origin: Vector2i = anchor if anchor != null else grid_pos
+	var rot: int = main.building_rotation.get(origin, 0)
+	if not factory_buffers.has(origin):
+		factory_buffers[origin] = {
+			"inputs": {},
+			"phase": "collecting",
+			"timer": 0.0,
+			"pending_outputs": {},
+		}
+	var state: Dictionary = factory_buffers[origin]
+	if state["phase"] != "collecting":
+		var accepts_in_processing: bool = is_unit_fab or is_omni
+		if not accepts_in_processing or state["phase"] != "processing":
+			if not is_omni or state["phase"] != "outputting":
+				return 0.0
+
+	var cap: float = 0.0
+	if data.tags.has("auto_recipe"):
+		var known_input := false
+		var locked_other := false
+		var matched_amt: float = 0.0
+		for entry in data.factory_recipes:
+			if typeof(entry) != TYPE_DICTIONARY:
+				continue
+			var in_dict: Dictionary = entry.get("input", {})
+			for in_id in in_dict:
+				var in_sn := StringName(in_id)
+				if in_sn == fluid_id:
+					known_input = true
+					matched_amt = maxf(matched_amt, float(in_dict[in_id]))
+				elif float(state["inputs"].get(in_sn, 0.0)) > 0.0:
+					locked_other = true
+		if not known_input or locked_other:
+			return 0.0
+		cap = float(data.max_stored_items) if data.max_stored_items > 0 else maxf(matched_amt, 1.0) * 10.0
+	elif is_omni or is_unit_fab:
+		var effective_inputs := _get_effective_inputs(data, origin)
+		for raw_id in effective_inputs:
+			if StringName(raw_id) == fluid_id:
+				cap = float(data.max_stored_items) if data.max_stored_items > 0 else maxf(float(effective_inputs[raw_id]), 1.0) * 10.0
+				break
+	else:
+		for rel_dir_key in data.side_inputs:
+			var rel_dir: int = int(rel_dir_key)
+			var world_dir: int = (rel_dir + rot) % 4
+			if world_dir == entry_dir and StringName(data.side_inputs[rel_dir_key]) == fluid_id:
+				cap = 1.0
+				for raw_id in data.input_items:
+					if StringName(raw_id) == fluid_id:
+						cap = float(data.input_items[raw_id])
+						break
+				break
+
+	if cap <= 0.0:
+		return 0.0
+	var have: float = float(state["inputs"].get(fluid_id, 0.0))
+	if have >= cap:
+		return 0.0
+	var accepted: float = minf(amount, cap - have)
+	if accepted <= 0.0:
+		return 0.0
+	state["inputs"][fluid_id] = have + accepted
+	return accepted
 
 
 func _try_accept_fluid_storage(grid_pos: Vector2i, fluid_id: StringName, amount: float) -> float:
@@ -6265,6 +6577,20 @@ func _try_accept_turret_ammo(grid_pos: Vector2i, item_id: StringName) -> bool:
 	if not block_storage.has(origin):
 		block_storage[origin] = {"items": {}, "fluids": {}}
 	var storage: Dictionary = block_storage[origin]
+
+	if Registry.get_fluid(item_id) != null:
+		if data.liquid_capacity <= 0.0:
+			return false
+		if not storage.has("fluids"):
+			storage["fluids"] = {}
+		var fluids: Dictionary = storage["fluids"]
+		if float(fluids.get(item_id, 0.0)) >= float(data.liquid_capacity):
+			return false
+		fluids[item_id] = float(fluids.get(item_id, 0.0)) + 1.0
+		storage["fluids"] = fluids
+		block_storage[origin] = storage
+		return true
+
 	if not storage.has("items"):
 		storage["items"] = {}
 
@@ -7129,13 +7455,17 @@ func _refab_consume_inputs_dict(recipe: Dictionary, buf: Dictionary) -> void:
 
 ## Resolves the recipe (item -> amount) for a refab processing `t2_id`.
 ## Checks `data.refab_recipes[t2_id]` first so authors can give specific
-## tier-2 units their own cost, and falls back to `data.input_items`
-## otherwise. Accepts an empty `t2_id` to get the generic fallback.
+## tier-2 units their own cost, then falls back to that unit's build_cost.
+## `data.input_items` is the final legacy fallback.
 func _refab_effective_recipe(data: BlockData, t2_id: StringName) -> Dictionary:
 	if t2_id != &"" and data.refab_recipes.has(t2_id):
 		var r = data.refab_recipes[t2_id]
 		if r is Dictionary and not r.is_empty():
 			return r
+	if t2_id != &"":
+		var unit_data = Registry.get_unit(t2_id)
+		if unit_data != null and not unit_data.build_cost.is_empty():
+			return unit_data.build_cost
 	return data.input_items
 
 
@@ -8121,6 +8451,8 @@ func _draw_items() -> void:
 		var exit_dir: int = entry.get("exit_dir", -1)
 		# Routers and overflow/underflow belts hold the item at cell centre until
 		# an exit is decided, then animate it out toward that face.
+		if bool(meta.get("junction", false)):
+			continue
 		var holds_center: bool = bool(meta.get("router", false)) \
 			or bool(meta.get("overflow", false)) or bool(meta.get("underflow", false))
 		if holds_center and exit_dir < 0:
@@ -8137,10 +8469,6 @@ func _draw_items() -> void:
 				draw_circle(ip, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
 				draw_arc(ip, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
 			continue
-		if bool(meta.get("junction", false)):
-			var j_entry_dir: int = int(entry.get("entry_dir", -1))
-			if j_entry_dir >= 0 and j_entry_dir <= 3:
-				exit_dir = (j_entry_dir + 2) % 4
 		var effective_dir: int = exit_dir if exit_dir >= 0 else rotation
 		var dir_vec = Vector2(DIR_VECTORS[effective_dir])
 
@@ -8187,46 +8515,8 @@ func _draw_items() -> void:
 			draw_circle(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
 			draw_arc(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
 
-	# Draw junction perpendicular-axis items (same rendering logic)
-	for grid_pos in junction_items:
-		if _ss_items and _ss_items.is_tile_hidden(grid_pos):
-			continue
-		if _la_items and _la_items.has_method("is_block_hidden") \
-				and _la_items.is_block_hidden(main.building_origins.get(grid_pos, grid_pos)):
-			continue
-		var entry = junction_items[grid_pos]
-		var item_id: StringName = entry["item_id"]
-		var progress: float = entry["progress"]
-
-		var item = _item_visual_data(item_id)
-		if item == null:
-			continue
-
-		var entry_dir: int = entry.get("entry_dir", -1)
-		if entry_dir < 0:
-			continue  # Junction items must have an entry direction
-
-		# Exit direction = opposite of entry
-		var exit_dir: int = (entry_dir + 2) % 4
-		var dir_vec = Vector2(DIR_VECTORS[exit_dir])
-
-		var world_pos = main.grid_to_world(grid_pos)
-		var cell_center = world_pos + Vector2(main.GRID_SIZE / 2.0, main.GRID_SIZE / 2.0)
-
-		var offset = Vector2.ZERO
-		if building_sys:
-			offset = building_sys._get_top_offset(world_pos)
-
-		# Junction items always go straight through
-		var item_pos: Vector2 = cell_center + offset + dir_vec * (progress - 0.5) * main.GRID_SIZE
-
-		if item.icon != null:
-			var tex_size = Vector2(ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR, ITEM_TEXTURE_SIZE * main.SPRITE_SCALE_FACTOR)
-			var tex_rect = Rect2(item_pos - tex_size / 2.0, tex_size)
-			draw_texture_rect(item.icon, tex_rect, false)
-		else:
-			draw_circle(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, item.color.darkened(0.15))
-			draw_arc(item_pos, ITEM_RADIUS * main.SPRITE_SCALE_FACTOR, 0, TAU, 16, item.color.lightened(0.4), 2.0)
+	# Junctions are instant crossovers now; legacy junction_items are drained
+	# by the update loop but intentionally not drawn.
 
 
 func _lane_shifter_effect_geometry(anchor: Vector2i, data: BlockData, specs: Dictionary,
@@ -8738,6 +9028,10 @@ func _update_factories(delta: float) -> void:
 				# for unit fabricators.
 				if not is_unit_fabricator and _is_storage_full(origin, data) \
 						and not _factory_has_output_route(origin, data):
+					_debug_petroleum_mixer(origin, data, state, "collecting blocked: output storage full and no output route", {
+						"storage": block_storage.get(origin, {}),
+						"outputs": _get_effective_outputs(data, origin),
+					})
 					continue
 				# FEROX (enemy) fabricators ignore both the player's tech
 				# tree and the player's per-unit cap — those gates are
@@ -8757,6 +9051,10 @@ func _update_factories(delta: float) -> void:
 					continue
 				# Check if all required inputs are met
 				if _factory_has_all_inputs(state, data, origin):
+					_debug_petroleum_mixer(origin, data, state, "starting processing", {
+						"inputs": state.get("inputs", {}),
+						"recipe": _get_effective_inputs(data, origin),
+					})
 					# Don't deduct upfront — _consume_progressive drains
 					# the buffer in step with the timer below so the
 					# tooltip's "have/needed" bars visibly tick down.
@@ -8790,6 +9088,13 @@ func _update_factories(delta: float) -> void:
 				if _can_afford_progress(state["inputs"], _recipe, state["recipe_consumed"], _new_prog):
 					state["timer"] = _tentative_timer
 					_consume_progressive(state["inputs"], _recipe, state["recipe_consumed"], _new_prog)
+				else:
+					_debug_petroleum_mixer(origin, data, state, "processing stalled: missing next input slice", {
+						"inputs": state.get("inputs", {}),
+						"recipe": _recipe,
+						"consumed": state.get("recipe_consumed", {}),
+						"progress": _new_prog,
+					})
 				# Otherwise: don't advance the timer this tick, leaving
 				# the build paused until items show up.
 				if state["timer"] <= 0:
@@ -8845,11 +9150,29 @@ func _update_factories(delta: float) -> void:
 								if factory_is_lumina:
 									main.item_produced.emit(out_id)
 						state["pending_outputs"] = pending
+						_debug_petroleum_mixer(origin, data, state, "finished processing; pending outputs created", {
+							"pending": pending,
+							"storage": block_storage.get(origin, {}),
+						})
 
 			"outputting":
+				if state["pending_outputs"].is_empty():
+					_debug_petroleum_mixer(origin, data, state, "outputting finished; returning to collecting")
+					state["phase"] = "collecting"
+					state["timer"] = 0.0
+					state.erase("timer_total")
+					state["recipe_consumed"] = {}
+					continue
+				var _pending_before_debug: Dictionary = state["pending_outputs"].duplicate(true)
 				_factory_try_output(origin, data, state)
 				if state["pending_outputs"].is_empty():
+					_debug_petroleum_mixer(origin, data, state, "all pending outputs delivered")
 					state["phase"] = "collecting"
+				elif state["pending_outputs"] == _pending_before_debug:
+					_debug_petroleum_mixer(origin, data, state, "outputting stalled: pending outputs unchanged", {
+						"pending": state.get("pending_outputs", {}),
+						"storage": block_storage.get(origin, {}),
+					})
 
 			"ejecting":
 				# Animate the finished unit from the fabricator center toward
@@ -8944,6 +9267,18 @@ func _get_selected_recipe(data: BlockData, anchor: Vector2i) -> Dictionary:
 	return {}
 
 
+func _is_debug_petroleum_mixer(data: BlockData, anchor: Vector2i) -> bool:
+	if not DEBUG_PETROLEUM_MIXER or data == null:
+		return false
+	if data.id != &"compound_mixer":
+		return false
+	return StringName(factory_recipe_state.get(anchor, &"")) == &"coal_liquefy"
+
+
+func _debug_petroleum_mixer(_anchor: Vector2i, _data: BlockData, _state: Dictionary, _message: String, _extra: Dictionary = {}) -> void:
+	pass
+
+
 ## Returns the output dict for this factory: selected recipe's output for
 ## recipe-select factories, or `data.output_items` otherwise.
 func _get_effective_outputs(data: BlockData, anchor: Vector2i = Vector2i(-2147483648, -2147483648)) -> Dictionary:
@@ -8953,6 +9288,34 @@ func _get_effective_outputs(data: BlockData, anchor: Vector2i = Vector2i(-214748
 			return _normalize_item_keys(rec.get("output", {}))
 		return {}
 	return data.output_items
+
+
+func _factory_should_discard_blocked_solid_output(
+		data: BlockData,
+		origin: Vector2i,
+		pending: Dictionary,
+		current_key,
+		delivered_external: int
+) -> bool:
+	var current_item: StringName = StringName(pending.get(current_key, &""))
+	if current_item == &"" or Registry.get_fluid(current_item) != null:
+		return false
+	var outputs: Dictionary = _get_effective_outputs(data, origin)
+	var recipe_has_fluid_output := false
+	for raw_id in outputs:
+		if Registry.get_fluid(StringName(raw_id)) != null:
+			recipe_has_fluid_output = true
+			break
+	if not recipe_has_fluid_output:
+		return false
+	if delivered_external > 0:
+		return true
+	for key in pending:
+		if key == current_key:
+			continue
+		if Registry.get_fluid(StringName(pending[key])) != null:
+			return false
+	return true
 
 
 ## Production-cycle length for this factory — the selected recipe's per-recipe
@@ -9007,6 +9370,9 @@ func get_landing_pad_filter(anchor: Vector2i) -> Array:
 
 
 func set_factory_recipe(anchor: Vector2i, recipe_id: StringName) -> void:
+	var data: BlockData = null
+	if main.placed_buildings.has(anchor):
+		data = Registry.get_block(main.placed_buildings[anchor])
 	factory_recipe_state[anchor] = recipe_id
 	# Reset the build buffer so a half-finished cycle of recipe A doesn't
 	# carry into recipe B. Inputs already in storage stay put (player can
@@ -9015,6 +9381,8 @@ func set_factory_recipe(anchor: Vector2i, recipe_id: StringName) -> void:
 		factory_buffers[anchor]["phase"] = "collecting"
 		factory_buffers[anchor]["timer"] = 0.0
 		factory_buffers[anchor]["recipe_consumed"] = {}
+		factory_buffers[anchor].erase("timer_total")
+		factory_buffers[anchor]["pending_outputs"] = {}
 
 
 ## Normalizes an item dict's keys to the full "mat_*" form used by runtime
@@ -9194,19 +9562,35 @@ func _factory_try_output(origin: Vector2i, data: BlockData, state: Dictionary) -
 						and _pipe_feeds_toward_building(target_pos, origin, data.grid_size):
 					continue
 				var push_entry_dir := _get_entry_dir_from_building(target_pos, origin, data.grid_size)
-				if _try_push_item(target_pos, out_item, push_entry_dir):
+				if _try_push_factory_output(target_pos, out_item, push_entry_dir):
 					pushed = true
 					break
-			if pushed:
-				delivered.append(rel_dir_key)
-				delivered_external += 1
-			elif _add_to_storage(origin, out_item, data):
-				# Couldn't push anywhere — fall back to internal storage.
-				delivered.append(rel_dir_key)
-			elif Registry.get_fluid(out_item) != null:
-				# A fluid output that can't be pushed OR stored — a candidate
-				# for venting (resolved below). Items instead hold (back-pressure).
-				stuck_fluid_keys.append(rel_dir_key)
+				if pushed:
+					delivered.append(rel_dir_key)
+					delivered_external += 1
+				elif _add_to_storage(origin, out_item, data):
+					# Couldn't push anywhere — fall back to internal storage.
+					delivered.append(rel_dir_key)
+				elif _factory_should_discard_blocked_solid_output(
+						data,
+						origin,
+						state["pending_outputs"],
+						rel_dir_key,
+						delivered_external
+				):
+					# Mixed fluid/item recipes often carry a solid byproduct
+					# (coal+water -> petroleum+sand). Once the fluid side has
+					# moved, a full byproduct buffer should not freeze the fluid
+					# chain forever.
+					delivered.append(rel_dir_key)
+					_debug_petroleum_mixer(origin, data, state, "discarding blocked solid byproduct", {
+						"item": out_item,
+						"storage": block_storage.get(origin, {}),
+					})
+				elif Registry.get_fluid(out_item) != null:
+					# A fluid output that can't be pushed OR stored — a candidate
+					# for venting (resolved below). Items instead hold (back-pressure).
+					stuck_fluid_keys.append(rel_dir_key)
 		# Vent stuck fluid outputs ONLY if another output got out this tick. A
 		# fully-blocked factory holds everything (no waste); a partially-blocked
 		# one keeps its working output flowing and vents the jammed surplus.
@@ -9244,7 +9628,7 @@ func _factory_try_output(origin: Vector2i, data: BlockData, state: Dictionary) -
 			if _is_cross_faction(origin, target_pos):
 				if _add_to_storage(origin, out_item, data):
 					delivered.append(rel_dir_key)
-			elif _try_push_item(target_pos, out_item, entry_dir):
+			elif _try_push_factory_output(target_pos, out_item, entry_dir):
 				delivered.append(rel_dir_key)
 			else:
 				if _add_to_storage(origin, out_item, data):
@@ -9555,8 +9939,8 @@ func _spread_fabricator_spawn_position(base_pos: Vector2, rot: int, unit_data: U
 			forward = Vector2.UP
 	var side := Vector2(-forward.y, forward.x)
 	var candidates: Array[Vector2] = []
-	var lateral_steps: Array[float] = [0.0, -0.65, 0.65, -1.3, 1.3, -1.95, 1.95]
-	var forward_steps: Array[float] = [0.0, 0.55, 1.1, 1.65]
+	var lateral_steps: Array[float] = [0.0, -0.45, 0.45, -0.9, 0.9, -1.35, 1.35]
+	var forward_steps: Array[float] = [0.0, 0.35, 0.7, 1.05]
 	for f in forward_steps:
 		for l in lateral_steps:
 			candidates.append(base_pos + forward * float(f) * gs + side * float(l) * gs)
@@ -9576,6 +9960,7 @@ func _spread_fabricator_spawn_position(base_pos: Vector2, rot: int, unit_data: U
 
 func _fabricator_spawn_clearance_score(candidate: Vector2, base_pos: Vector2, ml: int, unit_mgr: Node) -> float:
 	var min_d2 := INF
+	var good_enough_clearance: float = float(main.GRID_SIZE) * 0.95
 	for pool_name in ["player_units", "enemies"]:
 		if not (pool_name in unit_mgr):
 			continue
@@ -9588,8 +9973,10 @@ func _fabricator_spawn_clearance_score(candidate: Vector2, base_pos: Vector2, ml
 				continue
 			min_d2 = minf(min_d2, candidate.distance_squared_to(other.position))
 	if min_d2 == INF:
-		min_d2 = main.GRID_SIZE * main.GRID_SIZE * 100.0
-	return min_d2 - candidate.distance_squared_to(base_pos) * 0.35
+		min_d2 = good_enough_clearance * good_enough_clearance
+	else:
+		min_d2 = minf(min_d2, good_enough_clearance * good_enough_clearance)
+	return min_d2 - candidate.distance_squared_to(base_pos) * 0.7
 
 
 ## Tries to accept an item into a factory's input buffer.

@@ -111,9 +111,9 @@ func _gui_input(event: InputEvent) -> void:
 				_drag_moved = false
 				_press_pos = mb.position
 			else:
+				# Left-click is a no-op — the full-screen map is a viewer, not
+				# a camera-jump control. Left-drag still pans the view.
 				_dragging = false
-				if not _drag_moved:
-					_jump_camera_to(mb.position)
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
 			_zoom_at(mb.position, 1.15)
@@ -139,18 +139,6 @@ func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 	var new_size := Vector2(_mw(), _mh()) * new_scale
 	_pan = screen_pos - texel * new_scale - size * 0.5 + new_size * 0.5
 	queue_redraw()
-
-
-## Left-click → move the game camera to the clicked world point, then close.
-func _jump_camera_to(screen_pos: Vector2) -> void:
-	if corner == null or main == null:
-		return
-	var info := _map_layout()
-	var texel: Vector2 = (screen_pos - info["tl"]) / info["scale"]
-	var world := texel * float(main.GRID_SIZE)
-	if corner.has_method("request_camera_jump"):
-		corner.request_camera_jump(world)
-	close()
 
 
 # =========================
@@ -242,6 +230,9 @@ func _draw_damage_flashes(tl: Vector2, scale: float, _gs: float, clip: Rect2) ->
 			expired.append(anchor)
 			continue
 		if not main.placed_buildings.has(anchor):
+			expired.append(anchor)
+			continue
+		if main.get_building_faction(anchor) != main.Faction.LUMINA:
 			expired.append(anchor)
 			continue
 		var gsize := Vector2i.ONE

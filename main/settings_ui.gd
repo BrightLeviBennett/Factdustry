@@ -268,6 +268,7 @@ func _build_game_tab() -> void:
 	_add_button_row("Play Land", _on_play_land_pressed,
 		"Play Launch", _on_play_launch_pressed)
 	_add_button("Play Explosion", _on_play_explosion_pressed)
+	_add_button("Play Reactor Explosion", _on_play_reactor_explosion_pressed)
 
 func _get_show_fps() -> bool:
 	return Engine.is_printing_error_messages()
@@ -878,10 +879,42 @@ func _on_play_explosion_pressed() -> void:
 	if expl == null or not expl.has_method("core_explosion"):
 		push_warning("Play Explosion: ExplosionSystem not found.")
 		return
-	var core_pos: Vector2i = main_node.core_position if "core_position" in main_node else Vector2i(-1, -1)
-	if core_pos == Vector2i(-1, -1):
+	var core_info: Dictionary = _core_explosion_target(main_node)
+	if core_info.is_empty():
 		push_warning("Play Explosion: no core_position on Main.")
 		return
+	var core_world: Vector2 = core_info["world"]
+	var core_size: Vector2 = core_info["size"]
+	# Match the real core-death visuals: old ring + shrapnel burst UNDER the
+	# new Mindustry-style boom.
+	if expl.has_method("explode"):
+		expl.explode(core_world, maxf(core_size.x, core_size.y) * 2.5, 1.7, false)
+	expl.core_explosion(core_world, maxf(core_size.x, core_size.y))
+	_close_settings_and_pause_menu()
+
+
+## Plays the reactor meltdown animation centered on the player's core.
+func _on_play_reactor_explosion_pressed() -> void:
+	var main_node = get_node_or_null("/root/Main")
+	if main_node == null:
+		push_warning("Play Reactor Explosion: no Main scene — open a sector first.")
+		return
+	var expl = main_node.get_node_or_null("ExplosionSystem")
+	if expl == null or not expl.has_method("reactor_explosion"):
+		push_warning("Play Reactor Explosion: ExplosionSystem not found.")
+		return
+	var core_info: Dictionary = _core_explosion_target(main_node)
+	if core_info.is_empty():
+		push_warning("Play Reactor Explosion: no core_position on Main.")
+		return
+	expl.reactor_explosion(core_info["world"], maxf(core_info["size"].x, core_info["size"].y))
+	_close_settings_and_pause_menu()
+
+
+func _core_explosion_target(main_node: Node) -> Dictionary:
+	var core_pos: Vector2i = main_node.core_position if "core_position" in main_node else Vector2i(-1, -1)
+	if core_pos == Vector2i(-1, -1):
+		return {}
 	var gs: float = float(main_node.GRID_SIZE)
 	var core_size := Vector2(3.0, 3.0)
 	var core_id: StringName = main_node.placed_buildings.get(core_pos, &"") if "placed_buildings" in main_node else &""
@@ -890,12 +923,7 @@ func _on_play_explosion_pressed() -> void:
 		if core_data:
 			core_size = Vector2(core_data.grid_size.x, core_data.grid_size.y)
 	var core_world: Vector2 = main_node.grid_to_world(core_pos) + Vector2(core_size.x * gs * 0.5, core_size.y * gs * 0.5)
-	# Match the real core-death visuals: old ring + shrapnel burst UNDER the
-	# new Mindustry-style boom.
-	if expl.has_method("explode"):
-		expl.explode(core_world, maxf(core_size.x, core_size.y) * 2.5, 1.7, false)
-	expl.core_explosion(core_world, maxf(core_size.x, core_size.y))
-	_close_settings_and_pause_menu()
+	return {"world": core_world, "size": core_size}
 
 
 ## Plays the landing animation on the currently-loaded sector. No-op

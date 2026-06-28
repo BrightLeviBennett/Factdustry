@@ -6,19 +6,21 @@
 script = ExtResource("1")
 id = &"nuclear_reactor"
 display_name = "Nuclear Reactor"
-description = "Generates massive power by burning uranium rods. Requires graphite rods and constant water cooling — running dry leads to a catastrophic explosion."
+description = "Generates huge amounts of power using uranium and graphite rods.
+Requires lots of water to use as coolant; running low will cause a catastrophic meltdown. "
 category = 3
 tags = PackedStringArray("power", "nuclear_reactor")
 color = Color(0.55, 0.95, 0.3, 1)
 grid_size = Vector2i(3, 3)
 max_health = 600.0
 build_cost = {
-"aluminum": 50,
+"brass": 100,
 "copper": 800,
 "silicon": 150,
 "steel": 250
 }
 build_time = 8.0
+vent_tiles = PackedStringArray()
 boosters = [{
 "item_id": &"mat_water",
 "multiplier": 1.0,

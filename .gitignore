@@ -1,6 +1,7 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+godot_headless*.log
 
 # macOS
 .DS_Store

@@ -1,32 +1,14 @@
 {
-	"arc_charge": {
-
-	},
-	"archive_decoder_state": {
-
-	},
-	"archive_holdings": {
-
-	},
-	"battery_stored": {
-
-	},
-	"belt_unloader_state": {
-
-	},
-	"block_internal_battery": {
-
-	},
-	"block_storage": {
-
-	},
-	"bridge_output_rr": {
-
-	},
+	"arc_charge": {},
+	"archive_decoder_state": {},
+	"archive_holdings": {},
+	"battery_stored": {},
+	"belt_unloader_state": {},
+	"block_internal_battery": {},
+	"block_storage": {},
+	"bridge_output_rr": {},
 	"build_order": [],
-	"build_progress": {
-
-	},
+	"build_progress": {},
 	"building_factions": {
 		"130,51": 1,
 		"130,52": 1,
@@ -545,6 +527,7 @@
 		"234,40": 1,
 		"234,41": 1,
 		"234,42": 1,
+		"234,44": 1,
 		"234,45": 1,
 		"234,46": 1,
 		"234,47": 1,
@@ -557,7 +540,6 @@
 		"235,41": 1,
 		"235,42": 1,
 		"235,43": 1,
-		"235,44": 1,
 		"235,45": 1,
 		"235,46": 1,
 		"235,60": 1,
@@ -586,13 +568,13 @@
 		"239,61": 1,
 		"240,39": 1,
 		"240,41": 1,
-		"240,42": 1,
 		"240,61": 1,
 		"241,39": 1,
 		"241,41": 1,
 		"242,39": 1,
 		"242,40": 1,
 		"242,41": 1,
+		"242,43": 1,
 		"243,39": 1,
 		"243,41": 1,
 		"244,39": 1,
@@ -607,7 +589,6 @@
 		"245,64": 1,
 		"246,39": 1,
 		"246,41": 1,
-		"246,42": 1,
 		"246,43": 1,
 		"246,44": 1,
 		"246,61": 1,
@@ -670,6 +651,7 @@
 		"251,39": 1,
 		"251,41": 1,
 		"251,43": 1,
+		"251,44": 1,
 		"251,46": 1,
 		"251,47": 1,
 		"251,48": 1,
@@ -681,7 +663,6 @@
 		"251,66": 1,
 		"252,39": 1,
 		"252,41": 1,
-		"252,42": 1,
 		"252,43": 1,
 		"252,46": 1,
 		"252,47": 1,
@@ -880,7 +861,9 @@
 		"260,48": 1,
 		"260,49": 1,
 		"260,50": 1,
+		"260,53": 1,
 		"260,54": 1,
+		"260,57": 1,
 		"260,62": 1,
 		"260,63": 1,
 		"260,64": 1,
@@ -1275,9 +1258,7 @@
 		"55,68": 0,
 		"55,69": 0
 	},
-	"building_fires": {
-
-	},
+	"building_fires": {},
 	"building_health": {
 		"130,51": 140.0,
 		"130,52": 280.0,
@@ -1796,6 +1777,7 @@
 		"234,40": 240.0,
 		"234,41": 240.0,
 		"234,42": 240.0,
+		"234,44": 560.0,
 		"234,45": 160.0,
 		"234,46": 160.0,
 		"234,47": 160.0,
@@ -1808,7 +1790,6 @@
 		"235,41": 180.0,
 		"235,42": 120.0,
 		"235,43": 120.0,
-		"235,44": 560.0,
 		"235,45": 160.0,
 		"235,46": 160.0,
 		"235,60": 120.0,
@@ -1837,13 +1818,13 @@
 		"239,61": 140.0,
 		"240,39": 140.0,
 		"240,41": 120.0,
-		"240,42": 560.0,
 		"240,61": 140.0,
 		"241,39": 140.0,
 		"241,41": 120.0,
 		"242,39": 140.0,
 		"242,40": 180.0,
 		"242,41": 200.0,
+		"242,43": 560.0,
 		"243,39": 140.0,
 		"243,41": 120.0,
 		"244,39": 140.0,
@@ -1858,7 +1839,6 @@
 		"245,64": 280.0,
 		"246,39": 140.0,
 		"246,41": 120.0,
-		"246,42": 560.0,
 		"246,43": 160.0,
 		"246,44": 160.0,
 		"246,61": 140.0,
@@ -1921,6 +1901,7 @@
 		"251,39": 140.0,
 		"251,41": 120.0,
 		"251,43": 120.0,
+		"251,44": 560.0,
 		"251,46": 160.0,
 		"251,47": 160.0,
 		"251,48": 160.0,
@@ -1932,7 +1913,6 @@
 		"251,66": 280.0,
 		"252,39": 140.0,
 		"252,41": 120.0,
-		"252,42": 560.0,
 		"252,43": 120.0,
 		"252,46": 160.0,
 		"252,47": 160.0,
@@ -2131,7 +2111,9 @@
 		"260,48": 280.0,
 		"260,49": 280.0,
 		"260,50": 180.0,
+		"260,53": 560.0,
 		"260,54": 120.0,
+		"260,57": 560.0,
 		"260,62": 120.0,
 		"260,63": 120.0,
 		"260,64": 280.0,
@@ -2526,15 +2508,9 @@
 		"55,68": 280.0,
 		"55,69": 280.0
 	},
-	"building_home_core": {
-
-	},
-	"building_resources_consumed": {
-
-	},
-	"building_resources_refunded": {
-
-	},
+	"building_home_core": {},
+	"building_resources_consumed": {},
+	"building_resources_refunded": {},
 	"building_rotation": {
 		"130,51": 1,
 		"130,52": 1,
@@ -3053,6 +3029,7 @@
 		"234,40": 3,
 		"234,41": 3,
 		"234,42": 3,
+		"234,44": 0,
 		"234,45": 0,
 		"234,46": 0,
 		"234,47": 0,
@@ -3065,7 +3042,6 @@
 		"235,41": 1,
 		"235,42": 3,
 		"235,43": 3,
-		"235,44": 1,
 		"235,45": 0,
 		"235,46": 0,
 		"235,60": 0,
@@ -3094,13 +3070,13 @@
 		"239,61": 0,
 		"240,39": 1,
 		"240,41": 0,
-		"240,42": 3,
 		"240,61": 0,
 		"241,39": 1,
 		"241,41": 0,
 		"242,39": 1,
 		"242,40": 0,
 		"242,41": 0,
+		"242,43": 0,
 		"243,39": 1,
 		"243,41": 0,
 		"244,39": 1,
@@ -3115,7 +3091,6 @@
 		"245,64": 0,
 		"246,39": 1,
 		"246,41": 0,
-		"246,42": 3,
 		"246,43": 1,
 		"246,44": 1,
 		"246,61": 2,
@@ -3178,6 +3153,7 @@
 		"251,39": 1,
 		"251,41": 0,
 		"251,43": 0,
+		"251,44": 0,
 		"251,46": 2,
 		"251,47": 2,
 		"251,48": 2,
@@ -3189,7 +3165,6 @@
 		"251,66": 0,
 		"252,39": 1,
 		"252,41": 0,
-		"252,42": 3,
 		"252,43": 0,
 		"252,46": 2,
 		"252,47": 2,
@@ -3388,7 +3363,9 @@
 		"260,48": 2,
 		"260,49": 2,
 		"260,50": 3,
+		"260,53": 0,
 		"260,54": 0,
+		"260,57": 0,
 		"260,62": 1,
 		"260,63": 2,
 		"260,64": 0,
@@ -4301,6 +4278,7 @@
 		"234,40": "vent_turbine",
 		"234,41": "vent_turbine",
 		"234,42": "vent_turbine",
+		"234,44": "cable_node",
 		"234,45": "mechanical_drill",
 		"234,46": "mechanical_drill",
 		"234,47": "mechanical_drill",
@@ -4313,7 +4291,6 @@
 		"235,41": "single_barrel",
 		"235,42": "conveyor_belt",
 		"235,43": "conveyor_belt",
-		"235,44": "cable_node",
 		"235,45": "mechanical_drill",
 		"235,46": "mechanical_drill",
 		"235,60": "conveyor_belt",
@@ -4342,13 +4319,13 @@
 		"239,61": "copper_wall",
 		"240,39": "copper_wall",
 		"240,41": "conveyor_belt",
-		"240,42": "cable_node",
 		"240,61": "copper_wall",
 		"241,39": "copper_wall",
 		"241,41": "conveyor_belt",
 		"242,39": "copper_wall",
 		"242,40": "single_barrel",
 		"242,41": "belt_router",
+		"242,43": "cable_node",
 		"243,39": "copper_wall",
 		"243,41": "conveyor_belt",
 		"244,39": "copper_wall",
@@ -4363,7 +4340,6 @@
 		"245,64": "large_copper_wall",
 		"246,39": "copper_wall",
 		"246,41": "conveyor_belt",
-		"246,42": "cable_node",
 		"246,43": "mechanical_drill",
 		"246,44": "mechanical_drill",
 		"246,61": "copper_wall",
@@ -4426,6 +4402,7 @@
 		"251,39": "copper_wall",
 		"251,41": "conveyor_belt",
 		"251,43": "conveyor_belt",
+		"251,44": "cable_node",
 		"251,46": "mechanical_drill",
 		"251,47": "mechanical_drill",
 		"251,48": "mechanical_drill",
@@ -4437,7 +4414,6 @@
 		"251,66": "large_copper_wall",
 		"252,39": "copper_wall",
 		"252,41": "conveyor_belt",
-		"252,42": "cable_node",
 		"252,43": "conveyor_belt",
 		"252,46": "mechanical_drill",
 		"252,47": "mechanical_drill",
@@ -4636,7 +4612,9 @@
 		"260,48": "large_copper_wall",
 		"260,49": "large_copper_wall",
 		"260,50": "single_barrel",
+		"260,53": "cable_node",
 		"260,54": "conveyor_belt",
+		"260,57": "cable_node",
 		"260,62": "conveyor_belt",
 		"260,63": "conveyor_belt",
 		"260,64": "large_copper_wall",
@@ -5031,49 +5009,27 @@
 		"55,68": "large_copper_wall",
 		"55,69": "large_copper_wall"
 	},
-	"constructor_state": {
-
-	},
-	"conveyor_items": {
-
-	},
+	"constructor_state": {},
+	"conveyor_items": {},
 	"core_position": "35,66",
-	"crane_links": {
-
-	},
-	"crane_states": {
-
-	},
-	"deconstructor_state": {
-
-	},
+	"crane_links": {},
+	"crane_states": {},
+	"deconstructor_state": {},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1782158140.17444
+		"timestamp": 1782345771.97203
 	},
-	"drill_timers": {
-
-	},
+	"drill_timers": {},
 	"drone_heal_mode": false,
-	"drone_inventory": {
-
-	},
+	"drone_inventory": {},
 	"drone_position": "",
-	"duct_bridge_filters": {
-
-	},
+	"duct_bridge_filters": {},
 	"enemy_units": [],
-	"extractor_efficiency": {
-
-	},
-	"factory_buffers": {
-
-	},
-	"factory_recipe_state": {
-
-	},
+	"extractor_efficiency": {},
+	"factory_buffers": {},
+	"factory_recipe_state": {},
 	"ferox_rebuild_queue": [],
 	"floor_tiles": {
 		"0,0": "salt_water",
@@ -35082,18 +35038,10 @@
 	"grid_height": 100,
 	"grid_width": 300,
 	"hints": [],
-	"junction_items": {
-
-	},
-	"landing_pad_filters": {
-
-	},
-	"lane_shifter_state": {
-
-	},
-	"launchpad_state": {
-
-	},
+	"junction_items": {},
+	"landing_pad_filters": {},
+	"lane_shifter_state": {},
+	"launchpad_state": {},
 	"linked_pairs": [
 		[
 			"143,61",
@@ -35120,13 +35068,9 @@
 			"267,38"
 		]
 	],
-	"loader_state": {
-
-	},
+	"loader_state": {},
 	"mass_driver_projectiles": [],
-	"mass_driver_state": {
-
-	},
+	"mass_driver_state": {},
 	"ore_tiles": {
 		"139,41": "graphite_ore",
 		"139,42": "graphite_ore",
@@ -35219,34 +35163,16 @@
 		"47,47": "graphite_ore",
 		"47,48": "graphite_ore"
 	},
-	"payload_items": {
-
-	},
-	"payload_router_idx": {
-
-	},
-	"pipe_contents": {
-
-	},
-	"pipe_junction_state": {
-
-	},
+	"payload_items": {},
+	"payload_router_idx": {},
+	"pipe_contents": {},
+	"pipe_junction_state": {},
 	"player_units": [],
-	"pump_timers": {
-
-	},
-	"refabricator_state": {
-
-	},
-	"refit_state": {
-
-	},
-	"resources": {
-
-	},
-	"router_output_index": {
-
-	},
+	"pump_timers": {},
+	"refabricator_state": {},
+	"refit_state": {},
+	"resources": {},
+	"router_output_index": {},
 	"script_steps": [
 		{
 			"actions": [],
@@ -35266,15 +35192,9 @@
 		}
 	],
 	"sector_name": "SSh",
-	"shield_states": {
-
-	},
-	"sorter_filters": {
-
-	},
-	"sorter_side_index": {
-
-	},
+	"shield_states": {},
+	"sorter_filters": {},
+	"sorter_side_index": {},
 	"stats_blocks_placed": 0,
 	"stats_blocks_removed": 0,
 	"stats_enemy_blocks_destroyed": 0,
@@ -35283,12 +35203,8 @@
 	"stats_units_destroyed": 0,
 	"stats_units_produced": 0,
 	"type": "sector",
-	"unloader_state": {
-
-	},
-	"upgrader_state": {
-
-	},
+	"unloader_state": {},
+	"upgrader_state": {},
 	"version": 3,
 	"wall_tiles": {
 		"135,14": "sand_wall",

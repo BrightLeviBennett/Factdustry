@@ -24,5 +24,5 @@ output_items = {
 "mat_refined_uranium": 1
 }
 production_time = 6.0
-electrical_power_use = 25.0
+electrical_power_use = 65.0
 max_stored_items = 40

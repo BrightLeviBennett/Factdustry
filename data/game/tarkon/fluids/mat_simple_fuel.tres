@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="FluidData" format=3]
+
+[ext_resource type="Script" uid="uid://c7nvgs1wjylv6" path="res://data/game/fluids/fluid_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"mat_simple_fuel"
+display_name = "Simple Fuel"
+description = "Refined combustible from blast compound and petroleum."
+color = Color(0.9, 0.55, 0.1, 1)
+viscosity = 0.8
+flammable = true
+units_per_segment = 20.0

@@ -16,8 +16,14 @@ const MAX_CORNER_ZOOM := 64.0
 const DIRTY_FLUSH_INTERVAL := 2.0 / 60.0
 const DOT_RADIUS := 2.5
 const TERRAIN_DIRTY_RADIUS := 9
-const EDGE_FADE_START := 9.0
-const EDGE_FADE_STRENGTH := 0.72
+## Mindustry-style wall darkness, matching the in-world `wall_darkness.gd`: the
+## darkness lives ON the walls (deeper into a wall cluster = darker) and the
+## floor stays bright. A wall tile's level is `min(MAX, dist_to_nearest_non_wall
+## - 1)`, eroded over MAX tiles, exactly like the world's addDarkness loop.
+## STRENGTH scales the overlay; push toward 1.0 for harsher walls.
+const WALL_DARK_RADIUS := 5
+const WALL_DARK_MAX := 4.0
+const WALL_DARK_STRENGTH := 0.9
 ## How long after the last hit a block keeps pulsing its red damage outline.
 const DAMAGE_FLASH_MS := 750
 ## Damage-pulse colour + cadence (Hz).
@@ -29,6 +35,7 @@ var _terrain: Node2D
 var _unit_mgr: Node
 var _camera: Camera2D
 var _fog: Node
+var _sector_script: Node
 var _fullscreen: Control
 
 var _img: Image
@@ -60,6 +67,10 @@ func _ready() -> void:
 	_unit_mgr = get_node_or_null("/root/Main/UnitManager")
 	_camera = get_node_or_null("/root/Main/Camera2D")
 	_fog = get_node_or_null("/root/Main/FogSystem")
+	_sector_script = get_node_or_null("/root/Main/SectorScript")
+	# Joined so SectorScript can poke us for a rebuild when a hide_region /
+	# reveal_region action changes which tiles are script-hidden.
+	add_to_group("minimap")
 	_connect_change_signals()
 	var fs_script: Script = load("res://main/minimap_fullscreen.gd")
 	if fs_script != null:
@@ -254,13 +265,16 @@ func _write_cell(cell: Vector2i) -> void:
 func _color_for_cell(cell: Vector2i) -> Color:
 	if main == null or _terrain == null:
 		return Color(0, 0, 0, 0)
+	# Script-hidden tiles (hide_region) read as void — the world skips them in
+	# its terrain bake, so the minimap must blank them too instead of leaking
+	# the hidden area's layout to the player.
+	if _is_tile_hidden(cell):
+		return Color(0, 0, 0, 0)
 	var col := Color(0, 0, 0, 0)
 	if _terrain.floor_tiles.has(cell):
 		col = _tile_map_color(StringName(_terrain.floor_tiles[cell]))
 	if _terrain.wall_tiles.has(cell):
 		col = _wall_map_color(StringName(_terrain.wall_tiles[cell]))
-	elif cell.y < _map_h - 1 and _terrain.wall_tiles.has(cell + Vector2i(0, 1)):
-		col = col.darkened(0.3)
 	if _terrain.ore_tiles.has(cell):
 		col = _tile_map_color(StringName(_terrain.ore_tiles[cell]))
 	if _terrain.floor_tiles.has(cell):
@@ -273,10 +287,60 @@ func _color_for_cell(cell: Vector2i) -> Color:
 				north_liquid = ndata != null and ndata.is_liquid
 			if not north_liquid:
 				col = Color(col.r * 0.84, col.g * 0.84, col.b * 0.9, col.a)
-	col = _apply_edge_fade(cell, col)
+	# Wall darkness (in-world style): the darkness sits ON wall tiles — deeper
+	# into a wall cluster = darker — while floors stay bright. No inward bleed
+	# across the floor and no edge vignette; the dark reads on the walls/edges,
+	# matching the world's wall_darkness shader.
+	if _terrain.wall_tiles.has(cell) and col.a > 0.0:
+		col = _apply_wall_shade(cell, col)
 	if main.placed_buildings.has(cell):
 		col = main.faction_color(main.get_building_faction(cell))
 	return col
+
+
+## Darkness level for a wall tile: a wall `dist` tiles from the nearest bright
+## floor ends at level `min(MAX, dist-1)`. Only open floor lightens walls — void,
+## off-map, and hidden tiles are NOT sinks, so a wall facing the void stays fully
+## dark instead of un-fading. Thick wall masses (no floor within reach) go fully
+## dark; a thin wall against interior floor barely darkens.
+func _apply_wall_shade(cell: Vector2i, col: Color) -> Color:
+	var dist := _nearest_sink_distance(cell, WALL_DARK_RADIUS)
+	var d: float = minf(WALL_DARK_MAX, float(dist) - 1.0)
+	if d <= 0.0:
+		return col
+	var overlay: float = minf((d + 0.5) / WALL_DARK_MAX, 1.0) * WALL_DARK_STRENGTH
+	return col.lerp(Color(0, 0, 0, col.a), clampf(overlay, 0.0, 1.0))
+
+
+func _nearest_sink_distance(cell: Vector2i, max_dist: int) -> int:
+	for r in range(1, max_dist + 1):
+		for dx in range(-r, r + 1):
+			var dy_abs: int = r - absi(dx)
+			if _is_dark_sink(cell + Vector2i(dx, dy_abs)):
+				return r
+			if dy_abs != 0 and _is_dark_sink(cell + Vector2i(dx, -dy_abs)):
+				return r
+	return max_dist + 1
+
+
+## A darkness "sink" — a cell that lightens neighbouring walls — is ONLY open
+## floor (a floor tile with no wall on it). Void, off-map, and script-hidden
+## cells are not sinks, so walls bordering them keep their full darkness.
+func _is_dark_sink(cell: Vector2i) -> bool:
+	if not _in_bounds(cell):
+		return false
+	if _is_tile_hidden(cell):
+		return false
+	return _terrain.floor_tiles.has(cell) and not _terrain.wall_tiles.has(cell)
+
+
+func _is_tile_hidden(cell: Vector2i) -> bool:
+	# Resolved lazily: SectorScript is created a few frames after the HUD/minimap
+	# (main.gd awaits several process frames before adding it), and it's recreated
+	# on every sector load — so caching it once in _ready() would leave this null.
+	if _sector_script == null or not is_instance_valid(_sector_script):
+		_sector_script = get_node_or_null("/root/Main/SectorScript")
+	return _sector_script != null and _sector_script.is_tile_hidden(cell)
 
 
 func _mark_terrain_dirty(cell: Vector2i) -> void:
@@ -323,6 +387,9 @@ func _on_building_destroyed(grid_pos: Vector2i) -> void:
 
 ## A block took (non-fatal) combat damage — (re)arm its red pulse outline.
 func _on_building_damaged(anchor: Vector2i) -> void:
+	if main == null or main.get_building_faction(anchor) != main.Faction.LUMINA:
+		_damage_flash.erase(anchor)
+		return
 	_damage_flash[anchor] = Time.get_ticks_msec() + DAMAGE_FLASH_MS
 
 
@@ -369,38 +436,14 @@ func _tile_map_color(tile_id: StringName) -> Color:
 	return col
 
 
+## Walls render notably darker than their material colour so they read as the
+## dark structure of the base (the per-tile enclosure shade in `_apply_wall_shade`
+## then deepens thick wall masses further).
 func _wall_map_color(tile_id: StringName) -> Color:
 	var col := _tile_map_color(tile_id)
 	if tile_id == &"blackstone_wall" or tile_id == &"purple_wall":
-		return col.darkened(0.34)
-	return col.darkened(0.15)
-
-
-func _apply_edge_fade(cell: Vector2i, col: Color) -> Color:
-	if col.a <= 0.0 or not (_terrain.floor_tiles.has(cell) or _terrain.wall_tiles.has(cell)):
-		return col
-	var dist := _nearest_void_distance(cell, int(EDGE_FADE_START))
-	if dist >= EDGE_FADE_START:
-		return col
-	var darkness: float = (1.0 - float(dist) / EDGE_FADE_START) * EDGE_FADE_STRENGTH
-	return col.lerp(Color(0, 0, 0, col.a), clampf(darkness, 0.0, 1.0))
-
-
-func _nearest_void_distance(cell: Vector2i, max_dist: int) -> int:
-	for r in range(1, max_dist + 1):
-		for dx in range(-r, r + 1):
-			var dy_abs: int = r - absi(dx)
-			if _is_void_for_fade(cell + Vector2i(dx, dy_abs)):
-				return r
-			if dy_abs != 0 and _is_void_for_fade(cell + Vector2i(dx, -dy_abs)):
-				return r
-	return max_dist
-
-
-func _is_void_for_fade(cell: Vector2i) -> bool:
-	if not _in_bounds(cell):
-		return true
-	return not _terrain.floor_tiles.has(cell) and not _terrain.wall_tiles.has(cell)
+		return col.darkened(0.55)
+	return col.darkened(0.4)
 
 
 func _category_fallback(category: int) -> Color:
@@ -499,7 +542,7 @@ func _draw() -> void:
 	if _tex == null or _map_w <= 0 or _map_h <= 0 or main == null:
 		return
 	var box := Rect2(Vector2.ZERO, size)
-	draw_rect(box, Color(0.05, 0.06, 0.08, 0.85), true)
+	draw_rect(box, Color(0, 0, 0, 1.0), true)
 	var crop := _visible_tile_rect()
 	var src := crop
 	draw_texture_rect_region(_tex, box, src, Color.WHITE, false)
@@ -538,6 +581,9 @@ func _draw_damage_flashes(crop: Rect2, box: Rect2) -> void:
 			continue
 		# Block may have been removed between the hit and now.
 		if main == null or not main.placed_buildings.has(anchor):
+			expired.append(anchor)
+			continue
+		if main.get_building_faction(anchor) != main.Faction.LUMINA:
 			expired.append(anchor)
 			continue
 		var gsize := Vector2i.ONE

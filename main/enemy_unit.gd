@@ -189,7 +189,7 @@ var is_rallying: bool = false
 # try to rebuild destroyed ferox buildings from the rebuild queue.
 var rebuild_target: Variant = null  # Dictionary from ferox_rebuild_queue or null
 var rebuild_timer := 0.0
-const REBUILD_TIME := 3.0  # Seconds to rebuild a building
+const REBUILD_TIME_FALLBACK := 3.0  # Used only if target block data is missing.
 var _rebuild_arrived := false  # True when unit is at the rebuild location
 
 # --- AIM ANGLE (for units with head_sprite) ---
@@ -233,6 +233,10 @@ var _vel_initialised: bool = false
 var _water_time: float = 0.0
 ## Seconds a ground/crawler unit can spend in water before it drowns and dies.
 const WATER_DROWN_TIME := 8.0
+const WATER_SINK_OFFSET := 10.0
+const WATER_MIN_DRAW_SCALE := 0.35
+const WATER_TINT_STRENGTH := 0.78
+const WATER_SHADOW_ALPHA := 0.18
 
 # --- NAVAL WATER WAKE (faithful port of Mindustry's WaterMoveComp + Trail) ---
 # Two tapering trail ribbons, one per side. Each ribbon is a flat history
@@ -1511,7 +1515,11 @@ func _effective_tank_turn_speed() -> float:
 	# Keep the turning circle proportional to the unit's footprint. Without
 	# this, a tiny scout and a heavy tank with the same speed/turn values carve
 	# identical arcs, and large tanks appear to pivot around their centre.
-	var desired_radius: float = maxf(unit_size * 2.0, float(main.GRID_SIZE) * 0.75)
+	# The flat floor must stay BELOW the radius the authored body_turn_speed
+	# values want (~0.46-0.55 tile for the current tanks) — otherwise it widens
+	# every tank's arc past what designers tuned and they overshoot corners into
+	# walls. 0.4 tile keeps a sane minimum without overriding authored turn.
+	var desired_radius: float = maxf(unit_size * 2.0, float(main.GRID_SIZE) * 0.4)
 	var size_limited_turn: float = move_speed / maxf(desired_radius, 1.0)
 	return minf(authored_turn, maxf(size_limited_turn, 0.05))
 
@@ -2841,6 +2849,12 @@ func _fire_turret_weapon(w: WeaponData, muzzle: Vector2, aim_world: Vector2) -> 
 			"collides_air": w.ammo.collides_air,
 			"collides_ground": w.ammo.collides_ground,
 		}
+	if target_unit != null and is_instance_valid(target_unit):
+		extras["intended_target_ref"] = target_unit
+		extras["intended_target_type"] = "enemy"
+	elif target_building != null and target_building is Vector2i:
+		extras["intended_target_ref"] = target_building
+		extras["intended_target_type"] = "building"
 	combat._spawn_projectile(
 		muzzle, null, end_pos, "none", spd, dmg, col, source_str,
 		(w.ammo.is_splash if w.ammo != null else (data.is_aoe if data else false)),
@@ -2941,6 +2955,12 @@ func _fire_point_defense_weapon(w: WeaponData, mount_world: Vector2) -> void:
 func _draw_weapon_mounts() -> void:
 	if _weapon_mounts.is_empty():
 		return
+	var drown: float = _water_visual_amount()
+	var draw_scale: float = _water_draw_scale(drown)
+	var draw_off: Vector2 = _water_draw_offset(drown)
+	var tint: Color = Color(1.0, 1.0, 1.0, 1.0)
+	if drown > 0.0:
+		tint = _get_display_color()
 	for m in _weapon_mounts:
 		var w: WeaponData = m["weapon"]
 		if w.sprite == null:
@@ -2954,11 +2974,12 @@ func _draw_weapon_mounts() -> void:
 		# off, i.e. sideways instead of backward.
 		var rot: float = float(m["rotation"])
 		var recoil_off: Vector2 = Vector2(0.0, -float(m["recoil"])).rotated(rot - PI / 2.0)
-		var local: Vector2 = (mount_world + recoil_off) - position
+		var local: Vector2 = ((mount_world + recoil_off) - position) * draw_scale + draw_off
 		var scale_f: float = (w.sprite_scale if w.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
 		var sz: Vector2 = w.sprite.get_size() * scale_f
-		draw_set_transform(local, rot + PI / 2.0 + w.sprite_angle_offset, Vector2(-1.0 if m["flip"] else 1.0, 1.0))
-		draw_texture_rect(w.sprite, Rect2(-sz * 0.5, sz), false)
+		draw_set_transform(local, rot + PI / 2.0 + w.sprite_angle_offset,
+			Vector2((-1.0 if m["flip"] else 1.0) * draw_scale, draw_scale))
+		draw_texture_rect(w.sprite, Rect2(-sz * 0.5, sz), false, tint)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
@@ -3220,6 +3241,16 @@ func _is_rebuilder() -> bool:
 	return data != null and team == UnitData.Team.ENEMY and data.id == &"rebuild"
 
 
+## Time this target should take to rebuild, matching the block's own build time.
+func _rebuild_target_time() -> float:
+	if rebuild_target is Dictionary:
+		var target: Dictionary = rebuild_target
+		var bdata = Registry.get_block(StringName(target.get("block_id", &"")))
+		if bdata != null:
+			return maxf(float(bdata.build_time), 0.0)
+	return REBUILD_TIME_FALLBACK
+
+
 ## Ferox rebuild logic: pick a target from the queue, pathfind to it, rebuild.
 func _try_rebuild(delta: float) -> void:
 	# If no rebuild target, try to pick one from the queue
@@ -3258,7 +3289,8 @@ func _try_rebuild(delta: float) -> void:
 	_rebuild_arrived = true
 	rebuild_timer += delta
 
-	if rebuild_timer >= REBUILD_TIME:
+	var rebuild_time := _rebuild_target_time()
+	if rebuild_time <= 0.0 or rebuild_timer >= rebuild_time:
 		_finish_rebuild()
 
 
@@ -3292,7 +3324,7 @@ func _finish_rebuild() -> void:
 		# hold position at this site and keep "building", retrying every frame so
 		# it finishes the instant the resources arrive. Timer is clamped at the
 		# completion threshold so the retry fires each frame without overflowing.
-		rebuild_timer = REBUILD_TIME
+		rebuild_timer = _rebuild_target_time()
 		_rebuild_arrived = true
 		return
 
@@ -4033,15 +4065,17 @@ func _draw() -> void:
 	var is_flying: bool = data != null and data.movement_layer == UnitData.MovementLayer.FLYING
 	if is_flying:
 		_draw_flying_shadow()
+	elif _water_visual_amount() > 0.0:
+		_draw_water_shadow()
 
 	# Naval wake — two tapering trail ribbons, painted FIRST so the hull
 	# covers their origin. Drawn on the unit's OWN canvas (the proven path
 	# the flying shadow uses) rather than a separate node. Skipped when the
 	# unit is off-screen (the batched ribbon is still hundreds of verts).
-		if _wake_enabled and _wake_on_screen():
-			_draw_water_wake()
-		if _afterburner_active():
-			_draw_afterburner_flame()
+	if _wake_enabled and _wake_on_screen():
+		_draw_water_wake()
+	if _afterburner_active():
+		_draw_afterburner_flame()
 
 	# Textured rendering (turret-style: base + rotating head) takes precedence
 	# over the primitive-shape fallbacks whenever the .tres supplies sprites.
@@ -4175,16 +4209,43 @@ func _draw_flying_shadow() -> void:
 		draw_circle(off, unit_size, shadow_tint)
 
 
+## Ground/crawler water shadow. Mindustry fades submerged units' soft shadow
+## by (1 - drown), which makes the body feel like it is disappearing under
+## the liquid instead of just being tinted blue.
+func _draw_water_shadow() -> void:
+	var drown: float = _water_visual_amount()
+	var alpha: float = WATER_SHADOW_ALPHA * (1.0 - drown)
+	if alpha <= 0.01:
+		return
+	var scale: float = lerpf(1.0, WATER_MIN_DRAW_SCALE, drown)
+	var off: Vector2 = _water_draw_offset(drown) + Vector2(0.0, unit_size * 0.16)
+	var tint := Color(0.0, 0.0, 0.0, alpha)
+	if data != null and data.base_sprite != null:
+		var sf: float = (data.sprite_scale if data.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
+		var b_size: Vector2 = data.base_sprite.get_size() * sf
+		var spr_off: float = data.sprite_angle_offset
+		draw_set_transform(off, facing_angle + PI / 2.0 + spr_off, Vector2(scale, scale))
+		draw_texture_rect(data.base_sprite, Rect2(-b_size * 0.5, b_size), false, tint)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	else:
+		draw_set_transform(off, 0.0, Vector2(scale, scale))
+		draw_circle(Vector2.ZERO, unit_size, tint)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+
 ## Renders the unit as a stacked base + rotating head, mirroring the
 ## turret_head_sprite pattern (source textures face UP, so +PI/2 is
 ## added to convert facing/aim angles into texture angles). Tinted
 ## toward blue when the unit is drowning, otherwise full brightness.
 func _draw_textured_unit() -> void:
 	var tint: Color = _get_display_color()
+	var drown: float = _water_visual_amount()
+	var draw_scale: float = _water_draw_scale(drown)
+	var draw_off: Vector2 = _water_draw_offset(drown)
 	# Preserve alpha but otherwise render the textures at full brightness
-	# unless the unit is drowning (then lerp toward blue like the shapes do).
+	# unless the unit is drowning (then lerp toward the current liquid tile).
 	var base_tint: Color = Color(1, 1, 1, tint.a)
-	if _water_time > 0.0:
+	if drown > 0.0:
 		base_tint = tint
 	var scale_f: float = (data.sprite_scale if data and data.sprite_scale > 0.0 else 1.0) * main.SPRITE_SCALE_FACTOR
 
@@ -4197,26 +4258,26 @@ func _draw_textured_unit() -> void:
 		# shardling-style chassis rotation). Source art faces UP, so the
 		# usual +PI/2 offset converts facing_angle into a texture angle;
 		# `sprite_angle_offset` corrects art that faces a different way.
-		draw_set_transform(Vector2.ZERO, facing_angle + PI / 2.0 + spr_off)
+		draw_set_transform(draw_off, facing_angle + PI / 2.0 + spr_off, Vector2(draw_scale, draw_scale))
 		draw_texture_rect(
 			data.base_sprite,
 			Rect2(-b_size * 0.5, b_size),
 			false,
 			base_tint
 		)
-		draw_set_transform(Vector2.ZERO, 0.0)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 	if data.head_sprite:
 		var h_size: Vector2 = data.head_sprite.get_size() * scale_f
 		var h_angle: float = aim_angle + PI / 2.0 + spr_off
-		draw_set_transform(Vector2.ZERO, h_angle)
+		draw_set_transform(draw_off, h_angle, Vector2(draw_scale, draw_scale))
 		draw_texture_rect(
 			data.head_sprite,
 			Rect2(-h_size * 0.5, h_size),
 			false,
 			base_tint
 		)
-		draw_set_transform(Vector2.ZERO, 0.0)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 ## Renders a UNIT PAYLOAD exactly like a live in-world unit — chassis sprite
@@ -4300,27 +4361,68 @@ static func draw_unit_payload(canvas: CanvasItem, udata: UnitData, payload: Dict
 			canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
-## Returns the current body color, blended toward deep blue based on how long
-## the unit has been submerged. At 0 time → base unit_color. At drown time →
-## almost fully blue. Hover/flying units never accumulate _water_time so they
-## always draw with their base color.
-func _get_display_color() -> Color:
+func _water_visual_amount() -> float:
 	if _water_time <= 0.0:
+		return 0.0
+	return clampf(_water_time / WATER_DROWN_TIME, 0.0, 1.0)
+
+
+func _water_draw_scale(drown: float = -1.0) -> float:
+	var d: float = _water_visual_amount() if drown < 0.0 else clampf(drown, 0.0, 1.0)
+	return lerpf(1.0, WATER_MIN_DRAW_SCALE, d)
+
+
+func _water_draw_offset(drown: float = -1.0) -> Vector2:
+	var d: float = _water_visual_amount() if drown < 0.0 else clampf(drown, 0.0, 1.0)
+	return Vector2(0.0, WATER_SINK_OFFSET * d)
+
+
+func _current_liquid_draw_color() -> Color:
+	var fallback := Color(0.15, 0.35, 0.8, unit_color.a)
+	if main == null:
+		return fallback
+	var terrain = _terrain_ref()
+	if terrain == null:
+		return fallback
+	var grid: Vector2i = main.world_to_grid(position)
+	var fid: StringName = StringName(terrain.floor_tiles.get(grid, &""))
+	if fid == &"":
+		return fallback
+	var fdata = Registry.get_tile(fid)
+	if fdata == null or fdata.color.a <= 0.0:
+		return fallback
+	return Color(
+		minf(fdata.color.r * 1.35, 1.0),
+		minf(fdata.color.g * 1.35, 1.0),
+		minf(fdata.color.b * 1.35, 1.0),
+		unit_color.a
+	)
+
+
+## Returns the current body color, blended toward the liquid tile color based
+## on how long the unit has been submerged. Hover/flying/naval units never
+## accumulate _water_time, so they draw with their base color.
+func _get_display_color() -> Color:
+	var drown: float = _water_visual_amount()
+	if drown <= 0.0:
 		return unit_color
-	var t: float = clampf(_water_time / WATER_DROWN_TIME, 0.0, 1.0)
-	var water_tint := Color(0.15, 0.35, 0.8, unit_color.a)
-	return unit_color.lerp(water_tint, t * 0.75)
+	return unit_color.lerp(_current_liquid_draw_color(), drown * WATER_TINT_STRENGTH)
 
 
 func _draw_circle_shape() -> void:
 	var c := _get_display_color()
+	var drown := _water_visual_amount()
+	draw_set_transform(_water_draw_offset(drown), 0.0, Vector2.ONE * _water_draw_scale(drown))
 	draw_circle(Vector2.ZERO, unit_size, c)
 	draw_arc(Vector2.ZERO, unit_size, 0, TAU, 24, c.lightened(0.3), 1.5)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _draw_diamond_shape() -> void:
 	var s = unit_size
 	var c := _get_display_color()
+	var drown := _water_visual_amount()
+	draw_set_transform(_water_draw_offset(drown), 0.0, Vector2.ONE * _water_draw_scale(drown))
 	var points = PackedVector2Array([
 		Vector2(0, -s), Vector2(s, 0), Vector2(0, s), Vector2(-s, 0)
 	])
@@ -4329,11 +4431,14 @@ func _draw_diamond_shape() -> void:
 		PackedVector2Array([Vector2(0, -s), Vector2(s, 0), Vector2(0, s), Vector2(-s, 0), Vector2(0, -s)]),
 		c.lightened(0.3), 1.5
 	)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _draw_triangle_shape() -> void:
 	var s = unit_size
 	var c := _get_display_color()
+	var drown := _water_visual_amount()
+	draw_set_transform(_water_draw_offset(drown), 0.0, Vector2.ONE * _water_draw_scale(drown))
 	var points = PackedVector2Array([
 		Vector2(0, -s), Vector2(s, s * 0.7), Vector2(-s, s * 0.7)
 	])
@@ -4342,10 +4447,13 @@ func _draw_triangle_shape() -> void:
 		PackedVector2Array([Vector2(0, -s), Vector2(s, s * 0.7), Vector2(-s, s * 0.7), Vector2(0, -s)]),
 		c.lightened(0.3), 1.5
 	)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _draw_hexagon_shape() -> void:
 	var c := _get_display_color()
+	var drown := _water_visual_amount()
+	draw_set_transform(_water_draw_offset(drown), 0.0, Vector2.ONE * _water_draw_scale(drown))
 	var points = PackedVector2Array()
 	var colors = PackedColorArray()
 	for i in range(6):
@@ -4358,12 +4466,14 @@ func _draw_hexagon_shape() -> void:
 		var angle = i * TAU / 6.0
 		outline.append(Vector2(cos(angle), sin(angle)) * unit_size)
 	draw_polyline(outline, c.lightened(0.3), 1.5)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _draw_rebuild_progress() -> void:
 	if not _rebuild_arrived or rebuild_target == null:
 		return
-	var pct := rebuild_timer / REBUILD_TIME
+	var rebuild_time := _rebuild_target_time()
+	var pct := 1.0 if rebuild_time <= 0.0 else clampf(rebuild_timer / rebuild_time, 0.0, 1.0)
 	var radius := unit_size + 6.0
 	draw_arc(Vector2.ZERO, radius, -PI / 2.0, -PI / 2.0 + pct * TAU, 24, Color(0.3, 1.0, 0.5, 0.8), 2.0)
 

@@ -15,7 +15,8 @@ tags = PackedStringArray("mining", "extractor", "wall_miner", "crusher_heads")
 color = Color(0.6, 0.6, 0.5, 1)
 grid_size = Vector2i(2, 2)
 top_sprite = ExtResource("1_uuuo3")
-max_health = 240.0
+max_health = 480.0
+armor = 4.0
 build_cost = {
 "copper": 45,
 "graphite": 15
@@ -32,5 +33,5 @@ wall_efficiency = {
 &"sand_wall": 1.5,
 &"sulfur_wall": 1.25
 }
-electrical_power_use = 10.0
+electrical_power_use = 15.0
 max_stored_items = 15

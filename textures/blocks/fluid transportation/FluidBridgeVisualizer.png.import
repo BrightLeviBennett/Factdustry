@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bgx4fkjy21srr"
-path="res://.godot/imported/SiliconRefineryHead.png-7a912eef1e22726ecdd3963f58b57ae8.ctex"
+uid="uid://bmsvnkx68lbr"
+path="res://.godot/imported/FluidBridgeVisualizer.png-02c27a462d2754cfac27d9991c62f385.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://SiliconRefineryHead.png"
-dest_files=["res://.godot/imported/SiliconRefineryHead.png-7a912eef1e22726ecdd3963f58b57ae8.ctex"]
+source_file="res://textures/blocks/fluid transportation/FluidBridgeVisualizer.png"
+dest_files=["res://.godot/imported/FluidBridgeVisualizer.png-02c27a462d2754cfac27d9991c62f385.ctex"]
 
 [params]
 

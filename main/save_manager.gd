@@ -1128,6 +1128,18 @@ func save_sector(sector_name: String, as_template: bool = false) -> bool:
 				"phase": state["phase"],
 				"timer": state["timer"],
 			}
+			if state.has("timer_total"):
+				save_entry["timer_total"] = state["timer_total"]
+			if state.has("recipe_consumed"):
+				var consumed_dict := {}
+				for k in state["recipe_consumed"]:
+					consumed_dict[str(k)] = state["recipe_consumed"][k]
+				save_entry["recipe_consumed"] = consumed_dict
+			if state.has("pending_outputs") and state["pending_outputs"] is Dictionary:
+				var pending_dict := {}
+				for k in state["pending_outputs"]:
+					pending_dict[str(k)] = str(state["pending_outputs"][k])
+				save_entry["pending_outputs"] = pending_dict
 			# Persist ejection/holding bookkeeping so a unit fabricator
 			# that was mid-eject or waiting on a blocked output resumes
 			# cleanly after a reload instead of stalling with no payload.
@@ -2033,13 +2045,43 @@ func load_sector_from_path(path: String) -> bool:
 				var saved = data["factory_buffers"][key]
 				var inputs_dict := {}
 				for k in saved.get("inputs", {}):
-					inputs_dict[StringName(k)] = int(saved["inputs"][k])
+					inputs_dict[StringName(k)] = float(saved["inputs"][k])
 				var entry: Dictionary = {
 					"inputs": inputs_dict,
 					"phase": str(saved.get("phase", "collecting")),
 					"timer": float(saved.get("timer", 0.0)),
 					"pending_outputs": {},
 				}
+				if saved.has("timer_total"):
+					entry["timer_total"] = float(saved["timer_total"])
+				if saved.has("recipe_consumed") and saved["recipe_consumed"] is Dictionary:
+					var consumed_dict := {}
+					for k in saved["recipe_consumed"]:
+						consumed_dict[StringName(k)] = int(saved["recipe_consumed"][k])
+					entry["recipe_consumed"] = consumed_dict
+				if saved.has("pending_outputs") and saved["pending_outputs"] is Dictionary:
+					var pending_dict := {}
+					for k in saved["pending_outputs"]:
+						pending_dict[str(k)] = StringName(saved["pending_outputs"][k])
+					entry["pending_outputs"] = pending_dict
+				# Older saves did not persist the progressive-consumption
+				# bookkeeping. A processing factory restored without it can
+				# stall forever because already-drained ingredients are charged
+				# again. Reset to the same state the recipe picker creates.
+				if entry["phase"] == "processing" and (not entry.has("timer_total") or not entry.has("recipe_consumed")):
+					entry["phase"] = "collecting"
+					entry["timer"] = 0.0
+					entry.erase("timer_total")
+					entry["recipe_consumed"] = {}
+				# Older saves also restored recipe-select factories in
+				# "outputting" without their pending_outputs list. That state
+				# retries nothing forever; clicking the same recipe fixes it by
+				# resetting the buffer, so do that normalization on load.
+				if entry["phase"] == "outputting" and entry["pending_outputs"].is_empty():
+					entry["phase"] = "collecting"
+					entry["timer"] = 0.0
+					entry.erase("timer_total")
+					entry["recipe_consumed"] = {}
 				if saved.has("eject_progress"):
 					entry["eject_progress"] = float(saved["eject_progress"])
 				if saved.has("held_payload") and saved["held_payload"] is Dictionary:

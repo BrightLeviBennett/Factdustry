@@ -19,8 +19,8 @@ grid_size = Vector2i(3, 3)
 base_sprite = ExtResource("1_4rvnv")
 lumina_overlay = ExtResource("4_ce5b6")
 ferox_overlay = ExtResource("2_d1e5q")
-max_health = 500.0
-armor = 4.0
+max_health = 3500.0
+armor = 8.0
 build_cost = {
 "copper": 1500,
 "graphite": 1500,

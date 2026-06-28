@@ -25,7 +25,7 @@ base_sprite = ExtResource("1_dllr8")
 turret_head_sprite = ExtResource("3_nr14p")
 barrel_count = 4
 barrel_spacing = 80.0
-max_health = 340.0
+max_health = 480.0
 build_cost = {
 "copper": 200,
 "silicon": 80

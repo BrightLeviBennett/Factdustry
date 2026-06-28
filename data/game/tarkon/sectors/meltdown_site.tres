@@ -7,7 +7,7 @@ script = ExtResource("1")
 id = &"meltdown_site"
 display_name = "Meltdown Site"
 description = "<Optional Sector>
-The remmanants of what was once ferox's largest nuclear power production facility, now decimated by a coolant leak.
+The remnants of what was once ferox's largest nuclear power production facility, now decimated by a coolant leak.
 Research the various technology scattered through this sector and repair the facility."
 planet_id = &"Tarkon"
 hex_q = 2

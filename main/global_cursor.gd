@@ -26,7 +26,7 @@ extends Node
 ##                         Target / Wrench should show instead).
 ##   clear_override()    — restore the default.
 
-const _CURSOR_DEFAULT_PATH := "res://textures/mouse heads/DefualtMouse.png"
+const _CURSOR_DEFAULT_PATH := "res://textures/cursors/Defualt.png"
 const _CURSOR_DISPLAY_SIZE := 40.0     # on-screen size in viewport px
 ## Hotspot as a fraction of the display size — the point on the sprite
 ## that lines up with the actual mouse position. All cursor art points

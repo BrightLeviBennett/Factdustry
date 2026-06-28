@@ -44,7 +44,7 @@ tags = PackedStringArray("turret", "defense", "flame_emitter")
 color = Color(1, 0.5, 0.2, 1)
 base_sprite = ExtResource("3")
 turret_head_sprite = ExtResource("4")
-max_health = 200.0
+max_health = 680.0
 build_cost = {
 "copper": 110,
 "silicon": 40,
@@ -54,4 +54,5 @@ build_time = 3.0
 attack_speed = 0.35
 attack_range = 8.0
 ammo_types = Array[Resource]([SubResource("AmmoType_oxidized_fuel"), SubResource("AmmoType_fuel")])
+liquid_capacity = 30.0
 max_stored_items = 30

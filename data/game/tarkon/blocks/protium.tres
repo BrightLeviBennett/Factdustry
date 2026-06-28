@@ -42,7 +42,7 @@ tags = PackedStringArray("turret", "defense")
 color = Color(0.7, 0.85, 1.0, 1)
 base_sprite = ExtResource("3_base")
 turret_head_sprite = ExtResource("4_head")
-max_health = 260.0
+max_health = 480.0
 build_cost = {
 "copper": 150,
 "silicon": 60,

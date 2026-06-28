@@ -14,7 +14,8 @@ tags = PackedStringArray("wall", "defense")
 color = Color(0.4, 0.5, 0.6, 1)
 grid_size = Vector2i(2, 2)
 top_sprite = ExtResource("1_bbkke")
-max_health = 520.0
+max_health = 800.0
+armor = 6.0
 build_cost = {
 "steel": 24
 }

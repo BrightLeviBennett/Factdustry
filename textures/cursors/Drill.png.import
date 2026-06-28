@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://4blv48tfe0en"
-path="res://.godot/imported/TargetMouse.png-a5da8feba604dcc79f8b6ffdbe76e59b.ctex"
+uid="uid://d1uba5de17ddc"
+path="res://.godot/imported/Drill.png-5506e3c446dfea68d2242aaf6b53c997.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/mouse heads/TargetMouse.png"
-dest_files=["res://.godot/imported/TargetMouse.png-a5da8feba604dcc79f8b6ffdbe76e59b.ctex"]
+source_file="res://textures/cursors/Drill.png"
+dest_files=["res://.godot/imported/Drill.png-5506e3c446dfea68d2242aaf6b53c997.ctex"]
 
 [params]
 

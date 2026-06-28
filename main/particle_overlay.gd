@@ -89,17 +89,17 @@ const _BURST_PROFILES := {
 		"gravity": Vector2.ZERO,
 		"z_index": 4090,
 	},
-	# Incinerator burn-off: a small wisp of gray smoke drifting up off the
-	# block when it destroys an item. Narrow upward cone, slight upward
+	# Incinerator burn-off: a chunky gray smoke puff from the upper face of
+	# the block when it destroys an item. Narrow upward cone, slight upward
 	# gravity so it keeps rising, drawn above the building.
 	"incinerate_smoke": {
-		"color": Color(0.55, 0.55, 0.58, 0.5),
-		"count": 6,
-		"lifetime": 0.6,
-		"speed": 42.0,
+		"color": Color(0.5, 0.5, 0.54, 0.62),
+		"count": 18,
+		"lifetime": 1.0,
+		"speed": 34.0,
 		"dir": Vector2(0, -1),
-		"spread_deg": 22.0,
-		"scale": 2.4,
+		"spread_deg": 34.0,
+		"scale": 10.0,
 		"gravity": Vector2(0, -20.0),
 		"z_index": 4090,
 	},
@@ -171,6 +171,17 @@ const _UNIT_EXPLOSION_RING_R: float = 18.0  # final stroked ring radius (px)
 const _UNIT_EXPLOSION_EMBER_R: float = 38.0
 const _UNIT_EXPLOSION_SMOKE_R: float = 7.0  # smoke puff radius
 var _unit_explosion_seq: int = 0
+
+# --- INCINERATOR SMOKE ---
+# Mindustry-style smoke is drawn as soft filled circles, not square CPU
+# particles. Each puff stores a small deterministic cloud so it blooms and
+# drifts upward as one burn-off effect.
+var _incinerator_smoke: Array = []
+var _incinerator_smoke_seq: int = 0
+const _INCINERATOR_SMOKE_LIFETIME: float = 0.72
+const _INCINERATOR_SMOKE_PARTS: int = 7
+const _INCINERATOR_SMOKE_RADIUS: float = 32.0
+const _INCINERATOR_SMOKE_RISE: float = 28.0
 
 # --- FIRE PARTICLES ---
 # A reusable directional flame burst. `spawn_fire(world_pos, dir)`
@@ -368,8 +379,10 @@ func _on_building_destroyed_by_enemy(grid_pos: Vector2i) -> void:
 				expl_c.core_explosion(center, float(maxi(sz.x, sz.y)))
 	elif is_reactor:
 		var expl = main.get_node_or_null("ExplosionSystem")
-		if expl and expl.has_method("explode"):
-			expl.explode(center, -1.0)
+		if expl and expl.has_method("reactor_explosion"):
+			expl.reactor_explosion(center, float(maxi(sz.x, sz.y)))
+		elif expl and expl.has_method("explode"):
+			expl.explode(center, float(maxi(sz.x, sz.y)) * 5.0, 2.0, true)
 	spawn_block_ruins(anchor, sz)
 
 
@@ -487,6 +500,16 @@ func _process_ruins(delta: float) -> void:
 				if e["age"] >= float(e["lifetime"]):
 					_unit_explosions.remove_at(n)
 				n -= 1
+	if not _incinerator_smoke.is_empty():
+		dirty = true
+		if not paused:
+			var q: int = _incinerator_smoke.size() - 1
+			while q >= 0:
+				var puff: Dictionary = _incinerator_smoke[q]
+				puff["age"] = float(puff.get("age", 0.0)) + delta
+				if puff["age"] >= float(puff["lifetime"]):
+					_incinerator_smoke.remove_at(q)
+				q -= 1
 	if dirty:
 		queue_redraw()
 
@@ -746,6 +769,31 @@ func _draw() -> void:
 				Color(0.55, 0.55, 0.55, 0.85 * fout),
 			)
 
+	# Incinerator burn-off smoke: a compact cluster of soft gray circles
+	# that blooms upward, matching the round Mindustry smoke language.
+	for puff in _incinerator_smoke:
+		var life: float = float(puff["lifetime"])
+		var age: float = float(puff.get("age", 0.0))
+		var t_smoke: float = clampf(age / life, 0.0, 1.0)
+		var fin_smoke: float = sin(t_smoke * PI * 0.5)
+		var fout_smoke: float = 1.0 - t_smoke
+		var center_smoke: Vector2 = puff["pos"] + Vector2(0.0, -_INCINERATOR_SMOKE_RISE * fin_smoke)
+		var id_smoke: int = int(puff.get("id", 0))
+		for i in range(_INCINERATOR_SMOKE_PARTS):
+			var h_smoke: float = float(id_smoke * 97 + i * 311)
+			var ang_smoke: float = wrapf(sin(h_smoke * 12.9898) * 43758.5453, 0.0, TAU)
+			var len_smoke: float = (4.0 + 18.0 * fin_smoke) * (0.35 + 0.65 * absf(sin(h_smoke * 4.7)))
+			var off_smoke := Vector2(cos(ang_smoke), sin(ang_smoke)) * len_smoke
+			off_smoke.y -= float(i % 3) * 1.8 * fin_smoke
+			var part_scale: float = 0.65 + 0.45 * absf(sin(h_smoke * 2.13))
+			var radius_smoke: float = _INCINERATOR_SMOKE_RADIUS * part_scale * lerpf(0.45, 1.15, fin_smoke)
+			var alpha_smoke: float = 0.42 * fout_smoke * fout_smoke
+			if radius_smoke < 0.5 or alpha_smoke <= 0.01:
+				continue
+			var smoke_col := Color(0.32, 0.32, 0.35, alpha_smoke)
+			draw_circle(center_smoke + off_smoke, radius_smoke, smoke_col)
+			draw_circle(center_smoke + off_smoke, radius_smoke * 0.55, Color(0.43, 0.43, 0.46, alpha_smoke * 0.6))
+
 	# Decon shrapnel — solid red-white squares flying out, decelerating,
 	# then shrinking to nothing in the tail of their life.
 	for s in _shrapnel:
@@ -783,6 +831,16 @@ func spawn_burst(world_pos: Vector2, kind: String) -> void:
 			"lifetime": _UNIT_EXPLOSION_LIFETIME,
 			"id": _unit_explosion_seq,
 			"scale": 1.0,
+		})
+		queue_redraw()
+		return
+	if kind == "incinerate_smoke":
+		_incinerator_smoke_seq += 1
+		_incinerator_smoke.append({
+			"pos": world_pos,
+			"age": 0.0,
+			"lifetime": _INCINERATOR_SMOKE_LIFETIME,
+			"id": _incinerator_smoke_seq,
 		})
 		queue_redraw()
 		return

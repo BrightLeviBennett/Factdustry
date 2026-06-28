@@ -146,13 +146,13 @@ tags = PackedStringArray("turret", "defense")
 color = Color(0.45, 0.75, 1.0, 1)
 base_sprite = ExtResource("2_base")
 turret_head_sprite = ExtResource("3_head")
-max_health = 220.0
+max_health = 320.0
 build_cost = {
 "copper": 80,
 "silicon": 30
 }
 build_time = 3.0
-electrical_power_use = 3.0
+electrical_power_use = 0.0
 attack_speed = 0.25
 attack_range = 5.5
 ammo_types = Array[Resource]([SubResource("Ammo_water"), SubResource("Ammo_salt_water"), SubResource("Ammo_slag"), SubResource("Ammo_petroleum"), SubResource("Ammo_heavy_fuel"), SubResource("Ammo_oxygen"), SubResource("Ammo_hydrogen")])

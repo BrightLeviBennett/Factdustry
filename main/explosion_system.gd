@@ -168,6 +168,32 @@ func core_explosion(world_pos: Vector2, size_tiles: float = 3.0) -> void:
 		fb.add_shake(15.0)
 
 
+## Mindustry-style reactor meltdown: a core-like dynamic explosion, but
+## hotter, wider, and messier. The old yellow ring sits underneath as the
+## fast pressure wave, while the dynamic bursts provide smoke, shockwave,
+## and orange ejecta.
+func reactor_explosion(world_pos: Vector2, size_tiles: float = 3.0) -> void:
+	var gs: float = float(main.GRID_SIZE) if main else 16.0
+	var scl: float = gs / 16.0
+	var intensity: float = clampf(size_tiles * 1.85, 5.0, 8.0)
+	explode(world_pos, size_tiles * 5.0, 2.4, true)
+	_spawn_dynamic_explosion(world_pos, intensity, scl)
+	var spread: float = size_tiles * gs * 0.85
+	for _i in range(8):
+		var off: Vector2 = Vector2.from_angle(randf() * TAU) * randf_range(0.15, 1.0) * spread
+		_spawn_dynamic_explosion(world_pos + off, intensity * randf_range(0.35, 0.7), scl)
+	var particles = main.get_node_or_null("ParticleOverlay") if main else null
+	if particles and particles.has_method("spawn_fire"):
+		particles.spawn_fire(world_pos, Vector2.ZERO, 95, 560.0, 1.45, 26.0, 180.0)
+		for _i in range(7):
+			var dir: Vector2 = Vector2.from_angle(randf() * TAU)
+			var off: Vector2 = dir * randf_range(gs * 0.4, spread)
+			particles.spawn_fire(world_pos + off, dir, 20, 460.0, 1.2, 19.0, 70.0)
+	var fb = main.get_node_or_null("FeedbackSystem") if main else null
+	if fb and fb.has_method("add_shake"):
+		fb.add_shake(45.0)
+
+
 ## Core of the Fx.dynamicExplosion port: builds the smoke / ring / spark
 ## timelines for a blast of the given `intensity` (Mindustry radius/8) at
 ## world scale `scl` (Mindustry-px → our-px) and queues it. Both unit_death

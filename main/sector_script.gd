@@ -195,7 +195,7 @@ func _check_condition(cond: Dictionary, delta: float) -> bool:
 			var dep_item := StringName(cond.get("item_id", ""))
 			var dep_amount := int(cond.get("amount", 1))
 			var baseline := int(_step_deposited_baselines.get(dep_item, 0))
-			return main.resources.get(dep_item, 0) >= baseline + dep_amount
+			return int(_core_counts.get(dep_item, 0)) >= baseline + dep_amount
 		"produced":
 			return has_produced(StringName(cond.get("item_id", "")), int(cond.get("amount", 1)))
 		"placed":
@@ -776,6 +776,10 @@ func _invalidate_caches() -> void:
 		terrain._water_depth_dirty = true
 		terrain._slag_mesh_dirty = true
 		terrain.queue_redraw()
+	# The minimap blanks script-hidden tiles, so a hide/reveal must rebuild it.
+	for mm in get_tree().get_nodes_in_group("minimap"):
+		if mm.has_method("_mark_full_rebuild"):
+			mm._mark_full_rebuild()
 	# Update pathfinding grids so hidden tiles become impassable
 	var unit_mgr = get_node_or_null("/root/Main/UnitManager")
 	if unit_mgr:
@@ -1060,7 +1064,7 @@ func _get_objective_for_condition(cond: Dictionary) -> Dictionary:
 			var item_id := StringName(cond.get("item_id", ""))
 			var amount := int(cond.get("amount", 1))
 			var baseline := int(_step_deposited_baselines.get(item_id, 0))
-			var current := int(main.resources.get(item_id, 0)) - baseline
+			var current := int(_core_counts.get(item_id, 0)) - baseline
 			var name: String = _get_display_name_item(item_id)
 			return {"text": "Deposit %s" % name, "icon": _get_item_icon(item_id), "current": clampi(current, 0, amount), "target": amount, "done": current >= amount}
 		"produced":
@@ -1179,9 +1183,10 @@ func _enter_step(idx: int) -> void:
 			"wait":
 				_step_wait_timer = float(cond.get("seconds", 3.0))
 			"deposited":
-				# Snapshot current inventory so we measure relative increase
+				# Snapshot explicit core deposit events so core-unit mining
+				# that adds directly to resources does not satisfy this.
 				var item_id := StringName(cond.get("item_id", ""))
-				_step_deposited_baselines[item_id] = main.resources.get(item_id, 0)
+				_step_deposited_baselines[item_id] = _core_counts.get(item_id, 0)
 			"placed":
 				# Snapshot current placed count so we measure relative increase
 				var block_id := StringName(cond.get("block_id", ""))

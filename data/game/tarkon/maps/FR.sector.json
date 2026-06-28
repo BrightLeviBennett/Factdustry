@@ -1,32 +1,14 @@
 {
-	"arc_charge": {
-
-	},
-	"archive_decoder_state": {
-
-	},
-	"archive_holdings": {
-
-	},
-	"battery_stored": {
-
-	},
-	"belt_unloader_state": {
-
-	},
-	"block_internal_battery": {
-
-	},
-	"block_storage": {
-
-	},
-	"bridge_output_rr": {
-
-	},
+	"arc_charge": {},
+	"archive_decoder_state": {},
+	"archive_holdings": {},
+	"battery_stored": {},
+	"belt_unloader_state": {},
+	"block_internal_battery": {},
+	"block_storage": {},
+	"bridge_output_rr": {},
 	"build_order": [],
-	"build_progress": {
-
-	},
+	"build_progress": {},
 	"building_factions": {
 		"142,69": 1,
 		"142,70": 1,
@@ -1448,9 +1430,7 @@
 		"92,143": 0,
 		"92,144": 0
 	},
-	"building_fires": {
-
-	},
+	"building_fires": {},
 	"building_health": {
 		"142,69": 240.0,
 		"142,70": 240.0,
@@ -2872,15 +2852,9 @@
 		"92,143": 500.0,
 		"92,144": 500.0
 	},
-	"building_home_core": {
-
-	},
-	"building_resources_consumed": {
-
-	},
-	"building_resources_refunded": {
-
-	},
+	"building_home_core": {},
+	"building_resources_consumed": {},
+	"building_resources_refunded": {},
 	"building_rotation": {
 		"142,69": 2,
 		"142,70": 2,
@@ -5723,49 +5697,27 @@
 		"92,143": "core_shard",
 		"92,144": "core_shard"
 	},
-	"constructor_state": {
-
-	},
-	"conveyor_items": {
-
-	},
+	"constructor_state": {},
+	"conveyor_items": {},
 	"core_position": "90,142",
-	"crane_links": {
-
-	},
-	"crane_states": {
-
-	},
-	"deconstructor_state": {
-
-	},
+	"crane_links": {},
+	"crane_states": {},
+	"deconstructor_state": {},
 	"defense_sim": {
 		"is_stable": true,
 		"summary": "No active threats",
 		"time_to_fall": -1.0,
-		"timestamp": 1782065444.18748
+		"timestamp": 1782518852.29034
 	},
-	"drill_timers": {
-
-	},
+	"drill_timers": {},
 	"drone_heal_mode": false,
-	"drone_inventory": {
-
-	},
+	"drone_inventory": {},
 	"drone_position": "",
-	"duct_bridge_filters": {
-
-	},
+	"duct_bridge_filters": {},
 	"enemy_units": [],
-	"extractor_efficiency": {
-
-	},
-	"factory_buffers": {
-
-	},
-	"factory_recipe_state": {
-
-	},
+	"extractor_efficiency": {},
+	"factory_buffers": {},
+	"factory_recipe_state": {},
 	"ferox_rebuild_queue": [],
 	"floor_tiles": {
 		"100,109": "grassy_floor",
@@ -20689,53 +20641,19 @@
 	"grid_height": 300,
 	"grid_width": 300,
 	"hints": [],
-	"hints_runtime": {
-		"clock": 772.774340333072,
-		"landing_fired": true,
-		"runtime": {
-			"Mass Driver": {
-				"activated_at": 231894.702059201,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			},
-			"bridge": {
-				"activated_at": 4519.55109756418,
-				"baselines": {
-
-				},
-				"sentinel": null,
-				"state": "dismissed"
-			}
-		}
-	},
-	"junction_items": {
-
-	},
-	"landing_pad_filters": {
-
-	},
-	"lane_shifter_state": {
-
-	},
-	"launchpad_state": {
-
-	},
+	"junction_items": {},
+	"landing_pad_filters": {},
+	"lane_shifter_state": {},
+	"launchpad_state": {},
 	"linked_pairs": [
 		[
 			"160,102",
 			"166,105"
 		]
 	],
-	"loader_state": {
-
-	},
+	"loader_state": {},
 	"mass_driver_projectiles": [],
-	"mass_driver_state": {
-
-	},
+	"mass_driver_state": {},
 	"ore_tiles": {
 		"101,169": "graphite_ore",
 		"102,169": "graphite_ore",
@@ -20900,22 +20818,12 @@
 		"97,115": "graphite_ore",
 		"98,116": "graphite_ore"
 	},
-	"payload_items": {
-
-	},
-	"payload_router_idx": {
-
-	},
-	"pipe_contents": {
-
-	},
-	"pipe_junction_state": {
-
-	},
+	"payload_items": {},
+	"payload_router_idx": {},
+	"pipe_contents": {},
+	"pipe_junction_state": {},
 	"player_units": [],
-	"pump_timers": {
-
-	},
+	"pump_timers": {},
 	"refabricator_state": {
 		"171,83": {
 			"in_unit_id": "",
@@ -20923,68 +20831,37 @@
 			"phase": "idle",
 			"selected_t2": "beattle",
 			"timer": 0.0
+		},
+		"181,60": {
+			"in_unit_id": "",
+			"out_unit_id": "",
+			"phase": "idle",
+			"selected_t2": "breach",
+			"timer": 0.0
+		},
+		"221,203": {
+			"in_unit_id": "",
+			"out_unit_id": "",
+			"phase": "idle",
+			"selected_t2": "breach",
+			"timer": 0.0
 		}
 	},
-	"refit_state": {
-
-	},
+	"refit_state": {},
 	"resources": {
 		"mat_copper": 993,
 		"mat_graphite": 574,
 		"mat_silicon": 2965,
 		"mat_steel": 1526
 	},
-	"router_output_index": {
-
-	},
-	"script_runtime": {
-		"active_delays": [],
-		"core_counts": {
-
-		},
-		"core_unit_mined_counts": {
-
-		},
-		"current_step": -1,
-		"decoded_archive_counts": {
-
-		},
-		"deposited_baselines": {
-
-		},
-		"disabled_buildings": [],
-		"ferox_blocks_destroyed_counts": {
-
-		},
-		"hidden_tiles": [],
-		"mined_counts": {
-
-		},
-		"placed_baselines": {
-
-		},
-		"placed_counts": {
-
-		},
-		"produced_counts": {
-
-		},
-		"script_running": false,
-		"step_wait_timer": 0.0,
-		"units_destroyed_counts": {
-
-		},
-		"units_produced_counts": {
-
-		}
-	},
+	"router_output_index": {},
 	"script_steps": [
 		{
 			"actions": [
 				{
-					"from": "130,200",
+					"from": "130,25",
 					"include_floors": true,
-					"to": "280,20",
+					"to": "280,240",
 					"type": "hide_region"
 				},
 				{
@@ -21240,8 +21117,8 @@
 			"name": "Spawn units",
 			"on_exit": [
 				{
-					"from": "130,200",
-					"to": "200,40",
+					"from": "130,25",
+					"to": "280,240",
 					"type": "reveal_region"
 				},
 				{
@@ -21266,6 +21143,7 @@
 			],
 			"conditions": [
 				{
+					"amount": 2.0,
 					"block_id": "core_shard",
 					"type": "ferox_blocks_destroyed"
 				}
@@ -21282,15 +21160,9 @@
 		}
 	],
 	"sector_name": "FR",
-	"shield_states": {
-
-	},
-	"sorter_filters": {
-
-	},
-	"sorter_side_index": {
-
-	},
+	"shield_states": {},
+	"sorter_filters": {},
+	"sorter_side_index": {},
 	"stats_blocks_placed": 0,
 	"stats_blocks_removed": 0,
 	"stats_enemy_blocks_destroyed": 0,
@@ -21299,12 +21171,8 @@
 	"stats_units_destroyed": 0,
 	"stats_units_produced": 0,
 	"type": "sector",
-	"unloader_state": {
-
-	},
-	"upgrader_state": {
-
-	},
+	"unloader_state": {},
+	"upgrader_state": {},
 	"version": 3,
 	"wall_tiles": {
 		"100,109": "grassy_wall",

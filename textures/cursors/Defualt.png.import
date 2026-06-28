@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cpm3sgwj2e6g"
-path="res://.godot/imported/SiliconRefineryBase.png-4b53debe7f115f24d6016695a68d2488.ctex"
+uid="uid://3tmsbjxuyx6k"
+path="res://.godot/imported/Defualt.png-3c69c4d7eff2707de403d5278bfe75cd.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://SiliconRefineryBase.png"
-dest_files=["res://.godot/imported/SiliconRefineryBase.png-4b53debe7f115f24d6016695a68d2488.ctex"]
+source_file="res://textures/cursors/Defualt.png"
+dest_files=["res://.godot/imported/Defualt.png-3c69c4d7eff2707de403d5278bfe75cd.ctex"]
 
 [params]
 
